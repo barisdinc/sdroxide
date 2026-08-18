@@ -116,6 +116,9 @@ pub enum CatUpdate {
     Mode(Mode),
     /// TX SWR reading (routed to the telemetry channel, not the control channel).
     Swr(f32),
+    /// TX power-output reading as a `0.0..=1.0` fraction of the rig's full
+    /// scale (routed to the telemetry channel, like [`CatUpdate::Swr`]).
+    Po(f32),
     /// RX S-meter reading in dBm, from the rig's own meter (routed to the
     /// signal channel, not the control channel).
     Signal(f32),
@@ -405,7 +408,9 @@ impl Protocol for Civ {
         vec![civ::read_freq_frame(self.radio)]
     }
     fn tx_telemetry_requests(&self) -> Vec<Vec<u8>> {
-        vec![civ::read_swr_frame(self.radio)]
+        // Two reads per telemetry tick. They are answered on the same command
+        // and are told apart by their sub-command byte on the way back in.
+        vec![civ::read_swr_frame(self.radio), civ::read_po_frame(self.radio)]
     }
     fn tx_state_requests(&self) -> Vec<Vec<u8>> {
         vec![civ::read_ptt_frame(self.radio)]
@@ -506,13 +511,16 @@ impl Protocol for Civ {
                         out.push(CatUpdate::Power(frac));
                     }
                 }
-                // Meter read (0x15): the SWR sub-meter (0x12) while transmitting,
-                // the S-meter (0x02) while receiving. The sub-command byte in the
-                // reply says which arrived — nothing else does, since both are
-                // answered on the one command.
+                // Meter read (0x15): the SWR sub-meter (0x12) and the power-output
+                // meter (0x11) while transmitting, the S-meter (0x02) while
+                // receiving. The sub-command byte in the reply says which arrived
+                // — nothing else does, since all three are answered on the one
+                // command, and each parser checks that byte before decoding.
                 0x15 => {
                     if let Some(swr) = civ::parse_swr_reply(&reply.data) {
                         out.push(CatUpdate::Swr(swr));
+                    } else if let Some(po) = civ::parse_po_reply(&reply.data) {
+                        out.push(CatUpdate::Po(po));
                     } else if let Some(dbm) = civ::parse_smeter_reply(&reply.data) {
                         out.push(CatUpdate::Signal(dbm));
                     }
@@ -756,9 +764,10 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
                     match u {
                         CatUpdate::Freq(hz) => freq = Some(hz),
                         CatUpdate::Mode(m) => mode = Some(m),
-                        // Neither meter, the power, nor the transmit state is
+                        // No meter, the power, or the transmit state is
                         // requested during the startup query.
                         CatUpdate::Swr(_)
+                        | CatUpdate::Po(_)
                         | CatUpdate::Signal(_)
                         | CatUpdate::Power(_)
                         | CatUpdate::Ptt(_) => {}
@@ -1153,6 +1162,20 @@ fn serial_thread(
         // When a CAT key-down was last written, so the rig's refusal of one can
         // be told from the refusals its unimplemented sub-commands answer with.
         let mut ptt_written: Option<Instant> = None;
+        // The transmit meters, held together between replies.
+        //
+        // SWR and PO arrive as two separate frames, and `poll_telemetry` on the
+        // far end keeps only the LAST `TxTelemetry` of each batch
+        // (`try_iter().last()`). So sending one field at a time and leaving the
+        // other `None` does not merge at the receiver, it overwrites: the two
+        // readings would take turns blanking each other and both bars would
+        // flicker at the polling rate. Accumulating here and sending the pair
+        // means every message is a complete picture of the transmit meters.
+        //
+        // Cleared on unkey along with the `TxTelemetry::default()` sent there,
+        // so a new over never opens showing the last one's readings.
+        let mut tx_swr: Option<f32> = None;
+        let mut tx_po: Option<f32> = None;
         let mut pending_freq: Option<f64> = None;
         let mut last_sent_freq: Option<f64> = None;
         let mut freq_deadline = Instant::now();
@@ -1278,7 +1301,12 @@ fn serial_thread(
                         // for the rest of the current period.
                         next_meter = Instant::now();
                         if !on {
-                            // Clear the reading so the meter drops SWR on unkey.
+                            // Clear the readings so the meters drop on unkey,
+                            // here as well as at the receiver: a stale SWR held
+                            // locally would be re-sent beside the next over's
+                            // first PO reading and briefly look current.
+                            tx_swr = None;
+                            tx_po = None;
                             let _ = telem_tx.send(TxTelemetry::default());
                         }
                     }
@@ -1527,8 +1555,25 @@ fn serial_thread(
                         // to their own channels and skip the freq/mode dedup
                         // below — a reading that repeats is still current, and
                         // dropping it would freeze the meter.
+                        // Either transmit meter updates its own field and then
+                        // sends BOTH, for the overwrite reason recorded where
+                        // `tx_swr` is declared.
                         if let CatUpdate::Swr(v) = u {
-                            let _ = telem_tx.send(TxTelemetry { fwd_w: None, swr: Some(v) });
+                            tx_swr = Some(v);
+                            let _ = telem_tx.send(TxTelemetry {
+                                fwd_w: None,
+                                swr: tx_swr,
+                                po: tx_po,
+                            });
+                            continue;
+                        }
+                        if let CatUpdate::Po(v) = u {
+                            tx_po = Some(v);
+                            let _ = telem_tx.send(TxTelemetry {
+                                fwd_w: None,
+                                swr: tx_swr,
+                                po: tx_po,
+                            });
                             continue;
                         }
                         if let CatUpdate::Signal(dbm) = u {
@@ -1588,9 +1633,10 @@ fn serial_thread(
                                 }
                                 c
                             }
-                            // Both meters, the power and the transmit state are
+                            // The meters, the power and the transmit state are
                             // handled above.
                             CatUpdate::Swr(_)
+                            | CatUpdate::Po(_)
                             | CatUpdate::Signal(_)
                             | CatUpdate::Power(_)
                             | CatUpdate::Ptt(_) => false,

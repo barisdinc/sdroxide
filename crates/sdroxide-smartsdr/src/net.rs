@@ -1210,7 +1210,9 @@ impl DataThread {
                         }
                         drop(table);
                         if changed && self.keyed {
-                            let _ = self.telem.send(TxTelemetry { fwd_w, swr });
+                            // As for TCI: watts are measured, so there is no needle-position
+                            // meter to report and `po` stays `None`.
+                            let _ = self.telem.send(TxTelemetry { fwd_w, swr, po: None });
                         }
                     }
                 }

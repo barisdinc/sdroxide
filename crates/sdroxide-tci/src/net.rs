@@ -1102,7 +1102,11 @@ impl NetThread {
 
     /// Emit the current aggregated TX telemetry snapshot.
     fn emit_tx_telem(&self) {
-        let _ = self.telem.send(TxTelemetry { fwd_w: self.tx_fwd_w, swr: self.tx_swr });
+        // TCI reports forward power in watts and has no separate
+        // percent-of-scale meter, so `po` stays `None` and the bar falls
+        // back to SWR for these rigs.
+        let _ =
+            self.telem.send(TxTelemetry { fwd_w: self.tx_fwd_w, swr: self.tx_swr, po: None });
     }
 }
 

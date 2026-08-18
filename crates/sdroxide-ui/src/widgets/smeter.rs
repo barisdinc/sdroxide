@@ -236,6 +236,19 @@ fn s_stops() -> Vec<Stop> {
     ]
 }
 
+/// Power-output ramp: one cool-to-warm sweep with no red in it.
+///
+/// Deliberately unlike the ALC and SWR ramps, which turn red because their top
+/// ends are faults — overdriving, and a bad match. A rig sitting at full power
+/// output is doing exactly what it was asked to, so colouring the top of this
+/// scale as a warning would teach the eye to read a healthy transmitter as a
+/// problem. What the operator is watching for here is the needle FALLING while
+/// drive stays put, and that shows as movement rather than as colour.
+fn po_stops() -> Vec<Stop> {
+    let m = meter();
+    vec![(0.00, m.ramp_lo), (0.35, m.ramp_mid), (1.00, m.ramp_hi)]
+}
+
 /// SWR ramp: green while the match is good, amber as it approaches 3:1, and
 /// the whole upper half — everything past 3:1 — in red. Deliberately the same
 /// in every theme: green-means-safe and red-means-stop are not up for
@@ -475,6 +488,7 @@ enum ScaleKind {
     S,
     Swr,
     Alc,
+    Po,
 }
 
 /// A meter scale: its graduations, its gridlines, and the ramp along its rail.
@@ -569,6 +583,25 @@ fn alc_scale() -> Scale {
         grid_at(0.95, "95", true),
     ];
     Scale { kind: ScaleKind::Alc, ticks, grid, stops: alc_stops() }
+}
+
+/// 0…100 % of the rig's own power-output meter.
+///
+/// Graduated like the ALC scale beside it so the two rows read as one
+/// instrument: the same ten divisions, numbered every 50. The gridlines differ
+/// because what matters on them differs — none of these is a limit, so none is
+/// marked `hot`.
+fn po_scale() -> Scale {
+    let ticks = (0..=10)
+        .map(|i| {
+            let f = i as f32 / 10.0;
+            let major = i % 5 == 0;
+            Tick { f, major, label: major.then(|| format!("{}", i * 10)), hot: false }
+        })
+        .collect();
+    let grid =
+        vec![grid_at(0.25, "25", false), grid_at(0.5, "50", false), grid_at(0.75, "75", false)];
+    Scale { kind: ScaleKind::Po, ticks, grid, stops: po_stops() }
 }
 
 /// What the instrument is currently displaying: the scale to draw, where the
@@ -884,9 +917,21 @@ fn show_bar(ui: &mut Ui, meters: Option<&Meters>, size: Vec2) -> Response {
     header(&p, rect, &r, k);
 
     if let Some(tx) = tx {
-        // Two stacked rows: the engine's drive on top, SWR below on its own
-        // logarithmic scale. Without an SWR bridge only the drive row is drawn,
-        // grown to fill the space the SWR row would have taken.
+        // Two stacked rows: the engine's drive on top, and below it whichever
+        // transmit meter the rig actually gives us. With nothing to put there
+        // only the drive row is drawn, grown to fill the space.
+        //
+        // The lower row prefers POWER OUTPUT over SWR where the rig reports it,
+        // which on the face of it throws away a reading. It does not. The SWR
+        // figure keeps its place in the header chip, where it is a number and
+        // is legible at a glance; what it was doing down here was drawing a bar
+        // that sits at the extreme left of a logarithmic scale for the whole of
+        // any normal over, so the row carried almost no information while
+        // occupying half the instrument. Power output uses the same space to
+        // show something that moves: whether the rig is delivering what it was
+        // asked for, and whether it is folding back.
+        //
+        // A rig that reports no PO meter keeps the SWR row exactly as before.
         let alc = alc_scale();
         let row = |top: f32, bottom: f32| {
             Rect::from_min_max(
@@ -894,7 +939,17 @@ fn show_bar(ui: &mut Ui, meters: Option<&Meters>, size: Vec2) -> Response {
                 pos2(right, rect.top() + bottom * k),
             )
         };
-        let (drive_rect, swr_rect) = match tx.swr {
+        // What goes in the lower row, if anything: its label, its scale, where
+        // the bar sits on it, and whether it carries a peak-hold marker. Peak
+        // hold belongs to the SWR reading (`r.frac` is the needle's own value,
+        // and `peak` was computed from it); the PO bar is read live and a
+        // held peak on it would just be the loudest syllable of the over.
+        let lower = match (tx.po, tx.swr) {
+            (Some(po), _) => Some(("PO", po_scale(), po.clamp(0.0, 1.0), None)),
+            (None, Some(_)) => Some(("SWR", swr_scale(), r.frac, peak)),
+            (None, None) => None,
+        };
+        let (drive_rect, lower_rect) = match lower {
             Some(_) => (row(20.0, 33.0), Some(row(36.0, 49.0))),
             None => (row(24.0, 42.0), None),
         };
@@ -909,13 +964,13 @@ fn show_bar(ui: &mut Ui, meters: Option<&Meters>, size: Vec2) -> Response {
         };
         row_label(drive_rect, "ALC");
         bar_row(&p, drive_rect, &alc, tx.alc.clamp(0.0, 1.0), None);
-        match swr_rect {
-            Some(swr_rect) => {
-                row_label(swr_rect, "SWR");
-                bar_row(&p, swr_rect, &r.scale, r.frac, peak);
-                bar_ticks(&p, swr_rect, rect, &r.scale, k, swr_rect.bottom() + 8.0 * k);
+        match (lower, lower_rect) {
+            (Some((label, scale, frac, hold)), Some(lower_rect)) => {
+                row_label(lower_rect, label);
+                bar_row(&p, lower_rect, &scale, frac, hold);
+                bar_ticks(&p, lower_rect, rect, &scale, k, lower_rect.bottom() + 8.0 * k);
             }
-            None => bar_ticks(&p, drive_rect, rect, &alc, k, drive_rect.bottom() + 8.0 * k),
+            _ => bar_ticks(&p, drive_rect, rect, &alc, k, drive_rect.bottom() + 8.0 * k),
         }
         border(ui, rect);
         return resp;

@@ -2400,7 +2400,7 @@ fn engine_thread(
                 Some(Meters {
                     s_dbm: -127.0,
                     adc_peak_dbfs: 0.0,
-                    tx: Some(TxMeters { fwd_w: tele.fwd_w, swr: tele.swr, alc }),
+                    tx: Some(TxMeters { fwd_w: tele.fwd_w, swr: tele.swr, alc, po: tele.po }),
                     stereo: false,
                     tone: None,
                 })

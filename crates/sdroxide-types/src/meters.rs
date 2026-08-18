@@ -7,18 +7,34 @@ pub struct TxMeters {
     pub swr: Option<f32>,
     /// 0.0..=1.0 modulation drive level.
     pub alc: f32,
+    /// The rig's own power-output meter as a `0.0..=1.0` fraction of full
+    /// scale, if it has one. Deliberately not watts: see [`TxTelemetry::po`].
+    pub po: Option<f32>,
 }
 
-/// TX-side telemetry a rig reports out-of-band (CAT / TCI): forward power and
-/// SWR. Distinct from [`TxMeters`], which also carries the engine's own ALC —
-/// this is only what the *device* measures, merged into `TxMeters` by the
-/// engine while transmitting.
+/// TX-side telemetry a rig reports out-of-band (CAT / TCI): forward power,
+/// SWR and the rig's own power-output meter. Distinct from [`TxMeters`], which
+/// also carries the engine's own ALC — this is only what the *device*
+/// measures, merged into `TxMeters` by the engine while transmitting.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct TxTelemetry {
     /// Forward power in watts, if the device exposes a sensor for it.
     pub fwd_w: Option<f32>,
     /// SWR as a ratio (e.g. `1.4` = 1.4:1), if the device measures it.
     pub swr: Option<f32>,
+    /// The rig's power-output meter as a `0.0..=1.0` fraction of full scale.
+    ///
+    /// Kept separate from `fwd_w`, and deliberately not converted into it,
+    /// because the two are different claims. `fwd_w` is watts a device has
+    /// actually measured; this is a needle position. An Icom answers its PO
+    /// meter as a raw `0..255` with published breakpoints for the *scale* but
+    /// no calibrated wattage behind them, so turning it into watts would
+    /// invent a precision the rig never offered — the same reasoning the ALC
+    /// reading is reported as a percentage rather than in dB.
+    ///
+    /// A device that genuinely measures forward power still fills `fwd_w`, and
+    /// the two can be present together on a rig that reports both.
+    pub po: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
