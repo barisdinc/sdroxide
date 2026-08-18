@@ -187,44 +187,105 @@ impl SdroxideApp {
                 // whole range below it is the operator's to choose from, and a
                 // number printed in a tooltip is a number everyone sits on.
                 let our_hz = self.digi_status.as_ref().map(|s| s.audio_hz).unwrap_or(1500.0);
-                // Each control gated on its own rather than the group being
-                // wrapped in an `add_enabled_ui`, for the wrapping reason above.
-                ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
-                if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
-                    cmds.push(Command::SetDigiAudioFreq((our_hz - 10.0).clamp(200.0, 3500.0)));
-                }
-                if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
-                    cmds.push(Command::SetDigiAudioFreq((our_hz + 10.0).clamp(200.0, 3500.0)));
-                }
-                // The readout and the entry are the same widget: two of them
-                // would be two things to disagree with each other.
+                // The three of them are one column, nudges above and typed
+                // figure below, rather than four items loose in the wrapping
+                // row. Loose, they sat side by side on a wide panel and broke
+                // apart on a narrow one, so where the box appeared depended on
+                // the panel width and it could be separated from the chips that
+                // move the same number. As a column it is placed as a single
+                // item: the whole group wraps or none of it does.
                 //
-                // Speed 0 so it is a box you type in and not a slider a stray
-                // drag can push off a licence edge.
-                //
-                // Committed on LOST FOCUS (Enter, or clicking away) rather than
-                // on `changed()`, because a DragValue in text mode reparses as
-                // you type: `changed()` would fire on "8", then "82", then
-                // "820", sending three transmit-frequency changes for one
-                // figure, the first two of them wrong. And NO `.range()`, for
-                // the same reason — it clamps the value while the text is still
-                // half-typed, so the box fights the operator and "820" becomes
-                // "200" the moment the 8 is pressed. Clamped here instead, once,
-                // when the number is finished.
-                let mut typed = our_hz;
-                let resp = ui
-                    .add_enabled(
-                        !held,
-                        egui::DragValue::new(&mut typed).speed(0.0).fixed_decimals(0).suffix(" Hz"),
-                    )
-                    .on_hover_text(
-                        "Type the transmit offset in Hz, then press Enter. Where your licence \
-                         is narrower than the band plan the whole range below the edge is \
-                         yours to pick from, so nothing is suggested here.",
-                    );
-                if resp.lost_focus() && (typed - our_hz).abs() >= 0.5 {
-                    cmds.push(Command::SetDigiAudioFreq(typed.clamp(200.0, 3500.0)));
-                }
+                // Each control is still gated on its own rather than the column
+                // being wrapped in an `add_enabled_ui`. The rule about a child
+                // `Ui` not wrapping inside a `horizontal_wrapped` is what this
+                // column relies on, not an exception to it: the inner rows are
+                // meant to keep their shape. An enabling wrapper would be a
+                // second child for a different purpose, and greying out is what
+                // `chip_enabled` is for.
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
+                        if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
+                            cmds.push(Command::SetDigiAudioFreq(
+                                (our_hz - 10.0).clamp(200.0, 3500.0),
+                            ));
+                        }
+                        if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
+                            cmds.push(Command::SetDigiAudioFreq(
+                                (our_hz + 10.0).clamp(200.0, 3500.0),
+                            ));
+                        }
+                    });
+                    // The readout and the entry are the same widget: two of them
+                    // would be two things to disagree with each other.
+                    //
+                    // A `TextEdit` rather than the `DragValue` this started as.
+                    // Speed 0 stopped a drag from changing anything, but it did not
+                    // stop egui *advertising* one: the pointer still turned into the
+                    // horizontal resize arrows on hover, so the box offered a
+                    // gesture that had been deliberately killed. A text box promises
+                    // only what it delivers, and its caret says "type here" without
+                    // a tooltip having to say it.
+                    //
+                    // The buffer is refreshed from the engine only while the box is
+                    // NOT focused, and that is what makes typing survive at all: the
+                    // offset arrives afresh in every status frame, so reseeding on
+                    // top of a half-typed figure would rewrite it under the
+                    // operator's hands.
+                    //
+                    // Committed on LOST FOCUS (Enter, or clicking away) rather than
+                    // on every change, because the text is reparsed as it is typed:
+                    // committing on change would send "8", then "82", then "820" —
+                    // three transmit-frequency changes for one figure, the first two
+                    // of them wrong, and on 60 m the first two are the ones inside
+                    // the band. Clamped once, when the number is finished, rather
+                    // than continuously, which would fight the operator and turn
+                    // "820" into "200" the moment the 8 was pressed.
+                    //
+                    // Anything unparsable is simply not sent, and the box puts
+                    // itself right on the next unfocused frame from the engine's own
+                    // value. There is no error state to explain or dismiss.
+                    let tx_hz_id = ui.id().with("digi_tx_hz");
+                    if !ui.memory(|m| m.has_focus(tx_hz_id)) {
+                        let shown = format!("{our_hz:.0}");
+                        if self.digi_tx_hz_edit != shown {
+                            self.digi_tx_hz_edit = shown;
+                        }
+                    }
+                    let resp = ui
+                        .horizontal(|ui| {
+                            let r = ui
+                                .add_enabled(
+                                    !held,
+                                    egui::TextEdit::singleline(&mut self.digi_tx_hz_edit)
+                                        .id(tx_hz_id)
+                                        .desired_width(40.0),
+                                )
+                                .on_hover_text(
+                                    "Type the transmit offset in Hz, then press Enter. Where \
+                                     your licence is narrower than the band plan the whole \
+                                     range below the edge is yours to pick from, so nothing \
+                                     is suggested here.",
+                                );
+                            // The unit rides beside the box rather than inside
+                            // it. As a suffix it would be text sitting in the
+                            // buffer the operator is typing into, to be worked
+                            // around on every edit and parsed back off again.
+                            ui.label(
+                                RichText::new("Hz").size(11.0).color(crate::theme::gray(140)),
+                            );
+                            r
+                        })
+                        .inner;
+                    if resp.lost_focus() {
+                        if let Ok(v) = self.digi_tx_hz_edit.trim().parse::<f32>() {
+                            let v = v.clamp(200.0, 3500.0);
+                            if (v - our_hz).abs() >= 0.5 {
+                                cmds.push(Command::SetDigiAudioFreq(v));
+                            }
+                        }
+                    }
+                });
             }
             ui.add_space(8.0);
             // The same control the keyboard-mode panels carry, but it cannot be
