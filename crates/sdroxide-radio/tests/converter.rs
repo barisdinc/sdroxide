@@ -505,7 +505,7 @@ impl IqSource for Recorder {
     }
     fn tx_telemetry(&mut self) -> Option<sdroxide_types::TxTelemetry> {
         self.calls.note("tx_telemetry");
-        Some(sdroxide_types::TxTelemetry { fwd_w: Some(5.0), swr: Some(1.2) })
+        Some(sdroxide_types::TxTelemetry { fwd_w: Some(5.0), swr: Some(1.2), alc: None })
     }
     fn set_if_offset(&mut self, _hz: f64) {
         self.calls.note("set_if_offset");

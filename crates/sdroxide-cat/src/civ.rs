@@ -163,6 +163,16 @@ pub fn parse_ptt_reply(data: &[u8]) -> Option<bool> {
 pub fn read_swr_frame(radio: u8) -> Vec<u8> {
     frame(radio, 0x15, &[0x12])
 }
+/// Read the ALC meter (Icom cmd `0x15` sub `0x13`). Only meaningful while
+/// transmitting, like the SWR meter beside it.
+///
+/// ALC is the rig telling us how hard its own automatic level control is
+/// working, which is the number that says whether the audio being fed to it is
+/// too hot. Nothing on this side can compute it: the drive level SDRoxide
+/// measures is what it SENDS, and ALC is what the rig does about it.
+pub fn read_alc_frame(radio: u8) -> Vec<u8> {
+    frame(radio, 0x15, &[0x13])
+}
 /// Read the S-meter (Icom cmd `0x15` sub `0x02`). The rig answers with a 0..255
 /// reading on its own calibrated scale (see [`dbm_from_smeter`]).
 ///
@@ -326,6 +336,24 @@ pub fn parse_swr_reply(data: &[u8]) -> Option<f32> {
         return None;
     }
     Some(swr_from_reading(decode_meter(&data[1..])?))
+}
+
+/// Parse an ALC-meter reply payload (Icom cmd `0x15`): the sub-command byte
+/// followed by the BCD reading. Returns 0.0..=1.0, or `None` if the reply is not
+/// the ALC meter (`0x13`) or is malformed.
+///
+/// ⚠️ **The scale is a straight 0..255 fraction, and that is a decision rather
+/// than a calibration.** Icom publishes a curve for the S-meter and the standard
+/// breakpoints for SWR, but nothing for ALC: the manual says only that the meter
+/// should stay within the ALC zone. So this reports the raw reading as a
+/// fraction of full scale and does not pretend to a precision it has not got.
+/// Read it as "how far along its own meter the rig says it is", which is what
+/// the operator is looking at on the rig's face anyway.
+pub fn parse_alc_reply(data: &[u8]) -> Option<f32> {
+    if data.first() != Some(&0x13) {
+        return None;
+    }
+    Some((decode_meter(&data[1..])? as f32 / 255.0).clamp(0.0, 1.0))
 }
 
 /// Map an Icom S-meter reading (`0..255`) to dBm, over the calibration Icom
@@ -827,6 +855,30 @@ mod tests {
         assert_eq!(parse_swr_reply(&[0x11, 0x00, 0x50]), None);
         // The S-meter shares command 0x15 and must not be read as an SWR.
         assert_eq!(parse_swr_reply(&[0x02, 0x01, 0x20]), None);
+    }
+
+    #[test]
+    fn the_alc_meter_is_read_and_parsed_on_its_own_sub_command() {
+        // The frame asks for sub-command 0x13, not the SWR meter's 0x12. Getting
+        // this wrong would return an SWR reading dressed as ALC, which is the
+        // kind of error that looks plausible on screen.
+        let f = read_alc_frame(0x94);
+        assert_eq!(f[f.len() - 3..f.len() - 1], [0x15, 0x13], "wrong meter requested");
+
+        // Raw 0..255 as a fraction of full scale: see the parser's note on why
+        // there is no calibration curve here.
+        let alc = |bcd: [u8; 2]| parse_alc_reply(&[0x13, bcd[0], bcd[1]]);
+        assert_eq!(alc([0x00, 0x00]), Some(0.0));
+        assert_eq!(alc([0x02, 0x55]), Some(1.0));
+        assert!((alc([0x01, 0x28]).unwrap() - 0.5).abs() < 0.01, "midscale");
+
+        // ⛔ The three TX/RX meters all answer on command 0x15 and are told
+        // apart ONLY by the sub-command byte, so each parser must refuse the
+        // others. Without this an ALC reply would fall through to the SWR
+        // parser and be reported as an SWR ratio, which the guard acts on.
+        assert_eq!(parse_alc_reply(&[0x12, 0x00, 0x48]), None, "took an SWR reply");
+        assert_eq!(parse_alc_reply(&[0x02, 0x01, 0x20]), None, "took an S-meter reply");
+        assert_eq!(parse_swr_reply(&[0x13, 0x01, 0x28]), None, "SWR parser took an ALC reply");
     }
 
     #[test]

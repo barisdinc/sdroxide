@@ -2288,11 +2288,19 @@ fn engine_thread(
             // but only an over *we* key is one the guard may unkey, which is
             // why the rails below stay on `tx_active` alone.
             let meters = if engine.tx_active || engine.rig_tx {
-                let alc = engine.tx.as_ref().map(|t| t.alc_peak).unwrap_or(0.0);
                 // CAT/TCI rigs report real forward power / SWR; HackRF and other
                 // IQ sources have no such sensor and leave both `None` (the meter
                 // then falls back to showing drive-side ALC).
                 let tele = engine.source.tx_telemetry().unwrap_or_default();
+                // The rig's own ALC where it reports one, our modulator's peak
+                // otherwise. They are different measurements and the rig's is
+                // the one that answers the operator's question: `alc_peak` is
+                // what SDRoxide SENDS, and ALC is what the rig does about it.
+                // On a CAT rig driving an external radio our figure says
+                // nothing useful about whether the audio is too hot for it.
+                let alc = tele
+                    .alc
+                    .unwrap_or_else(|| engine.tx.as_ref().map(|t| t.alc_peak).unwrap_or(0.0));
                 // Clients that asked for `tx_sensors` get the same figures.
                 if let Some(srv) = engine.tci_srv.as_ref() {
                     srv.push_telemetry(tele);
