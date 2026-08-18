@@ -1732,6 +1732,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_band_keyed_offset_survives_the_config_file() {
+        // The failure this guards compiles perfectly and only shows at runtime:
+        // serde_json requires map keys to be strings, so a key type that
+        // serialises as anything else would make `save_digi_config` fail at the
+        // moment the operator sets an offset, leaving a log line and no saved
+        // figure. `Band` is a unit-variant enum and serialises as its name, and
+        // this pins that rather than trusting it.
+        let mut cfg = DigiConfig { my_call: "G4MQL".into(), ..DigiConfig::default() };
+        cfg.tx_audio_hz.insert(crate::Band::M60, 370.0);
+        cfg.tx_audio_hz.insert(crate::Band::M20, 1500.0);
+        let text = serde_json::to_string(&cfg).expect("a band-keyed map must serialise");
+        assert!(text.contains(r#""M60":370.0"#), "60 m's offset is not in the file: {text}");
+
+        let back: DigiConfig = serde_json::from_str(&text).expect("and must load again");
+        assert_eq!(back.tx_audio_hz.get(&crate::Band::M60).copied(), Some(370.0));
+        assert_eq!(back.tx_audio_hz.get(&crate::Band::M20).copied(), Some(1500.0));
+
+        // And a `digi.json` written before this field existed still loads, which
+        // is what `#[serde(default)]` is there for. Anything else would greet an
+        // operator with a config reset to defaults on the first run after an
+        // update, callsign included.
+        let old = r#"{"my_call":"G4MQL","my_grid":"IO81VS"}"#;
+        let loaded: DigiConfig = serde_json::from_str(old).expect("an old config must still load");
+        assert_eq!(loaded.my_call, "G4MQL");
+        assert!(loaded.tx_audio_hz.is_empty(), "a band with no entry must have none");
+    }
+
+    #[test]
     fn report_formatting() {
         assert_eq!(fmt_report(-13), "-13");
         assert_eq!(fmt_report(2), "+02");
