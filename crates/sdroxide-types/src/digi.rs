@@ -897,10 +897,32 @@ pub struct DigiConfig {
     /// tells us nothing about who is transmitting there when *we* do — and the
     /// station that is will not hear a word. With this on, the engine picks the
     /// quietest spot in the period we are about to transmit in, from the
-    /// stations it has actually decoded there. Turn it off to hold a frequency
-    /// by hand. Ignored in DXpedition mode, where both roles have their
-    /// frequencies decided for them.
+    /// stations it has actually decoded there. Ignored in DXpedition mode, where
+    /// both roles have their frequencies decided for them.
+    ///
+    /// Turning it OFF does not hold the frequency: it selects the other mover,
+    /// answering on the frequency of the station being called. To hold, see
+    /// [`hold_tx_freq`](Self::hold_tx_freq).
     pub auto_tx_freq: bool,
+    /// FT8/FT4: never move the transmit tone by itself, whatever else asks.
+    ///
+    /// The third state the pair above cannot express. `auto_tx_freq` chooses
+    /// *which* automatic mover runs, not whether one does: on, the engine hunts
+    /// the quietest slot between 400 and 2600 Hz; off, it jumps onto whichever
+    /// station is being answered. Both are wrong where the licence, and not the
+    /// band plan, sets the ceiling.
+    ///
+    /// The case that earned it is UK 60 m. On a 5357 kHz dial the allocation
+    /// ends at 5358.0, so the transmit tone must stay under 1 kHz, and either
+    /// mover will walk out of the band unprompted between one over and the next.
+    ///
+    /// With this on nothing moves the tone: not answering a station, not the
+    /// call queue walking on, not calling CQ, not a click on a decode or on the
+    /// waterfall. Turn it off to move, then on again. The one exception is a
+    /// Hound following the Fox that answered it, which is the DXpedition's
+    /// frequency to give and not ours to hold.
+    #[serde(default)]
+    pub hold_tx_freq: bool,
     /// FT8: which side of a DXpedition pile-up to operate (see [`DxpedMode`]).
     /// Ignored in every other mode.
     pub dxped_mode: DxpedMode,
@@ -1202,6 +1224,7 @@ impl Default for DigiConfig {
             sstv_tx_ppm: 0.0,
             rf_paint_speed: 0.25,
             auto_tx_freq: true,
+            hold_tx_freq: false,
             dxped_mode: DxpedMode::Normal,
             fox_slots: 3,
             rade_mute_analog: false,

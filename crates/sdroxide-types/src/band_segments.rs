@@ -239,6 +239,31 @@ pub fn segment_kind_at(hz: f64) -> Option<SegmentKind> {
     segment_kind_at_in(hz, crate::region())
 }
 
+/// True when the whole span `lo..=hi` fits inside one sub-segment of `region`'s
+/// band plan.
+///
+/// Unlike [`segment_kind_at_in`], which asks about a point, this asks about an
+/// emission: a signal has width, and the question at a band edge is whether all
+/// of it is inside, not whether its carrier is.
+///
+/// The upper bound is INCLUSIVE, deliberately, where `segment_kind_at_in`'s is
+/// not. A segment ending at 5358.0 kHz permits a transmission reaching exactly
+/// 5358.0; the exclusive test would refuse it, and the operator who did the
+/// arithmetic correctly would be the one told no.
+///
+/// A span straddling two adjacent segments is NOT accepted, even where they
+/// touch. Segments divide a band by usage as well as by legality, and the case
+/// this exists for is the licence edge, where the neighbour is not another
+/// segment but a gap.
+pub fn span_within_segment_in(lo: f64, hi: f64, region: Region) -> bool {
+    segments_in(region).iter().any(|s| lo >= s.lo && hi <= s.hi)
+}
+
+/// True when `lo..=hi` fits inside one sub-segment of the station's region.
+pub fn span_within_segment(lo: f64, hi: f64) -> bool {
+    span_within_segment_in(lo, hi, crate::region())
+}
+
 /// True if `hz` falls in a CW sub-segment.
 pub fn is_cw_segment(hz: f64) -> bool {
     segment_kind_at(hz) == Some(SegmentKind::Cw)

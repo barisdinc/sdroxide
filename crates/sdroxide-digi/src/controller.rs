@@ -264,8 +264,24 @@ impl DigiController {
     /// one legitimate move into it — following the Fox once it has answered us —
     /// goes through [`tune_audio_hz`](Self::tune_audio_hz) instead.
     pub fn set_audio_hz(&mut self, hz: f32) {
+        // Held means held, whoever is asking. This is the operator's own route
+        // (a click on a decode or the waterfall, the offset box, a key binding)
+        // *and* the follow-the-DX branch of `start_qso`, so one check covers
+        // both the deliberate move and the automatic one.
+        if self.tx_held() {
+            return;
+        }
         let hz = if self.is_hound() { hz.max(sdroxide_types::FOX_ZONE_MAX_HZ) } else { hz };
         self.tune_audio_hz(hz);
+    }
+
+    /// True when the operator has pinned the transmit tone.
+    ///
+    /// Deliberately not overridable by a modifier key the way WSJT-X's Hold Tx
+    /// Freq is: the case this exists for is a licence edge, where a move made by
+    /// accident is an out-of-band transmission and not merely bad manners.
+    fn tx_held(&self) -> bool {
+        self.qso.status(false).config.hold_tx_freq
     }
 
     fn is_hound(&self) -> bool {
@@ -310,7 +326,9 @@ impl DigiController {
         // Where to answer from. Moving onto the DX's own frequency is the
         // obvious choice and the wrong one — see `pick_tx_freq`. A Hound is
         // exempt twice over: its calling frequency is the operator's, and the
-        // Fox's own half of the band is out of bounds.
+        // Fox's own half of the band is out of bounds. Both branches below are
+        // no-ops under `hold_tx_freq`, which is checked inside each of them
+        // rather than here, so every other caller is covered by the same gate.
         if !self.is_hound() {
             if self.qso.status(false).config.auto_tx_freq {
                 self.pick_tx_freq();
@@ -336,7 +354,9 @@ impl DigiController {
     fn pick_tx_freq(&mut self) {
         let cfg_ok = {
             let s = self.qso.status(false);
-            s.config.auto_tx_freq && s.config.dxped_mode == sdroxide_types::DxpedMode::Normal
+            !s.config.hold_tx_freq
+                && s.config.auto_tx_freq
+                && s.config.dxped_mode == sdroxide_types::DxpedMode::Normal
         };
         if !cfg_ok {
             return;
@@ -816,6 +836,60 @@ mod tests {
         c.set_config(DigiConfig { auto_tx_freq: false, ..cfg() });
         c.start_qso("K1ABC".into(), None, -10, 800.0, false);
         assert_eq!(c.audio_hz(), 800.0);
+    }
+
+    #[test]
+    fn holding_the_transmit_frequency_stops_every_mover() {
+        // The case this exists for: UK 60 m, where the allocation ends 1 kHz
+        // above a 5357 kHz dial and either automatic mover walks out of it.
+        let mut c = DigiController::new(
+            Mode::Ft8,
+            DigiConfig { hold_tx_freq: true, ..cfg() },
+            12_000.0,
+        );
+        // Placed by the sequencer's own route, which is what the operator's
+        // click becomes once the hold is lifted.
+        c.tune_audio_hz(820.0);
+
+        // 1. The operator's own set is refused while held — no modifier-key
+        //    escape, unlike WSJT-X's Hold Tx Freq.
+        c.set_audio_hz(2400.0);
+        assert_eq!(c.audio_hz(), 820.0, "an operator click moved a held frequency");
+
+        // 2. Answering a station does not follow it, with Auto TX FRQ either way.
+        c.start_qso("W9XYZ".into(), None, -10, 2400.0, false);
+        assert_eq!(c.audio_hz(), 820.0, "answering moved a held frequency");
+        c.set_config(DigiConfig { hold_tx_freq: true, auto_tx_freq: false, ..cfg() });
+        c.start_qso("K1ABC".into(), None, -10, 2400.0, false);
+        assert_eq!(c.audio_hz(), 820.0, "follow-the-DX moved a held frequency");
+
+        // 3. Calling CQ does not hunt for a clear slot. `pick_tx_freq` would
+        //    otherwise roam 400..2600 Hz, most of which is out of band here.
+        c.set_config(DigiConfig { hold_tx_freq: true, ..cfg() });
+        c.call_cq();
+        assert_eq!(c.audio_hz(), 820.0, "calling CQ moved a held frequency");
+
+        // Lifting it hands control back, and the operator's click lands.
+        c.set_config(DigiConfig { hold_tx_freq: false, ..cfg() });
+        c.set_audio_hz(2400.0);
+        assert_eq!(c.audio_hz(), 2400.0, "lifting the hold did not release the frequency");
+    }
+
+    #[test]
+    fn a_held_hound_still_follows_the_fox() {
+        use sdroxide_types::DxpedMode;
+        // The one move a hold does not block: a Fox that has answered us owns
+        // the frequency the contact finishes on, and it is not ours to pin.
+        let mut c = DigiController::new(
+            Mode::Ft8,
+            DigiConfig { hold_tx_freq: true, dxped_mode: DxpedMode::Hound, ..cfg() },
+            12_000.0,
+        );
+        c.tune_audio_hz(1800.0);
+        c.start_qso("DX1FOX".into(), None, -10, 700.0, false);
+        assert_eq!(c.audio_hz(), 1800.0, "calling frequency should be held");
+        c.tune_audio_hz(700.0);
+        assert_eq!(c.audio_hz(), 700.0, "the Fox's QSY is exempt");
     }
 
     #[test]

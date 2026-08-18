@@ -807,6 +807,11 @@ pub fn show_ext(
     // FT8/FT4: the engine is choosing the transmit frequency, so clicking a
     // station label must not drag it onto that station.
     auto_tx_freq: bool,
+    // FT8/FT4: the operator has pinned the transmit tone, so NO click moves it
+    // — a station label or bare waterfall alike. The engine refuses the command
+    // regardless; suppressing it here keeps the UI from asking for something it
+    // has been told cannot happen.
+    hold_tx_freq: bool,
     // Extra audio-offset tuning lines (Hz relative to the dial), e.g. the RTTY
     // mark/space pair. Drawn as thin amber lines to aid exact tuning.
     markers: &[f32],
@@ -1282,7 +1287,7 @@ pub fn show_ext(
                         // the period opposite ours, so their frequency says
                         // nothing about who is there when we key. With it on the
                         // label is a label; with it off it tunes, as before.
-                        if !auto_tx_freq {
+                        if !auto_tx_freq && !hold_tx_freq {
                             let audio = (spot_hz - state.rx_freq_hz()) as f32;
                             cmds.push(Command::SetDigiAudioFreq(audio.clamp(200.0, 3500.0)));
                         }
@@ -1319,8 +1324,11 @@ pub fn show_ext(
                             }
                         }
                     }
-                } else if click_sets_offset {
-                    // Digital mode: set the audio TX offset, not the VFO.
+                } else if click_sets_offset && !hold_tx_freq {
+                    // Digital mode: set the audio TX offset, not the VFO. Held
+                    // means held even for a deliberate click on clear water:
+                    // the case this exists for is a licence edge, where a slip
+                    // is an out-of-band transmission.
                     let audio = (view.x_to_freq(pos.x, &rect) - state.rx_freq_hz()) as f32;
                     cmds.push(Command::SetDigiAudioFreq(audio.clamp(200.0, 3500.0)));
                 } else {

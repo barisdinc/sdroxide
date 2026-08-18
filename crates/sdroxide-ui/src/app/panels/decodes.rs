@@ -135,18 +135,95 @@ impl SdroxideApp {
             // than in the setup window because it decides what clicking a
             // decode in this list does.
             if self.digi_cfg_seeded {
+                let held = self.digi_cfg_edit.hold_tx_freq;
                 let auto = self.digi_cfg_edit.auto_tx_freq;
-                if crate::chrome::chip(ui, auto, "Auto TX FRQ")
-                    .on_hover_text(
+                // Greyed while held, because held wins: leaving it live would
+                // offer a choice between two movers neither of which can run.
+                // `chip_enabled`, not a bare `add_enabled_ui`: this row is
+                // `horizontal_wrapped`, and a child Ui inside one does not wrap.
+                let auto_chip = crate::chrome::chip_enabled(ui, !held, auto && !held, "Auto TX FRQ")
+                    .on_hover_text(if held {
+                        "Overridden by Hold TX. Lift the hold to choose which way the transmit \
+                         frequency moves."
+                    } else {
                         "Pick our transmit frequency automatically: the quietest spot in the \
                          period we transmit in, rather than the frequency of whoever we are \
                          answering — they transmit in the other period, so theirs says nothing \
-                         about who is there when we key. Off holds the frequency you set.",
+                         about who is there when we key. Off does NOT hold the frequency: it \
+                         answers on the frequency of the station being called. To hold, use \
+                         Hold TX."
+                    });
+                if auto_chip.clicked() {
+                    self.digi_cfg_edit.auto_tx_freq = !auto;
+                    cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
+                }
+                // The third state neither setting above can express: don't move
+                // at all. For the licence edges, where the band plan is wider
+                // than what we are allowed to key into.
+                if crate::chrome::chip(ui, held, "Hold TX")
+                    .on_hover_text(
+                        "Pin the transmit tone where it is. Nothing moves it: not answering a \
+                         station, not the call queue, not calling CQ, not a click on a decode \
+                         or on the waterfall. Turn it off to move, then on again.\n\nFor where \
+                         the licence is narrower than the band plan — on a UK 60 m dial of \
+                         5357 kHz the allocation ends at 5358.0, so the tone has to stay under \
+                         1000 Hz, and either automatic mover will walk out of the band between \
+                         one over and the next.",
                     )
                     .clicked()
                 {
-                    self.digi_cfg_edit.auto_tx_freq = !auto;
+                    self.digi_cfg_edit.hold_tx_freq = !held;
                     cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
+                }
+                // Our own transmit offset: readout, ±10 Hz, and a box to type
+                // it into. FT8 and FT4 were the only slotted modes without one
+                // — JS8, FSQ, CW and the text modem all have the nudge pair —
+                // so the offset could be placed only by clicking the waterfall,
+                // which is not a way to land on an exact figure. A hold is only
+                // as good as the ability to set what is being held.
+                //
+                // No suggested value anywhere here, deliberately. Where the
+                // ceiling is the licence's rather than the band plan's, the
+                // whole range below it is the operator's to choose from, and a
+                // number printed in a tooltip is a number everyone sits on.
+                let our_hz = self.digi_status.as_ref().map(|s| s.audio_hz).unwrap_or(1500.0);
+                // Each control gated on its own rather than the group being
+                // wrapped in an `add_enabled_ui`, for the wrapping reason above.
+                ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
+                if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
+                    cmds.push(Command::SetDigiAudioFreq((our_hz - 10.0).clamp(200.0, 3500.0)));
+                }
+                if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
+                    cmds.push(Command::SetDigiAudioFreq((our_hz + 10.0).clamp(200.0, 3500.0)));
+                }
+                // The readout and the entry are the same widget: two of them
+                // would be two things to disagree with each other.
+                //
+                // Speed 0 so it is a box you type in and not a slider a stray
+                // drag can push off a licence edge.
+                //
+                // Committed on LOST FOCUS (Enter, or clicking away) rather than
+                // on `changed()`, because a DragValue in text mode reparses as
+                // you type: `changed()` would fire on "8", then "82", then
+                // "820", sending three transmit-frequency changes for one
+                // figure, the first two of them wrong. And NO `.range()`, for
+                // the same reason — it clamps the value while the text is still
+                // half-typed, so the box fights the operator and "820" becomes
+                // "200" the moment the 8 is pressed. Clamped here instead, once,
+                // when the number is finished.
+                let mut typed = our_hz;
+                let resp = ui
+                    .add_enabled(
+                        !held,
+                        egui::DragValue::new(&mut typed).speed(0.0).fixed_decimals(0).suffix(" Hz"),
+                    )
+                    .on_hover_text(
+                        "Type the transmit offset in Hz, then press Enter. Where your licence \
+                         is narrower than the band plan the whole range below the edge is \
+                         yours to pick from, so nothing is suggested here.",
+                    );
+                if resp.lost_focus() && (typed - our_hz).abs() >= 0.5 {
+                    cmds.push(Command::SetDigiAudioFreq(typed.clamp(200.0, 3500.0)));
                 }
             }
             ui.add_space(8.0);
@@ -188,6 +265,8 @@ impl SdroxideApp {
         // the same question of the same radio.
         let tx_ok = self.tx_capable();
         let auto_tx_freq = self.digi_status.as_ref().map(|s| s.config.auto_tx_freq).unwrap_or(true);
+        let hold_tx_freq =
+            self.digi_status.as_ref().map(|s| s.config.hold_tx_freq).unwrap_or(false);
         let sort = self.digi_sort;
         let desc = self.digi_sort_desc;
         // Turn parity needs the mode's slot length (FT8 15 s, FT4 7.5 s). JS8's
@@ -692,8 +771,11 @@ impl SdroxideApp {
                     } else if row.clicked() {
                         // Moving our transmit onto theirs is exactly what Auto
                         // TX FRQ exists to avoid, so with it on a click only
-                        // previews the station.
-                        if !auto_tx_freq {
+                        // previews the station. Hold TX suppresses it too: the
+                        // engine would refuse the command anyway, and sending
+                        // one it drops on the floor is how a UI comes to
+                        // disagree with the radio.
+                        if !auto_tx_freq && !hold_tx_freq {
                             cmds.push(Command::SetDigiAudioFreq(d.audio_hz));
                         }
                         // Preview this station's location (if it sent a grid).

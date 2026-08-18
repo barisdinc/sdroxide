@@ -8044,6 +8044,51 @@ impl Engine {
                      --oob-tx, if you are licensed to transmit here)",
                 );
             }
+            // The dial is not what goes out. A digital mode transmits at the
+            // dial PLUS its audio offset, so every check above — this radio's
+            // range, the amateur-band rail — has been vetting a frequency we do
+            // not radiate. On most bands the gap does not matter, because the
+            // conventional dial sits kilohertz below the edge. Where a licence
+            // is narrower than the band plan it matters entirely.
+            //
+            // UK 60 m is the case that earned it: on a 5357 kHz dial the
+            // allocation ends at 5358.0, an audio offset over 1 kHz is out of
+            // band, and `Band::containing` says 60 m throughout because the
+            // built-in table carries the WRC-15 allocation (5351.5–5366.5) that
+            // most of Region 1 actually has.
+            //
+            // So this is checked against the SUB-SEGMENTS rather than the band
+            // edges, because `bandplan.json` holds one range per band and eleven
+            // would be needed. An operator whose licence is narrower says so by
+            // narrowing the segments in that file; nothing here is UK-specific.
+            //
+            // It fails OPEN where the table says nothing: unless the dial is
+            // inside a listed segment, no opinion is offered. A band plan with a
+            // gap in it must not become a transmit lockout for the operator who
+            // is legitimately in that gap.
+            if self.tx_ham_only
+                && let Some(d) = self.digi.as_ref()
+                && let Some(bw) = d.mode().occupied_bw_hz()
+                && sdroxide_types::segment_kind_at(txf).is_some()
+            {
+                // Upper sideband, and the offset is the signal's LOWEST tone —
+                // the figure the waterfall shows and the one WSJT-X's Tx Freq
+                // means — so the emission runs from there up by its bandwidth.
+                let lo = txf + f64::from(d.audio_hz());
+                let hi = lo + f64::from(bw);
+                if !sdroxide_types::span_within_segment(lo, hi) {
+                    return self.deny_tx(&format!(
+                        "{:.3} kHz dial + {:.0} Hz offset puts {} from {:.3} to {:.3} kHz, which \
+                         leaves the band plan's segment — lower the transmit offset, or widen \
+                         the segment in bandplan.json if your licence allows it",
+                        txf / 1e3,
+                        d.audio_hz(),
+                        d.mode().label(),
+                        lo / 1e3,
+                        hi / 1e3,
+                    ));
+                }
+            }
             // Assert the app's current mode and power levels to the rig before
             // keying, so a CAT/TCI rig transmits in the right modulation at the
             // right drive even when the operator hasn't touched those controls

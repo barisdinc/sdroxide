@@ -379,7 +379,13 @@ use sdroxide_types::{
 /// the new block on the end stops at the wrong byte, and the LimeRFE settings
 /// it cannot decode are the ones that decide whether an amplifier is switched
 /// into the transmit path.
-pub const PROTO_VERSION: u16 = 65;
+///
+/// **66** — the transmit tone can be held. `DigiConfig` gained `hold_tx_freq`,
+/// and `DigiConfig` travels inside `DigiStatus`, so this is not an append a v65
+/// client can survive: postcard is positional and every field after it shifts.
+/// `#[serde(default)]` covers the config file on disk, not the wire. The engine
+/// gained `Settings.tx_guard_offset`, but that is local and not on the wire.
+pub const PROTO_VERSION: u16 = 66;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

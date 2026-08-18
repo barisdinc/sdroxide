@@ -228,6 +228,33 @@ impl Mode {
         matches!(self, Mode::Ft8 | Mode::Ft4 | Mode::Ft2 | Mode::Js8)
     }
 
+    /// How much spectrum this mode's signal occupies, in Hz, for the modes whose
+    /// answer is a property of the waveform rather than of a filter setting.
+    ///
+    /// `None` means "ask something else": SSB and NFM are as wide as the filter
+    /// the operator chose, and CW as wide as the fist sending it.
+    ///
+    /// Used by the transmit lockout, which needs to know how far above the
+    /// carrier the emission actually reaches. The figures are tones times tone
+    /// spacing: FT8 is 8 × 6.25, FT4 is 4 × 20.833, FT2 is 4 × 41.667 (see
+    /// `Ft2::TONE_SPACING_HZ`), WSPR is 4 × 1.4648.
+    ///
+    /// JS8 is given its WIDEST speed, Turbo's 160 Hz, because a `Mode` does not
+    /// know which speed is set — [`crate::Js8Speed::bandwidth_hz`] does, and is
+    /// the figure to prefer wherever the speed is in hand. Erring wide is the
+    /// right direction for a band-edge check and the wrong one for a display,
+    /// so do not reuse this for drawing.
+    pub fn occupied_bw_hz(self) -> Option<f32> {
+        match self {
+            Mode::Ft8 => Some(50.0),
+            Mode::Ft4 => Some(83.3),
+            Mode::Ft2 => Some(166.7),
+            Mode::Js8 => Some(crate::Js8Speed::Turbo.bandwidth_hz()),
+            Mode::Wspr => Some(6.0),
+            _ => None,
+        }
+    }
+
     /// True for WSPR. Its own controller and panel: it is slotted like FT8, but
     /// there is no QSO to sequence and what it decodes is a list of paths rather
     /// than a conversation.

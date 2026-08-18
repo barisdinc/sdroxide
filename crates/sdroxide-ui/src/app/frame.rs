@@ -445,6 +445,12 @@ impl eframe::App for SdroxideApp {
                                 .as_ref()
                                 .map(|s| s.config.auto_tx_freq)
                                 .unwrap_or(true),
+                        mode.is_slotted()
+                            && self
+                                .digi_status
+                                .as_ref()
+                                .map(|s| s.config.hold_tx_freq)
+                                .unwrap_or(false),
                         &markers,
                         &ft8_spots,
                         &ft8_alpha,
@@ -589,6 +595,11 @@ impl eframe::App for SdroxideApp {
                         &mut self.trace_cache,
                         cw_pitch,
                         sdroxide_types::DxpedMode::Normal,
+                        false,
+                        // This waterfall is drawn for the non-slotted modes, so
+                        // there is no held FT8 transmit tone for a click to
+                        // disturb. The engine's own gate is the authority in any
+                        // case; this only decides whether the UI bothers asking.
                         false,
                         &[],
                         &cw_spots,
