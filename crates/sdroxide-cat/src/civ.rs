@@ -349,6 +349,16 @@ pub fn parse_swr_reply(data: &[u8]) -> Option<f32> {
 /// fraction of full scale and does not pretend to a precision it has not got.
 /// Read it as "how far along its own meter the rig says it is", which is what
 /// the operator is looking at on the rig's face anyway.
+///
+/// ✅ **CHECKED ON AIR 18 August 2026 against an IC-7300 and found good enough.**
+/// Rodger's verdict, and it settles the open question this comment used to
+/// carry: the percentage agrees with the rig's own meter and reads much as
+/// WSJT-X 3.2.0's does beside its SWR figure. **It is a GUIDE and is meant to
+/// be one** — his words, "if I really am looking for adjusting I would go to the
+/// rig". ⛔ **So do not fit a calibration curve here.** There is no published
+/// Icom curve to fit it to, a plausible-looking one would be invented precision,
+/// and the raw fraction has now been shown to track the rig closely enough for
+/// the job it does.
 pub fn parse_alc_reply(data: &[u8]) -> Option<f32> {
     if data.first() != Some(&0x13) {
         return None;
