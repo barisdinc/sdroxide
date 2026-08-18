@@ -4560,6 +4560,7 @@ impl Engine {
 
             // Digital modes (FT8/FT4).
             SetDigiConfig(c) => {
+                let c = keep_engine_owned(c, &self.digi_config);
                 self.digi_config = c.clone();
                 if let Some(d) = self.digi.as_mut() {
                     d.set_config(c);
@@ -9246,6 +9247,52 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageLuma8(img).write_to(&mut buf, image::ImageFormat::Png).ok()?;
     Some(buf.into_inner())
+}
+
+/// Replace the fields of an incoming [`DigiConfig`] that the engine owns rather
+/// than the client, leaving every genuine setting as sent.
+///
+/// Only `tx_audio_hz` so far, the per-band transmit offsets. They ride in
+/// `DigiConfig` because that is what reaches the config file, not because a
+/// client has any business setting them, and the panel seeds its editable copy
+/// from the first status and owns it from then on. So an incoming map is always
+/// a stale snapshot, and taking it discards every offset learned since that
+/// client started.
+///
+/// Found the hard way, minutes after the offsets went in. 60 m's was set,
+/// recorded and saved; ticking Hold TX a moment later sent a copy seeded before
+/// it existed, and the empty map went over the good file. Nothing reported a
+/// fault, because the write succeeded. A merge here cannot be defeated by a
+/// client that means no harm, where asking clients to send the map back
+/// faithfully could be defeated by any of them.
+fn keep_engine_owned(mut incoming: DigiConfig, current: &DigiConfig) -> DigiConfig {
+    incoming.tx_audio_hz = current.tx_audio_hz.clone();
+    incoming
+}
+
+#[cfg(test)]
+mod digi_config_tests {
+    use super::*;
+
+    #[test]
+    fn a_client_config_cannot_wipe_the_band_offsets() {
+        use sdroxide_types::Band;
+        // What the engine has learned: an offset the operator set on 60 m.
+        let mut current = DigiConfig::default();
+        current.tx_audio_hz.insert(Band::M60, 370.0);
+
+        // What a panel sends when a chip is toggled: its own copy, seeded
+        // before that offset existed, carrying an empty map and one real edit.
+        let incoming = DigiConfig { hold_tx_freq: true, ..DigiConfig::default() };
+
+        let merged = keep_engine_owned(incoming, &current);
+        assert_eq!(
+            merged.tx_audio_hz.get(&Band::M60).copied(),
+            Some(370.0),
+            "a chip toggle wiped the band offsets"
+        );
+        assert!(merged.hold_tx_freq, "and the edit the client actually made was lost");
+    }
 }
 
 #[cfg(test)]

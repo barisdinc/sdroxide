@@ -190,6 +190,19 @@ impl SdroxideApp {
                 // whole range below it is the operator's to choose from, and a
                 // number printed in a tooltip is a number everyone sits on.
                 let our_hz = self.digi_status.as_ref().map(|s| s.audio_hz).unwrap_or(1500.0);
+                // The nudges land on round figures rather than stepping a flat
+                // 10 Hz, because a flat step preserves the last digit of
+                // wherever the tone happens to be sitting. A tone left at 373 by
+                // an automatic move or a waterfall click can then reach 363 and
+                // 383 and never 370 at all, however many times it is pressed.
+                // Reported from the station the day the box landed, having been
+                // tried: "it would not give me exact 370 so its 373".
+                //
+                // Nothing is lost by it. The step is unchanged where the tone is
+                // already round, and an exact figure of any kind still comes
+                // from the box beneath.
+                let step_down = ((our_hz / 10.0).ceil() - 1.0) * 10.0;
+                let step_up = ((our_hz / 10.0).floor() + 1.0) * 10.0;
                 // The three of them are one column, nudges above and typed
                 // figure below, rather than four items loose in the wrapping
                 // row. Loose, they sat side by side on a wide panel and broke
@@ -209,14 +222,10 @@ impl SdroxideApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
                         if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
-                            cmds.push(Command::SetDigiAudioFreq(
-                                (our_hz - 10.0).clamp(200.0, 3500.0),
-                            ));
+                            cmds.push(Command::SetDigiAudioFreq(step_down.clamp(200.0, 3500.0)));
                         }
                         if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
-                            cmds.push(Command::SetDigiAudioFreq(
-                                (our_hz + 10.0).clamp(200.0, 3500.0),
-                            ));
+                            cmds.push(Command::SetDigiAudioFreq(step_up.clamp(200.0, 3500.0)));
                         }
                     });
                     // The readout and the entry are the same widget: two of them
