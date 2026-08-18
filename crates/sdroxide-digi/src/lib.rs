@@ -78,6 +78,20 @@ pub trait DigiEngine: Send {
     fn abort_tx(&mut self);
     fn set_config(&mut self, cfg: DigiConfig);
     fn set_audio_hz(&mut self, hz: f32);
+    /// Put the transmit tone back where the operator last left it on this band.
+    ///
+    /// Separate from [`set_audio_hz`](Self::set_audio_hz) because it is the one
+    /// move Hold TX does not block. Hold exists to stop the tone drifting on its
+    /// own; changing band is the operator's own act, and the figure being
+    /// restored is one they chose there themselves. Holding through a band
+    /// change would instead carry a licence-edge figure onto a band that does
+    /// not want it, or 1500 Hz onto one that cannot have it.
+    ///
+    /// Defaults to the ordinary route, so a mode with no hold of its own, and
+    /// no per-band memory, needs no implementation.
+    fn restore_audio_hz(&mut self, hz: f32) {
+        self.set_audio_hz(hz);
+    }
     fn audio_hz(&self) -> f32;
     fn status(&self) -> DigiStatus;
 

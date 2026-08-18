@@ -295,9 +295,10 @@ impl SdroxideApp {
                             "Pin the transmit tone where it is. Nothing moves it: not \
                              answering a station, not the call queue, not calling CQ, not a \
                              click on a decode or the waterfall. Overrides Auto TX frequency. \
-                             For where your licence is narrower than the band plan — on a UK \
-                             60 m dial of 5357 kHz the allocation ends at 5358.0, so the tone \
-                             must stay under 1000 Hz.",
+                             Changing band is the one exception: the offset you last set on \
+                             the new band comes back with it. For where your licence is \
+                             narrower than the band plan — on a UK 60 m dial of 5357 kHz the \
+                             allocation ends at 5358.0, so the tone must stay under 1000 Hz.",
                         )
                         .changed();
                     ui.end_row();

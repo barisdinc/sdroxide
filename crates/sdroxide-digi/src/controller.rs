@@ -661,6 +661,12 @@ impl DigiController {
 }
 
 impl crate::DigiEngine for DigiController {
+    /// Straight to `tune_audio_hz`, deliberately bypassing the hold that
+    /// [`set_audio_hz`](DigiController::set_audio_hz) enforces. See the trait
+    /// method for why a band change is the exception.
+    fn restore_audio_hz(&mut self, hz: f32) {
+        self.tune_audio_hz(hz);
+    }
     fn mode(&self) -> Mode {
         DigiController::mode(self)
     }
@@ -873,6 +879,32 @@ mod tests {
         c.set_config(DigiConfig { hold_tx_freq: false, ..cfg() });
         c.set_audio_hz(2400.0);
         assert_eq!(c.audio_hz(), 2400.0, "lifting the hold did not release the frequency");
+    }
+
+    #[test]
+    fn a_band_change_reaches_a_held_frequency() {
+        use crate::DigiEngine as _;
+        // The second exception, and the reason it is one: a hold pins the tone
+        // against everything that would move it by itself, but a change of band
+        // is the operator's own act, and what comes back is a figure they set
+        // on that band themselves. Holding through it would carry 60 m's
+        // sub-1 kHz figure onto 20 m, or 20 m's 1500 onto 60 m, where it cannot
+        // legally go.
+        let mut c = DigiController::new(
+            Mode::Ft8,
+            DigiConfig { hold_tx_freq: true, ..cfg() },
+            12_000.0,
+        );
+        c.tune_audio_hz(820.0);
+
+        // The ordinary route is still refused, so the hold is genuinely on and
+        // the restore below is not passing for the trivial reason.
+        c.set_audio_hz(1500.0);
+        assert_eq!(c.audio_hz(), 820.0, "an operator click moved a held frequency");
+
+        // The band-memory route goes through it.
+        c.restore_audio_hz(1500.0);
+        assert_eq!(c.audio_hz(), 1500.0, "a band change did not reach a held frequency");
     }
 
     #[test]

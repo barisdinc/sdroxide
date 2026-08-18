@@ -385,7 +385,14 @@ use sdroxide_types::{
 /// client can survive: postcard is positional and every field after it shifts.
 /// `#[serde(default)]` covers the config file on disk, not the wire. The engine
 /// gained `Settings.tx_guard_offset`, but that is local and not on the wire.
-pub const PROTO_VERSION: u16 = 66;
+///
+/// **67** — the transmit tone is remembered per band. `DigiConfig` gained
+/// `tx_audio_hz`, a map from `Band` to the offset last chosen there, and the
+/// same reasoning as 66 applies unchanged: it sits inside `DigiStatus`,
+/// postcard is positional, and a v66 client reading a v67 status runs into the
+/// wrong field. `#[serde(default)]` again covers the config file and not the
+/// wire. The engine's `digi_tx_band` is local state and is not sent.
+pub const PROTO_VERSION: u16 = 67;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

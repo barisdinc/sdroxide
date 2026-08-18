@@ -1336,6 +1336,12 @@ struct Engine {
     /// only while a digital mode is active.
     digi: Option<Box<dyn DigiEngine>>,
     digi_config: DigiConfig,
+    /// The band the running controller's transmit offset belongs to, so a move
+    /// to another one can be noticed. `None` means "not yet applied", which is
+    /// how a fresh controller asks for its band's stored offset: startup and a
+    /// mode change both go through the same path as a retune that way, rather
+    /// than each needing its own hook.
+    digi_tx_band: Option<sdroxide_types::Band>,
     /// True while the current TX burst is driven by the digi engine.
     digi_tx: bool,
     /// WSPR band hopping has been stood down because the operator moved the
@@ -1937,6 +1943,7 @@ fn engine_thread(
         audio_nr_level: NrLevel::Off,
         digi: None,
         digi_config,
+        digi_tx_band: None,
         digi_tx: false,
         hop_suspended: false,
         voice: VoiceKeyer::load(),
@@ -3354,6 +3361,32 @@ impl Engine {
 
     /// Tick the FT8/FT4 controller and apply its actions (emit events, key/
     /// unkey PTT). Owned actions avoid a `&mut self.digi` / `&mut self` clash.
+    /// Apply the transmit offset stored for the band the dial is on, when that
+    /// band has changed since the last one applied.
+    ///
+    /// Called from the poll rather than hooked onto the places that assign
+    /// `state.band`, of which there are four: two retune paths, a region change
+    /// and a band-plan reload, the last two moving the band under a dial that
+    /// never moved. One check at a known point covers all four and cannot be
+    /// forgotten by a fifth.
+    ///
+    /// A band with nothing stored is left alone rather than reset to 1500. The
+    /// operator is mid-session on a frequency they chose, and the memory has
+    /// nothing better to offer than what is already there.
+    fn follow_band_tx_offset(&mut self) {
+        let band = self.state.band;
+        if self.digi_tx_band == Some(band) {
+            return;
+        }
+        self.digi_tx_band = Some(band);
+        let Some(hz) = self.digi_config.tx_audio_hz.get(&band).copied() else { return };
+        if let Some(d) = self.digi.as_mut() {
+            // `restore_audio_hz`, not `set_audio_hz`: this is the one move that
+            // goes through a hold. See the trait method.
+            d.restore_audio_hz(hz);
+        }
+    }
+
     fn poll_digi(&mut self) {
         // A message the radio was keying itself has run its length: it is off
         // the air, so the station interlock goes back. Not while an ordinary
@@ -3366,6 +3399,7 @@ impl Engine {
                 self.release_tx_gate();
             }
         }
+        self.follow_band_tx_offset();
         let Some(digi) = self.digi.as_mut() else { return };
         let dial = self.state.rx_freq_hz();
         let actions = digi.poll(SystemTime::now(), dial);
@@ -3621,6 +3655,11 @@ impl Engine {
         // session a port whose other end has gone.
         self.packet_port = None;
         self.digi = Some(self.make_digi(mode, tap_rate));
+        // The new controller starts at the mode's default 1500 Hz whatever the
+        // last one was on, so the band's stored offset has to be applied again.
+        // Clearing this leaves that to `follow_band_tx_offset` on the next poll
+        // rather than repeating it here.
+        self.digi_tx_band = None;
         if mode == Mode::Cw {
             self.source.set_cw_wpm(self.digi_config.cw_wpm);
         }
@@ -4549,6 +4588,29 @@ impl Engine {
                     d.set_audio_hz(hz);
                 }
                 self.sync_cw_filter();
+                // Remembered against the band, and only here: this arm is the
+                // operator's own route (the offset box, the nudge chips, a click
+                // on a decode or the waterfall). The automatic movers never
+                // reach it, which is intended — the quietest slot this over is
+                // not a preference, and saving it would overwrite the figure
+                // that was chosen on purpose.
+                //
+                // Read back from the controller rather than stored as asked,
+                // because `hz` is a request: a hold refuses it outright and the
+                // Fox zone floors it, so the value on the air is the only one
+                // worth restoring later.
+                if let Some(actual) = self.digi.as_ref().map(|d| d.audio_hz()) {
+                    let band = self.state.band;
+                    if self.digi_config.tx_audio_hz.insert(band, actual) != Some(actual) {
+                        // Saved on every change, as every other setting here is.
+                        // The nudge chips can write repeatedly, which is a few
+                        // hundred bytes of JSON either way; the alternative is a
+                        // debounce that loses the last move on a crash.
+                        if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
+                            warn!("saving digi config: {e}");
+                        }
+                    }
+                }
             }
             DigiCallCq => {
                 if let Some(d) = self.digi.as_mut() {

@@ -164,7 +164,10 @@ impl SdroxideApp {
                     .on_hover_text(
                         "Pin the transmit tone where it is. Nothing moves it: not answering a \
                          station, not the call queue, not calling CQ, not a click on a decode \
-                         or on the waterfall. Turn it off to move, then on again.\n\nFor where \
+                         or on the waterfall. Turn it off to move, then on again.\n\nChanging \
+                         band is the one exception, and it is your own act: the offset you last \
+                         set on the new band comes back with it, so a 60 m figure is not carried \
+                         onto 20 m and 20 m's is not carried onto 60 m.\n\nFor where \
                          the licence is narrower than the band plan — on a UK 60 m dial of \
                          5357 kHz the allocation ends at 5358.0, so the tone has to stay under \
                          1000 Hz, and either automatic mover will walk out of the band between \

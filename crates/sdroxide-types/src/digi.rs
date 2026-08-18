@@ -918,11 +918,39 @@ pub struct DigiConfig {
     ///
     /// With this on nothing moves the tone: not answering a station, not the
     /// call queue walking on, not calling CQ, not a click on a decode or on the
-    /// waterfall. Turn it off to move, then on again. The one exception is a
-    /// Hound following the Fox that answered it, which is the DXpedition's
-    /// frequency to give and not ours to hold.
+    /// waterfall. Turn it off to move, then on again.
+    ///
+    /// Two exceptions, both of them moves the operator has effectively asked
+    /// for. A Hound follows the Fox that answered it, which is the
+    /// DXpedition's frequency to give and not ours to hold. And a change of
+    /// band restores that band's own entry in
+    /// [`tx_audio_hz`](Self::tx_audio_hz), because holding through a band
+    /// change is what carries a licence-edge figure onto a band that does not
+    /// want it.
     #[serde(default)]
     pub hold_tx_freq: bool,
+    /// FT8/FT4: the transmit tone offset last chosen on each band, in Hz.
+    ///
+    /// Per band and not one figure for the station, because the constraint that
+    /// makes an offset worth remembering belongs to the band rather than to the
+    /// operator. UK 60 m holds the tone under 1 kHz; carrying that figure onto
+    /// 20 m would sit us at the bottom of the passband for no reason, and
+    /// carrying 20 m's usual 1500 back onto 60 m is out of band. WSJT-X
+    /// remembers this by MODE instead, which does not help here: the edge is a
+    /// property of where the dial is, not of what is being sent.
+    ///
+    /// Only the operator's own moves are recorded. An automatic hop (the
+    /// quietest-slot hunt, or answering a station where it transmits) is the
+    /// engine's choice for one over and not a preference to restore next time.
+    ///
+    /// A band with no entry starts at the mode's usual 1500 Hz.
+    ///
+    /// `HashMap` rather than `BTreeMap` because [`Band`](crate::Band) has no
+    /// `Ord` and should not gain one: its declaration order is a postcard wire
+    /// index with later bands appended out of place, so a derived ordering
+    /// would read as frequency order without being it.
+    #[serde(default)]
+    pub tx_audio_hz: std::collections::HashMap<crate::Band, f32>,
     /// FT8: which side of a DXpedition pile-up to operate (see [`DxpedMode`]).
     /// Ignored in every other mode.
     pub dxped_mode: DxpedMode,
@@ -1225,6 +1253,7 @@ impl Default for DigiConfig {
             rf_paint_speed: 0.25,
             auto_tx_freq: true,
             hold_tx_freq: false,
+            tx_audio_hz: std::collections::HashMap::new(),
             dxped_mode: DxpedMode::Normal,
             fox_slots: 3,
             rade_mute_analog: false,
