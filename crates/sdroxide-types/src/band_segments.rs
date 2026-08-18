@@ -251,12 +251,41 @@ pub fn segment_kind_at(hz: f64) -> Option<SegmentKind> {
 /// 5358.0; the exclusive test would refuse it, and the operator who did the
 /// arithmetic correctly would be the one told no.
 ///
-/// A span straddling two adjacent segments is NOT accepted, even where they
-/// touch. Segments divide a band by usage as well as by legality, and the case
-/// this exists for is the licence edge, where the neighbour is not another
-/// segment but a gap.
+/// Touching segments are MERGED first, so a span crossing from one into the next
+/// is accepted where they meet. This asks a question about legality, not about
+/// band-plan etiquette: a signal reaching out of the digital sub-segment and
+/// into the phone one is in poor taste and is not out of band, and this is
+/// consulted by the transmit lockout, which must refuse only the latter.
+///
+/// Region 1's 160 m is the case that forced it. The plan runs 1.838–1.843 Digi
+/// and 1.843–2.000 Phone, so an FT8 signal on the conventional 1.840 dial leaves
+/// the digital segment at a 2950 Hz offset. Without the merge every offset above
+/// that was refused, on a band edge that is not one: 550 Hz of the mode's normal
+/// range, denied because two rows in a table happen to meet there.
+///
+/// A real GAP still stops it, which is the whole point. The UK's 60 m is eleven
+/// discrete slivers, and 5.358–5.362 is not an allocation at all, so a signal
+/// running past 5358.0 is not merged into anything and is correctly refused.
 pub fn span_within_segment_in(lo: f64, hi: f64, region: Region) -> bool {
-    segments_in(region).iter().any(|s| lo >= s.lo && hi <= s.hi)
+    let segs = segments_in(region);
+    // `segments_in` is sorted by lower edge and non-overlapping (the loader
+    // sorts it and complains about overlaps), so one pass finds the run.
+    let mut i = 0;
+    while i < segs.len() {
+        let start = segs[i].lo;
+        let mut end = segs[i].hi;
+        // Extend while the next segment begins exactly where this run ends.
+        // Sub-hertz slack because the edges come from MHz in `bandplan.json`.
+        while i + 1 < segs.len() && (segs[i + 1].lo - end).abs() < 0.5 {
+            i += 1;
+            end = segs[i].hi;
+        }
+        if lo >= start && hi <= end {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// True when `lo..=hi` fits inside one sub-segment of the station's region.
@@ -762,6 +791,45 @@ mod tests {
         assert_eq!(segment_kind_at_in(7_074_000.0, Region::R1), Some(Digi));
         // Outside any HF ham segment.
         assert_eq!(segment_kind_at_in(15_000_000.0, Region::R1), None);
+    }
+
+    /// An emission has width, so the transmit lockout asks about a span rather
+    /// than a point. Two things have to hold at once, and they pull opposite
+    /// ways: a signal must be free to cross where the band plan merely changes
+    /// its mind about usage, and must be stopped where the allocation stops.
+    #[test]
+    fn a_span_may_cross_a_usage_boundary_but_not_a_gap() {
+        // Region 1's 160 m: Digi ends and Phone begins at 1.843, and nothing
+        // about that is a band edge. FT8 on the conventional 1.840 dial reaches
+        // past it at any offset over 2950 Hz, and refusing that would deny
+        // 550 Hz of the mode's normal range on a boundary that is not one.
+        let dial = 1_840_000.0;
+        let ft8 = 50.0;
+        for off in [200.0, 2950.0, 3000.0, 3500.0] {
+            assert!(
+                span_within_segment_in(dial + off, dial + off + ft8, Region::R1),
+                "160 m FT8 at {off} Hz should be allowed; it is inside the band throughout"
+            );
+        }
+        // Above the band itself is still refused. 2.000 is where Region 1's
+        // 160 m ends, and nothing is merged past it.
+        assert!(!span_within_segment_in(1_999_990.0, 2_000_050.0, Region::R1));
+
+        // The built-in Region 1 60 m is one all-modes block, so a signal
+        // anywhere inside it is fine. This is what a UK operator narrows by
+        // hand, and the narrowing is what the lockout then enforces; the
+        // built-in tables are the IARU allocation, not any one licence.
+        assert!(span_within_segment_in(5_357_950.0, 5_358_000.0, Region::R1));
+
+        // A gap is not merged away, which is the half that matters. Region 1
+        // has nothing between 2.000 and 3.500, so a span reaching into it is
+        // refused however close the neighbours are.
+        assert!(!span_within_segment_in(3_499_950.0, 3_500_050.0, Region::R1));
+
+        // The upper bound is inclusive: a transmission finishing exactly on a
+        // segment's top edge is permitted. Refusing it would fail the operator
+        // who did the arithmetic correctly.
+        assert!(span_within_segment_in(1_842_000.0, 1_843_000.0, Region::R1));
     }
 
     /// The places the three plans genuinely disagree — the point of the
