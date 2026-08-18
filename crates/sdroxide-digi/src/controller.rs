@@ -157,9 +157,13 @@ pub struct BurstPlayer {
     pub pos: usize,
 }
 
-/// The stretch of the passband [`clearest_tx_hz`] will choose from, and the
-/// grid it searches on. Kept inside the usual SSB filter with room for the
+/// The widest stretch of the passband [`clearest_tx_hz`] will choose from, and
+/// the grid it searches on. Kept inside the usual SSB filter with room for the
 /// ~50 Hz signal at either edge.
+///
+/// The band plan narrows this further where it has an opinion, so these are the
+/// outer bounds rather than the range actually searched. See
+/// [`DigiController::emission_permitted`].
 const TX_PICK_MIN_HZ: f32 = 400.0;
 const TX_PICK_MAX_HZ: f32 = 2600.0;
 const TX_PICK_STEP_HZ: f32 = 10.0;
@@ -176,9 +180,11 @@ const CLEAR_ENOUGH_HZ: f32 = 120.0;
 /// the spot furthest from all of them; among spots that are equally clear, the
 /// one nearest `current`, so the transmit marker doesn't wander across the band
 /// between contacts for no reason.
-fn clearest_tx_hz(busy: &[f32], current: f32) -> f32 {
+fn clearest_tx_hz(busy: &[f32], current: f32, permitted: impl Fn(f32) -> bool) -> f32 {
     let steps = ((TX_PICK_MAX_HZ - TX_PICK_MIN_HZ) / TX_PICK_STEP_HZ) as i32;
-    let candidates = || (0..=steps).map(|i| TX_PICK_MIN_HZ + i as f32 * TX_PICK_STEP_HZ);
+    let candidates = || {
+        (0..=steps).map(|i| TX_PICK_MIN_HZ + i as f32 * TX_PICK_STEP_HZ).filter(|&hz| permitted(hz))
+    };
     let clearance = |hz: f32| {
         busy.iter().map(|b| (b - hz).abs()).fold(f32::INFINITY, f32::min).min(CLEAR_ENOUGH_HZ)
     };
@@ -369,8 +375,42 @@ impl DigiController {
             })
             .map(|(_, hz)| *hz)
             .collect();
-        let hz = clearest_tx_hz(&busy, self.audio_hz);
+        let hz = clearest_tx_hz(&busy, self.audio_hz, |hz| self.emission_permitted(hz));
         self.tune_audio_hz(hz);
+    }
+
+    /// Would a signal at this offset sit inside the band plan's segment?
+    ///
+    /// The same question the engine's transmit lockout asks at key-down, asked
+    /// early so the automatic chooser stops picking slots that would then be
+    /// refused. Without it the two disagree in the one case that matters: on a
+    /// UK 60 m dial of 5357 kHz the allocation ends at 5358.0, so everything
+    /// above 950 Hz is out of band, while the chooser hunts to 2600 Hz and has
+    /// no idea. The operator gets a transmit lockout instead of a contact, and
+    /// nothing on screen says which of the two settings caused it.
+    ///
+    /// So Auto TX FRQ becomes usable where a licence is narrower than the mode's
+    /// habits, rather than being a thing to be avoided there. Hold TX is
+    /// unaffected and is still the way to pin an exact figure.
+    ///
+    /// Fails OPEN on the same rule as the lockout: unless the dial itself is
+    /// inside a listed segment, no opinion is offered. A band plan with a gap in
+    /// it must not silently strand the chooser with nowhere to go, and a mode
+    /// with no stated bandwidth is not one this can reason about.
+    ///
+    /// The dial here is the RECEIVE dial, which is the one the controller is
+    /// given. Under split or XIT the transmitted dial differs and this can
+    /// therefore approve a slot the lockout then refuses, which is exactly
+    /// today's behaviour and no worse. It cannot go the other way and approve
+    /// something that radiates out of band, because the lockout still has the
+    /// final say at key-down.
+    fn emission_permitted(&self, offset_hz: f32) -> bool {
+        let Some(bw) = self.mode().occupied_bw_hz() else { return true };
+        if sdroxide_types::segment_kind_at(self.dial_hz).is_none() {
+            return true;
+        }
+        let lo = self.dial_hz + f64::from(offset_hz);
+        sdroxide_types::span_within_segment(lo, lo + f64::from(bw))
     }
 
     /// Pick which message goes out next (the operator's Tx1–Tx6).
@@ -809,19 +849,42 @@ mod tests {
     }
 
     #[test]
+    fn the_chooser_stays_inside_what_the_band_plan_allows() {
+        // UK 60 m in the shape the chooser sees it: on a 5357 kHz dial the
+        // allocation ends at 5358.0, so an FT8 signal may start no higher than
+        // 950 Hz, while the search runs to 2600. The real predicate reads the
+        // band plan; here it is handed in directly, so this pins the CHOOSER
+        // and does not depend on which bandplan.json happens to be installed,
+        // nor touch the process-wide plan that other tests are reading.
+        let ceiling = 950.0;
+
+        // Crowded right up to the edge of what is legal. The quiet space above
+        // is the obvious choice and the illegal one.
+        let busy: Vec<f32> = (0..8).map(|i| 420.0 + i as f32 * 60.0).collect();
+        let hz = clearest_tx_hz(&busy, 1500.0, |hz| hz <= ceiling);
+        assert!(hz <= ceiling, "picked {hz} Hz, which is past the band edge");
+        assert!(hz >= TX_PICK_MIN_HZ, "picked {hz} Hz, below the search floor");
+
+        // Nothing legal anywhere: it stays put rather than jumping to an
+        // arbitrary edge. Declining to choose is the safe answer, and the
+        // transmit lockout is still there to refuse what it was already on.
+        assert_eq!(clearest_tx_hz(&[], 700.0, |_| false), 700.0);
+    }
+
+    #[test]
     fn the_transmit_frequency_goes_where_our_own_period_is_quiet() {
         // A crowded stretch below 1200 Hz and a clear one above it.
         let busy: Vec<f32> = (0..12).map(|i| 500.0 + i as f32 * 60.0).collect();
-        let hz = clearest_tx_hz(&busy, 1500.0);
+        let hz = clearest_tx_hz(&busy, 1500.0, |_| true);
         assert!(hz > 1220.0, "picked {hz} Hz, inside the crowd");
         assert!(busy.iter().all(|b| (b - hz).abs() >= 60.0), "picked {hz} Hz, on top of a station");
 
         // With the band empty it stays where it already is rather than
         // wandering off to an arbitrary edge.
-        assert_eq!(clearest_tx_hz(&[], 1500.0), 1500.0);
+        assert_eq!(clearest_tx_hz(&[], 1500.0, |_| true), 1500.0);
         // One station in the middle: it moves clear, but no further than it has
         // to — a spot 120 Hz away is as good as one 900 Hz away.
-        let hz = clearest_tx_hz(&[1500.0], 1500.0);
+        let hz = clearest_tx_hz(&[1500.0], 1500.0, |_| true);
         assert!((hz - 1500.0).abs() >= CLEAR_ENOUGH_HZ, "{hz} is still on top of them");
         assert!(
             (hz - 1500.0).abs() <= CLEAR_ENOUGH_HZ + TX_PICK_STEP_HZ,
