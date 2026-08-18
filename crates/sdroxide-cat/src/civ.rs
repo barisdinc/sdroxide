@@ -355,6 +355,19 @@ pub fn parse_swr_reply(data: &[u8]) -> Option<f32> {
 /// moves with band, mode, supply voltage and drive setting. Converting would
 /// hand the operator a figure that looks measured and is not. See
 /// [`sdroxide_types::TxTelemetry::po`].
+///
+/// ✅ **CHECKED ON AIR 18 August 2026 against an IC-7300.** Rodger's verdict:
+/// "perfect, running as expected". The bar tracks the rig's own PO meter, so
+/// the breakpoints below are confirmed against the thing they model rather
+/// than only against their own tests.
+///
+/// ⛔ **So do not replace this table with a divide, and do not convert it to
+/// watts.** The table is here because the scale is not linear in the reading:
+/// half scale is at 143, not at 128. The absent watts conversion is the same
+/// decision the ALC parser records, for the same reason — there is no published
+/// Icom curve to fit, so a plausible-looking one would be invented precision.
+/// A percentage that has been shown to agree with the rig's face is worth more
+/// than a wattage that has not.
 fn po_from_reading(reading: u32) -> f32 {
     const CAL: &[(f32, f32)] = &[(0.0, 0.0), (143.0, 0.5), (213.0, 1.0)];
     let r = reading as f32;
