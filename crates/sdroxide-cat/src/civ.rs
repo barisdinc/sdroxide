@@ -173,6 +173,19 @@ pub fn read_swr_frame(radio: u8) -> Vec<u8> {
 pub fn read_alc_frame(radio: u8) -> Vec<u8> {
     frame(radio, 0x15, &[0x13])
 }
+/// Read the power-output meter (Icom cmd `0x15` sub `0x11`). Only meaningful
+/// while transmitting, like the SWR meter beside it; the rig answers with a
+/// 0..255 reading (see [`po_from_reading`]).
+///
+/// This is what the rig is actually putting out, which is a different question
+/// from the drive level it was *asked* for (cmd `0x14` sub `0x0A`, read once at
+/// connect to place the Drive slider). The two disagree whenever the rig is
+/// folding back — heat, a high SWR, or an ATU still searching — and that
+/// disagreement is the reason for showing this at all.
+pub fn read_po_frame(radio: u8) -> Vec<u8> {
+    frame(radio, 0x15, &[0x11])
+}
+
 /// Read the S-meter (Icom cmd `0x15` sub `0x02`). The rig answers with a 0..255
 /// reading on its own calibrated scale (see [`dbm_from_smeter`]).
 ///
@@ -364,6 +377,63 @@ pub fn parse_alc_reply(data: &[u8]) -> Option<f32> {
         return None;
     }
     Some((decode_meter(&data[1..])? as f32 / 255.0).clamp(0.0, 1.0))
+}
+
+/// Map an Icom power-output reading (`0..255`) to a `0.0..=1.0` fraction of
+/// full scale, over the breakpoints Icom publish for the PO meter's face and
+/// Hamlib carries for this family (0 → 0%, 143 → 50%, 213 → 100%).
+///
+/// The scale is not linear in the reading, which is why this is a table and not
+/// a divide: half scale sits at 143 rather than at 128, and the meter reaches
+/// full scale at 213 with the remaining readings above it pinned there.
+///
+/// The result is a NEEDLE POSITION, not a wattage, and the deliberate absence
+/// of a watts conversion here is the point. Icom calibrate the face in percent
+/// of the rig's own maximum, not in watts, and the relationship between the two
+/// moves with band, mode, supply voltage and drive setting. Converting would
+/// hand the operator a figure that looks measured and is not. See
+/// [`sdroxide_types::TxTelemetry::po`].
+///
+/// ✅ **CHECKED ON AIR 18 August 2026 against an IC-7300.** Rodger's verdict:
+/// "perfect, running as expected". The bar tracks the rig's own PO meter, so
+/// the breakpoints below are confirmed against the thing they model rather
+/// than only against their own tests.
+///
+/// ⛔ **So do not replace this table with a divide, and do not convert it to
+/// watts.** The table is here because the scale is not linear in the reading:
+/// half scale is at 143, not at 128. The absent watts conversion is the same
+/// decision the ALC parser records, for the same reason — there is no published
+/// Icom curve to fit, so a plausible-looking one would be invented precision.
+/// A percentage that has been shown to agree with the rig's face is worth more
+/// than a wattage that has not.
+fn po_from_reading(reading: u32) -> f32 {
+    const CAL: &[(f32, f32)] = &[(0.0, 0.0), (143.0, 0.5), (213.0, 1.0)];
+    let r = reading as f32;
+    if r <= CAL[0].0 {
+        return CAL[0].1;
+    }
+    for w in CAL.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if r <= x1 {
+            return y0 + (y1 - y0) * (r - x0) / (x1 - x0);
+        }
+    }
+    CAL[CAL.len() - 1].1
+}
+
+/// Parse a power-output reply payload (Icom cmd `0x15`): the sub-command byte
+/// followed by the BCD reading. Returns the `0.0..=1.0` fraction, or `None` if
+/// the reply isn't the PO meter (`0x11`) or is malformed.
+///
+/// The sub-command guard is load-bearing. SWR, ALC, PO and the S-meter are all
+/// answered on command `0x15` and are told apart by nothing but this byte, so a
+/// parser that skipped it would happily report an SWR reading as a power level.
+pub fn parse_po_reply(data: &[u8]) -> Option<f32> {
+    if data.first() != Some(&0x11) {
+        return None;
+    }
+    Some(po_from_reading(decode_meter(&data[1..])?))
 }
 
 /// Map an Icom S-meter reading (`0..255`) to dBm, over the calibration Icom
@@ -889,6 +959,42 @@ mod tests {
         assert_eq!(parse_alc_reply(&[0x12, 0x00, 0x48]), None, "took an SWR reply");
         assert_eq!(parse_alc_reply(&[0x02, 0x01, 0x20]), None, "took an S-meter reply");
         assert_eq!(parse_swr_reply(&[0x13, 0x01, 0x28]), None, "SWR parser took an ALC reply");
+    }
+
+    #[test]
+    fn po_meter_decodes_and_scales() {
+        // Reply payload = sub-command 0x11 followed by the 2-byte BCD reading.
+        let po = |reading_bcd: [u8; 2]| parse_po_reply(&[0x11, reading_bcd[0], reading_bcd[1]]);
+        // The calibration breakpoints map exactly.
+        assert_eq!(po([0x00, 0x00]), Some(0.0)); // reading 0
+        assert_eq!(po([0x01, 0x43]), Some(0.5)); // reading 143, half scale
+        assert_eq!(po([0x02, 0x13]), Some(1.0)); // reading 213, full scale
+        // Half scale sits at 143, not at 128, so the curve is not a divide:
+        // reading 128 must come out BELOW 50%, which a linear /255 would miss.
+        let mid = po([0x01, 0x28]).unwrap();
+        assert!(mid < 0.5, "reading 128 should be under half scale, got {mid}");
+        assert!((mid - 0.4476).abs() < 0.001, "interpolated 0..143 segment, got {mid}");
+        // Readings above the top breakpoint pin at full scale rather than
+        // running past it, as the SWR curve clamps at its own end.
+        assert_eq!(po([0x02, 0x55]), Some(1.0)); // reading 255
+        // A malformed reading (bad BCD nibble) yields None, not a bogus level.
+        assert_eq!(po([0x00, 0x0f]), None);
+        // Every other meter shares command 0x15 and must not be read as power.
+        // Getting this wrong would put an SWR ratio on the PO bar, which is the
+        // failure the sub-command guard exists to prevent.
+        assert_eq!(parse_po_reply(&[0x12, 0x00, 0x50]), None); // SWR
+        assert_eq!(parse_po_reply(&[0x13, 0x00, 0x50]), None); // ALC
+        assert_eq!(parse_po_reply(&[0x02, 0x01, 0x20]), None); // S-meter
+        // And the converse: a PO reply must not be parsed as any of them.
+        assert_eq!(parse_swr_reply(&[0x11, 0x02, 0x13]), None);
+        assert_eq!(parse_smeter_reply(&[0x11, 0x02, 0x13]), None);
+    }
+
+    #[test]
+    fn po_meter_frame_asks_for_its_own_sub_command() {
+        // Sub-command 0x11, not the SWR meter's 0x12: asking for the wrong one
+        // returns a plausible number on the wrong scale.
+        assert_eq!(read_po_frame(0x94), vec![0xFE, 0xFE, 0x94, 0xE0, 0x15, 0x11, 0xFD]);
     }
 
     #[test]

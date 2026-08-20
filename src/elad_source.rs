@@ -490,6 +490,7 @@ impl IqSource for EladSource {
                 // The meters arrive on their own telemetry channels, not here.
                 sdroxide_cat::CatUpdate::Swr(_)
                 | sdroxide_cat::CatUpdate::Alc(_)
+                | sdroxide_cat::CatUpdate::Po(_)
                 | sdroxide_cat::CatUpdate::Signal(_) => {}
             }
         }

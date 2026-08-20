@@ -1102,7 +1102,12 @@ impl NetThread {
 
     /// Emit the current aggregated TX telemetry snapshot.
     fn emit_tx_telem(&self) {
-        let _ = self.telem.send(TxTelemetry { fwd_w: self.tx_fwd_w, swr: self.tx_swr, alc: None });
+        let _ = self.telem.send(TxTelemetry {
+            fwd_w: self.tx_fwd_w,
+            swr: self.tx_swr,
+            alc: None,
+            po: None,
+        });
     }
 }
 

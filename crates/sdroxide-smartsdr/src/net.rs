@@ -1210,7 +1210,8 @@ impl DataThread {
                         }
                         drop(table);
                         if changed && self.keyed {
-                            let _ = self.telem.send(TxTelemetry { fwd_w, swr, alc: None });
+                            let _ =
+                                self.telem.send(TxTelemetry { fwd_w, swr, alc: None, po: None });
                         }
                     }
                 }

@@ -120,6 +120,9 @@ pub enum CatUpdate {
     /// [`CatUpdate::Swr`]. Distinct from the engine's own drive measurement,
     /// which is what SDRoxide SENDS rather than what the rig does about it.
     Alc(f32),
+    /// TX power-output reading as a `0.0..=1.0` fraction of the rig's full
+    /// scale (routed to the telemetry channel, like [`CatUpdate::Swr`]).
+    Po(f32),
     /// RX S-meter reading in dBm, from the rig's own meter (routed to the
     /// signal channel, not the control channel).
     Signal(f32),
@@ -439,7 +442,13 @@ impl Protocol for Civ {
         vec![civ::read_freq_frame(self.radio)]
     }
     fn tx_telemetry_requests(&self) -> Vec<Vec<u8>> {
-        vec![civ::read_swr_frame(self.radio), civ::read_alc_frame(self.radio)]
+        // Three reads per telemetry tick. All are answered on the same command
+        // and are told apart by their sub-command byte on the way back in.
+        vec![
+            civ::read_swr_frame(self.radio),
+            civ::read_alc_frame(self.radio),
+            civ::read_po_frame(self.radio),
+        ]
     }
     fn tx_state_requests(&self) -> Vec<Vec<u8>> {
         vec![civ::read_ptt_frame(self.radio)]
@@ -540,16 +549,19 @@ impl Protocol for Civ {
                         out.push(CatUpdate::Power(frac));
                     }
                 }
-                // Meter read (0x15): while transmitting the SWR sub-meter (0x12)
-                // and the ALC one (0x13); while receiving the S-meter (0x02).
-                // The sub-command byte in the reply says which arrived — nothing
-                // else does, since all three are answered on the one command,
-                // which is why each parser checks it and returns None otherwise.
+                // Meter read (0x15): while transmitting the SWR sub-meter
+                // (0x12), the ALC one (0x13) and the power-output one (0x11);
+                // while receiving the S-meter (0x02). The sub-command byte in
+                // the reply says which arrived — nothing else does, since all
+                // four are answered on the one command, which is why each
+                // parser checks it and returns None otherwise.
                 0x15 => {
                     if let Some(swr) = civ::parse_swr_reply(&reply.data) {
                         out.push(CatUpdate::Swr(swr));
                     } else if let Some(alc) = civ::parse_alc_reply(&reply.data) {
                         out.push(CatUpdate::Alc(alc));
+                    } else if let Some(po) = civ::parse_po_reply(&reply.data) {
+                        out.push(CatUpdate::Po(po));
                     } else if let Some(dbm) = civ::parse_smeter_reply(&reply.data) {
                         out.push(CatUpdate::Signal(dbm));
                     }
@@ -814,6 +826,7 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
                         // requested during the startup query.
                         CatUpdate::Swr(_)
                         | CatUpdate::Alc(_)
+                        | CatUpdate::Po(_)
                         | CatUpdate::Signal(_)
                         | CatUpdate::Power(_)
                         | CatUpdate::Antenna(_)
@@ -1109,6 +1122,7 @@ fn serial_thread(
     // the consumer keeps only the last message sent. See the send site.
     let mut last_swr: Option<f32> = None;
     let mut last_alc: Option<f32> = None;
+    let mut last_po: Option<f32> = None;
     // What mode to command the rig into for a given app mode. FT8/FT4 use the
     // separate `digi_mode` setting; every other mode obeys `mode_control`
     // (CAT = mirror the selected mode to the rig; Radio = don't touch it).
@@ -1360,6 +1374,11 @@ fn serial_thread(
                             // open carrying the last one from the previous one.
                             last_swr = None;
                             last_alc = None;
+                            last_po = None;
+                            // Clear the readings so the meters drop on unkey,
+                            // here as well as at the receiver: a stale SWR held
+                            // locally would be re-sent beside the next over's
+                            // first PO reading and briefly look current.
                             let _ = telem_tx.send(TxTelemetry::default());
                         }
                     }
@@ -1637,16 +1656,22 @@ fn serial_thread(
                         // and would sit at that forever, never tripping. Both
                         // are therefore held here and sent together, so every
                         // message carries the latest of each.
+                        let send = |swr, alc, po| {
+                            let _ = telem_tx.send(TxTelemetry { fwd_w: None, swr, alc, po });
+                        };
                         if let CatUpdate::Swr(v) = u {
                             last_swr = Some(v);
-                            let _ =
-                                telem_tx.send(TxTelemetry { fwd_w: None, swr: last_swr, alc: last_alc });
+                            send(last_swr, last_alc, last_po);
                             continue;
                         }
                         if let CatUpdate::Alc(v) = u {
                             last_alc = Some(v);
-                            let _ =
-                                telem_tx.send(TxTelemetry { fwd_w: None, swr: last_swr, alc: last_alc });
+                            send(last_swr, last_alc, last_po);
+                            continue;
+                        }
+                        if let CatUpdate::Po(v) = u {
+                            last_po = Some(v);
+                            send(last_swr, last_alc, last_po);
                             continue;
                         }
                         if let CatUpdate::Signal(dbm) = u {
@@ -1724,6 +1749,7 @@ fn serial_thread(
                             // handled above.
                             CatUpdate::Swr(_)
                             | CatUpdate::Alc(_)
+                            | CatUpdate::Po(_)
                             | CatUpdate::Signal(_)
                             | CatUpdate::Power(_)
                             | CatUpdate::Antenna(_)

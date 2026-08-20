@@ -911,11 +911,8 @@ mod tests {
     fn holding_the_transmit_frequency_stops_every_mover() {
         // The case this exists for: UK 60 m, where the allocation ends 1 kHz
         // above a 5357 kHz dial and either automatic mover walks out of it.
-        let mut c = DigiController::new(
-            Mode::Ft8,
-            DigiConfig { hold_tx_freq: true, ..cfg() },
-            12_000.0,
-        );
+        let mut c =
+            DigiController::new(Mode::Ft8, DigiConfig { hold_tx_freq: true, ..cfg() }, 12_000.0);
         // Placed by the sequencer's own route, which is what the operator's
         // click becomes once the hold is lifted.
         c.tune_audio_hz(820.0);
@@ -953,11 +950,8 @@ mod tests {
         // on that band themselves. Holding through it would carry 60 m's
         // sub-1 kHz figure onto 20 m, or 20 m's 1500 onto 60 m, where it cannot
         // legally go.
-        let mut c = DigiController::new(
-            Mode::Ft8,
-            DigiConfig { hold_tx_freq: true, ..cfg() },
-            12_000.0,
-        );
+        let mut c =
+            DigiController::new(Mode::Ft8, DigiConfig { hold_tx_freq: true, ..cfg() }, 12_000.0);
         c.tune_audio_hz(820.0);
 
         // The ordinary route is still refused, so the hold is genuinely on and

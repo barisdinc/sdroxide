@@ -141,18 +141,19 @@ impl SdroxideApp {
                 // offer a choice between two movers neither of which can run.
                 // `chip_enabled`, not a bare `add_enabled_ui`: this row is
                 // `horizontal_wrapped`, and a child Ui inside one does not wrap.
-                let auto_chip = crate::chrome::chip_enabled(ui, !held, auto && !held, "Auto TX FRQ")
-                    .on_hover_text(if held {
-                        "Overridden by Hold TX. Lift the hold to choose which way the transmit \
+                let auto_chip =
+                    crate::chrome::chip_enabled(ui, !held, auto && !held, "Auto TX FRQ")
+                        .on_hover_text(if held {
+                            "Overridden by Hold TX. Lift the hold to choose which way the transmit \
                          frequency moves."
-                    } else {
-                        "Pick our transmit frequency automatically: the quietest spot in the \
+                        } else {
+                            "Pick our transmit frequency automatically: the quietest spot in the \
                          period we transmit in, rather than the frequency of whoever we are \
                          answering — they transmit in the other period, so theirs says nothing \
                          about who is there when we key. Off does NOT hold the frequency: it \
                          answers on the frequency of the station being called. To hold, use \
                          Hold TX."
-                    });
+                        });
                 if auto_chip.clicked() {
                     self.digi_cfg_edit.auto_tx_freq = !auto;
                     cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
@@ -283,9 +284,7 @@ impl SdroxideApp {
                             // it. As a suffix it would be text sitting in the
                             // buffer the operator is typing into, to be worked
                             // around on every edit and parsed back off again.
-                            ui.label(
-                                RichText::new("Hz").size(11.0).color(crate::theme::gray(140)),
-                            );
+                            ui.label(RichText::new("Hz").size(11.0).color(crate::theme::gray(140)));
                             r
                         })
                         .inner;
