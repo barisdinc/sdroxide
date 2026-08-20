@@ -75,7 +75,10 @@ impl IqSource for MockRig {
     /// The rig's SWR bridge — it reads whoever is keying it, which during the
     /// operator's own over is the operator.
     fn tx_telemetry(&mut self) -> Option<TxTelemetry> {
-        self.rig.lock().unwrap().keyed.then_some(TxTelemetry { fwd_w: None, swr: Some(SWR) })
+        // An SWR bridge and nothing else: this rig reports no ALC meter, so
+        // `alc` stays absent rather than being invented as a zero reading.
+        let t = TxTelemetry { fwd_w: None, swr: Some(SWR), alc: None };
+        self.rig.lock().unwrap().keyed.then_some(t)
     }
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {
         self.rig.lock().unwrap().keyed_by_us.push(center_hz);

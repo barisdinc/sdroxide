@@ -9,8 +9,8 @@ pub struct TxMeters {
     pub alc: f32,
 }
 
-/// TX-side telemetry a rig reports out-of-band (CAT / TCI): forward power and
-/// SWR. Distinct from [`TxMeters`], which also carries the engine's own ALC —
+/// TX-side telemetry a rig reports out-of-band (CAT / TCI): forward power,
+/// SWR and ALC. Distinct from [`TxMeters`], which also carries the engine's own ALC —
 /// this is only what the *device* measures, merged into `TxMeters` by the
 /// engine while transmitting.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -19,6 +19,15 @@ pub struct TxTelemetry {
     pub fwd_w: Option<f32>,
     /// SWR as a ratio (e.g. `1.4` = 1.4:1), if the device measures it.
     pub swr: Option<f32>,
+    /// ALC as `0.0..=1.0` of the rig's own meter, if it reports one.
+    ///
+    /// This is the rig saying how hard its automatic level control is working,
+    /// which is the number that says whether the audio being fed to it is too
+    /// hot. Nothing on this side can compute it: [`TxMeters::alc`] is what
+    /// SDRoxide SENDS, and this is what the rig does about it. On a CAT rig the
+    /// two are different measurements and only this one is the operator's
+    /// answer to "am I overdriving it".
+    pub alc: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

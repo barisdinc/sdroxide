@@ -545,8 +545,10 @@ impl IqSource for AudioCatSource {
                     }
                     out.push(ControlUpdate::RigTx(on));
                 }
-                // Both meters arrive on their own telemetry channels, not here.
-                sdroxide_cat::CatUpdate::Swr(_) | sdroxide_cat::CatUpdate::Signal(_) => {}
+                // The meters arrive on their own telemetry channels, not here.
+                sdroxide_cat::CatUpdate::Swr(_)
+                | sdroxide_cat::CatUpdate::Alc(_)
+                | sdroxide_cat::CatUpdate::Signal(_) => {}
             }
         }
         out
