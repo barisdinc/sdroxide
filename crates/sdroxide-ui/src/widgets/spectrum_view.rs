@@ -1200,7 +1200,12 @@ pub fn show_ext(
     } else {
         // --- wheel (zoom or tune) / click-tune -----------------------------
         if let Some(pos) = resp.hover_pos() {
-            let (scroll, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
+            let (delta, shift) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
+            // Shift is egui's `horizontal_scroll_modifier`, so while it is held
+            // it folds the whole wheel delta onto the horizontal axis and `.y`
+            // reads zero. Take whichever axis the detents landed on, or the
+            // shift gesture is dead whatever it is bound to.
+            let scroll = if shift { delta.x + delta.y } else { delta.y };
             let scroll = if wheel.invert { -scroll } else { scroll };
             let act = if shift { wheel.wheel_shift } else { wheel.wheel };
             if scroll.abs() > 0.1 {
