@@ -100,6 +100,14 @@ const TX_MIC_GAP: f32 = 16.0;
 const RX_DB_RAIL_W: f32 = 76.0;
 /// Text size of the band/mode chip's label.
 const BAND_MODE_TEXT: f32 = 14.0;
+/// How much taller the band/mode chip stands than a plain one. Band and mode
+/// are what an operator changes most, and the chip opens the longest menu in
+/// the program; standing taller — and lit in the palette's green rather than
+/// the fill every other chip wears — is what makes it findable at a glance
+/// among a strip of chips instead of one more of them. Green and not the
+/// palette's pink: pink doubles as the error colour in most of the themes, and
+/// a permanently red button on the bar reads as something being wrong.
+const BAND_MODE_EXTRA_H: f32 = 10.0;
 /// Below this the frequency digits stop reading as a dial, so the box sheds
 /// something else rather than shrinking them further.
 const MIN_DIGIT: f32 = 22.0;
@@ -1305,9 +1313,7 @@ impl SdroxideApp {
                     // column taller than the box on a touched layout, where a
                     // chip is half again as tall — and a box that outgrows
                     // `MODULE_TALL_H` no longer lines up with the S-meter.
-                    let pad = (ui.available_height()
-                        - crate::chrome::chip_height(ui, Some(BAND_MODE_TEXT)))
-                    .max(0.0);
+                    let pad = (ui.available_height() - band_mode_h(ui)).max(0.0);
                     ui.add_space(pad);
                     self.band_mode_button(ui, cmds);
                 },
@@ -1562,13 +1568,16 @@ impl SdroxideApp {
     fn band_mode_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, extra: f32) {
         let mode = self.state.rx[0].mode;
         let label = RichText::new(self.band_mode_label()).size(BAND_MODE_TEXT);
-        let btn = if extra > 0.5 {
-            let w = crate::chrome::chip_width(ui, &self.band_mode_label(), Some(BAND_MODE_TEXT));
-            let h = crate::chrome::chip_height(ui, Some(BAND_MODE_TEXT));
-            crate::chrome::chip_sized(ui, false, label, egui::vec2(w + extra, h))
-        } else {
-            crate::chrome::chip(ui, false, label)
-        };
+        let w = crate::chrome::chip_width(ui, &self.band_mode_label(), Some(BAND_MODE_TEXT))
+            + extra.max(0.0);
+        let size = egui::vec2(w, band_mode_h(ui));
+        let btn = crate::chrome::chip_lit_sized(
+            ui,
+            label,
+            crate::theme::GREEN(),
+            crate::theme::INK_ON_BRIGHT(),
+            size,
+        );
 
         // The same scrolled, viewport-sized popup the menu chips use. This is
         // the longest menu in the program — three sections and forty chips —
@@ -3298,6 +3307,16 @@ fn vfo_offsets_w(ui: &egui::Ui, tx_capable: bool) -> f32 {
     } else {
         rit
     }
+}
+
+/// How tall the band/mode chip is drawn: a plain chip plus
+/// [`BAND_MODE_EXTRA_H`], or as much of it as the row it stands in can spare.
+/// The compact strips cut their rows to the point — a phone's frequency box is
+/// [`PHONE_FREQ_H`] and no taller — and a chip that outgrew one would push the
+/// box out of line with the S-meter beside it rather than stand out.
+fn band_mode_h(ui: &egui::Ui) -> f32 {
+    let base = crate::chrome::chip_height(ui, Some(BAND_MODE_TEXT));
+    (base + BAND_MODE_EXTRA_H).min(ui.available_height().max(base))
 }
 
 /// The natural width of a row of chips inside a condensed box: each chip at

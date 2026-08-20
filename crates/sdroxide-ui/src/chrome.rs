@@ -690,6 +690,29 @@ fn chip_padding(ui: &Ui) -> egui::Vec2 {
     ui.spacing().button_padding + vec2(2.0, 1.0)
 }
 
+/// The colour a chip wears instead of the cyan a selected one takes by
+/// default, and the ink that goes on it. `lit` says the chip wears it always
+/// rather than only while selected — see [`chip_lit_sized`].
+#[derive(Clone, Copy)]
+struct Accent {
+    fill: Color32,
+    ink: Color32,
+    lit: bool,
+}
+
+impl Accent {
+    /// An accent that stands in for the cyan of a *selected* chip: PTT red,
+    /// the scanner's green. The chip is plain until it is selected.
+    fn on_select(fill: Color32, ink: Color32) -> Self {
+        Self { fill, ink, lit: false }
+    }
+
+    /// An accent the chip wears the whole time, selected or not.
+    fn lit(fill: Color32, ink: Color32) -> Self {
+        Self { fill, ink, lit: true }
+    }
+}
+
 /// Angled chip: a selectable button with cut top-left and bottom-right corners.
 /// Selected chips fill cyan with dark ink, like the reference nav pills.
 pub fn chip(ui: &mut Ui, selected: bool, text: impl Into<RichText>) -> Response {
@@ -720,7 +743,29 @@ pub fn chip_accent_sized(
     ink: Color32,
     size: egui::Vec2,
 ) -> Response {
-    chip_impl(ui, selected, text.into(), Some((fill, ink)), Sense::click(), Some(size))
+    chip_impl(
+        ui,
+        selected,
+        text.into(),
+        Some(Accent::on_select(fill, ink)),
+        Sense::click(),
+        Some(size),
+    )
+}
+
+/// A chip that wears its accent colour the whole time rather than only while
+/// selected, at an exact size — for the one button on a bar that has to be
+/// found without being looked for (the band/mode selector). It still answers
+/// the pointer: the fill brightens under the cursor and sinks while it is
+/// held, so it reads as a button and not as a status light.
+pub fn chip_lit_sized(
+    ui: &mut Ui,
+    text: impl Into<RichText>,
+    fill: Color32,
+    ink: Color32,
+    size: egui::Vec2,
+) -> Response {
+    chip_impl(ui, false, text.into(), Some(Accent::lit(fill, ink)), Sense::click(), Some(size))
 }
 
 /// [`chip_hold`] at an exact size — the compact strip's PTT, which is drawn
@@ -734,7 +779,14 @@ pub fn chip_hold_sized(
     ink: Color32,
     size: egui::Vec2,
 ) -> Response {
-    chip_impl(ui, selected, text.into(), Some((fill, ink)), Sense::click_and_drag(), Some(size))
+    chip_impl(
+        ui,
+        selected,
+        text.into(),
+        Some(Accent::on_select(fill, ink)),
+        Sense::click_and_drag(),
+        Some(size),
+    )
 }
 
 /// A chip that may be greyed out, in a row that is allowed to wrap.
@@ -775,7 +827,7 @@ pub fn chip_accent_enabled(
     };
     ui.allocate_ui(exact, |ui| {
         ui.add_enabled_ui(enabled, |ui| {
-            chip_impl(ui, selected, text, Some((fill, ink)), Sense::click(), None)
+            chip_impl(ui, selected, text, Some(Accent::on_select(fill, ink)), Sense::click(), None)
         })
         .inner
     })
@@ -846,7 +898,7 @@ pub fn chip_accent(
     fill: Color32,
     ink: Color32,
 ) -> Response {
-    chip_impl(ui, selected, text.into(), Some((fill, ink)), Sense::click(), None)
+    chip_impl(ui, selected, text.into(), Some(Accent::on_select(fill, ink)), Sense::click(), None)
 }
 
 /// An accent chip that reports being *held* rather than clicked — for a control
@@ -860,7 +912,14 @@ pub fn chip_hold(
     fill: Color32,
     ink: Color32,
 ) -> Response {
-    chip_impl(ui, selected, text.into(), Some((fill, ink)), Sense::click_and_drag(), None)
+    chip_impl(
+        ui,
+        selected,
+        text.into(),
+        Some(Accent::on_select(fill, ink)),
+        Sense::click_and_drag(),
+        None,
+    )
 }
 
 /// The classic chip shape: corners cut on the top-left and bottom-right (the
@@ -881,7 +940,7 @@ fn chip_impl(
     ui: &mut Ui,
     selected: bool,
     text: RichText,
-    accent: Option<(Color32, Color32)>,
+    accent: Option<Accent>,
     sense: Sense,
     exact: Option<egui::Vec2>,
 ) -> Response {
@@ -898,8 +957,26 @@ fn chip_impl(
     if ui.is_rect_visible(rect) {
         let v = ui.style().interact_selectable(&resp, selected);
 
-        let (fill, stroke, ink) = if selected {
-            let (fill, ink) = accent.unwrap_or((theme::CYAN(), theme::INK_ON_CYAN()));
+        // A lit chip carries its accent whether or not it is selected.
+        let lit = accent.is_some_and(|a| a.lit);
+        let (fill, stroke, ink) = if selected || lit {
+            let (fill, ink) =
+                accent.map_or((theme::CYAN(), theme::INK_ON_CYAN()), |a| (a.fill, a.ink));
+            // A lit chip's colour is not reporting a state, so the colour is
+            // not free to answer the pointer with: it has to move under the
+            // cursor the way the plain chips beside it do, or it reads as
+            // painted-on rather than pressable.
+            let fill = if lit && !selected {
+                if resp.is_pointer_button_down_on() {
+                    lerp(fill, Color32::BLACK, 0.25)
+                } else if resp.hovered() {
+                    lerp(fill, Color32::WHITE, 0.20)
+                } else {
+                    fill
+                }
+            } else {
+                fill
+            };
             (fill, Stroke::new(1.0, fill), ink)
         } else {
             (v.bg_fill, v.bg_stroke, v.fg_stroke.color)
