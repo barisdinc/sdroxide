@@ -57,8 +57,10 @@ or connects to a remote sdroxide server.
   WFM, broadcast stereo and **RDS/RBDS** are decoded automatically — the station
   name, programme type, radio text, what is playing, and the station's clock.
 - **Transmit** (on TX-capable rigs): PTT, TUNE, drive and tune-drive levels,
-  mic gain, XIT, and a transmit meter (power / SWR / ALC). A ham-band-only
-  transmit lockout is on by default, as is an **SWR guard** that stops the over
+  mic gain, XIT, and a transmit meter (the rig's ALC over power output, or over
+  SWR where the rig has no power meter). A ham-band-only
+  transmit lockout is on by default — on digital modes it vets the emission,
+  dial plus offset, not just the dial — as is an **SWR guard** that stops the over
   and latches transmit out when the rig reports a bad match — with a looser
   limit and a five-second grace while you are tuning an ATU. While transmitting,
   the panadapter shows a
@@ -616,11 +618,30 @@ Clicking the meter cycles three faces:
 - **Trace** — the last fifteen seconds plotted as a scrolling graph, which is
   the one to watch for fading and QSB.
 
-On transmit all three switch to a transmit meter. Where the rig reports SWR it
-becomes the headline reading, on a logarithmic scale with 1:1 at the left stop,
-3:1 at mid-scale and everything past 3:1 in red; forward power (or ALC, on a rig
-with no wattmeter) is shown alongside. Rigs with no SWR bridge fall back to a
-drive/ALC scale.
+On transmit all three switch to a transmit meter, stacked in two rows. The top
+row is **ALC**. On a rig that reports its own ALC over CAT — Icom CI-V rigs do —
+that is the rig's figure, which is the one that answers "am I overdriving it";
+on anything else it is sdroxide's own drive level, which is how hard the audio
+being sent is driving the modulator. The two are different measurements, and on
+a CAT rig driving an external radio only the rig's says anything about whether
+the audio is too hot for it.
+
+The lower row is whichever meter the rig actually gives us. Where the rig
+reports a **power-output** meter it goes there, as a percentage of the rig's own
+full scale rather than in watts — Icom calibrate that meter's face in percent,
+with no calibrated wattage behind it, and the relation to watts moves with band,
+mode, supply voltage and drive, so a wattage would look measured without being
+so. It answers what the drive slider cannot: the slider is what the rig was
+*asked* for, and this is what it is *delivering*. The two part company whenever
+the rig folds back — heat, a high SWR, or an ATU still hunting. The ramp carries
+no red, because a rig at full output is doing what it was asked; what you are
+watching for is the needle falling while drive stays put.
+
+Where there is no power meter but there is an **SWR** bridge, the lower row is
+SWR instead, on a logarithmic scale with 1:1 at the left stop, 3:1 at mid-scale
+and everything past 3:1 in red. Either way the SWR keeps its place as a number
+in the header chip. Rigs with neither show the drive row alone, grown to fill
+the space.
 
 Where the reading comes from depends on the interface. An SDR delivers IQ and
 the receiver measures the signal in its own passband, calibrated to dBm by
@@ -1537,9 +1558,34 @@ free text is cut to 13 characters.
   quietest spot in your own transmit period, from the stations it has decoded
   there, and moves no further than it has to. While it is on, clicking a decode
   or a station label on the waterfall no longer drags your transmit frequency
-  onto that station; the click just selects. Turn it off to hold a frequency by
-  hand. It has no effect in DXpedition mode, where both roles have their
-  frequencies decided for them.
+  onto that station; the click just selects. It has no effect in DXpedition
+  mode, where both roles have their frequencies decided for them.
+
+  **Turning it off does not hold the frequency.** It chooses the other mover:
+  with Auto off, answering a station jumps your transmit tone onto theirs. To
+  pin the tone, use Hold TX below.
+- **Hold TX frequency pins the transmit tone.** Off by default (the setup
+  window). With it on nothing moves the tone by itself: not answering a station,
+  not the call queue walking on, not calling CQ, not a click on a decode or on
+  the waterfall. It overrides Auto TX FRQ, and unlike WSJT-X's Hold Tx Freq
+  there is deliberately no modifier-key escape.
+
+  It is for where **your licence is narrower than the band plan**. UK 60 m is
+  the case: on a 5357 kHz dial the allocation ends at 5358.0, so the tone has to
+  stay under 1000 Hz, and either automatic mover will walk out of the band
+  between one over and the next.
+
+  Two things still move it. A Hound follows the Fox that answered it — that
+  frequency is the DXpedition's to give. And changing band brings back the
+  offset you last set on the *new* band, because holding through a band change
+  is what carries a licence-edge figure onto a band that does not want it.
+- **Set the transmit offset by hand.** FT8 and FT4 have a transmit-offset
+  readout above the decode list: a box to type a figure into and a **-10** /
+  **+10** Hz pair. The offset is remembered **per band**, not per station and
+  not per mode, because the constraint that makes one worth remembering belongs
+  to the band — and it is saved to `digi.json` as you set it. Only your own
+  moves are recorded; an automatic hop is the engine's choice for one over, not
+  a preference. A band with nothing stored starts at the usual 1500 Hz.
 - **Queue a run of stations.** The **+** button on each decode marks that
   station to be worked; mark as many as you like in one pass over a busy slot.
   They appear in a `QUEUE` strip above the transcript, next one in green, and
@@ -2931,6 +2977,20 @@ The file is one row per line, in **megahertz**, and it explains itself in a
 That edit is the common one: **narrow a band to your own licence**, and with
 `tx_ham_only` set (the default) sdroxide refuses to transmit outside it. The
 band buttons, the waterfall strip and the frequency displays all follow.
+
+**On a slotted digital mode the lockout vets what actually radiates**, not the
+dial. FT8, FT4, FT2, JS8 and WSPR transmit at the dial *plus* an audio offset,
+so the check is dial + offset + the mode's occupied bandwidth, and it is made
+against the **sub-segments** rather than the band edges — `bandplan.json` holds
+one range per band, and a licence like the UK's 60 m needs eleven. Narrow the
+segments there and the lockout narrows with them; nothing about this is
+UK-specific. An emission may cross from one sub-segment into a touching one — a
+signal reaching out of the digital segment into the phone one is poor manners,
+not out of band — but it may not cross a **gap**. Where the table says nothing
+about your dial, no opinion is offered, so a band plan with a hole in it never
+becomes a lockout for someone legitimately in it. Auto TX FRQ obeys the same
+limit when it hunts for a slot, so it stops choosing frequencies the lockout
+would then refuse.
 
 **A band sdroxide adds later** — 4 m (`M4`) was the first, and 1.25 m (`M125`),
 33 cm (`Cm33`), 23 cm (`Cm23`), 13 cm (`Cm13`), 9 cm (`Cm9`) and 6 cm (`Cm6`)
@@ -8002,7 +8062,7 @@ sdroxide stores its settings under the per-user config directory:
 | --- | --- | --- |
 | `config.toml` | TOML | General settings: `device_args`, `sample_rate`, `cal_offset_db`, `spectrum_fft`, `spectrum_fps`, `server_bind`, `server_port`, `tx_ham_only`, `swr_guard` and `swr_limit` (the SWR guard, [§6.1](#61-general-station-audio-and-remote-access)), `audio_output`, `audio_input`, `region` (`"R1"` / `"R2"` / `"R3"` — the IARU region every band plan follows, [§6.1](#61-general-station-audio-and-remote-access)), plus the `[ui]` display preferences (including `theme`, `button_style` and `window_style`), the `[speech]` announcement settings ([§6.3](#63-ui-display-preferences-and-voice-announcements)), the `[remote_access]` sign-in that server mode demands ([§8.3](#83-sign-in-who-may-operate-the-station), stored in plaintext) and the `[remote_server]` address the **Remote** tab dials ([§8.2](#82-connect-a-native-remote-client)). Belongs to the machine the engine runs on — except `[ui]`, `[speech]` and `[remote_server]`, which belong to the screen in front of you. |
 | `radio.json` | JSON | Which radio interface is selected and everything that configures it — the CAT/HPSDR/TCI/SmartSDR/RTL-SDR/rtl_tcp/SpyServer/RX-888/Airspy HF+/SDRplay/PlutoSDR sections, the converter offset and stated tuning ranges, and the radio's sound-card device names. |
-| `digi.json` | JSON | Digital-mode operator settings: your callsign and grid, FT8/FT4/FT2 TX period, auto-sequence and message templates, and the WSPR beacon's duty cycle, power and band-hop list. |
+| `digi.json` | JSON | Digital-mode operator settings: your callsign and grid, FT8/FT4/FT2 TX period, auto-sequence and message templates, the transmit-frequency hold (`hold_tx_freq`) and the per-band transmit offsets it pins (`tx_audio_hz`), and the WSPR beacon's duty cycle, power and band-hop list. |
 | `memories.json` | JSON | Saved memory channels. |
 | `bandstacks.json` | JSON | Per-band memory of your last frequency/mode/filter (up to three per band). |
 | `bandplan.json` | JSON | The band plan itself, per IARU region: band edges, the CW/data/phone/beacon/all-modes sub-segments, and the PSK and RTTY skimmer windows — all in MHz. Written from the built-in IARU tables on first start and meant to be edited; narrow a band here and the transmit lockout narrows with it. Which region applies is `region` in `config.toml`. **RELOAD BAND PLAN** on the General tab applies an edit without a restart, and deleting the file restores the defaults. See [§6.1](#61-general-station-audio-and-remote-access). |
