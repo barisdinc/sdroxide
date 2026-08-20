@@ -236,8 +236,18 @@ pub fn popup_fade_alpha(
 pub fn paint_cut_border(p: &Painter, rect: Rect, color: Color32, mask: Color32) {
     match theme::window_style() {
         ChromeStyle::Angled => paint_angled_border(p, rect, color, mask),
-        ChromeStyle::Rectangular | ChromeStyle::Gradient | ChromeStyle::Terminal => {
+        ChromeStyle::Rectangular | ChromeStyle::Gradient => {
             p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.2, color), StrokeKind::Inside);
+        }
+        ChromeStyle::Terminal => {
+            // The whole of what an edge is on a character display: a run of
+            // `-` along the top and bottom, a column of `|` down each side,
+            // and a `+` where they meet. Laid on the edge itself rather than
+            // inside it, so the border sits where a stroke would have and the
+            // panel's own margin still holds its content clear of it.
+            for shape in ascii_box(p, rect, color, terminal_size(p), FrameFit::OnEdge) {
+                p.add(shape);
+            }
         }
         ChromeStyle::Rounded => {
             p.rect_stroke(
@@ -761,58 +771,100 @@ fn cell_font(size: f32) -> egui::FontId {
 
 /// `text` laid out in the character-display face. Newlines start a new row, so
 /// a whole column of `|` is one galley.
-fn cells(ui: &Ui, text: &str, size: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
-    ui.painter().layout_no_wrap(text.to_owned(), cell_font(size), color)
+fn cells(p: &Painter, text: &str, size: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+    p.layout_no_wrap(text.to_owned(), cell_font(size), color)
 }
 
 /// One character cell of the display at `size`: the advance of a glyph, and
 /// the height of a row.
-fn cell_size(ui: &Ui, size: f32) -> egui::Vec2 {
-    cells(ui, "-", size, Color32::WHITE).size()
+fn cell_size(p: &Painter, size: f32) -> egui::Vec2 {
+    cells(p, "-", size, Color32::WHITE).size()
 }
 
 /// The point size the Terminal style draws its frames at — the body text
 /// size, so a frame built from characters is the same scale as the words
 /// inside it and follows the interface font setting with them.
-fn terminal_size(ui: &Ui) -> f32 {
-    TextStyle::Body.resolve(ui.style()).size
+///
+/// Read off the context rather than a `Ui`, because a window's border is
+/// painted straight onto a layer, with no `Ui` in hand.
+fn terminal_size(p: &Painter) -> f32 {
+    let ctx = p.ctx();
+    TextStyle::Body.resolve(&ctx.style_of(ctx.theme())).size
+}
+
+/// Where a character frame's glyphs sit relative to the rect they frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameFit {
+    /// Wholly inside it — for a control, which must not paint over the one
+    /// beside it whatever style it is wearing.
+    Inside,
+    /// Ink *on* the edge, with the empty parts of the border cells hanging a
+    /// few points outside. For a window or a panel, which is the outermost
+    /// thing there is: a `-` is inked across the middle of its cell and a `|`
+    /// down the middle of its own, so what hangs over the edge is blank.
+    OnEdge,
 }
 
 /// A box drawn the way a character display draws one: `+` at the corners, a
 /// run of `-` along the top and bottom, a column of `|` down each side.
 ///
-/// Used for anything with the height to carry three rows of characters — a
+/// Used for anything with the room to carry three rows of characters — a
 /// multi-line text box, a floating window. Shorter controls get [`brackets`]
 /// instead, which is what a one-line field looks like on the same display.
-fn ascii_box(ui: &Ui, rect: Rect, ink: Color32, size: f32) -> Vec<Shape> {
-    let cell = cell_size(ui, size);
+fn ascii_box(p: &Painter, rect: Rect, ink: Color32, size: f32, fit: FrameFit) -> Vec<Shape> {
+    let cell = cell_size(p, size);
     let (cw, ch) = (cell.x.max(1.0), cell.y.max(1.0));
-    let across = (((rect.width() - 2.0 * cw) / cw).floor() as i32).max(0) as usize;
-    let down = (((rect.height() - 2.0 * ch) / ch).floor() as i32).max(0) as usize;
-    let rule = format!("+{}+", "-".repeat(across));
-    let side = std::iter::repeat_n("|", down).collect::<Vec<_>>().join("\n");
-    let (l, t, r, b) = (rect.left(), rect.top(), rect.right(), rect.bottom());
-    let mut out = vec![
-        Shape::galley(pos2(l, t), cells(ui, &rule, size, ink), ink),
-        Shape::galley(pos2(l, b - ch), cells(ui, &rule, size, ink), ink),
-    ];
+    // Where the four corner cells go. `Inside` keeps every cell within the
+    // rect; `OnEdge` puts the *ink* on it — a `-` is inked across the middle
+    // of its cell and a `|` down the middle of its own, so what hangs over the
+    // edge is the blank part of the cell and nothing is painted out there.
+    let (x0, x1, y0, y1) = match fit {
+        FrameFit::Inside => (rect.left(), rect.right() - cw, rect.top(), rect.bottom() - ch),
+        FrameFit::OnEdge => (
+            rect.left() - cw / 2.0,
+            rect.right() - cw / 2.0,
+            rect.top() - ch * 0.42,
+            rect.bottom() - ch * 0.58,
+        ),
+    };
+    let mut out = Vec::new();
+    let mut put = |pos: Pos2, text: String| {
+        out.push(Shape::galley(pos, cells(p, &text, size, ink), ink));
+    };
+    for corner in [pos2(x0, y0), pos2(x1, y0), pos2(x0, y1), pos2(x1, y1)] {
+        put(corner, "+".into());
+    }
+    // The runs between the corners, centred on the gap they fill: a whole
+    // number of cells rarely divides it exactly, and half the remainder at
+    // each end reads as kerning where all of it at one end reads as a hole.
+    let across = ((x1 - x0) / cw).floor() as i32 - 1;
+    if across > 0 {
+        let run = across as usize;
+        let x = x0 + cw + ((x1 - x0 - cw) - run as f32 * cw) / 2.0;
+        put(pos2(x, y0), "-".repeat(run));
+        put(pos2(x, y1), "-".repeat(run));
+    }
+    let down = ((y1 - y0) / ch).floor() as i32 - 1;
     if down > 0 {
-        out.push(Shape::galley(pos2(l, t + ch), cells(ui, &side, size, ink), ink));
-        out.push(Shape::galley(pos2(r - cw, t + ch), cells(ui, &side, size, ink), ink));
+        let run = down as usize;
+        let y = y0 + ch + ((y1 - y0 - ch) - run as f32 * ch) / 2.0;
+        let column = std::iter::repeat_n("|", run).collect::<Vec<_>>().join("\n");
+        put(pos2(x0, y), column.clone());
+        put(pos2(x1, y), column);
     }
     out
 }
 
 /// The `[` and `]` a one-line control wears on a character display, tucked
 /// into the padding at either end of `rect`.
-fn brackets(ui: &Ui, rect: Rect, ink: Color32) -> Vec<Shape> {
+fn brackets(p: &Painter, rect: Rect, ink: Color32) -> Vec<Shape> {
     // The display's own size rather than the control's height: a bracket
     // scaled up to fill a roomy field would have its ink out past the 4 pt a
     // text box keeps for a margin, and would sit on the first letter typed.
-    let size = (terminal_size(ui) * 0.85).min(rect.height() * 0.9);
+    let size = (terminal_size(p) * 0.85).min(rect.height() * 0.9);
     let mut out = Vec::new();
-    for (text, x) in [("[", rect.left()), ("]", rect.right() - cell_size(ui, size).x)] {
-        let g = cells(ui, text, size, ink);
+    for (text, x) in [("[", rect.left()), ("]", rect.right() - cell_size(p, size).x)] {
+        let g = cells(p, text, size, ink);
         let y = rect.center().y - g.size().y / 2.0;
         out.push(Shape::galley(pos2(x, y), g, ink));
     }
@@ -822,11 +874,11 @@ fn brackets(ui: &Ui, rect: Rect, ink: Color32) -> Vec<Shape> {
 /// A run of one character filling `rect` across — the Terminal style's answer
 /// to a bar too short to frame: a slider rail is `----------`, and the fill
 /// behind the knob is `==========` over the top of it.
-fn cell_run(ui: &Ui, rect: Rect, glyph: &str, ink: Color32) -> Vec<Shape> {
+fn cell_run(p: &Painter, rect: Rect, glyph: &str, ink: Color32) -> Vec<Shape> {
     let size = (rect.height() * 1.9).clamp(8.0, 15.0);
-    let cw = cell_size(ui, size).x.max(1.0);
+    let cw = cell_size(p, size).x.max(1.0);
     let n = ((rect.width() / cw).round() as i32).max(1) as usize;
-    let g = cells(ui, &glyph.repeat(n), size, ink);
+    let g = cells(p, &glyph.repeat(n), size, ink);
     vec![Shape::galley(pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, ink)]
 }
 
@@ -909,15 +961,16 @@ fn styled_surface(ui: &Ui, r: &egui::epaint::RectShape, style: ChromeStyle, dept
         }
         ChromeStyle::Terminal => {
             let ink = if stroke.width > 0.0 { stroke.color } else { theme::LINE_LIT() };
-            let size = terminal_size(ui);
-            let cell = cell_size(ui, size);
+            let p = ui.painter();
+            let size = terminal_size(p);
+            let cell = cell_size(p, size);
             if depth == Depth::Knob {
                 // The outline colour, not the fill: egui gives a knob the
                 // panel's own dark fill and puts all its contrast in the
                 // stroke, and a `#` painted in that fill would vanish into
                 // the rail it is meant to be sliding along.
                 let ink = if stroke.width > 0.0 { stroke.color } else { fill };
-                let g = cells(ui, "#", rect.height().min(rect.width() * 2.0), ink);
+                let g = cells(p, "#", rect.height().min(rect.width() * 2.0), ink);
                 return Shape::galley(rect.center() - g.size() / 2.0, g, ink);
             }
             // Thinner than a character and running across: a bar, not a box.
@@ -927,7 +980,7 @@ fn styled_surface(ui: &Ui, r: &egui::epaint::RectShape, style: ChromeStyle, dept
             // *down* keeps its solid block — a column of glyphs would have
             // the row spacing showing through it as gaps.
             if rect.height() < cell.y * 1.4 && rect.width() > rect.height() {
-                return Shape::Vec(cell_run(ui, rect, "=", if fill.a() > 0 { fill } else { ink }));
+                return Shape::Vec(cell_run(p, rect, "=", if fill.a() > 0 { fill } else { ink }));
             }
             let mut out = Vec::new();
             // A sunken surface keeps its fill: an input well on a character
@@ -940,9 +993,9 @@ fn styled_surface(ui: &Ui, r: &egui::epaint::RectShape, style: ChromeStyle, dept
             // Three rows of characters is the least a `+--+ | | +--+` frame
             // can be drawn in; anything shorter wears the one-line form.
             if rect.height() >= cell.y * 3.0 {
-                out.extend(ascii_box(ui, rect, ink, size));
+                out.extend(ascii_box(p, rect, ink, size, FrameFit::Inside));
             } else {
-                out.extend(brackets(ui, rect, ink));
+                out.extend(brackets(p, rect, ink));
             }
             Shape::Vec(out)
         }
@@ -988,7 +1041,7 @@ fn styled_knob(ui: &Ui, c: &egui::epaint::CircleShape, style: ChromeStyle) -> Sh
             // own dark fill and puts all its contrast in the stroke, and a `#`
             // painted in that fill would be invisible on the rail.
             let ink = if c.stroke.width > 0.0 { c.stroke.color } else { c.fill };
-            let g = cells(ui, "#", (rad * 2.6).clamp(9.0, 18.0), ink);
+            let g = cells(ui.painter(), "#", (rad * 2.6).clamp(9.0, 18.0), ink);
             Shape::galley(centre - g.size() / 2.0, g, ink)
         }
         _ => Shape::Circle(*c),
@@ -1054,7 +1107,7 @@ impl StyledCombo for egui::ComboBox {
 /// The `v` a dropdown wears on a character display.
 fn terminal_arrow(ui: &Ui, rect: Rect, visuals: &egui::style::WidgetVisuals, _open: bool) {
     let ink = visuals.fg_stroke.color;
-    let g = cells(ui, "v", terminal_size(ui), ink);
+    let g = cells(ui.painter(), "v", terminal_size(ui.painter()), ink);
     ui.painter().galley(rect.center() - g.size() / 2.0, g, ink);
 }
 
@@ -1109,7 +1162,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Resp
 /// be readable, and egui's own icon width everywhere else.
 fn tick_box_width(ui: &Ui) -> f32 {
     if theme::button_style() == ChromeStyle::Terminal {
-        (3.0 * cell_size(ui, terminal_size(ui)).x).max(ui.spacing().icon_width)
+        (3.0 * cell_size(ui.painter(), terminal_size(ui.painter())).x).max(ui.spacing().icon_width)
     } else {
         ui.spacing().icon_width
     }
@@ -1122,7 +1175,7 @@ fn paint_tick_box(ui: &Ui, rect: Rect, on: bool, v: &egui::style::WidgetVisuals)
     // and no tick to draw, so this one style takes the whole control.
     if theme::button_style() == ChromeStyle::Terminal {
         let ink = if on { theme::CYAN() } else { v.bg_stroke.color };
-        let g = cells(ui, if on { "[X]" } else { "[ ]" }, terminal_size(ui), ink);
+        let g = cells(p, if on { "[X]" } else { "[ ]" }, terminal_size(p), ink);
         p.galley(rect.center() - g.size() / 2.0, g, ink);
         return;
     }
@@ -1573,7 +1626,7 @@ fn chip_impl(
                     p.rect_filled(rect, CornerRadius::ZERO, fill);
                 }
                 let bracket = if selected || lit { ink } else { stroke.color };
-                for shape in brackets(ui, rect, bracket) {
+                for shape in brackets(p, rect, bracket) {
                     p.add(shape);
                 }
             }
@@ -2244,6 +2297,30 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// A window's border under the Terminal style has to land *on* the edge:
+    /// the frame is the only thing that says where the window ends, and one
+    /// drawn a whole character inside it reads as a box floating on the panel
+    /// rather than as the panel's own outline. It may hang over the edge by
+    /// the border cell itself and no further — the ink of a `-`, a `|` and a
+    /// `+` all sit in the middle of their own cell, so what hangs over is
+    /// blank.
+    #[test]
+    fn the_terminal_border_sits_on_the_edge_it_frames() {
+        let rect = Rect::from_min_max(pos2(40.0, 60.0), pos2(340.0, 220.0));
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let p = ui.painter();
+            let size = terminal_size(p);
+            let cell = cell_size(p, size);
+            let ink = ascii_box(p, rect, Color32::WHITE, size, FrameFit::OnEdge)
+                .iter()
+                .fold(Rect::NOTHING, |acc, s| acc.union(s.visual_bounding_rect()));
+            assert!(ink.min.x < rect.left() && ink.min.y < rect.top(), "{ink:?} vs {rect:?}");
+            assert!(ink.max.x > rect.right() && ink.max.y > rect.bottom(), "{ink:?} vs {rect:?}");
+            assert!(rect.expand2(cell).contains_rect(ink), "{ink:?} spills past {rect:?}");
+        });
     }
 
     /// Same for a slider's knob: it is drawn at the value's position, and a

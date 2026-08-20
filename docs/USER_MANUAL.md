@@ -5687,7 +5687,10 @@ spoken announcements below them under `[speech]`:
   buttons: text boxes, tick boxes, sliders and dropdowns all wear it too, with
   the controls you type into or drag along sunk into the panel and the ones
   you press standing proud of it — so Gradient and 3D bevel read as depth
-  rather than as decoration.
+  rather than as decoration. Picked as the **Window style**, Terminal frames
+  every panel, window and popup the way a character display frames one: a `+`
+  at each corner, a run of `-` along the top and bottom and a column of `|`
+  down each side, laid on the edge itself.
 - **Screen update rate** — the GUI/spectrum frame rate (5, 10, 15, 30, 60 or 90
   fps). Higher looks smoother and costs more CPU/GPU. The rates below 30 are
   there for machines that cannot keep up — a single-board computer, a big screen
