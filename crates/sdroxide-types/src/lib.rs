@@ -75,7 +75,7 @@ pub use band_segments::{
 pub use bandplan::{BandPlan, BandPlanError, RegionPlan, band_plan, set_band_plan};
 pub use broadcast::{BroadcastStation, BroadcastStations};
 pub use callsign::{CallsignInfo, LoginTarget, LoginTestResult, UploadResult, UploadTarget};
-pub use caps::{DeviceCaps, Direction, GainElement};
+pub use caps::{DeviceCaps, DeviceSetting, Direction, GainElement, SettingKind};
 pub use command::Command;
 pub use contacts::FsqContact;
 pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};
@@ -143,9 +143,9 @@ pub use radio::{
     Parity, PlutoAgc, PlutoConfig, PlutoDevice, PttMethod, RadioConfig, RtlSdrAgc, RtlSdrConfig,
     RtlSdrDevice, RtlSdrHfMode, RtlTcpConfig, Rx888Config, Rx888Device, SdrPlayAgc, SdrPlayConfig,
     SdrPlayDevice, SdrPlayDuoTuner, SdrPlayModel, SerialConfig, SmartSdrConfig, SmartSdrDevice,
-    SoapyDeviceInfo, SoundFormat, SpyServerConfig, SpyServerFormat, StopBits, TciConfig,
-    cat_iq_offset_max_hz, converter_preset_name, format_freq_ranges, hackrf_serial_matches,
-    parse_freq_ranges,
+    SoapyConfig, SoapyDeviceInfo, SoundFormat, SpyServerConfig, SpyServerFormat, StopBits,
+    TciConfig, cat_iq_offset_max_hz, converter_preset_name, format_freq_ranges,
+    hackrf_serial_matches, parse_freq_ranges,
 };
 pub use rds::{
     RdsClock, RdsData, RdsGroupLog, RdsStandard, RdsStats, RtPlus, af_code_hz, pi_callsign,

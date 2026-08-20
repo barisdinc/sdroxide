@@ -1354,7 +1354,7 @@ fn open_configured_source(
         Backend::SdrPlay => open_sdrplay_source(radio, cli.center_hz()),
         Backend::Elad => open_elad_source(radio, cli.center_hz()),
         Backend::Lime => open_lime_source(radio, cli.center_hz(), cli.rate),
-        Backend::Soapy => open_soapy_source(cli, settings),
+        Backend::Soapy => open_soapy_source(cli, settings, radio),
         Backend::Auto => {
             #[cfg(feature = "soapy")]
             {
@@ -1368,7 +1368,7 @@ fn open_configured_source(
                 {
                     open_cat_source(radio)
                 } else {
-                    open_soapy_source(cli, settings)
+                    open_soapy_source(cli, settings, radio)
                 }
             }
             #[cfg(not(feature = "soapy"))]
@@ -1425,8 +1425,18 @@ fn selectable_soapy_devices(filter: &str) -> anyhow::Result<(Vec<DeviceInfo>, Ve
 fn open_soapy_source(
     cli: &Cli,
     settings: &Settings,
+    radio: &RadioConfig,
 ) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
-    let rate = cli.rate.unwrap_or(settings.sample_rate);
+    // `--rate` first, then the operator's SoapySDR block, then the app-wide
+    // rate. The middle one is new; a configuration written before it existed
+    // leaves it at zero and lands on the app-wide rate exactly as before.
+    let rate = cli.rate.unwrap_or_else(|| {
+        if radio.soapy.sample_rate_hz > 0.0 {
+            radio.soapy.sample_rate_hz
+        } else {
+            settings.sample_rate
+        }
+    });
     let filter = device_filter(cli, settings);
     let (devices, skipped) = selectable_soapy_devices(&filter)?;
     let Some(info) = devices.first() else {
@@ -1450,7 +1460,7 @@ fn open_soapy_source(
     let dev =
         SoapyDevice::open(&info.args).with_context(|| format!("opening device {}", info.label))?;
     let caps = dev.caps().clone();
-    Ok((Box::new(dev.rx_source(rate, cli.center_hz(), cli.gain)?), caps))
+    Ok((Box::new(dev.rx_source(rate, cli.center_hz(), cli.gain, &radio.soapy)?), caps))
 }
 
 #[cfg(not(feature = "soapy"))]

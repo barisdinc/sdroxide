@@ -2,6 +2,19 @@
 resolver = "3"
 members = ["crates/*"]
 default-members = [".", "crates/sdroxide-types", "crates/sdroxide-proto", "crates/sdroxide-dsp", "crates/sdroxide-radio", "crates/sdroxide-config"]
+# The vendored `soapysdr` is reached through `[patch.crates-io]`, not as a
+# member: it is upstream's crate under upstream's licence, not ours to lint or
+# version with the rest.
+exclude = ["vendor/soapysdr"]
+
+# `soapysdr` 0.5.1 with one method added: `Device::setting_info`, the call that
+# says which settings a driver has. Upstream wraps `readSetting`/`writeSetting`
+# but not the enumeration, and the raw device pointer it needs is private to the
+# crate — so a host can set a driver setting it already knows the name of, but
+# cannot discover one. That is what the SoapySDR settings panel is built on.
+# See vendor/soapysdr/PROVENANCE.md; this stays until the method is upstream.
+[patch.crates-io]
+soapysdr = { path = "vendor/soapysdr" }
 
 [workspace.package]
 version = "1.3.2"

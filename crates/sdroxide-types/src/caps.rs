@@ -16,6 +16,51 @@ pub struct GainElement {
     pub step_db: f64,
 }
 
+/// What a driver setting holds, which is what decides the control drawn for it.
+///
+/// SoapySDR's own four argument types. `String` is the fallback in both
+/// directions: a driver that declares nothing gets a text box, which can express
+/// any of the others, rather than a control that quietly cannot say what the
+/// driver wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SettingKind {
+    Bool,
+    Int,
+    Float,
+    #[default]
+    String,
+}
+
+/// One driver-specific setting, as the device describes itself.
+///
+/// Not a fixed list and deliberately not interpreted: a HackRF's `bias_tx`, an
+/// RTL-SDR's `direct_samp` and an RSP's `rfnotch_ctrl` all arrive here the same
+/// way, and sdroxide draws a control for each without knowing what any of them
+/// means. That is the whole point of reaching a radio through SoapySDR, and it
+/// is why this is carried as data rather than as per-driver code.
+///
+/// Values are strings in both directions because that is what
+/// `readSetting`/`writeSetting` take; [`Self::kind`] says how to *render* one,
+/// not how to store it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DeviceSetting {
+    /// The key `writeSetting` takes. Stable; this is what gets persisted.
+    pub key: String,
+    /// The driver's display name, or the key again when it gave none.
+    pub name: String,
+    /// One line of help from the driver, if it offered any.
+    pub description: String,
+    /// dB, Hz, and so on. Empty when unitless.
+    pub units: String,
+    pub kind: SettingKind,
+    /// The value read back from the device at probe time.
+    pub value: String,
+    /// The values the driver will accept, when it restricts them. Empty means
+    /// "anything of this kind" — a range check is the driver's job, not ours,
+    /// because only it knows what it will refuse.
+    pub options: Vec<String>,
+}
+
 /// Device capabilities probed once at open time. Drives all UI adaptation
 /// (e.g. `tx_channels == 0` hides every TX control).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -94,6 +139,20 @@ pub struct DeviceCaps {
     /// lifetime wanted.
     #[serde(default)]
     pub lent_to: Option<u32>,
+    /// The receive baseband filter widths this device will take, in Hz:
+    /// discrete values first, then any continuous ranges as (min, max).
+    ///
+    /// Separate from [`Self::sample_rates`] because they are separate controls
+    /// on the hardware — a device is perfectly entitled to run a 2 Msps stream
+    /// through a 1.75 MHz filter — and because plenty of drivers publish one
+    /// and not the other. Appended last, for the same reason as `shared_lo_rx`.
+    #[serde(default)]
+    pub bandwidths: Vec<f64>,
+    #[serde(default)]
+    pub bandwidth_ranges: Vec<(f64, f64)>,
+    /// The driver's own settings, as it describes them. See [`DeviceSetting`].
+    #[serde(default)]
+    pub settings: Vec<DeviceSetting>,
 }
 
 impl DeviceCaps {

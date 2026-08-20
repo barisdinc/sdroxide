@@ -237,6 +237,9 @@ impl DigiEngine for RadeController {
     }
 
     fn abort_tx(&mut self) {
+        // See `CwController::abort_tx`: a refused key-up must not leave the
+        // latch set, or nothing can ever key again.
+        self.keyed = false;
         self.tx_active = false;
         if let Some(w) = self.worker.as_ref() {
             w.set_tx(false);

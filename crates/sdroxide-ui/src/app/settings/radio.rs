@@ -2699,6 +2699,207 @@ impl SdroxideApp {
     }
 }
 
+/// A frequency in the unit an operator reads it in, with the unit spelled by
+/// the caller — the same number is "2.000 Msps" as a rate and "2.000 MHz" as a
+/// filter width, and calling one by the other's name is how a panel starts
+/// quietly misinforming people.
+fn scaled_label(hz: f64, mega: &str, kilo: &str) -> String {
+    if hz >= 1e6 { format!("{:.3} {mega}", hz / 1e6) } else { format!("{:.0} {kilo}", hz / 1e3) }
+}
+
+fn rate_label(hz: f64) -> String {
+    scaled_label(hz, "Msps", "ksps")
+}
+
+fn bw_label(hz: f64) -> String {
+    scaled_label(hz, "MHz", "kHz")
+}
+
+/// The SoapySDR device's own controls, drawn from what it says about itself.
+///
+/// Nothing on this panel is device-specific code. The rates, the filter widths
+/// and every switch below them come from the driver's own answers
+/// (`DeviceCaps::sample_rates`, `bandwidths`, `settings`), so a radio nobody
+/// here has ever run still gets the controls its author wrote for it — which is
+/// the point of reaching it through SoapySDR rather than through a backend of
+/// its own.
+///
+/// Two speeds, deliberately. A driver setting is written to the running radio
+/// the moment it is touched, because most of them are switches — a bias tee, a
+/// notch, a direct-sampling branch — and one that took effect only after a
+/// restart is one the operator cannot tell is working. The rate and the filter
+/// need the DSP chain rebuilt around them, so those ask for a reopen.
+///
+/// Every control's "leave it alone" option is the default and comes first. A
+/// driver knows more about its own hardware than this panel does, and an
+/// operator who has not chosen should not silently be overriding it.
+pub(in crate::app) fn settings_soapy_tab(
+    ui: &mut egui::Ui,
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    radio_edit: &mut Option<sdroxide_types::RadioConfig>,
+    apply: &mut bool,
+    cmds: &mut Vec<Command>,
+) {
+    use sdroxide_types::SettingKind;
+
+    let Some(cfg) = radio_edit.as_mut() else {
+        ui.label("Waiting for the configuration of the machine the radio is attached to.");
+        return;
+    };
+    let Some(caps) = caps else {
+        ui.label(
+            RichText::new(
+                "These controls appear once a SoapySDR device is open — they are the \
+                 device's own, and it has to be asked.",
+            )
+            .weak(),
+        );
+        return;
+    };
+
+    if !caps.sample_rates.is_empty() || !caps.rate_ranges.is_empty() {
+        ui.label(RichText::new("Stream").strong());
+        egui::Grid::new("soapy-stream").num_columns(2).show(ui, |ui| {
+            ui.label("Sample rate");
+            let shown = if cfg.soapy.sample_rate_hz > 0.0 {
+                rate_label(cfg.soapy.sample_rate_hz)
+            } else {
+                "Follow the app setting".to_string()
+            };
+            ComboBox::from_id_salt("soapy-rate").selected_text(shown).show_styled(ui, |ui| {
+                if ui
+                    .selectable_label(cfg.soapy.sample_rate_hz <= 0.0, "Follow the app setting")
+                    .clicked()
+                {
+                    cfg.soapy.sample_rate_hz = 0.0;
+                    *apply = true;
+                }
+                for &r in &caps.sample_rates {
+                    let sel = (cfg.soapy.sample_rate_hz - r).abs() < 1.0;
+                    if ui.selectable_label(sel, rate_label(r)).clicked() {
+                        cfg.soapy.sample_rate_hz = r;
+                        *apply = true;
+                    }
+                }
+            });
+            ui.end_row();
+
+            // A driver that publishes a continuous range rather than a list —
+            // plenty do — has nothing to put in the combo above, so it gets a
+            // number to type instead. Applied on release rather than per
+            // keystroke: every digit typed would otherwise reopen the radio.
+            if !caps.rate_ranges.is_empty() {
+                let (lo, hi) = caps
+                    .rate_ranges
+                    .iter()
+                    .fold((f64::MAX, 0.0f64), |(a, b), &(l, h)| (a.min(l), b.max(h)));
+                ui.label("or, in Msps");
+                let mut msps = cfg.soapy.sample_rate_hz / 1e6;
+                let r =
+                    ui.add(egui::DragValue::new(&mut msps).speed(0.05).range(lo / 1e6..=hi / 1e6));
+                if r.changed() {
+                    cfg.soapy.sample_rate_hz = msps * 1e6;
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    *apply = true;
+                }
+                ui.end_row();
+            }
+
+            if !caps.bandwidths.is_empty() {
+                ui.label("Baseband filter");
+                let shown = if cfg.soapy.bandwidth_hz > 0.0 {
+                    bw_label(cfg.soapy.bandwidth_hz)
+                } else {
+                    "Let the driver choose".to_string()
+                };
+                ComboBox::from_id_salt("soapy-bw").selected_text(shown).show_styled(ui, |ui| {
+                    if ui
+                        .selectable_label(cfg.soapy.bandwidth_hz <= 0.0, "Let the driver choose")
+                        .clicked()
+                    {
+                        cfg.soapy.bandwidth_hz = 0.0;
+                        *apply = true;
+                    }
+                    for &b in &caps.bandwidths {
+                        let sel = (cfg.soapy.bandwidth_hz - b).abs() < 1.0;
+                        if ui.selectable_label(sel, bw_label(b)).clicked() {
+                            cfg.soapy.bandwidth_hz = b;
+                            *apply = true;
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        ui.label(RichText::new("Changing either reopens the radio.").weak());
+    }
+
+    if caps.settings.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new("This driver publishes no settings of its own.").weak());
+        return;
+    }
+
+    ui.separator();
+    ui.label(RichText::new(format!("{} settings", caps.driver)).strong());
+    egui::Grid::new("soapy-settings").num_columns(2).show(ui, |ui| {
+        for st in &caps.settings {
+            let label = ui.label(&st.name);
+            if !st.description.is_empty() {
+                label.on_hover_text(&st.description);
+            }
+            // What the operator chose, or failing that what the radio answered
+            // when it was asked at open.
+            let current = cfg.soapy.setting(&st.key).unwrap_or(&st.value).to_string();
+            let mut chosen: Option<String> = None;
+
+            match st.kind {
+                SettingKind::Bool => {
+                    // SoapySDR spells booleans "true"/"false" on the wire.
+                    let mut on = matches!(current.as_str(), "true" | "1" | "True");
+                    if crate::chrome::checkbox(ui, &mut on, "").changed() {
+                        chosen = Some(if on { "true".into() } else { "false".into() });
+                    }
+                }
+                _ if !st.options.is_empty() => {
+                    ComboBox::from_id_salt(format!("soapy-set-{}", st.key))
+                        .selected_text(current.clone())
+                        .show_styled(ui, |ui| {
+                            for o in &st.options {
+                                if ui.selectable_label(current == *o, o).clicked() {
+                                    chosen = Some(o.clone());
+                                }
+                            }
+                        });
+                }
+                _ => {
+                    // Numbers and free text alike: the driver is the only thing
+                    // that knows what it will accept, so this passes the text
+                    // through and lets it refuse — which surfaces as a notice
+                    // rather than as a silently clamped value.
+                    let mut text = current.clone();
+                    let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(120.0));
+                    if r.lost_focus() && text != current {
+                        chosen = Some(text);
+                    }
+                }
+            }
+            if !st.units.is_empty() {
+                ui.label(RichText::new(&st.units).weak());
+            }
+
+            if let Some(v) = chosen {
+                // Straight to the running radio, and remembered for next time.
+                cmds.push(Command::SetDeviceSetting { key: st.key.clone(), value: v.clone() });
+                cfg.soapy.set_setting(&st.key, &v);
+            }
+            ui.end_row();
+        }
+    });
+    ui.label(RichText::new("Applied at once, and remembered for the next start.").weak());
+}
+
 /// Settings for the RX-888 direct-sampling receiver.
 ///
 /// The layout follows the signal path: which receiver, how fast to clock the

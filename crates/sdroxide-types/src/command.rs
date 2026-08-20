@@ -163,6 +163,14 @@ pub enum Command {
         dir: Direction,
         name: String,
     },
+    /// Write one driver-specific setting on a SoapySDR device, by the key the
+    /// device published for it. Applied to the running radio; persisting it is
+    /// a separate `SetRadioConfig`, because an operator trying a switch out is
+    /// not the same act as choosing to keep it.
+    SetDeviceSetting {
+        key: String,
+        value: String,
+    },
 
     // Memories
     StoreMemory {

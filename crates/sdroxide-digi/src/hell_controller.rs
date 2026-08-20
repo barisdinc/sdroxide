@@ -273,6 +273,9 @@ impl DigiEngine for HellController {
     }
 
     fn abort_tx(&mut self) {
+        // See `CwController::abort_tx`: a refused key-up must not leave the
+        // latch set, or nothing can ever key again.
+        self.keyed = false;
         self.tx.clear();
         self.tx_buffer.clear();
         self.tx_pushed = 0;

@@ -38,8 +38,8 @@ use self::radio::{
     settings_airspy_tab, settings_airspyhf_tab, settings_cat_tab, settings_elad_tab,
     settings_hackrf_tab, settings_hpsdr_tab, settings_icomnet_tab, settings_lime_tab,
     settings_pluto_tab, settings_rtlsdr_tab, settings_rtltcp_tab, settings_rx888_tab,
-    settings_sdrplay_tab, settings_smartsdr_tab, settings_soapy_devices, settings_spyserver_tab,
-    settings_tci_tab,
+    settings_sdrplay_tab, settings_smartsdr_tab, settings_soapy_devices, settings_soapy_tab,
+    settings_spyserver_tab, settings_tci_tab,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use self::remote::settings_remote_tab;
@@ -1757,6 +1757,14 @@ impl SdroxideApp {
                 match backend {
                     Backend::Soapy => {
                         self.settings_device_tab(ui, cmds);
+                        ui.add_space(4.0);
+                        settings_soapy_tab(
+                            ui,
+                            self.caps.as_ref(),
+                            io.radio_edit,
+                            io.apply_iface,
+                            cmds,
+                        );
                         ui.add_space(4.0);
                         settings_soapy_devices(
                             ui,

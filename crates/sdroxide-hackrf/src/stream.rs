@@ -119,6 +119,12 @@ struct TxStats {
     /// endpoint: `service_tx` holds the bulk endpoint, but only the pump holds
     /// the [`Device`], and the radio's own account of itself is a control read.
     wants_m0: bool,
+    /// Times the queue ran dry mid-over — the host failing to keep up, which is
+    /// the opposite fault from the one above and looks nothing like it on the
+    /// air. A radio starved long enough stops transmitting on its own (the M0
+    /// reverts to IDLE on its transmit timeout), so an over that is *cut off*
+    /// rather than merely rough is this, not a USB fault.
+    starves: u64,
 }
 
 impl TxStats {
@@ -133,6 +139,7 @@ impl TxStats {
             moving: false,
             notice_given: false,
             wants_m0: false,
+            starves: 0,
         }
     }
 
@@ -164,7 +171,7 @@ impl TxStats {
         self.notice_given = true;
         self.wants_m0 = true;
         let msg = format!(
-            "NOT ONE transmit transfer has completed {:.0} ms after key-down: {} submitted              ({} bytes), {} still pending, {} error(s), {} stall(s). The radio is keyed but              is not reading the bulk OUT endpoint.",
+            "NOT ONE transmit transfer has completed {:.0} ms after key-down: {} submitted ({} bytes), {} still pending, {} error(s), {} stall(s). The radio is keyed but is not reading the bulk OUT endpoint.",
             self.keyed.elapsed().as_secs_f64() * 1000.0,
             self.submitted,
             self.bytes,
@@ -176,6 +183,18 @@ impl TxStats {
         trace.note(msg);
     }
 
+    /// The transmit queue emptied with the radio still keyed. Counted rather
+    /// than logged: a host a few percent short of the sample rate starves
+    /// hundreds of times an over, and a line each would bury everything else.
+    ///
+    /// Only once the radio has proved it is reading at all — before that the
+    /// queue being empty is the fault above, not this one.
+    fn on_starve(&mut self) {
+        if self.moving {
+            self.starves += 1;
+        }
+    }
+
     /// One line at key-up. The equivalent rate is the load-bearing figure: a
     /// transmitter that consumed at anything other than the sample rate did not
     /// put the over on the air the way the engine built it.
@@ -183,7 +202,7 @@ impl TxStats {
         let secs = self.keyed.elapsed().as_secs_f64();
         let sps = if secs > 0.0 { self.bytes as f64 / BYTES_PER_SAMPLE as f64 / secs } else { 0.0 };
         format!(
-            "{}/{} transfers completed, {} bytes over {:.2}s ({:.1} ksps equivalent),              {} error(s), {} stall(s)",
+            "{}/{} transfers completed, {} bytes over {:.2}s ({:.1} ksps equivalent), {} error(s), {} stall(s), {} starve(s)",
             self.completed,
             self.submitted,
             self.bytes,
@@ -191,6 +210,7 @@ impl TxStats {
             sps / 1e3,
             self.errors,
             self.stalls,
+            self.starves,
         )
     }
 }
@@ -528,6 +548,16 @@ fn transition(
             // keeps an ordinary key-up from clipping the end of the over.
             drain_tx(&mut ep, tx, transfer_bytes, &mut stats, trace);
             trace.note(format!("transmit ended: {}", stats.summary()));
+            // An over that starved deserves a second opinion: `num_shortfalls`
+            // is the radio's own count of the same event, and its `error` says
+            // whether it gave up and unkeyed itself rather than merely
+            // stuttering — the difference between an over that sounded rough
+            // and one that was cut off.
+            if stats.starves > 0
+                && let Some(m) = dev.m0_state()
+            {
+                trace.note(format!("the radio's own account of a starved over: {m}"));
+            }
             close(Lane::Tx(ep, stats));
             shared.tx_active.store(false, Ordering::Relaxed);
             dev.end_tx()?;
@@ -781,6 +811,11 @@ fn service_tx(
     // The radio is keyed and idle, which is what the pause between two
     // paced blocks looks like.
     if ep.pending() == 0 {
+        // Keyed, nothing outstanding, nothing to send: the radio has run out of
+        // over. Either the engine cannot build samples this fast, or this is
+        // simply the gap between two paced blocks — the count tells them apart
+        // at key-up, where hundreds mean the former.
+        stats.on_starve();
         std::thread::sleep(Duration::from_micros(500));
     } else if let Some(c) = ep.wait_next_complete(COMPLETE_TIMEOUT) {
         // Accounted for rather than dropped: this is where most completions are

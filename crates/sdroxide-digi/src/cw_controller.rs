@@ -623,6 +623,15 @@ impl DigiEngine for CwController {
     }
 
     fn abort_tx(&mut self) {
+        // First, and not merely for tidiness: `keyed` is what `poll` checks to
+        // decide there is an over to start, and it used to be cleared only by
+        // `on_burst_done` — which never runs for an over that was *refused*
+        // rather than finished. The engine calls this when a rail denies a
+        // key-up, so one refusal left the latch set and this controller could
+        // never key again; the only cure was changing mode and back, which
+        // rebuilds it. Every controller in this crate keys through the same
+        // latch, so every one of them clears it here.
+        self.keyed = false;
         self.tx.clear();
         self.tx48.clear();
         self.tx_buffer.clear();
@@ -740,6 +749,34 @@ mod tests {
 
     fn cfg() -> DigiConfig {
         DigiConfig { my_call: "W1AW".into(), cw_wpm: 25.0, ..Default::default() }
+    }
+
+    /// A refused key-up must not cost every later one.
+    ///
+    /// The engine calls `abort_tx` when a rail denies the key-up — the station
+    /// interlock, an out-of-band dial, a radio that would not key. `keyed` was
+    /// cleared only by `on_burst_done`, which never runs for an over that was
+    /// refused rather than finished, so one refusal wedged the transmitter
+    /// until the operator changed mode and back and rebuilt the controller.
+    /// Reported from the field against CW on a HackRF, where a half-duplex
+    /// key-up is refused often enough to hit within a couple of overs.
+    #[test]
+    fn a_refused_key_up_does_not_wedge_the_transmitter() {
+        let mut c = CwController::new(cfg(), 48_000.0, None);
+        fn keys(c: &mut CwController) -> bool {
+            c.poll(SystemTime::now(), 14_030_000.0).iter().any(|a| matches!(a, DigiAction::KeyTx))
+        }
+
+        c.set_tx_text("CQ CQ DE W1AW".into());
+        c.set_tx_active(true);
+        assert!(keys(&mut c), "the first over must key");
+
+        // Exactly what the engine does when a rail refuses.
+        c.abort_tx();
+
+        c.set_tx_text("CQ CQ DE W1AW".into());
+        c.set_tx_active(true);
+        assert!(keys(&mut c), "a refused over must not cost every later one");
     }
 
     /// Settle the receive window: the model decodes on its own thread, so the

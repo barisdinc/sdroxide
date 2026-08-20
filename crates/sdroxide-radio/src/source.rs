@@ -167,6 +167,13 @@ pub trait IqSource: Send {
     fn set_antenna(&mut self, _name: &str) -> Result<()> {
         Ok(())
     }
+    /// Write one driver-specific setting, by the key the device published for
+    /// it (see `DeviceCaps::settings`). A no-op on every backend whose controls
+    /// are named fields in its own config block — this exists for SoapySDR,
+    /// where the set of controls is whatever the driver says it is.
+    fn set_device_setting(&mut self, _key: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
     fn current_gains(&self) -> Vec<(String, f64)> {
         Vec::new()
     }
@@ -757,6 +764,10 @@ impl IqSource for ConvertedSource {
 
     fn set_antenna(&mut self, name: &str) -> Result<()> {
         self.inner.set_antenna(name)
+    }
+
+    fn set_device_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.inner.set_device_setting(key, value)
     }
 
     fn current_gains(&self) -> Vec<(String, f64)> {

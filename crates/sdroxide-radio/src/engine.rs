@@ -4459,6 +4459,12 @@ impl Engine {
             // Remembered as well as applied: a reconnect or an interface switch
             // reopens the device on its driver default, and the operator's
             // choice has to survive that (see [`Engine::restore_antennas`]).
+            SetDeviceSetting { key, value } => {
+                if let Err(e) = self.source.set_device_setting(&key, &value) {
+                    warn!("set {key} = {value}: {e}");
+                    self.notice(&format!("The radio would not take {key} = {value}: {e}"));
+                }
+            }
             SetAntenna { dir, name } => match dir {
                 Direction::Rx => {
                     if let Err(e) = self.source.set_antenna(&name) {

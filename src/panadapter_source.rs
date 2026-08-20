@@ -198,6 +198,12 @@ impl PanadapterSource {
             rx_audio_external: cfg.audio == PanadapterAudio::Transceiver,
             // This is the radio doing the borrowing, not the one lent out.
             lent_to: None,
+            // The receiver's, because these describe the stream: the filter it
+            // is running and the driver knobs behind it belong to the radio
+            // painting the picture, not to the transceiver being listened to.
+            bandwidths: rx.bandwidths.clone(),
+            bandwidth_ranges: rx.bandwidth_ranges.clone(),
+            settings: rx.settings.clone(),
         }
     }
 

@@ -404,7 +404,15 @@ use sdroxide_types::{
 /// The ALC reading that landed alongside it is NOT a wire change: it went into
 /// `TxTelemetry`, which the engine folds into `TxMeters::alc` — an existing
 /// field — and which never leaves the process on its own.
-pub const PROTO_VERSION: u16 = 68;
+///
+/// **69** — the SoapySDR settings panel. `DeviceCaps` gained `bandwidths`,
+/// `bandwidth_ranges` and `settings`, so that a driver's own controls can be
+/// drawn from what the device says about itself rather than from per-driver
+/// code. They are appended last and `#[serde(default)]`, but postcard is not
+/// self-describing and `DeviceCaps` is sent whole: a v68 client would stop
+/// reading where the struct used to end and treat the remainder as the next
+/// message. Same reasoning as every other `DeviceCaps` append.
+pub const PROTO_VERSION: u16 = 69;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

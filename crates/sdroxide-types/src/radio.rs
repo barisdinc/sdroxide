@@ -4311,6 +4311,52 @@ impl PanadapterConfig {
     }
 }
 
+/// What the operator has chosen for a SoapySDR device.
+///
+/// Every field's default means **"leave it alone"** — zero for the two rates,
+/// empty for the settings — so a configuration written before this existed
+/// opens its radio exactly as it always did. That matters more here than in a
+/// native backend's block: this one covers every driver SoapySDR has, most of
+/// which nobody here has ever run, and a default that asserted something would
+/// be asserting it blind on all of them.
+///
+/// The settings are a key/value list rather than named fields on purpose. They
+/// are whatever the driver said it had ([`DeviceSetting`]), so naming them here
+/// would mean naming every driver's — which is exactly the per-driver knowledge
+/// that reaching a radio through SoapySDR is supposed to avoid. Keys the device
+/// no longer reports are kept rather than pruned: the operator may be moving one
+/// configuration between two machines, and a setting silently dropped because
+/// the module was missing that day is worse than one that goes unused.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoapyConfig {
+    /// Complex sample rate in Hz, or `0.0` to take the app-wide rate as before.
+    /// Snapped to what the device says it accepts, so a value that no longer
+    /// fits a swapped-in radio degrades to the nearest one rather than failing.
+    pub sample_rate_hz: f64,
+    /// Receive baseband filter in Hz, or `0.0` to leave the driver's own choice
+    /// alone — which is usually derived from the sample rate and usually right.
+    pub bandwidth_hz: f64,
+    /// Driver settings, as `(key, value)`. See the note above on why these are
+    /// not named fields.
+    pub settings: Vec<(String, String)>,
+}
+
+impl SoapyConfig {
+    /// The value the operator has chosen for `key`, if any.
+    pub fn setting(&self, key: &str) -> Option<&str> {
+        self.settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// Record a choice, replacing any earlier one for the same key.
+    pub fn set_setting(&mut self, key: &str, value: &str) {
+        match self.settings.iter_mut().find(|(k, _)| k == key) {
+            Some((_, v)) => *v = value.to_string(),
+            None => self.settings.push((key.to_string(), value.to_string())),
+        }
+    }
+}
+
 /// Persisted backend configuration (`radio.json`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -4393,11 +4439,44 @@ pub struct RadioConfig {
     /// LimeSDR family through LimeSuite, and the LimeRFE in front of it.
     /// Appended after `elad` for the same reason.
     pub lime: LimeConfig,
+    /// The SoapySDR interface's own block. Appended after `lime`, for the same
+    /// reason as every field above it: the layout is positional.
+    pub soapy: SoapyConfig,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SoapySDR block's defaults must mean "change nothing", because it
+    /// covers every driver SoapySDR has and almost none of them has ever been
+    /// run here. A configuration written before this existed opens its radio
+    /// exactly as it always did.
+    #[test]
+    fn an_untouched_soapy_block_asserts_nothing() {
+        let cfg = SoapyConfig::default();
+        assert_eq!(cfg.sample_rate_hz, 0.0, "a rate would be forced on every driver");
+        assert_eq!(cfg.bandwidth_hz, 0.0, "a filter would override the driver's own choice");
+        assert!(cfg.settings.is_empty());
+        assert_eq!(cfg.setting("bias_tx"), None);
+    }
+
+    /// A key is remembered once and updated in place: a second choice for the
+    /// same setting replaces the first rather than queuing behind it, or the
+    /// list would grow without bound and the wrong one would be applied last.
+    #[test]
+    fn a_soapy_setting_is_remembered_once_and_updated_in_place() {
+        let mut cfg = SoapyConfig::default();
+        cfg.set_setting("bias_tx", "true");
+        cfg.set_setting("direct_samp", "2");
+        cfg.set_setting("bias_tx", "false");
+        assert_eq!(cfg.settings.len(), 2, "{:?}", cfg.settings);
+        assert_eq!(cfg.setting("bias_tx"), Some("false"));
+        assert_eq!(cfg.setting("direct_samp"), Some("2"));
+        // Order is insertion order, so what the operator set first is applied
+        // first — some drivers care (a direct-sampling branch before a gain).
+        assert_eq!(cfg.settings[0].0, "bias_tx");
+    }
 
     /// A config written before the rate was selectable has to come up at the
     /// rate it was written for. Every such rig was opened at 48 kHz, and a

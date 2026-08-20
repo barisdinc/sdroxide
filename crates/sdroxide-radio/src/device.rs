@@ -119,6 +119,32 @@ impl SoapyDevice {
             .unwrap_or(requested)
     }
 
+    /// Apply the operator's SoapySDR block: the driver settings, then the
+    /// baseband filter.
+    ///
+    /// **Nothing here is fatal.** A driver that refuses a setting — because the
+    /// key moved between versions, because the hardware revision lacks it,
+    /// because the operator's configuration came from a different radio — must
+    /// not cost them the radio. Each failure is logged with its key and the
+    /// rest are still applied, which is also the only way an operator finds out
+    /// that one of their choices is not taking effect.
+    ///
+    /// The sample rate is deliberately not here: it has to be snapped against
+    /// what the device accepts, which is [`Self::choose_sample_rate`]'s job.
+    pub fn apply_config(&self, cfg: &sdroxide_types::SoapyConfig) {
+        for (key, value) in &cfg.settings {
+            match self.dev.write_setting(key.as_str(), value.as_str()) {
+                Ok(()) => info!(key, value, "SoapySDR setting applied"),
+                Err(e) => warn!("this radio would not take {key} = {value}: {e}"),
+            }
+        }
+        if cfg.bandwidth_hz > 0.0
+            && let Err(e) = self.dev.set_bandwidth(Direction::Rx, 0, cfg.bandwidth_hz)
+        {
+            warn!("this radio would not take a {} Hz baseband filter: {e}", cfg.bandwidth_hz);
+        }
+    }
+
     /// Open, configure, and activate an RX stream on channel 0.
     ///
     /// `gain_db`: explicit overall RX gain; `None` enables hardware AGC when
@@ -128,11 +154,15 @@ impl SoapyDevice {
         sample_rate: f64,
         center_hz: f64,
         gain_db: Option<f64>,
+        cfg: &sdroxide_types::SoapyConfig,
     ) -> Result<SoapyRxSource> {
         let channel = 0;
         let rate = self.choose_sample_rate(sample_rate);
         self.dev.set_sample_rate(Direction::Rx, channel, rate)?;
         self.dev.set_frequency(Direction::Rx, channel, center_hz, ())?;
+        // After the rate, because a driver that derives its filter from the
+        // rate would otherwise overwrite an explicit bandwidth with its own.
+        self.apply_config(cfg);
 
         // Hardware AGC owns the RX stages where it is running, so those must not
         // be re-asserted behind its back (see `rx_gains`).
@@ -533,6 +563,24 @@ impl IqSource for SoapyRxSource {
         Ok(())
     }
 
+    /// Write one driver setting to the running radio.
+    ///
+    /// Live rather than at the next open, because most of what arrives here is
+    /// a switch — a bias tee, a notch, a direct-sampling branch — and a switch
+    /// that only takes effect after a stream restart is one the operator cannot
+    /// tell is working. The value goes back into `caps` so a client that asks
+    /// what the radio is set to gets the answer the radio gave, not the one it
+    /// was sent.
+    fn set_device_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        let dev = self.dev()?;
+        dev.write_setting(key, value)?;
+        let applied = dev.read_setting(key).unwrap_or_else(|_| value.to_string());
+        if let Some(s) = self.caps.settings.iter_mut().find(|s| s.key == key) {
+            s.value = applied;
+        }
+        Ok(())
+    }
+
     fn set_antenna(&mut self, name: &str) -> Result<()> {
         self.dev()?.set_antenna(Direction::Rx, self.channel, name)?;
         Ok(())
@@ -800,6 +848,55 @@ fn probe_caps(dev: &soapysdr::Device) -> Result<DeviceCaps> {
         Vec::new()
     };
 
+    // The baseband filter, which is a separate control from the sample rate: a
+    // device may perfectly well run a 2 Msps stream through a 1.75 MHz filter,
+    // and plenty of drivers publish one and not the other.
+    let mut bandwidths = Vec::new();
+    let mut bandwidth_ranges = Vec::new();
+    if rx_channels > 0 {
+        for r in dev.bandwidth_range(Direction::Rx, 0).unwrap_or_default() {
+            if (r.maximum - r.minimum).abs() < 1.0 {
+                bandwidths.push(r.minimum);
+            } else {
+                bandwidth_ranges.push((r.minimum, r.maximum));
+            }
+        }
+    }
+
+    // The driver's own settings, taken entirely from what it says about itself.
+    // Nothing here knows what `bias_tx` or `direct_samp` mean, and that is the
+    // point: reaching a radio through SoapySDR should not cost the operator the
+    // controls the driver author wrote for it. `setting_info` is the one call
+    // this needs and the one call upstream does not wrap — see
+    // `vendor/soapysdr/PROVENANCE.md`.
+    let settings = dev
+        .setting_info()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| {
+            // The current value, not the declared default: what the panel has
+            // to show is what the radio is doing. A driver that will not read
+            // a key back falls to its own default rather than to blank.
+            let value = dev.read_setting(a.key.as_str()).unwrap_or_else(|_| a.value.clone());
+            sdroxide_types::DeviceSetting {
+                name: a.name.clone().unwrap_or_else(|| a.key.clone()),
+                description: a.description.clone().unwrap_or_default(),
+                units: a.units.clone().unwrap_or_default(),
+                kind: match a.data_type {
+                    soapysdr::ArgType::Bool => sdroxide_types::SettingKind::Bool,
+                    soapysdr::ArgType::Int => sdroxide_types::SettingKind::Int,
+                    soapysdr::ArgType::Float => sdroxide_types::SettingKind::Float,
+                    // `ArgType` is `#[non_exhaustive]`; anything new is text,
+                    // which can carry whatever the driver meant.
+                    _ => sdroxide_types::SettingKind::String,
+                },
+                options: a.options.iter().map(|(v, _)| v.clone()).collect(),
+                key: a.key,
+                value,
+            }
+        })
+        .collect();
+
     let mut sensors: Vec<String> = dev.list_sensors().unwrap_or_default();
     for (dir, n) in [(Direction::Rx, rx_channels), (Direction::Tx, tx_channels)] {
         if n > 0 {
@@ -836,6 +933,9 @@ fn probe_caps(dev: &soapysdr::Device) -> Result<DeviceCaps> {
         // being one — and, for `lent_to`, stands in for one.
         rx_audio_external: false,
         lent_to: None,
+        bandwidths,
+        bandwidth_ranges,
+        settings,
     })
 }
 

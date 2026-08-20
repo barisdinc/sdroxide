@@ -3339,6 +3339,23 @@ exposes, and nothing it does not:
   port, and a **TX** one when it has more than one transmit port. A LimeSDR
   receives on `LNAH`/`LNAL`/`LNAW` and transmits on `BAND1`/`BAND2`; a HackRF
   has a single `TX/RX` port and gets no drop-down at all.
+- **Stream** — **Sample rate** and **Baseband filter**, listing the values this
+  device says it accepts. Both default to leaving things as they were: the rate
+  falls back to the app-wide `sample_rate`, and the filter to whatever the
+  driver picks for itself (usually derived from the rate, and usually right).
+  Changing either reopens the radio.
+- **<driver> settings** — every setting the driver publishes, drawn from what it
+  says about itself: a HackRF's `bias_tx`, an RTL-SDR's `direct_samp`, an RSP's
+  `rfnotch_ctrl`. sdroxide does not know what any of them mean, which is the
+  point — a radio it has never heard of still gets the controls its driver
+  author wrote. Switches appear as tick boxes, settings with a fixed set of
+  values as drop-downs, and everything else as a text box; hover a name for the
+  driver's own description. These take effect on the running radio as soon as
+  you touch them, and are remembered for the next start.
+
+> A driver is free to refuse a setting — a key that moved between versions, a
+> hardware revision that lacks it, a value it will not take. It says so in a
+> notice rather than failing quietly, and the rest are still applied.
 
 Whichever ports and gains you pick are remembered in `session.json` and set
 again the next time you start, and re-applied if the radio drops out and the
@@ -3363,10 +3380,11 @@ the one selected — which is why the screenshot still reads
 `TCI 127.0.0.1:50001 (192 kHz IQ)`: the interface has been switched to SoapySDR
 but **Apply / reconnect** has not been pressed yet.
 
-The device to open and the sample rate come from `config.toml`
-(`device_args`, `sample_rate`). For example, `device_args = "driver=hackrf"`;
-an empty value uses the first device found. You can also override the device on
-the command line with `--device`.
+Which device to open comes from `config.toml` (`device_args`) — for example
+`device_args = "driver=hackrf"`; an empty value uses the first device found. You
+can also override it on the command line with `--device`. The sample rate is on
+this tab, but `--rate` still wins over it, and an untouched **Stream** section
+leaves the app-wide `sample_rate` in charge exactly as before.
 
 **Why your VFO does not sit in the middle of the waterfall.** On a SoapySDR
 device with a wide enough span, sdroxide parks the hardware LO a quarter of the
