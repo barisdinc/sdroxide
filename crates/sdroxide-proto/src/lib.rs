@@ -392,7 +392,19 @@ use sdroxide_types::{
 /// postcard is positional, and a v66 client reading a v67 status runs into the
 /// wrong field. `#[serde(default)]` again covers the config file and not the
 /// wire. The engine's `digi_tx_band` is local state and is not sent.
-pub const PROTO_VERSION: u16 = 67;
+///
+/// **68** — the rig's own power-output meter. `TxMeters` gained `po`, a
+/// `0.0..=1.0` fraction of the rig's own scale, and `TxMeters` is not the last
+/// field of `Meters`: `stereo` and `tone` follow it. So this is not even an
+/// append a client can stop short of — every byte after `tx` shifts, and a v67
+/// client handed a v68 `Meters` with the transmitter keyed reads the new
+/// `Option` tag as `stereo` and then runs off the end of the message. Same
+/// reasoning as v27 and v40, which bumped for exactly this struct.
+///
+/// The ALC reading that landed alongside it is NOT a wire change: it went into
+/// `TxTelemetry`, which the engine folds into `TxMeters::alc` — an existing
+/// field — and which never leaves the process on its own.
+pub const PROTO_VERSION: u16 = 68;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
