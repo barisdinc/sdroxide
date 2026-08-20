@@ -870,12 +870,13 @@ pub fn map() -> &'static MapPalette {
 }
 
 /// Indexed by [`style_index`].
-const STYLE_ORDER: [ChromeStyle; 5] = [
+const STYLE_ORDER: [ChromeStyle; 6] = [
     ChromeStyle::Angled,
     ChromeStyle::Rectangular,
     ChromeStyle::Rounded,
     ChromeStyle::Gradient,
     ChromeStyle::Bevel,
+    ChromeStyle::Terminal,
 ];
 
 const fn theme_index(t: UiTheme) -> u8 {
@@ -897,6 +898,7 @@ const fn style_index(s: ChromeStyle) -> u8 {
         ChromeStyle::Rounded => 2,
         ChromeStyle::Gradient => 3,
         ChromeStyle::Bevel => 4,
+        ChromeStyle::Terminal => 5,
     }
 }
 

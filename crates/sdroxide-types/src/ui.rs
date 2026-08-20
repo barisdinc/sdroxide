@@ -148,6 +148,10 @@ pub enum ChromeStyle {
     Rounded,
     Gradient,
     Bevel,
+    /// Drawn as if the screen were a character display: frames built out of
+    /// `+`, `-` and `|`, buttons wearing `[` and `]`, tick boxes reading
+    /// `[X]`, and everything set in the monospace face.
+    Terminal,
     /// The classic cut-corner look. Last for the same reason as
     /// [`UiTheme::Default`]: the serde catch-all must be the final variant.
     #[default]
@@ -156,12 +160,13 @@ pub enum ChromeStyle {
 }
 
 impl ChromeStyle {
-    pub const ALL: [ChromeStyle; 5] = [
+    pub const ALL: [ChromeStyle; 6] = [
         ChromeStyle::Angled,
         ChromeStyle::Rectangular,
         ChromeStyle::Rounded,
         ChromeStyle::Gradient,
         ChromeStyle::Bevel,
+        ChromeStyle::Terminal,
     ];
 
     pub fn label(self) -> &'static str {
@@ -171,6 +176,7 @@ impl ChromeStyle {
             ChromeStyle::Rounded => "Rounded",
             ChromeStyle::Gradient => "Gradient",
             ChromeStyle::Bevel => "3D bevel",
+            ChromeStyle::Terminal => "Terminal",
         }
     }
 }

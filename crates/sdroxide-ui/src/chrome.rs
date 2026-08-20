@@ -236,7 +236,7 @@ pub fn popup_fade_alpha(
 pub fn paint_cut_border(p: &Painter, rect: Rect, color: Color32, mask: Color32) {
     match theme::window_style() {
         ChromeStyle::Angled => paint_angled_border(p, rect, color, mask),
-        ChromeStyle::Rectangular | ChromeStyle::Gradient => {
+        ChromeStyle::Rectangular | ChromeStyle::Gradient | ChromeStyle::Terminal => {
             p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.2, color), StrokeKind::Inside);
         }
         ChromeStyle::Rounded => {
@@ -632,6 +632,9 @@ pub fn slider_enabled(ui: &mut Ui, enabled: bool, slider: egui::Slider<'_>) -> R
 enum Depth {
     Raised,
     Recessed,
+    /// A slider's knob: raised like a button, and small enough that the
+    /// Terminal style gives it a character of its own rather than a frame.
+    Knob,
 }
 
 /// How much of what a widget painted counts as its chrome.
@@ -683,8 +686,13 @@ fn reskin<R>(ui: &mut Ui, skin: Skin, depth: Depth, add: impl FnOnce(&mut Ui) ->
             }
         }
     });
-    let redone: Vec<(ShapeIdx, Shape)> =
-        taken.iter().filter_map(|(i, s)| Some((*i, reskin_shape(s, style, depth)?))).collect();
+    let redone: Vec<(ShapeIdx, Shape)> = taken
+        .iter()
+        .filter_map(|(i, s)| {
+            let depth = if skin == Skin::Whole && is_knob(s) { Depth::Knob } else { depth };
+            Some((*i, reskin_shape(ui, s, style, depth)?))
+        })
+        .collect();
     if !redone.is_empty() {
         ui.ctx().graphics_mut(|g| {
             let list = g.entry(layer);
@@ -715,12 +723,111 @@ fn is_chrome(shape: &Shape, skin: Skin) -> bool {
     }
 }
 
-fn reskin_shape(shape: &Shape, style: ChromeStyle, depth: Depth) -> Option<Shape> {
+/// Is this one of the three rects a slider paints its knob?
+///
+/// The rail and the fill that tracks the value are long and thin along
+/// whichever way the slider runs; the knob is the compact one, and it is the
+/// only part of a slider that stands proud of the panel. The size cap keeps
+/// the readout beside a slider — a `DragValue`, which is a rect too — out of
+/// it: a knob is a couple of dozen points at the very most, even under the
+/// touch metrics.
+fn is_knob(shape: &Shape) -> bool {
+    let Shape::Rect(r) = shape else { return false };
+    let (w, h) = (r.rect.width(), r.rect.height());
+    w < 3.0 * h && h < 3.0 * w && w.max(h) <= 30.0
+}
+
+fn reskin_shape(ui: &Ui, shape: &Shape, style: ChromeStyle, depth: Depth) -> Option<Shape> {
     match shape {
-        Shape::Rect(r) => Some(styled_surface(r, style, depth)),
-        Shape::Circle(c) => Some(styled_knob(c, style)),
+        Shape::Rect(r) => Some(styled_surface(ui, r, style, depth)),
+        Shape::Circle(c) => Some(styled_knob(ui, c, style)),
         _ => None,
     }
+}
+
+/// The character-display face at `size` points. Everything the Terminal style
+/// draws is set in it, frames included: a frame made of `+` and `-` only lines
+/// up if the glyphs come off one grid.
+///
+/// The generic monospace family rather than `cyber-mono` by name: the app
+/// makes Share Tech Mono the head of that family
+/// ([`crate::theme::install_fonts`]), so this is the same face wherever the
+/// fonts were installed — and a context that never installed them (a test, a
+/// bare viewport) falls back instead of panicking, which naming a family that
+/// is not bound would do.
+fn cell_font(size: f32) -> egui::FontId {
+    egui::FontId::monospace(size)
+}
+
+/// `text` laid out in the character-display face. Newlines start a new row, so
+/// a whole column of `|` is one galley.
+fn cells(ui: &Ui, text: &str, size: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(text.to_owned(), cell_font(size), color)
+}
+
+/// One character cell of the display at `size`: the advance of a glyph, and
+/// the height of a row.
+fn cell_size(ui: &Ui, size: f32) -> egui::Vec2 {
+    cells(ui, "-", size, Color32::WHITE).size()
+}
+
+/// The point size the Terminal style draws its frames at — the body text
+/// size, so a frame built from characters is the same scale as the words
+/// inside it and follows the interface font setting with them.
+fn terminal_size(ui: &Ui) -> f32 {
+    TextStyle::Body.resolve(ui.style()).size
+}
+
+/// A box drawn the way a character display draws one: `+` at the corners, a
+/// run of `-` along the top and bottom, a column of `|` down each side.
+///
+/// Used for anything with the height to carry three rows of characters — a
+/// multi-line text box, a floating window. Shorter controls get [`brackets`]
+/// instead, which is what a one-line field looks like on the same display.
+fn ascii_box(ui: &Ui, rect: Rect, ink: Color32, size: f32) -> Vec<Shape> {
+    let cell = cell_size(ui, size);
+    let (cw, ch) = (cell.x.max(1.0), cell.y.max(1.0));
+    let across = (((rect.width() - 2.0 * cw) / cw).floor() as i32).max(0) as usize;
+    let down = (((rect.height() - 2.0 * ch) / ch).floor() as i32).max(0) as usize;
+    let rule = format!("+{}+", "-".repeat(across));
+    let side = std::iter::repeat_n("|", down).collect::<Vec<_>>().join("\n");
+    let (l, t, r, b) = (rect.left(), rect.top(), rect.right(), rect.bottom());
+    let mut out = vec![
+        Shape::galley(pos2(l, t), cells(ui, &rule, size, ink), ink),
+        Shape::galley(pos2(l, b - ch), cells(ui, &rule, size, ink), ink),
+    ];
+    if down > 0 {
+        out.push(Shape::galley(pos2(l, t + ch), cells(ui, &side, size, ink), ink));
+        out.push(Shape::galley(pos2(r - cw, t + ch), cells(ui, &side, size, ink), ink));
+    }
+    out
+}
+
+/// The `[` and `]` a one-line control wears on a character display, tucked
+/// into the padding at either end of `rect`.
+fn brackets(ui: &Ui, rect: Rect, ink: Color32) -> Vec<Shape> {
+    // The display's own size rather than the control's height: a bracket
+    // scaled up to fill a roomy field would have its ink out past the 4 pt a
+    // text box keeps for a margin, and would sit on the first letter typed.
+    let size = (terminal_size(ui) * 0.85).min(rect.height() * 0.9);
+    let mut out = Vec::new();
+    for (text, x) in [("[", rect.left()), ("]", rect.right() - cell_size(ui, size).x)] {
+        let g = cells(ui, text, size, ink);
+        let y = rect.center().y - g.size().y / 2.0;
+        out.push(Shape::galley(pos2(x, y), g, ink));
+    }
+    out
+}
+
+/// A run of one character filling `rect` across — the Terminal style's answer
+/// to a bar too short to frame: a slider rail is `----------`, and the fill
+/// behind the knob is `==========` over the top of it.
+fn cell_run(ui: &Ui, rect: Rect, glyph: &str, ink: Color32) -> Vec<Shape> {
+    let size = (rect.height() * 1.9).clamp(8.0, 15.0);
+    let cw = cell_size(ui, size).x.max(1.0);
+    let n = ((rect.width() / cw).round() as i32).max(1) as usize;
+    let g = cells(ui, &glyph.repeat(n), size, ink);
+    vec![Shape::galley(pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, ink)]
 }
 
 /// One rect of widget chrome, redrawn in `style`.
@@ -728,7 +835,7 @@ fn reskin_shape(shape: &Shape, style: ChromeStyle, depth: Depth) -> Option<Shape
 /// Shared by the reskinned egui widgets and by the tick box [`checkbox`]
 /// paints by hand, so a text field and the checkbox beside it cannot come out
 /// wearing different corners.
-fn styled_surface(r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth) -> Shape {
+fn styled_surface(ui: &Ui, r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth) -> Shape {
     let (rect, fill, stroke) = (r.rect, r.fill, r.stroke);
     match style {
         ChromeStyle::Rectangular | ChromeStyle::Rounded => Shape::Rect(r.clone()),
@@ -762,12 +869,10 @@ fn styled_surface(r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth)
                 // away below, a sunken one is shadowed at the top and picks up
                 // the bounce along its bottom lip.
                 let (top, bottom) = match depth {
-                    Depth::Raised => {
-                        (lerp(fill, Color32::WHITE, 0.26), lerp(fill, Color32::BLACK, 0.32))
-                    }
                     Depth::Recessed => {
                         (lerp(fill, Color32::BLACK, 0.55), lerp(fill, Color32::WHITE, 0.17))
                     }
+                    _ => (lerp(fill, Color32::WHITE, 0.26), lerp(fill, Color32::BLACK, 0.32)),
                 };
                 out.push(grad_rect(rect, top, bottom));
             }
@@ -788,8 +893,8 @@ fn styled_surface(r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth)
             // input well is nearly black on most of these themes, and a bevel
             // mixed out of *it* would have nothing left to darken.
             let (near, far) = match depth {
-                Depth::Raised => (Color32::from_white_alpha(105), Color32::from_black_alpha(150)),
                 Depth::Recessed => (Color32::from_black_alpha(175), Color32::from_white_alpha(80)),
+                _ => (Color32::from_white_alpha(105), Color32::from_black_alpha(150)),
             };
             let rr = rect.shrink(stroke.width.max(0.5));
             let w = (rect.height() * 0.14).clamp(1.2, 2.5);
@@ -802,12 +907,51 @@ fn styled_surface(r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth)
             ));
             Shape::Vec(out)
         }
+        ChromeStyle::Terminal => {
+            let ink = if stroke.width > 0.0 { stroke.color } else { theme::LINE_LIT() };
+            let size = terminal_size(ui);
+            let cell = cell_size(ui, size);
+            if depth == Depth::Knob {
+                // The outline colour, not the fill: egui gives a knob the
+                // panel's own dark fill and puts all its contrast in the
+                // stroke, and a `#` painted in that fill would vanish into
+                // the rail it is meant to be sliding along.
+                let ink = if stroke.width > 0.0 { stroke.color } else { fill };
+                let g = cells(ui, "#", rect.height().min(rect.width() * 2.0), ink);
+                return Shape::galley(rect.center() - g.size() / 2.0, g, ink);
+            }
+            // Thinner than a character and running across: a bar, not a box.
+            // A slider draws its rail and the fill that tracks the value as
+            // two of these, one over the other, which is how a gauge is drawn
+            // on a display with only characters to draw with. A rail running
+            // *down* keeps its solid block — a column of glyphs would have
+            // the row spacing showing through it as gaps.
+            if rect.height() < cell.y * 1.4 && rect.width() > rect.height() {
+                return Shape::Vec(cell_run(ui, rect, "=", if fill.a() > 0 { fill } else { ink }));
+            }
+            let mut out = Vec::new();
+            // A sunken surface keeps its fill: an input well on a character
+            // display is a block of inverse video, and it is the only thing
+            // that says where the typing will land. A raised one — a button
+            // face, a dropdown — is drawn from its characters alone.
+            if depth == Depth::Recessed && fill.a() > 0 {
+                out.push(Shape::rect_filled(rect, CornerRadius::ZERO, fill));
+            }
+            // Three rows of characters is the least a `+--+ | | +--+` frame
+            // can be drawn in; anything shorter wears the one-line form.
+            if rect.height() >= cell.y * 3.0 {
+                out.extend(ascii_box(ui, rect, ink, size));
+            } else {
+                out.extend(brackets(ui, rect, ink));
+            }
+            Shape::Vec(out)
+        }
     }
 }
 
 /// A slider's knob, redrawn in `style`. Always raised — a knob is the one part
 /// of a slider a finger is meant to reach for.
-fn styled_knob(c: &egui::epaint::CircleShape, style: ChromeStyle) -> Shape {
+fn styled_knob(ui: &Ui, c: &egui::epaint::CircleShape, style: ChromeStyle) -> Shape {
     let (centre, rad) = (c.center, c.radius);
     match style {
         ChromeStyle::Angled => {
@@ -826,6 +970,7 @@ fn styled_knob(c: &egui::epaint::CircleShape, style: ChromeStyle) -> Shape {
         ChromeStyle::Gradient | ChromeStyle::Bevel => {
             let cap = Rect::from_center_size(centre, egui::Vec2::splat(rad * 1.7));
             styled_surface(
+                ui,
                 &egui::epaint::RectShape::new(
                     cap,
                     CornerRadius::ZERO,
@@ -836,6 +981,15 @@ fn styled_knob(c: &egui::epaint::CircleShape, style: ChromeStyle) -> Shape {
                 style,
                 Depth::Raised,
             )
+        }
+        // A knob on a character display is the one cell that is not rail.
+        ChromeStyle::Terminal => {
+            // The outline colour, not the fill: egui gives a knob the panel's
+            // own dark fill and puts all its contrast in the stroke, and a `#`
+            // painted in that fill would be invisible on the rail.
+            let ink = if c.stroke.width > 0.0 { c.stroke.color } else { c.fill };
+            let g = cells(ui, "#", (rad * 2.6).clamp(9.0, 18.0), ink);
+            Shape::galley(centre - g.size() / 2.0, g, ink)
         }
         _ => Shape::Circle(*c),
     }
@@ -886,8 +1040,22 @@ impl StyledCombo for egui::ComboBox {
         ui: &mut Ui,
         menu_contents: impl FnOnce(&mut Ui) -> R,
     ) -> egui::InnerResponse<Option<R>> {
-        reskin(ui, Skin::Frame, Depth::Raised, move |ui| self.show_ui(ui, menu_contents))
+        // egui's filled triangle is the one part of a dropdown that cannot be
+        // reskinned after the fact — it is a polygon, not a rect — so the
+        // Terminal style hands the widget a character to draw instead.
+        let combo = match theme::button_style() {
+            ChromeStyle::Terminal => self.icon(terminal_arrow),
+            _ => self,
+        };
+        reskin(ui, Skin::Frame, Depth::Raised, move |ui| combo.show_ui(ui, menu_contents))
     }
+}
+
+/// The `v` a dropdown wears on a character display.
+fn terminal_arrow(ui: &Ui, rect: Rect, visuals: &egui::style::WidgetVisuals, _open: bool) {
+    let ink = visuals.fg_stroke.color;
+    let g = cells(ui, "v", terminal_size(ui), ink);
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, ink);
 }
 
 /// A checkbox in the app's chrome.
@@ -897,7 +1065,7 @@ impl StyledCombo for egui::ComboBox {
 /// no way to tell one from the other after the fact. The metrics follow
 /// egui's own so a column of these still lines up with everything beside it.
 pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Response {
-    let (icon_w, gap) = (ui.spacing().icon_width, ui.spacing().icon_spacing);
+    let (icon_w, gap) = (tick_box_width(ui), ui.spacing().icon_spacing);
     let wrap = {
         let a = ui.available_width() - icon_w - gap;
         if a.is_finite() && a > 40.0 { a } else { f32::INFINITY }
@@ -936,10 +1104,30 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Resp
     resp
 }
 
+/// How wide a [`checkbox`]'s tick box stands: three character cells under the
+/// Terminal style, where the box *is* the three characters `[X]` and has to
+/// be readable, and egui's own icon width everywhere else.
+fn tick_box_width(ui: &Ui) -> f32 {
+    if theme::button_style() == ChromeStyle::Terminal {
+        (3.0 * cell_size(ui, terminal_size(ui)).x).max(ui.spacing().icon_width)
+    } else {
+        ui.spacing().icon_width
+    }
+}
+
 /// The tick box of a [`checkbox`], in the current button style.
 fn paint_tick_box(ui: &Ui, rect: Rect, on: bool, v: &egui::style::WidgetVisuals) {
     let p = ui.painter();
+    // On a character display a tick box is literally `[X]` — no box to shape
+    // and no tick to draw, so this one style takes the whole control.
+    if theme::button_style() == ChromeStyle::Terminal {
+        let ink = if on { theme::CYAN() } else { v.bg_stroke.color };
+        let g = cells(ui, if on { "[X]" } else { "[ ]" }, terminal_size(ui), ink);
+        p.galley(rect.center() - g.size() / 2.0, g, ink);
+        return;
+    }
     p.add(styled_surface(
+        ui,
         &egui::epaint::RectShape::new(
             rect,
             v.corner_radius,
@@ -1011,11 +1199,16 @@ pub fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
 }
 
 /// The font a chip uses for `size` points of text, or for its default.
+///
+/// Monospace under the Terminal style: a button drawn as `[ LABEL ]` on a
+/// character display is set in the display's own face, and every width in the
+/// program comes back through [`chip_width`], so the rows still measure.
 fn chip_font(ui: &Ui, size: Option<f32>) -> egui::FontId {
-    match size {
+    let base = match size {
         Some(pt) => egui::FontId::proportional(pt),
         None => TextStyle::Button.resolve(ui.style()),
-    }
+    };
+    if theme::button_style() == ChromeStyle::Terminal { cell_font(base.size) } else { base }
 }
 
 /// What a chip carrying `label` will measure, padding included — the same
@@ -1038,7 +1231,14 @@ pub fn chip_height(ui: &Ui, size: Option<f32>) -> f32 {
 /// touched layout's larger `button_padding` grows every chip in the program at
 /// once — a chip is the only button this app has.
 fn chip_padding(ui: &Ui) -> egui::Vec2 {
-    ui.spacing().button_padding + vec2(2.0, 1.0)
+    // The Terminal style spends the extra width on its brackets, so the label
+    // still has the same air around it as it does under every other style.
+    let brackets = if theme::button_style() == ChromeStyle::Terminal {
+        vec2(7.0, 0.0)
+    } else {
+        vec2(0.0, 0.0)
+    };
+    ui.spacing().button_padding + vec2(2.0, 1.0) + brackets
 }
 
 /// The colour a chip wears instead of the cyan a selected one takes by
@@ -1363,6 +1563,19 @@ fn chip_impl(
                 p.line_segment([rr.left_top(), rr.right_top()], light);
                 p.line_segment([rr.right_top(), rr.right_bottom()], dark);
                 p.line_segment([rr.right_bottom(), rr.left_bottom()], dark);
+            }
+            ChromeStyle::Terminal => {
+                // `[ LABEL ]`, and inverse video when it is on: those are the
+                // two states a button has on a display with no shapes to draw
+                // with. The brackets take the stroke colour, so a chip still
+                // lights under the pointer the way its neighbours do.
+                if selected || lit {
+                    p.rect_filled(rect, CornerRadius::ZERO, fill);
+                }
+                let bracket = if selected || lit { ink } else { stroke.color };
+                for shape in brackets(ui, rect, bracket) {
+                    p.add(shape);
+                }
             }
         }
 
@@ -1914,13 +2127,7 @@ mod tests {
     #[test]
     fn every_tab_outline_is_open_along_its_bottom_edge() {
         let rect = Rect::from_min_max(pos2(10.0, 20.0), pos2(90.0, 50.0));
-        for style in [
-            ChromeStyle::Angled,
-            ChromeStyle::Rounded,
-            ChromeStyle::Rectangular,
-            ChromeStyle::Gradient,
-            ChromeStyle::Bevel,
-        ] {
+        for style in ChromeStyle::ALL {
             let pts = tab_outline(rect, style);
             assert_eq!(pts.first(), Some(&pos2(10.0, 50.0)), "{style:?} starts bottom-left");
             assert_eq!(pts.last(), Some(&pos2(90.0, 50.0)), "{style:?} ends bottom-right");
@@ -2012,23 +2219,30 @@ mod tests {
     /// belonged to.
     #[test]
     fn a_reskinned_surface_stays_inside_the_widget() {
-        let rect = Rect::from_min_max(pos2(20.0, 30.0), pos2(140.0, 52.0));
-        let base = egui::epaint::RectShape::new(
-            rect,
-            CornerRadius::same(3),
-            Color32::from_gray(20),
-            Stroke::new(1.0, Color32::from_gray(90)),
-            StrokeKind::Inside,
-        );
-        for style in ChromeStyle::ALL {
-            for depth in [Depth::Raised, Depth::Recessed] {
-                let got = styled_surface(&base, style, depth).visual_bounding_rect();
-                assert!(
-                    rect.expand(3.0).contains_rect(got),
-                    "{style:?} {depth:?} painted {got:?} outside {rect:?}"
-                );
-                assert!(got.is_positive(), "{style:?} painted nothing at all");
-            }
+        // Tall enough for a one-line control, and again for one with room for
+        // a character frame — the Terminal style draws those two differently.
+        for h in [22.0f32, 90.0] {
+            let rect = Rect::from_min_max(pos2(20.0, 30.0), pos2(140.0, 30.0 + h));
+            let base = egui::epaint::RectShape::new(
+                rect,
+                CornerRadius::same(3),
+                Color32::from_gray(20),
+                Stroke::new(1.0, Color32::from_gray(90)),
+                StrokeKind::Inside,
+            );
+            let ctx = egui::Context::default();
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                for style in ChromeStyle::ALL {
+                    for depth in [Depth::Raised, Depth::Recessed, Depth::Knob] {
+                        let got = styled_surface(ui, &base, style, depth).visual_bounding_rect();
+                        assert!(
+                            rect.expand(3.0).contains_rect(got),
+                            "{style:?} {depth:?} at {h} pt painted {got:?} outside {rect:?}"
+                        );
+                        assert!(got.is_positive(), "{style:?} painted nothing at all");
+                    }
+                }
+            });
         }
     }
 
@@ -2043,10 +2257,13 @@ mod tests {
             stroke: Stroke::new(1.0, Color32::WHITE),
         };
         let bounds = Rect::from_center_size(disc.center, egui::Vec2::splat(2.0 * disc.radius));
-        for style in ChromeStyle::ALL {
-            let got = styled_knob(&disc, style).visual_bounding_rect();
-            assert!(bounds.expand(2.0).contains_rect(got), "{style:?} painted {got:?}");
-        }
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            for style in ChromeStyle::ALL {
+                let got = styled_knob(ui, &disc, style).visual_bounding_rect();
+                assert!(bounds.expand(3.0).contains_rect(got), "{style:?} painted {got:?}");
+            }
+        });
     }
 
     /// Lay one checkbox out in a fresh context and report the size it took and
