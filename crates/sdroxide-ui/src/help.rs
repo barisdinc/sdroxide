@@ -542,7 +542,8 @@ impl Help {
             let reserved = 230.0;
             let w = (ui.available_width() - reserved).clamp(70.0, 460.0);
             let before = self.search.clone();
-            let field = ui.add(
+            let field = crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut self.search)
                     .desired_width(w)
                     .hint_text("find in manual")

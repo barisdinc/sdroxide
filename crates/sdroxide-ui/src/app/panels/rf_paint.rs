@@ -224,19 +224,19 @@ impl SdroxideApp {
             ui.label(RichText::new("Scan speed").size(10.5).color(crate::theme::CYAN_DIM()));
             let mut speed = self.digi_cfg_edit.rf_paint_speed;
             ui.spacing_mut().slider_width = 150.0;
-            let resp = ui
-                .add(
-                    egui::Slider::new(&mut speed, 0.0625..=1.0)
-                        .logarithmic(true)
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                        .custom_parser(|s| {
-                            s.trim().trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0)
-                        }),
-                )
-                .on_hover_text(
-                    "How fast the text/image is scanned onto the waterfall. Lower is slower and \
+            let resp = crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut speed, 0.0625..=1.0)
+                    .logarithmic(true)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|s| {
+                        s.trim().trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0)
+                    }),
+            )
+            .on_hover_text(
+                "How fast the text/image is scanned onto the waterfall. Lower is slower and \
                      more legible; 100% = base rate, 25% (centre) is the default.",
-                );
+            );
             if resp.changed() {
                 self.digi_cfg_edit.rf_paint_speed = speed;
                 cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
@@ -283,7 +283,8 @@ impl SdroxideApp {
             if pane.is_none_or(|p| p == 0) {
                 sstv_section(ui, "TEXT PAINT", egui::vec2(half, content_h), |ui| {
                     let inner_w = ui.available_width();
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut self.rf_paint.text)
                             .hint_text("Type text to paint…")
                             .desired_width(inner_w),

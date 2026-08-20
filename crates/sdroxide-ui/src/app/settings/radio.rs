@@ -10,6 +10,7 @@ use sdroxide_types::{Command, Direction};
 
 use crate::app::SdroxideApp;
 use crate::app::settings::enum_combo;
+use crate::chrome::StyledCombo;
 
 /// Why a discovery or test control is greyed out.
 ///
@@ -62,7 +63,7 @@ pub(in crate::app) fn settings_cat_tab(
         // sideband to swap.
         if matches!(cfg.cat.format, SoundFormat::Iq) {
             ui.label("Invert spectrum");
-            ui.checkbox(&mut cfg.cat.invert_spectrum, "Swap I/Q").on_hover_text(
+            crate::chrome::checkbox(ui, &mut cfg.cat.invert_spectrum, "Swap I/Q").on_hover_text(
                 "Mirror the panadapter about the tuned frequency, for a rig that \
                  carries I and Q the other way round on its sound card. The \
                  giveaway is a waterfall full of convincing signals that are all \
@@ -163,7 +164,8 @@ pub(in crate::app) fn settings_cat_tab(
                  from the rig's own text buffer, the receive filter, and \
                  per-model meter scales.",
             );
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.cat.rigctld_addr)
                     .desired_width(200.0)
                     .hint_text("127.0.0.1:4532"),
@@ -182,7 +184,7 @@ pub(in crate::app) fn settings_cat_tab(
             // the stored path is still worth showing — it says which port the
             // engine is using — but there is nothing here to choose from.
             probe_only(ui, can_probe, |ui| {
-                ComboBox::from_id_salt("serport").width(260.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("serport").width(260.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         for p in serial_ports {
@@ -198,22 +200,21 @@ pub(in crate::app) fn settings_cat_tab(
 
         if serial {
             ui.label("Baud");
-            ComboBox::from_id_salt("baud").selected_text(cfg.cat.serial.baud.to_string()).show_ui(
-                ui,
-                |ui| {
+            ComboBox::from_id_salt("baud")
+                .selected_text(cfg.cat.serial.baud.to_string())
+                .show_styled(ui, |ui| {
                     for b in [4800u32, 9600, 19200, 38400, 57600, 115200] {
                         if ui.selectable_label(cfg.cat.serial.baud == b, b.to_string()).clicked() {
                             cfg.cat.serial.baud = b;
                         }
                     }
-                },
-            );
+                });
             ui.end_row();
 
             ui.label("Data bits");
             ComboBox::from_id_salt("databits")
                 .selected_text(cfg.cat.serial.data_bits.to_string())
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for d in [7u8, 8] {
                         if ui
                             .selectable_label(cfg.cat.serial.data_bits == d, d.to_string())
@@ -377,7 +378,7 @@ pub(in crate::app) fn settings_cat_tab(
                  kept here.",
             );
             let shown = if antenna_rx.is_empty() { "—" } else { antenna_rx };
-            ComboBox::from_id_salt("cat_elad_antenna").selected_text(shown).show_ui(ui, |ui| {
+            ComboBox::from_id_salt("cat_elad_antenna").selected_text(shown).show_styled(ui, |ui| {
                 for a in EladAntenna::ALL {
                     if ui.selectable_label(antenna_rx == a.label(), a.label()).clicked() {
                         cmds.push(Command::SetAntenna {
@@ -440,7 +441,8 @@ pub(in crate::app) fn settings_cat_tab(
         if matches!(cfg.cat.family, CatFamily::Icom | CatFamily::Xiegu) {
             ui.label("Radio ID (hex)");
             let mut hex = format!("{:02X}", cfg.cat.icom_radio_id);
-            let resp = ui.add(egui::TextEdit::singleline(&mut hex).desired_width(48.0));
+            let resp =
+                crate::chrome::field(ui, egui::TextEdit::singleline(&mut hex).desired_width(48.0));
             if resp.changed() {
                 if let Ok(v) = u8::from_str_radix(hex.trim().trim_start_matches("0x"), 16) {
                     cfg.cat.icom_radio_id = v;
@@ -478,7 +480,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
                     *discover = true;
                 }
                 let shown = cfg.hpsdr.selected_ip.clone().unwrap_or_else(|| "— none —".into());
-                ComboBox::from_id_salt("hpsdr_dev").width(320.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("hpsdr_dev").width(320.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -503,7 +505,8 @@ pub(in crate::app) fn settings_hpsdr_tab(
 
         ui.label("Manual IP");
         let mut ip = cfg.hpsdr.manual_ip.clone().unwrap_or_default();
-        let resp = ui.add(
+        let resp = crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut ip)
                 .desired_width(160.0)
                 .hint_text("optional, e.g. 192.168.1.50"),
@@ -522,7 +525,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
             .map(|d| d.protocol)
             .unwrap_or(2);
         let shown = format!("{} kHz", (cfg.hpsdr.sample_rate_hz / 1000.0) as u32);
-        ComboBox::from_id_salt("hpsdr_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("hpsdr_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in HpsdrConfig::rates_for(proto) {
                 let sel = (cfg.hpsdr.sample_rate_hz - r).abs() < 1.0;
                 if ui.selectable_label(sel, format!("{} kHz", (r / 1000.0) as u32)).clicked() {
@@ -539,7 +542,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
         let shown = format!("DDC{}", cfg.hpsdr.ddc + 1);
         ComboBox::from_id_salt("hpsdr_ddc")
             .selected_text(shown)
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for ddc in 0u8..4 {
                     if ui
                         .selectable_label(cfg.hpsdr.ddc == ddc, format!("DDC{}", ddc + 1))
@@ -595,7 +598,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
         ComboBox::from_id_salt("hpsdr_filter")
             .width(220.0)
             .selected_text(cfg.hpsdr.filter_board.label())
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for b in sdroxide_types::HpsdrFilterBoard::ALL {
                     if ui.selectable_label(cfg.hpsdr.filter_board == b, b.label()).clicked() {
                         cfg.hpsdr.filter_board = b;
@@ -614,7 +617,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
         ComboBox::from_id_salt("hpsdr_io_rx")
             .width(220.0)
             .selected_text(cfg.hpsdr.io_rx_input.label())
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for m in sdroxide_types::HpsdrIoRxInput::ALL {
                     if ui.selectable_label(cfg.hpsdr.io_rx_input == m, m.label()).clicked() {
                         cfg.hpsdr.io_rx_input = m;
@@ -624,17 +627,18 @@ pub(in crate::app) fn settings_hpsdr_tab(
         ui.end_row();
 
         ui.label("Power amplifier");
-        ui.checkbox(&mut cfg.hpsdr.pa_enable, "Use the Hermes-Lite 2's onboard PA").on_hover_text(
-            "On by default, and what you want unless an external amplifier is driven from the \
+        crate::chrome::checkbox(ui, &mut cfg.hpsdr.pa_enable, "Use the Hermes-Lite 2's onboard PA")
+            .on_hover_text(
+                "On by default, and what you want unless an external amplifier is driven from the \
              board's low-power RF1 output. With it off the radio still keys — the T/R relay \
              throws and any accessory board follows — but the antenna jack makes no power at \
              all, and the relay is deliberately held in receive. Ignored on boards other than a \
              Hermes-Lite.",
-        );
+            );
         ui.end_row();
 
         ui.label("Invert spectrum");
-        ui.checkbox(&mut cfg.hpsdr.invert_spectrum, "Swap I/Q").on_hover_text(
+        crate::chrome::checkbox(ui, &mut cfg.hpsdr.invert_spectrum, "Swap I/Q").on_hover_text(
             "Mirror the board's spectrum about the tuned frequency, on transmit as well \
              as receive. On by default: a Hermes-Lite 2 needs it. Turn it off only if \
              signals show up on the wrong side of the dial and nothing decodes — the \
@@ -723,7 +727,7 @@ pub(in crate::app) fn settings_rtlsdr_tab(
                 }
                 let shown =
                     cfg.rtlsdr.serial.clone().unwrap_or_else(|| "— first one found —".into());
-                ComboBox::from_id_salt("rtlsdr_dev").width(300.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("rtlsdr_dev").width(300.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -759,7 +763,7 @@ pub(in crate::app) fn settings_rtlsdr_tab(
              nothing between. Takes effect on Apply.",
         );
         let shown = format!("{:.3} Msps", cfg.rtlsdr.sample_rate_hz / 1e6);
-        ComboBox::from_id_salt("rtlsdr_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("rtlsdr_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in &RtlSdrConfig::SAMPLE_RATES {
                 let sel = (cfg.rtlsdr.sample_rate_hz - r).abs() < 1.0;
                 let mut label = format!("{:.3} Msps", r / 1e6);
@@ -857,7 +861,9 @@ pub(in crate::app) fn settings_rtlsdr_tab(
              the spike: tune a kilohertz off it, or switch this off.",
         );
         let mut iq = cfg.rtlsdr.iq_correction;
-        if ui.checkbox(&mut iq, "Remove the centre spike and mirror image").changed() {
+        if crate::chrome::checkbox(ui, &mut iq, "Remove the centre spike and mirror image")
+            .changed()
+        {
             cfg.rtlsdr.iq_correction = iq;
             cmds.push(Command::SetGain {
                 dir: Direction::Rx,
@@ -869,7 +875,7 @@ pub(in crate::app) fn settings_rtlsdr_tab(
 
         ui.label("Bias tee");
         let mut bias = cfg.rtlsdr.bias_tee;
-        if ui.checkbox(&mut bias, "Feed ~4.5 V DC up the coax").changed() {
+        if crate::chrome::checkbox(ui, &mut bias, "Feed ~4.5 V DC up the coax").changed() {
             cfg.rtlsdr.bias_tee = bias;
             cmds.push(Command::SetGain {
                 dir: Direction::Rx,
@@ -929,7 +935,8 @@ pub(in crate::app) fn settings_rtltcp_tab(
              127.0.0.1, which is what it does with no -a, it only accepts \
              connections from that same machine.\n\nTakes effect on Apply.",
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.rtltcp.address)
                 .desired_width(220.0)
                 .hint_text("host or host:port, e.g. raspberrypi.local:1234"),
@@ -949,22 +956,25 @@ pub(in crate::app) fn settings_rtltcp_tab(
             cfg.rtltcp.sample_rate_hz / 1e6,
             RtlTcpConfig::link_mbit(cfg.rtltcp.sample_rate_hz),
         );
-        ComboBox::from_id_salt("rtltcp_rate").width(260.0).selected_text(shown).show_ui(ui, |ui| {
-            for &r in &RtlSdrConfig::SAMPLE_RATES {
-                let sel = (cfg.rtltcp.sample_rate_hz - r).abs() < 1.0;
-                let mbit = RtlTcpConfig::link_mbit(r);
-                let mut label = format!("{:.3} Msps  —  {mbit:.0} Mbit/s", r / 1e6);
-                // The threshold is where a rate stops fitting comfortably in
-                // what a single WiFi hop delivers in practice, which is well
-                // under its nominal rate.
-                if mbit >= 30.0 {
-                    label.push_str("  (wired link)");
+        ComboBox::from_id_salt("rtltcp_rate").width(260.0).selected_text(shown).show_styled(
+            ui,
+            |ui| {
+                for &r in &RtlSdrConfig::SAMPLE_RATES {
+                    let sel = (cfg.rtltcp.sample_rate_hz - r).abs() < 1.0;
+                    let mbit = RtlTcpConfig::link_mbit(r);
+                    let mut label = format!("{:.3} Msps  —  {mbit:.0} Mbit/s", r / 1e6);
+                    // The threshold is where a rate stops fitting comfortably in
+                    // what a single WiFi hop delivers in practice, which is well
+                    // under its nominal rate.
+                    if mbit >= 30.0 {
+                        label.push_str("  (wired link)");
+                    }
+                    if ui.selectable_label(sel, label).clicked() {
+                        cfg.rtltcp.sample_rate_hz = r;
+                    }
                 }
-                if ui.selectable_label(sel, label).clicked() {
-                    cfg.rtltcp.sample_rate_hz = r;
-                }
-            }
-        });
+            },
+        );
         ui.end_row();
 
         ui.label("AGC").on_hover_text(
@@ -1061,7 +1071,9 @@ pub(in crate::app) fn settings_rtltcp_tab(
              with the spike: tune a kilohertz off it, or switch this off.",
         );
         let mut iq = cfg.rtltcp.iq_correction;
-        if ui.checkbox(&mut iq, "Remove the centre spike and mirror image").changed() {
+        if crate::chrome::checkbox(ui, &mut iq, "Remove the centre spike and mirror image")
+            .changed()
+        {
             cfg.rtltcp.iq_correction = iq;
             cmds.push(Command::SetGain {
                 dir: Direction::Rx,
@@ -1078,7 +1090,7 @@ pub(in crate::app) fn settings_rtltcp_tab(
              necessarily this end's doing.",
         );
         let mut bias = cfg.rtltcp.bias_tee;
-        if ui.checkbox(&mut bias, "Feed ~4.5 V DC up the remote coax").changed() {
+        if crate::chrome::checkbox(ui, &mut bias, "Feed ~4.5 V DC up the remote coax").changed() {
             cfg.rtltcp.bias_tee = bias;
             cmds.push(Command::SetGain {
                 dir: Direction::Rx,
@@ -1130,8 +1142,7 @@ pub(in crate::app) fn settings_rtltcp_tab(
         ui.end_row();
 
         ui.label("LNA state");
-        if ui
-            .add(egui::Slider::new(&mut cfg.rtltcp.rsp_lna_state, 0..=9))
+        if crate::chrome::slider(ui, egui::Slider::new(&mut cfg.rtltcp.rsp_lna_state, 0..=9))
             .on_hover_text(
                 "A step index, not a dB figure: how much each step is worth \
                  depends on the RSP model and the band. 0 is the most gain.",
@@ -1143,13 +1154,15 @@ pub(in crate::app) fn settings_rtltcp_tab(
         ui.end_row();
 
         ui.label("IF gain reduction");
-        if ui
-            .add(egui::Slider::new(&mut cfg.rtltcp.rsp_if_gain_reduction, 20..=59).suffix(" dB"))
-            .on_hover_text(
-                "A reduction, so more is less signal. Only obeyed with the RSP's \
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.rtltcp.rsp_if_gain_reduction, 20..=59).suffix(" dB"),
+        )
+        .on_hover_text(
+            "A reduction, so more is less signal. Only obeyed with the RSP's \
                  AGC off.",
-            )
-            .changed()
+        )
+        .changed()
         {
             push_gain(
                 cmds,
@@ -1161,7 +1174,7 @@ pub(in crate::app) fn settings_rtltcp_tab(
 
         ui.label("AGC");
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut cfg.rtltcp.rsp_agc, "Enable").changed() {
+            if crate::chrome::checkbox(ui, &mut cfg.rtltcp.rsp_agc, "Enable").changed() {
                 push_gain(cmds, RtlTcpConfig::RSP_AGC_ELEMENT, cfg.rtltcp.rsp_agc as u8 as f64);
             }
             ui.add_enabled_ui(cfg.rtltcp.rsp_agc, |ui| {
@@ -1194,7 +1207,7 @@ pub(in crate::app) fn settings_rtltcp_tab(
                 (RtlTcpConfig::RSP_NOTCH_RF, "RF"),
             ] {
                 let mut on = mask & bit != 0;
-                if ui.checkbox(&mut on, name).changed() {
+                if crate::chrome::checkbox(ui, &mut on, name).changed() {
                     mask = if on { mask | bit } else { mask & !bit };
                 }
             }
@@ -1270,7 +1283,8 @@ pub(in crate::app) fn settings_spyserver_tab(
              machines can reach — bound to 127.0.0.1 it only accepts \
              connections from that same machine.\n\nTakes effect on Apply.",
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.address)
                 .desired_width(220.0)
                 .hint_text("host or host:port, e.g. raspberrypi.local:5555"),
@@ -1308,9 +1322,10 @@ pub(in crate::app) fn settings_spyserver_tab(
                 1u32 << cfg.iq_decimation.min(20)
             )
         };
-        ComboBox::from_id_salt(format!("{salt}_decim")).width(260.0).selected_text(shown).show_ui(
-            ui,
-            |ui| {
+        ComboBox::from_id_salt(format!("{salt}_decim"))
+            .width(260.0)
+            .selected_text(shown)
+            .show_styled(ui, |ui| {
                 if ui.selectable_label(cfg.iq_decimation < 0, "Automatic").clicked() {
                     cfg.iq_decimation = SpyServerConfig::AUTO_DECIMATION;
                 }
@@ -1325,8 +1340,7 @@ pub(in crate::app) fn settings_spyserver_tab(
                         cfg.iq_decimation = stage;
                     }
                 }
-            },
-        );
+            });
         ui.end_row();
 
         ui.label("Sample format").on_hover_text(
@@ -1379,7 +1393,7 @@ pub(in crate::app) fn settings_spyserver_tab(
         );
         ui.horizontal(|ui| {
             let mut auto = cfg.auto_digital_gain;
-            if ui.checkbox(&mut auto, "Automatic").changed() {
+            if crate::chrome::checkbox(ui, &mut auto, "Automatic").changed() {
                 cfg.auto_digital_gain = auto;
                 cmds.push(Command::SetGain {
                     dir: Direction::Rx,
@@ -1421,7 +1435,7 @@ pub(in crate::app) fn settings_spyserver_tab(
         });
         ui.horizontal(|ui| {
             let mut on = cfg.fft_enabled;
-            if ui.checkbox(&mut on, "Show").changed() {
+            if crate::chrome::checkbox(ui, &mut on, "Show").changed() {
                 cfg.fft_enabled = on;
                 cmds.push(Command::SetGain {
                     dir: Direction::Rx,
@@ -1438,7 +1452,7 @@ pub(in crate::app) fn settings_spyserver_tab(
                 ComboBox::from_id_salt(format!("{salt}_fftdec"))
                     .width(130.0)
                     .selected_text(shown)
-                    .show_ui(ui, |ui| {
+                    .show_styled(ui, |ui| {
                         for stage in 0..8u32 {
                             let sel = cfg.fft_decimation == stage;
                             let label = if stage == 0 {
@@ -1527,7 +1541,7 @@ pub(in crate::app) fn settings_spyserver_tab(
              does not say which it is talking to. Applies immediately.",
         );
         let mut iq = cfg.iq_correction;
-        if ui.checkbox(&mut iq, "Enabled").changed() {
+        if crate::chrome::checkbox(ui, &mut iq, "Enabled").changed() {
             cfg.iq_correction = iq;
             cmds.push(Command::SetGain {
                 dir: Direction::Rx,
@@ -1585,7 +1599,8 @@ pub(in crate::app) fn settings_tci_tab(
     };
     egui::Grid::new("tci-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Server address");
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.tci.address)
                 .desired_width(220.0)
                 .hint_text("host:port, e.g. 127.0.0.1:50001"),
@@ -1594,7 +1609,7 @@ pub(in crate::app) fn settings_tci_tab(
 
         ui.label("IQ sample rate");
         let shown = format!("{} kHz", (cfg.tci.iq_sample_rate_hz / 1000.0) as u32);
-        ComboBox::from_id_salt("tci_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("tci_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in &TciConfig::IQ_RATES {
                 let sel = (cfg.tci.iq_sample_rate_hz - r).abs() < 1.0;
                 if ui.selectable_label(sel, format!("{} kHz", (r / 1000.0) as u32)).clicked() {
@@ -1612,7 +1627,7 @@ pub(in crate::app) fn settings_tci_tab(
         let shown = format!("RX{}", cfg.tci.rx + 1);
         ComboBox::from_id_salt("tci_rx")
             .selected_text(shown)
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for rx in 0u32..2 {
                     if ui.selectable_label(cfg.tci.rx == rx, format!("RX{}", rx + 1)).clicked() {
                         cfg.tci.rx = rx;
@@ -1672,7 +1687,8 @@ pub(in crate::app) fn settings_icomnet_tab(
             "The address shown on the radio under SET > Network. Network Control has to \
              be on there, and the radio needs a network user name and password set.",
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut net.address)
                 .desired_width(220.0)
                 .hint_text("host or IP, e.g. 192.168.1.50"),
@@ -1685,14 +1701,20 @@ pub(in crate::app) fn settings_icomnet_tab(
         ui.end_row();
 
         ui.label("Network user");
-        ui.add(egui::TextEdit::singleline(&mut net.username).desired_width(220.0));
+        crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut net.username).desired_width(220.0),
+        );
         ui.end_row();
 
         ui.label("Password").on_hover_text(
             "Stored in the clear in radio.json. The protocol obfuscates it reversibly on \
              the wire, so nothing here would make it a secret.",
         );
-        ui.add(egui::TextEdit::singleline(&mut net.password).password(true).desired_width(220.0));
+        crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut net.password).password(true).desired_width(220.0),
+        );
         ui.end_row();
 
         ui.label("Receive from").on_hover_text(
@@ -1702,22 +1724,21 @@ pub(in crate::app) fn settings_icomnet_tab(
              decoders to bear over about ±12 kHz. Either way the wide waterfall is the \
              radio's own scope — no Icom outputs I/Q.",
         );
-        ComboBox::from_id_salt("icomnet_rx_source").selected_text(net.rx_source.label()).show_ui(
-            ui,
-            |ui| {
+        ComboBox::from_id_salt("icomnet_rx_source")
+            .selected_text(net.rx_source.label())
+            .show_styled(ui, |ui| {
                 for s in IcomRxSource::ALL {
                     if ui.selectable_label(net.rx_source == s, s.label()).clicked() {
                         net.rx_source = s;
                     }
                 }
-            },
-        );
+            });
         ui.end_row();
 
         ui.label("Audio sample rate");
         ComboBox::from_id_salt("icomnet_rate")
             .selected_text(format!("{} Hz", net.sample_rate_hz))
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for r in IcomNetConfig::SAMPLE_RATES {
                     if ui.selectable_label(net.sample_rate_hz == r, format!("{r} Hz")).clicked() {
                         net.sample_rate_hz = r;
@@ -1752,7 +1773,7 @@ pub(in crate::app) fn settings_icomnet_tab(
         }
 
         ui.label("CW keying");
-        ComboBox::from_id_salt("icomnet_cw").selected_text(net.cw_keying.label()).show_ui(
+        ComboBox::from_id_salt("icomnet_cw").selected_text(net.cw_keying.label()).show_styled(
             ui,
             |ui| {
                 for k in CwKeying::ALL {
@@ -1773,13 +1794,14 @@ pub(in crate::app) fn settings_icomnet_tab(
         ui.end_row();
 
         ui.label("");
-        ui.checkbox(&mut net.scope, "Show the radio's spectrum scope").on_hover_text(
-            "Streams the radio's own 475-bin sweep. On AF it is the panadapter — the \
+        crate::chrome::checkbox(ui, &mut net.scope, "Show the radio's spectrum scope")
+            .on_hover_text(
+                "Streams the radio's own 475-bin sweep. On AF it is the panadapter — the \
              audio the radio sends is what came through its filter, not a picture of \
              the band — and on the 12 kHz IF it is the full-band waterfall above one. \
              Either way it is the radio's picture, not sdroxide's DSP: there is no I/Q \
              to compute one from.",
-        );
+            );
         ui.end_row();
 
         if net.scope {
@@ -1793,7 +1815,7 @@ pub(in crate::app) fn settings_icomnet_tab(
             );
             ComboBox::from_id_salt("icomnet_scope_span")
                 .selected_text(net.scope_span.label())
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for sp in IcomScopeSpan::ALL {
                         if ui.selectable_label(net.scope_span == sp, sp.label()).clicked() {
                             net.scope_span = sp;
@@ -1804,12 +1826,16 @@ pub(in crate::app) fn settings_icomnet_tab(
         }
 
         ui.label("");
-        ui.checkbox(&mut net.set_mod_input_on_open, "Switch modulation input to LAN")
-            .on_hover_text(
-                "Transmit audio is only heard when the radio's MOD input is set to LAN. \
+        crate::chrome::checkbox(
+            ui,
+            &mut net.set_mod_input_on_open,
+            "Switch modulation input to LAN",
+        )
+        .on_hover_text(
+            "Transmit audio is only heard when the radio's MOD input is set to LAN. \
                  sdroxide can write that on a model whose menu numbering it knows; on any \
                  other it says so and leaves the menu alone.",
-            );
+        );
         ui.end_row();
 
         ui.label("");
@@ -1944,7 +1970,7 @@ pub(in crate::app) fn settings_pluto_tab(
                     *discover = true;
                 }
                 let shown = cfg.pluto.selected_ip.clone().unwrap_or_else(|| "— none —".into());
-                ComboBox::from_id_salt("pluto_dev").width(340.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("pluto_dev").width(340.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -1971,7 +1997,8 @@ pub(in crate::app) fn settings_pluto_tab(
              network adapter, not a serial port, so this is an IP address even when \
              the radio is on your desk.",
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.pluto.address)
                 .desired_width(220.0)
                 .hint_text(PlutoConfig::DEFAULT_ADDRESS),
@@ -1985,7 +2012,7 @@ pub(in crate::app) fn settings_pluto_tab(
         let shown = format!("RX{}", cfg.pluto.rx + 1);
         ComboBox::from_id_salt("pluto_rx")
             .selected_text(shown)
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for rx in 0u8..2 {
                     if ui.selectable_label(cfg.pluto.rx == rx, format!("RX{}", rx + 1)).clicked() {
                         cfg.pluto.rx = rx;
@@ -2011,7 +2038,7 @@ pub(in crate::app) fn settings_pluto_tab(
              Msps instead and says so when it connects. Takes effect on Apply.",
         );
         let shown = format!("{:.3} Msps", cfg.pluto.sample_rate_hz / 1e6);
-        ComboBox::from_id_salt("pluto_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("pluto_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in &PlutoConfig::SAMPLE_RATES {
                 let sel = (cfg.pluto.sample_rate_hz - r).abs() < 1.0;
                 let mut label = format!("{:.3} Msps", r / 1e6);
@@ -2130,7 +2157,12 @@ pub(in crate::app) fn settings_pluto_tab(
         // the failure mode is a starved transmit buffer, heard on the air as a
         // chopped envelope rather than reported as an error.
         ui.label("Full duplex");
-        ui.checkbox(&mut cfg.pluto.full_duplex, "Keep receiving while transmitting").on_hover_text(
+        crate::chrome::checkbox(
+            ui,
+            &mut cfg.pluto.full_duplex,
+            "Keep receiving while transmitting",
+        )
+        .on_hover_text(
             "Leave this off on a Pluto reached over its USB cable. That link cannot \
                  carry a megasample per second in both directions at once, and an over \
                  that starves the transmit buffer goes out chopped — so by default \
@@ -2198,12 +2230,14 @@ pub(in crate::app) fn settings_pluto_tab(
              these empty unless you have a board that does not. Takes effect on Apply.",
         );
         ui.horizontal(|ui| {
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.pluto.rx_port)
                     .desired_width(120.0)
                     .hint_text("A_BALANCED"),
             );
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.pluto.tx_port)
                     .desired_width(80.0)
                     .hint_text("A"),
@@ -2302,7 +2336,7 @@ pub(in crate::app) fn settings_smartsdr_tab(
                     *discover = true;
                 }
                 let shown = cfg.smartsdr.selected_ip.clone().unwrap_or_else(|| "— none —".into());
-                ComboBox::from_id_salt("flex_dev").width(340.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("flex_dev").width(340.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -2334,7 +2368,8 @@ pub(in crate::app) fn settings_smartsdr_tab(
             "Overrides the selection above. Use this for a radio on another subnet, \
              behind a VPN, or on a non-standard port.",
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.smartsdr.address)
                 .desired_width(220.0)
                 .hint_text("optional, e.g. 192.168.1.50"),
@@ -2346,7 +2381,7 @@ pub(in crate::app) fn settings_smartsdr_tab(
              for a DAX IQ stream, and so the widest span this interface can show.",
         );
         let shown = format!("{} kHz", (cfg.smartsdr.iq_sample_rate_hz / 1000.0) as u32);
-        ComboBox::from_id_salt("flex_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("flex_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in &SmartSdrConfig::IQ_RATES {
                 let sel = (cfg.smartsdr.iq_sample_rate_hz - r).abs() < 1.0;
                 if ui.selectable_label(sel, format!("{} kHz", (r / 1000.0) as u32)).clicked() {
@@ -2362,7 +2397,7 @@ pub(in crate::app) fn settings_smartsdr_tab(
         );
         ComboBox::from_id_salt("flex_ch")
             .selected_text(cfg.smartsdr.iq_channel.to_string())
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for ch in SmartSdrConfig::IQ_CHANNELS {
                     let sel = cfg.smartsdr.iq_channel == ch;
                     if ui.selectable_label(sel, ch.to_string()).clicked() {
@@ -2377,7 +2412,10 @@ pub(in crate::app) fn settings_smartsdr_tab(
              remembers a client by it, so renaming makes the radio treat sdroxide as \
              a new one.",
         );
-        ui.add(egui::TextEdit::singleline(&mut cfg.smartsdr.station).desired_width(160.0));
+        crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut cfg.smartsdr.station).desired_width(160.0),
+        );
         ui.end_row();
 
         ui.label("");
@@ -2627,7 +2665,7 @@ impl SdroxideApp {
                     ui.label("RX");
                     ComboBox::from_id_salt("ant-rx")
                         .selected_text(self.state.antenna_rx.clone())
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for a in &caps.antennas_rx {
                                 if ui.selectable_label(self.state.antenna_rx == *a, a).clicked() {
                                     cmds.push(Command::SetAntenna {
@@ -2643,7 +2681,7 @@ impl SdroxideApp {
                     ui.label(RichText::new("TX").color(Color32::from_rgb(240, 90, 60)));
                     ComboBox::from_id_salt("ant-tx")
                         .selected_text(self.state.antenna_tx.clone())
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for a in &caps.antennas_tx {
                                 if ui.selectable_label(self.state.antenna_tx == *a, a).clicked() {
                                     cmds.push(Command::SetAntenna {
@@ -2713,7 +2751,7 @@ pub(in crate::app) fn settings_rx888_tab(
                 } else {
                     cfg.rx888.serial.clone()
                 };
-                ComboBox::from_id_salt("rx888_dev").width(300.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("rx888_dev").width(300.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -2740,7 +2778,7 @@ pub(in crate::app) fn settings_rx888_tab(
             ComboBox::from_id_salt("rx888_rate")
                 .width(150.0)
                 .selected_text(format!("{:.1} Msps", rate / 1e6))
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for r in Rx888Config::ADC_RATES {
                         ui.selectable_value(
                             &mut cfg.rx888.adc_rate_hz,
@@ -2779,10 +2817,12 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.end_row();
 
         ui.label("VGA gain");
-        if ui
-            .add(egui::Slider::new(&mut cfg.rx888.vga_db, -6.0..=34.0).suffix(" dB"))
-            .on_hover_text("AD8370 variable-gain amplifier ahead of the ADC.")
-            .changed()
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.rx888.vga_db, -6.0..=34.0).suffix(" dB"),
+        )
+        .on_hover_text("AD8370 variable-gain amplifier ahead of the ADC.")
+        .changed()
         {
             cmds.push(Command::SetGain {
                 dir: sdroxide_types::Direction::Rx,
@@ -2793,10 +2833,12 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.end_row();
 
         ui.label("Attenuator");
-        if ui
-            .add(egui::Slider::new(&mut cfg.rx888.attenuator_db, -31.5..=0.0).suffix(" dB"))
-            .on_hover_text("PE4304 step attenuator, in 0.5 dB steps.")
-            .changed()
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.rx888.attenuator_db, -31.5..=0.0).suffix(" dB"),
+        )
+        .on_hover_text("PE4304 step attenuator, in 0.5 dB steps.")
+        .changed()
         {
             cmds.push(Command::SetGain {
                 dir: sdroxide_types::Direction::Rx,
@@ -2842,7 +2884,7 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.end_row();
 
         ui.label("Randomiser");
-        ui.checkbox(&mut cfg.rx888.randomize, "Enable").on_hover_text(
+        crate::chrome::checkbox(ui, &mut cfg.rx888.randomize, "Enable").on_hover_text(
             "The ADC scrambles its output so the digital bus stops radiating \
                  into the front end; the driver unscrambles it. Leave this on \
                  unless you are debugging. Applies on reconnect.",
@@ -2865,7 +2907,8 @@ pub(in crate::app) fn settings_rx888_tab(
 
         ui.label("VHF tuner gain");
         ui.horizontal(|ui| {
-            let slider = ui.add_enabled(
+            let slider = crate::chrome::slider_enabled(
+                ui,
                 !cfg.rx888.tuner_agc,
                 egui::Slider::new(
                     &mut cfg.rx888.tuner_gain_db,
@@ -3037,7 +3080,7 @@ pub(in crate::app) fn settings_elad_tab(
                 } else {
                     cfg.elad.serial.clone()
                 };
-                ComboBox::from_id_salt("elad_dev").width(300.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("elad_dev").width(300.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -3075,7 +3118,7 @@ pub(in crate::app) fn settings_elad_tab(
         );
         ui.horizontal(|ui| {
             let shown = format!("{:.0} kHz", cfg.elad.sample_rate_hz as f64 / 1e3);
-            ComboBox::from_id_salt("elad_rate").width(150.0).selected_text(shown).show_ui(
+            ComboBox::from_id_salt("elad_rate").width(150.0).selected_text(shown).show_styled(
                 ui,
                 |ui| {
                     for r in ELAD_SAMPLE_RATES {
@@ -3107,7 +3150,9 @@ pub(in crate::app) fn settings_elad_tab(
              the main window's Gain slider.",
         );
         let mut att = cfg.elad.attenuator;
-        if ui.checkbox(&mut att, format!("{ELAD_ATTENUATOR_DB:.0} dB pad in")).changed() {
+        if crate::chrome::checkbox(ui, &mut att, format!("{ELAD_ATTENUATOR_DB:.0} dB pad in"))
+            .changed()
+        {
             cfg.elad.attenuator = att;
             push_gain(cmds, EladConfig::ATT_ELEMENT, if att { -ELAD_ATTENUATOR_DB } else { 0.0 });
         }
@@ -3121,7 +3166,7 @@ pub(in crate::app) fn settings_elad_tab(
              filtered range.",
         );
         let mut lpf = cfg.elad.preselector;
-        if ui.checkbox(&mut lpf, "Filters in circuit").changed() {
+        if crate::chrome::checkbox(ui, &mut lpf, "Filters in circuit").changed() {
             cfg.elad.preselector = lpf;
             push_gain(cmds, EladConfig::LPF_ELEMENT, f64::from(u8::from(lpf)));
         }
@@ -3149,7 +3194,7 @@ pub(in crate::app) fn settings_elad_tab(
             cfg.cat.serial.path.clone()
         };
         probe_only(ui, can_probe, |ui| {
-            ComboBox::from_id_salt("elad_serport").width(260.0).selected_text(shown).show_ui(
+            ComboBox::from_id_salt("elad_serport").width(260.0).selected_text(shown).show_styled(
                 ui,
                 |ui| {
                     ui.selectable_value(
@@ -3169,9 +3214,9 @@ pub(in crate::app) fn settings_elad_tab(
 
         ui.label("Baud")
             .on_hover_text("Must match menu 70 \"CAT BAUD\" on the radio, which ships at 38400.");
-        ComboBox::from_id_salt("elad_baud").selected_text(cfg.cat.serial.baud.to_string()).show_ui(
-            ui,
-            |ui| {
+        ComboBox::from_id_salt("elad_baud")
+            .selected_text(cfg.cat.serial.baud.to_string())
+            .show_styled(ui, |ui| {
                 // The four the FDM-DUO's own menu offers, and only those:
                 // anything else is a rate the radio will not answer at.
                 for b in [9600u32, 38400, 57600, 115200] {
@@ -3179,8 +3224,7 @@ pub(in crate::app) fn settings_elad_tab(
                         cfg.cat.serial.baud = b;
                     }
                 }
-            },
-        );
+            });
         ui.end_row();
 
         ui.label("PTT method").on_hover_text(
@@ -3226,7 +3270,7 @@ pub(in crate::app) fn settings_elad_tab(
         // radio actually is. Blank until the rig has answered (or an operator
         // has chosen), which is exactly the moment nothing here is known.
         let shown = if antenna_rx.is_empty() { "—" } else { antenna_rx };
-        ComboBox::from_id_salt("elad_antenna").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("elad_antenna").selected_text(shown).show_styled(ui, |ui| {
             for a in EladAntenna::ALL {
                 if ui.selectable_label(antenna_rx == a.label(), a.label()).clicked() {
                     cmds.push(Command::SetAntenna {
@@ -3265,7 +3309,7 @@ pub(in crate::app) fn settings_elad_tab(
                 ComboBox::from_id_salt("elad_txaudio")
                     .width(300.0)
                     .selected_text(shown)
-                    .show_ui(ui, |ui| {
+                    .show_styled(ui, |ui| {
                         ui.selectable_value(&mut cfg.radio_audio_out, None, "— system default —");
                         for o in outs {
                             ui.selectable_value(&mut cfg.radio_audio_out, Some(o.clone()), o);
@@ -3391,9 +3435,10 @@ pub(in crate::app) fn settings_airspyhf_tab(
                 } else {
                     cfg.airspyhf.serial.clone()
                 };
-                ComboBox::from_id_salt("airspyhf_dev").width(300.0).selected_text(shown).show_ui(
-                    ui,
-                    |ui| {
+                ComboBox::from_id_salt("airspyhf_dev")
+                    .width(300.0)
+                    .selected_text(shown)
+                    .show_styled(ui, |ui| {
                         if devices.is_empty() {
                             ui.label(RichText::new("no receivers — press Rescan").weak());
                         }
@@ -3418,8 +3463,7 @@ pub(in crate::app) fn settings_airspyhf_tab(
                                 }
                             }
                         }
-                    },
-                );
+                    });
             });
         });
         ui.end_row();
@@ -3430,7 +3474,7 @@ pub(in crate::app) fn settings_airspyhf_tab(
         );
         ui.horizontal(|ui| {
             let shown = format!("{:.0} kSPS", cfg.airspyhf.sample_rate_hz / 1e3);
-            ComboBox::from_id_salt("airspyhf_rate").width(150.0).selected_text(shown).show_ui(
+            ComboBox::from_id_salt("airspyhf_rate").width(150.0).selected_text(shown).show_styled(
                 ui,
                 |ui| {
                     for &r in rates {
@@ -3469,7 +3513,7 @@ pub(in crate::app) fn settings_airspyhf_tab(
              turn it off to set the attenuator by hand for measurement.",
         );
         let mut agc = cfg.airspyhf.agc;
-        if ui.checkbox(&mut agc, "Automatic").changed() {
+        if crate::chrome::checkbox(ui, &mut agc, "Automatic").changed() {
             cfg.airspyhf.agc = agc;
             push_gain(cmds, AirspyHfConfig::AGC_ELEMENT, f64::from(u8::from(agc)));
         }
@@ -3498,9 +3542,11 @@ pub(in crate::app) fn settings_airspyhf_tab(
         );
         ui.add_enabled_ui(!cfg.airspyhf.agc, |ui| {
             let mut db = cfg.airspyhf.attenuator_db;
-            if ui
-                .add(Slider::new(&mut db, -att_max..=0.0).step_by(att_step).suffix(" dB"))
-                .changed()
+            if crate::chrome::slider(
+                ui,
+                Slider::new(&mut db, -att_max..=0.0).step_by(att_step).suffix(" dB"),
+            )
+            .changed()
             {
                 cfg.airspyhf.attenuator_db = db;
                 push_gain(cmds, AirspyHfConfig::ATT_ELEMENT, db);
@@ -3514,7 +3560,7 @@ pub(in crate::app) fn settings_airspyhf_tab(
              on a real antenna.",
         );
         let mut lna = cfg.airspyhf.lna;
-        if ui.checkbox(&mut lna, "LNA on").changed() {
+        if crate::chrome::checkbox(ui, &mut lna, "LNA on").changed() {
             cfg.airspyhf.lna = lna;
             push_gain(cmds, AirspyHfConfig::LNA_ELEMENT, f64::from(u8::from(lna)));
         }
@@ -3527,7 +3573,8 @@ pub(in crate::app) fn settings_airspyhf_tab(
         );
         ui.horizontal(|ui| {
             let mut stored = cfg.airspyhf.calibration_ppb.is_none();
-            if ui.checkbox(&mut stored, "Use the receiver's stored value").changed() {
+            if crate::chrome::checkbox(ui, &mut stored, "Use the receiver's stored value").changed()
+            {
                 cfg.airspyhf.calibration_ppb = if stored { None } else { Some(0) };
                 if let Some(ppb) = cfg.airspyhf.calibration_ppb {
                     push_gain(cmds, AirspyHfConfig::PPB_ELEMENT, ppb as f64);
@@ -3564,7 +3611,7 @@ pub(in crate::app) fn settings_airspyhf_tab(
              accurate only to the nearest kilohertz.",
         );
         let mut dsp = cfg.airspyhf.lib_dsp;
-        if ui.checkbox(&mut dsp, "Correct the image and fine-tune").changed() {
+        if crate::chrome::checkbox(ui, &mut dsp, "Correct the image and fine-tune").changed() {
             cfg.airspyhf.lib_dsp = dsp;
             push_gain(cmds, AirspyHfConfig::LIB_DSP_ELEMENT, f64::from(u8::from(dsp)));
         }
@@ -3681,7 +3728,7 @@ pub(in crate::app) fn settings_airspy_tab(
                 } else {
                     cfg.airspy.serial.clone()
                 };
-                ComboBox::from_id_salt("airspy_dev").width(300.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("airspy_dev").width(300.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -3707,7 +3754,7 @@ pub(in crate::app) fn settings_airspy_tab(
             ComboBox::from_id_salt("airspy_rate")
                 .width(180.0)
                 .selected_text(format!("{:.3} Msps", cfg.airspy.sample_rate_hz / 1e6))
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for r in &rates {
                         let note = AirspyConfig::rate_note(*r);
                         let text = if from_device || note.is_empty() {
@@ -3761,17 +3808,17 @@ pub(in crate::app) fn settings_airspy_tab(
         ui.end_row();
 
         ui.label("Gain");
-        if ui
-            .add(
-                egui::Slider::new(&mut cfg.airspy.gain_step, 0..=(AirspyConfig::GAIN_STEPS - 1))
-                    .text("step"),
-            )
-            .on_hover_text(
-                "A step along the curve above, not a dB figure — the tuner's LNA, \
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.airspy.gain_step, 0..=(AirspyConfig::GAIN_STEPS - 1))
+                .text("step"),
+        )
+        .on_hover_text(
+            "A step along the curve above, not a dB figure — the tuner's LNA, \
                  mixer and VGA move together, and how much each step is worth \
                  depends on the curve and the band. 0 is the quiet end.",
-            )
-            .changed()
+        )
+        .changed()
         {
             push_gain(cmds, AirspyConfig::GAIN_ELEMENT, cfg.airspy.gain_step as f64);
         }
@@ -3822,7 +3869,7 @@ pub(in crate::app) fn settings_airspy_tab(
 
         ui.label("12-bit packing");
         ui.horizontal(|ui| {
-            ui.checkbox(&mut cfg.airspy.packing, "Enable");
+            crate::chrome::checkbox(ui, &mut cfg.airspy.packing, "Enable");
             ui.add(
                 egui::Label::new(
                     RichText::new(
@@ -3969,7 +4016,7 @@ pub(in crate::app) fn settings_hackrf_tab(
                 } else {
                     cfg.hackrf.serial.clone()
                 };
-                ComboBox::from_id_salt("hackrf_dev").width(300.0).selected_text(shown).show_ui(
+                ComboBox::from_id_salt("hackrf_dev").width(300.0).selected_text(shown).show_styled(
                     ui,
                     |ui| {
                         if devices.is_empty() {
@@ -3995,7 +4042,7 @@ pub(in crate::app) fn settings_hackrf_tab(
             ComboBox::from_id_salt("hackrf_rate")
                 .width(150.0)
                 .selected_text(hackrf_rate_label(cfg.hackrf.sample_rate_hz))
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for r in HackRfConfig::rates_for(is_pro) {
                         ui.selectable_value(
                             &mut cfg.hackrf.sample_rate_hz,
@@ -4014,27 +4061,31 @@ pub(in crate::app) fn settings_hackrf_tab(
         ui.end_row();
 
         ui.label("LNA gain");
-        if ui
-            .add(egui::Slider::new(&mut cfg.hackrf.lna_db, 0.0..=40.0).step_by(8.0).suffix(" dB"))
-            .on_hover_text(
-                "Front-end amplifier, in 8 dB steps. This is the stage that \
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.hackrf.lna_db, 0.0..=40.0).step_by(8.0).suffix(" dB"),
+        )
+        .on_hover_text(
+            "Front-end amplifier, in 8 dB steps. This is the stage that \
                  changes sensitivity — and the stage that overloads first on a \
                  real antenna.",
-            )
-            .changed()
+        )
+        .changed()
         {
             push_gain(cmds, HackRfConfig::LNA_ELEMENT, cfg.hackrf.lna_db);
         }
         ui.end_row();
 
         ui.label("VGA gain");
-        if ui
-            .add(egui::Slider::new(&mut cfg.hackrf.vga_db, 0.0..=62.0).step_by(2.0).suffix(" dB"))
-            .on_hover_text(
-                "Baseband amplifier after the mixer, in 2 dB steps. Turn this up \
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.hackrf.vga_db, 0.0..=62.0).step_by(2.0).suffix(" dB"),
+        )
+        .on_hover_text(
+            "Baseband amplifier after the mixer, in 2 dB steps. Turn this up \
                  for a weak signal before reaching for the LNA.",
-            )
-            .changed()
+        )
+        .changed()
         {
             push_gain(cmds, HackRfConfig::VGA_ELEMENT, cfg.hackrf.vga_db);
         }
@@ -4070,9 +4121,10 @@ pub(in crate::app) fn settings_hackrf_tab(
             // all. A control that cannot do anything is worse than no control:
             // grey it out and say which it is.
             ui.add_enabled_ui(!is_pro, |ui| {
-                ComboBox::from_id_salt("hackrf_bbfilt").width(150.0).selected_text(shown).show_ui(
-                    ui,
-                    |ui| {
+                ComboBox::from_id_salt("hackrf_bbfilt")
+                    .width(150.0)
+                    .selected_text(shown)
+                    .show_styled(ui, |ui| {
                         ui.selectable_value(&mut picked, 0.0, "Automatic");
                         for bw in [
                             1.75e6, 2.5e6, 3.5e6, 5.0e6, 5.5e6, 6.0e6, 7.0e6, 8.0e6, 9.0e6, 10.0e6,
@@ -4080,8 +4132,7 @@ pub(in crate::app) fn settings_hackrf_tab(
                         ] {
                             ui.selectable_value(&mut picked, bw, format!("{:.2} MHz", bw / 1e6));
                         }
-                    },
-                );
+                    });
             });
             if picked != cfg.hackrf.filter_bw_hz {
                 cfg.hackrf.filter_bw_hz = picked;
@@ -4173,7 +4224,7 @@ pub(in crate::app) fn settings_hackrf_tab(
 
     egui::Grid::new("hackrf-tx-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Transmitter");
-        ui.checkbox(&mut cfg.hackrf.tx_enabled, "Enabled").on_hover_text(
+        crate::chrome::checkbox(ui, &mut cfg.hackrf.tx_enabled, "Enabled").on_hover_text(
             "Off by default. While this is off the backend publishes no transmit \
              channel at all, so nothing can key the radio. Applies on reconnect.",
         );
@@ -4181,19 +4232,17 @@ pub(in crate::app) fn settings_hackrf_tab(
 
         if cfg.hackrf.tx_enabled {
             ui.label("TX VGA gain");
-            if ui
-                .add(
-                    egui::Slider::new(&mut cfg.hackrf.txvga_db, 0.0..=47.0)
-                        .step_by(1.0)
-                        .suffix(" dB"),
-                )
-                .on_hover_text(
-                    "The transmit driver amplifier. Drive is applied digitally \
+            if crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut cfg.hackrf.txvga_db, 0.0..=47.0).step_by(1.0).suffix(" dB"),
+            )
+            .on_hover_text(
+                "The transmit driver amplifier. Drive is applied digitally \
                      before this stage, so leave the drive high and set output \
                      level here — turning drive down instead runs the DAC at a \
                      fraction of full scale and raises intermodulation.",
-                )
-                .changed()
+            )
+            .changed()
             {
                 cmds.push(Command::SetGain {
                     dir: Direction::Tx,
@@ -4369,9 +4418,10 @@ pub(in crate::app) fn settings_sdrplay_tab(
                 } else {
                     cfg.sdrplay.serial.clone()
                 };
-                ComboBox::from_id_salt("sdrplay_dev").width(300.0).selected_text(shown).show_ui(
-                    ui,
-                    |ui| {
+                ComboBox::from_id_salt("sdrplay_dev")
+                    .width(300.0)
+                    .selected_text(shown)
+                    .show_styled(ui, |ui| {
                         if devices.is_empty() {
                             ui.label(
                                 RichText::new(
@@ -4392,8 +4442,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
                                 d.label(),
                             );
                         }
-                    },
-                );
+                    });
             });
         });
         ui.end_row();
@@ -4403,7 +4452,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
              service. Takes effect on Apply.",
         );
         let shown = format!("{:.3} Msps", cfg.sdrplay.sample_rate_hz / 1e6);
-        ComboBox::from_id_salt("sdrplay_rate").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("sdrplay_rate").selected_text(shown).show_styled(ui, |ui| {
             for &r in &SdrPlayConfig::SAMPLE_RATES {
                 let sel = (cfg.sdrplay.sample_rate_hz - r).abs() < 1.0;
                 let mut label = format!("{:.3} Msps", r / 1e6);
@@ -4427,7 +4476,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
         } else {
             format!("{} kHz", cfg.sdrplay.bw_khz)
         };
-        ComboBox::from_id_salt("sdrplay_bw").selected_text(shown).show_ui(ui, |ui| {
+        ComboBox::from_id_salt("sdrplay_bw").selected_text(shown).show_styled(ui, |ui| {
             if ui.selectable_label(cfg.sdrplay.bw_khz == 0, "Auto").clicked() {
                 cfg.sdrplay.bw_khz = 0;
             }
@@ -4465,9 +4514,11 @@ pub(in crate::app) fn settings_sdrplay_tab(
                 "Signal level the loop holds the ADC at. Lower leaves more \
                  headroom for signals off-channel.",
             );
-            if ui
-                .add(Slider::new(&mut cfg.sdrplay.agc_setpoint_dbfs, -72..=-20).suffix(" dBFS"))
-                .changed()
+            if crate::chrome::slider(
+                ui,
+                Slider::new(&mut cfg.sdrplay.agc_setpoint_dbfs, -72..=-20).suffix(" dBFS"),
+            )
+            .changed()
             {
                 cmds.push(Command::SetGain {
                     dir: Direction::Rx,
@@ -4484,15 +4535,15 @@ pub(in crate::app) fn settings_sdrplay_tab(
              owns this value then, and the S-meter shows what it settled on.",
         );
         ui.add_enabled_ui(cfg.sdrplay.agc == SdrPlayAgc::Off, |ui| {
-            if ui
-                .add(
-                    Slider::new(
-                        &mut cfg.sdrplay.if_gr_db,
-                        SdrPlayConfig::IF_GR_MIN..=SdrPlayConfig::IF_GR_MAX,
-                    )
-                    .suffix(" dB"),
+            if crate::chrome::slider(
+                ui,
+                Slider::new(
+                    &mut cfg.sdrplay.if_gr_db,
+                    SdrPlayConfig::IF_GR_MIN..=SdrPlayConfig::IF_GR_MAX,
                 )
-                .changed()
+                .suffix(" dB"),
+            )
+            .changed()
             {
                 cmds.push(Command::SetGain {
                     dir: Direction::Rx,
@@ -4516,8 +4567,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
             .map(|g| (-g.min_db).round().clamp(0.0, 255.0) as u8)
             .filter(|&n| n > 0)
             .unwrap_or_else(|| model.max_lna_state());
-        if ui
-            .add(Slider::new(&mut cfg.sdrplay.lna_state, 0..=max_lna))
+        if crate::chrome::slider(ui, Slider::new(&mut cfg.sdrplay.lna_state, 0..=max_lna))
             .on_hover_text("0 = max gain")
             .changed()
         {
@@ -4580,7 +4630,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
             } else {
                 cfg.sdrplay.antenna.clone()
             };
-            ComboBox::from_id_salt("sdrplay_antenna").selected_text(shown).show_ui(ui, |ui| {
+            ComboBox::from_id_salt("sdrplay_antenna").selected_text(shown).show_styled(ui, |ui| {
                 for a in &antennas {
                     if ui.selectable_label(cfg.sdrplay.antenna == *a, *a).clicked() {
                         cfg.sdrplay.antenna = a.to_string();
@@ -4768,19 +4818,25 @@ pub(in crate::app) fn settings_lime_tab(
                             format!("{} (not found)", cfg.lime.device)
                         }
                     });
-                egui::ComboBox::from_id_salt("lime-dev").selected_text(current).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut cfg.lime.device, String::new(), "First one found");
-                    for d in devices {
-                        let sel = d.matches(&cfg.lime.device) && !cfg.lime.device.is_empty();
-                        if ui.selectable_label(sel, d.label()).clicked() {
-                            // Pin by serial where there is one: a device
-                            // string carries the bus address, which changes
-                            // when the cable moves.
-                            cfg.lime.device =
-                                if d.serial.is_empty() { d.info.clone() } else { d.serial.clone() };
+                egui::ComboBox::from_id_salt("lime-dev").selected_text(current).show_styled(
+                    ui,
+                    |ui| {
+                        ui.selectable_value(&mut cfg.lime.device, String::new(), "First one found");
+                        for d in devices {
+                            let sel = d.matches(&cfg.lime.device) && !cfg.lime.device.is_empty();
+                            if ui.selectable_label(sel, d.label()).clicked() {
+                                // Pin by serial where there is one: a device
+                                // string carries the bus address, which changes
+                                // when the cable moves.
+                                cfg.lime.device = if d.serial.is_empty() {
+                                    d.info.clone()
+                                } else {
+                                    d.serial.clone()
+                                };
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 if ui.button("Rescan").clicked() {
                     *rescan = true;
                 }
@@ -4791,7 +4847,7 @@ pub(in crate::app) fn settings_lime_tab(
         ui.label("Sample rate");
         ui.horizontal(|ui| {
             let text = format!("{:.3} Msps", cfg.lime.sample_rate_hz / 1e6);
-            egui::ComboBox::from_id_salt("lime-rate").selected_text(text).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("lime-rate").selected_text(text).show_styled(ui, |ui| {
                 for r in LimeConfig::SAMPLE_RATES {
                     let label = match LimeConfig::rate_note(r) {
                         Some(note) => format!("{:.3} Msps — {note}", r / 1e6),
@@ -4804,20 +4860,20 @@ pub(in crate::app) fn settings_lime_tab(
         ui.end_row();
 
         ui.label("Receive gain");
-        if ui
-            .add(
-                egui::Slider::new(
-                    &mut cfg.lime.rx_gain_db,
-                    LimeConfig::GAIN_MIN_DB..=LimeConfig::GAIN_MAX_DB,
-                )
-                .suffix(" dB")
-                .step_by(1.0),
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(
+                &mut cfg.lime.rx_gain_db,
+                LimeConfig::GAIN_MIN_DB..=LimeConfig::GAIN_MAX_DB,
             )
-            .on_hover_text(
-                "One combined figure, which LimeSuite distributes across the LNA, the TIA and \
+            .suffix(" dB")
+            .step_by(1.0),
+        )
+        .on_hover_text(
+            "One combined figure, which LimeSuite distributes across the LNA, the TIA and \
                  the PGA itself. It takes whole decibels, so anything finer is truncated.",
-            )
-            .changed()
+        )
+        .changed()
         {
             push_gain(cmds, LimeConfig::RX_GAIN_ELEMENT, cfg.lime.rx_gain_db);
         }
@@ -4830,7 +4886,7 @@ pub(in crate::app) fn settings_lime_tab(
             } else {
                 cfg.lime.antenna_rx.clone()
             };
-            egui::ComboBox::from_id_salt("lime-antrx").selected_text(text).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("lime-antrx").selected_text(text).show_styled(ui, |ui| {
                 ui.selectable_value(&mut cfg.lime.antenna_rx, String::new(), "Automatic");
                 for a in ["LNAH", "LNAL", "LNAW"] {
                     ui.selectable_value(&mut cfg.lime.antenna_rx, a.to_string(), a);
@@ -4880,7 +4936,7 @@ pub(in crate::app) fn settings_lime_tab(
                     f64::from(u8::from(cfg.lime.iq_correction)),
                 );
             }
-            ui.checkbox(&mut cfg.lime.calibrate, "Calibrate at open")
+            crate::chrome::checkbox(ui, &mut cfg.lime.calibrate, "Calibrate at open")
                 .on_hover_text("Costs about a second when the radio is opened.");
             if ui
                 .button("Calibrate now")
@@ -4896,23 +4952,23 @@ pub(in crate::app) fn settings_lime_tab(
     ui.add_space(6.0);
     ui.separator();
     ui.label(egui::RichText::new("Transmit").strong());
-    ui.checkbox(&mut cfg.lime.tx_enabled, "Enabled").on_hover_text(
+    crate::chrome::checkbox(ui, &mut cfg.lime.tx_enabled, "Enabled").on_hover_text(
         "With this off the interface publishes no transmit channel at all, so nothing can key \
          the radio.",
     );
     if cfg.lime.tx_enabled {
         egui::Grid::new("lime-tx-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Transmit gain");
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut cfg.lime.tx_gain_db,
-                        LimeConfig::GAIN_MIN_DB..=LimeConfig::GAIN_MAX_DB,
-                    )
-                    .suffix(" dB")
-                    .step_by(1.0),
+            if crate::chrome::slider(
+                ui,
+                egui::Slider::new(
+                    &mut cfg.lime.tx_gain_db,
+                    LimeConfig::GAIN_MIN_DB..=LimeConfig::GAIN_MAX_DB,
                 )
-                .changed()
+                .suffix(" dB")
+                .step_by(1.0),
+            )
+            .changed()
             {
                 cmds.push(Command::SetGain {
                     dir: Direction::Tx,
@@ -4928,7 +4984,7 @@ pub(in crate::app) fn settings_lime_tab(
             } else {
                 cfg.lime.antenna_tx.clone()
             };
-            egui::ComboBox::from_id_salt("lime-anttx").selected_text(text).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("lime-anttx").selected_text(text).show_styled(ui, |ui| {
                 ui.selectable_value(&mut cfg.lime.antenna_tx, String::new(), "Automatic");
                 for a in ["BAND1", "BAND2"] {
                     ui.selectable_value(&mut cfg.lime.antenna_tx, a.to_string(), a);
@@ -4953,7 +5009,7 @@ pub(in crate::app) fn settings_lime_tab(
         ui.label("Connected by");
         egui::ComboBox::from_id_salt("lime-rfe-link")
             .selected_text(cfg.lime.rfe.link.label())
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for l in RfeLink::ALL {
                     ui.selectable_value(&mut cfg.lime.rfe.link, l, l.label());
                 }
@@ -4970,7 +5026,7 @@ pub(in crate::app) fn settings_lime_tab(
                         } else {
                             cfg.lime.rfe.serial.path.clone()
                         })
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for p in serial_ports {
                                 ui.selectable_value(&mut cfg.lime.rfe.serial.path, p.clone(), p);
                             }
@@ -4993,7 +5049,7 @@ pub(in crate::app) fn settings_lime_tab(
             ui.label("Receive connector");
             egui::ComboBox::from_id_salt("lime-rfe-prx")
                 .selected_text(cfg.lime.rfe.port_rx.label())
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for p in RfePort::RX_PORTS {
                         ui.selectable_value(&mut cfg.lime.rfe.port_rx, p, p.label());
                     }
@@ -5003,7 +5059,7 @@ pub(in crate::app) fn settings_lime_tab(
             ui.label("Transmit connector");
             egui::ComboBox::from_id_salt("lime-rfe-ptx")
                 .selected_text(cfg.lime.rfe.port_tx.label())
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for p in RfePort::TX_PORTS {
                         ui.selectable_value(&mut cfg.lime.rfe.port_tx, p, p.label());
                     }
@@ -5012,14 +5068,15 @@ pub(in crate::app) fn settings_lime_tab(
 
             ui.label("Band");
             ui.horizontal(|ui| {
-                ui.checkbox(&mut cfg.lime.rfe.follow_band, "Follow the dial").on_hover_text(
-                    "Switch the filters to match the operating frequency, before any RF \
+                crate::chrome::checkbox(ui, &mut cfg.lime.rfe.follow_band, "Follow the dial")
+                    .on_hover_text(
+                        "Switch the filters to match the operating frequency, before any RF \
                      appears. Tuning within one band puts nothing on the control link.",
-                );
+                    );
                 if !cfg.lime.rfe.follow_band {
                     egui::ComboBox::from_id_salt("lime-rfe-chan")
                         .selected_text(cfg.lime.rfe.channel.label())
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for c in RfeChannel::ALL {
                                 ui.selectable_value(&mut cfg.lime.rfe.channel, c, c.label());
                             }
@@ -5031,7 +5088,7 @@ pub(in crate::app) fn settings_lime_tab(
             ui.label("Relays");
             egui::ComboBox::from_id_salt("lime-rfe-mode")
                 .selected_text(cfg.lime.rfe.mode.label())
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for m in RfeModeControl::ALL {
                         ui.selectable_value(&mut cfg.lime.rfe.mode, m, m.label());
                     }
@@ -5040,12 +5097,12 @@ pub(in crate::app) fn settings_lime_tab(
 
             ui.label("Receive attenuator");
             let mut steps = cfg.lime.rfe.atten_steps;
-            if ui
-                .add(
-                    egui::Slider::new(&mut steps, 0..=RFE_ATTEN_MAX_STEPS)
-                        .custom_formatter(|v, _| format!("{} dB", v as u8 * RFE_ATTEN_STEP_DB)),
-                )
-                .changed()
+            if crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut steps, 0..=RFE_ATTEN_MAX_STEPS)
+                    .custom_formatter(|v, _| format!("{} dB", v as u8 * RFE_ATTEN_STEP_DB)),
+            )
+            .changed()
             {
                 cfg.lime.rfe.atten_steps = steps;
                 push_gain(cmds, LimeConfig::RFE_ATTEN_ELEMENT, cfg.lime.rfe.atten_db());
@@ -5054,7 +5111,7 @@ pub(in crate::app) fn settings_lime_tab(
 
             ui.label("Other");
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut cfg.lime.rfe.notch, "Notch filter").changed() {
+                if crate::chrome::checkbox(ui, &mut cfg.lime.rfe.notch, "Notch filter").changed() {
                     push_gain(
                         cmds,
                         LimeConfig::RFE_NOTCH_ELEMENT,

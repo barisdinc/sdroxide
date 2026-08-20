@@ -342,7 +342,8 @@ impl SdroxideApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     ui.label(RichText::new("⌕").color(crate::theme::CYAN_DIM()).size(14.0));
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut self.spot_search)
                             .desired_width(200.0)
                             .hint_text("call, station, site, frequency")

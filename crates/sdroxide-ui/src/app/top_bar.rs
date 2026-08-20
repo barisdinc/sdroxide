@@ -31,6 +31,7 @@ use crate::widgets::{freq_display, smeter};
 
 use crate::app::SdroxideApp;
 use crate::app::panels::digi_freq_for_band;
+use crate::chrome::StyledCombo;
 
 /// Width of the VFO A/B column in the frequency box.
 const AB_W: f32 = 68.0;
@@ -3534,7 +3535,7 @@ fn sub_mode_picker(ui: &mut egui::Ui, cur: Mode, narrow: bool) -> Option<Mode> {
             }
         });
     } else {
-        ComboBox::from_id_salt("sub-mode").selected_text(cur.label()).width(74.0).show_ui(
+        ComboBox::from_id_salt("sub-mode").selected_text(cur.label()).width(74.0).show_styled(
             ui,
             |ui| {
                 for m in MODES {

@@ -1842,7 +1842,8 @@ fn find_box(
                         // the bundled faces — not Chakra Petch, not egui's
                         // Ubuntu/Noto Emoji fallbacks — so both drew as tofu.
                         ui.label(RichText::new("🔍").color(theme::CYAN_DIM()).size(12.0));
-                        let edit = ui.add(
+                        let edit = crate::chrome::field(
+                            ui,
                             egui::TextEdit::singleline(&mut st.search)
                                 .desired_width(width - 62.0)
                                 .hint_text(hint)

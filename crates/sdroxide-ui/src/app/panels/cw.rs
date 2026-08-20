@@ -221,7 +221,8 @@ impl SdroxideApp {
                                 .auto_shrink([false, false])
                                 .stick_to_bottom(true)
                                 .show_themed(ui, |ui| {
-                                    ui.add(
+                                    crate::chrome::field(
+                                        ui,
                                         egui::TextEdit::multiline(&mut self.text_tx)
                                             .id(tx_id)
                                             .layouter(&mut layouter)

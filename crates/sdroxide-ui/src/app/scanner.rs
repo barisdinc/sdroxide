@@ -7,6 +7,7 @@ use sdroxide_types::{
 };
 
 use crate::app::SdroxideApp;
+use crate::chrome::StyledCombo;
 
 impl SdroxideApp {
     pub(in crate::app) fn scanner_window(&mut self, ctx: &egui::Context, cmds: &mut Vec<Command>) {
@@ -108,7 +109,7 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label("Mode");
-            egui::ComboBox::from_id_salt("scan-mode").selected_text(cfg.mode.label()).show_ui(
+            egui::ComboBox::from_id_salt("scan-mode").selected_text(cfg.mode.label()).show_styled(
                 ui,
                 |ui| {
                     // The modes anyone scans in. A range scan sets one mode for

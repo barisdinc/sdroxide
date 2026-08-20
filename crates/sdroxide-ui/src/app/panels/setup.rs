@@ -42,19 +42,28 @@ impl SdroxideApp {
                 let mut changed = false;
                 egui::Grid::new("digi-cfg").num_columns(2).show(ui, |ui| {
                     ui.label("My callsign");
-                    if ui.text_edit_singleline(&mut cfg.my_call).changed() {
+                    if crate::chrome::field(ui, egui::TextEdit::singleline(&mut cfg.my_call))
+                        .changed()
+                    {
                         cfg.my_call = cfg.my_call.to_uppercase();
                         changed = true;
                     }
                     ui.end_row();
                     ui.label("My grid");
-                    if ui.text_edit_singleline(&mut cfg.my_grid).changed() {
+                    if crate::chrome::field(ui, egui::TextEdit::singleline(&mut cfg.my_grid))
+                        .changed()
+                    {
                         changed = true;
                     }
                     ui.end_row();
                     if mode.is_packet() {
                         ui.label("Station call");
-                        if ui.text_edit_singleline(&mut cfg.packet_mycall).changed() {
+                        if crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut cfg.packet_mycall),
+                        )
+                        .changed()
+                        {
                             cfg.packet_mycall = cfg.packet_mycall.to_uppercase();
                             changed = true;
                         }
@@ -138,12 +147,12 @@ impl SdroxideApp {
                                 )
                                 .on_hover_text("0 disables the timer")
                                 .changed();
-                            changed |= ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut cfg.packet_beacon_text)
-                                        .hint_text("beacon text"),
-                                )
-                                .changed();
+                            changed |= crate::chrome::field(
+                                ui,
+                                egui::TextEdit::singleline(&mut cfg.packet_beacon_text)
+                                    .hint_text("beacon text"),
+                            )
+                            .changed();
                         });
                         ui.end_row();
 
@@ -265,7 +274,11 @@ impl SdroxideApp {
                         });
                         ui.end_row();
                         ui.label("Status message");
-                        changed |= ui.text_edit_singleline(&mut cfg.js8_status).changed();
+                        changed |= crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut cfg.js8_status),
+                        )
+                        .changed();
                         ui.end_row();
                     }
                     ui.label("TX period");
@@ -275,7 +288,7 @@ impl SdroxideApp {
                     });
                     ui.end_row();
                     ui.label("Auto-sequence");
-                    changed |= ui.checkbox(&mut cfg.auto_seq, "").changed();
+                    changed |= crate::chrome::checkbox(ui, &mut cfg.auto_seq, "").changed();
                     ui.end_row();
                     ui.label("Auto TX frequency");
                     changed |= ui
@@ -382,7 +395,8 @@ impl SdroxideApp {
                         ("73", &mut cfg.msg_73),
                     ] {
                         ui.label(label);
-                        changed |= ui.text_edit_singleline(field).changed();
+                        changed |=
+                            crate::chrome::field(ui, egui::TextEdit::singleline(field)).changed();
                         ui.end_row();
                     }
                 });

@@ -578,7 +578,8 @@ impl crate::app::SdroxideApp {
         });
 
         ui.separator();
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::multiline(&mut msg.body.as_str())
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Monospace),
@@ -590,13 +591,13 @@ impl crate::app::SdroxideApp {
 
         egui::Grid::new("mail-compose").num_columns(2).show(ui, |ui| {
             ui.label("To");
-            ui.text_edit_singleline(&mut self.mail.compose_to);
+            crate::chrome::field(ui, egui::TextEdit::singleline(&mut self.mail.compose_to));
             ui.end_row();
             ui.label("Cc");
-            ui.text_edit_singleline(&mut self.mail.compose_cc);
+            crate::chrome::field(ui, egui::TextEdit::singleline(&mut self.mail.compose_cc));
             ui.end_row();
             ui.label("Subject");
-            ui.text_edit_singleline(&mut draft.subject);
+            crate::chrome::field(ui, egui::TextEdit::singleline(&mut draft.subject));
             ui.end_row();
         });
         ui.label(
@@ -605,7 +606,8 @@ impl crate::app::SdroxideApp {
         );
 
         ui.separator();
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::multiline(&mut draft.body)
                 .desired_width(f32::INFINITY)
                 .desired_rows(12)

@@ -87,14 +87,12 @@ fn settings_tle_subscriptions(ui: &mut egui::Ui, io: &mut SettingsIo) {
         let st = io.sat_subs.iter().find(|s| s.url.trim() == sub.url.trim());
         ui.push_id(("tle-sub", i), |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut sub.enabled, "").on_hover_text("Fetch and track this listing");
-                ui.add(
-                    egui::TextEdit::singleline(&mut sub.name)
+                crate::chrome::checkbox(ui, &mut sub.enabled, "").on_hover_text("Fetch and track this listing");
+                crate::chrome::field(ui, egui::TextEdit::singleline(&mut sub.name)
                         .desired_width(120.0)
                         .hint_text("name"),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut sub.url)
+                crate::chrome::field(ui, egui::TextEdit::singleline(&mut sub.url)
                         .desired_width(300.0)
                         .hint_text("https://…"),
                 );
@@ -133,9 +131,7 @@ fn settings_tle_subscriptions(ui: &mut egui::Ui, io: &mut SettingsIo) {
                     }
                 }
                 let mut only = sub.only_text();
-                let resp = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut only)
+                let resp = crate::chrome::field(ui, egui::TextEdit::singleline(&mut only)
                             .desired_width(180.0)
                             .hint_text("all satellites"),
                     )
@@ -231,8 +227,9 @@ fn settings_tle_pasted(ui: &mut egui::Ui, io: &mut SettingsIo) {
     for (i, t) in io.sat_edit.tles.iter_mut().enumerate() {
         ui.push_id(("tle-set", i), |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut t.enabled, "").on_hover_text("Track this one");
-                ui.add(
+                crate::chrome::checkbox(ui, &mut t.enabled, "").on_hover_text("Track this one");
+                crate::chrome::field(
+                    ui,
                     egui::TextEdit::singleline(&mut t.name).desired_width(180.0).hint_text("name"),
                 );
                 match t.problem() {
@@ -286,7 +283,8 @@ fn settings_tle_pasted(ui: &mut egui::Ui, io: &mut SettingsIo) {
                 // Monospace: the format is column-addressed, so a proportional
                 // font makes a misaligned paste impossible to see.
                 for line in [&mut t.line1, &mut t.line2] {
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(line)
                             .desired_width(560.0)
                             .font(egui::TextStyle::Monospace),
@@ -301,7 +299,8 @@ fn settings_tle_pasted(ui: &mut egui::Ui, io: &mut SettingsIo) {
     }
 
     ui.add_space(6.0);
-    ui.add(
+    crate::chrome::field(
+        ui,
         egui::TextEdit::multiline(&mut io.sat_ui.paste)
             .desired_rows(3)
             .desired_width(600.0)
@@ -396,7 +395,8 @@ fn settings_tle_freqs(ui: &mut egui::Ui, io: &mut SettingsIo) {
                     io.sat_ui.open_freq = (!open).then_some(i);
                 }
                 ui.label(RichText::new(format!("NORAD {}", f.norad_id)).color(theme::CYAN_DIM()));
-                ui.add(
+                crate::chrome::field(
+                    ui,
                     egui::TextEdit::singleline(&mut f.name).desired_width(180.0).hint_text("name"),
                 );
                 ui.label(
@@ -418,17 +418,20 @@ fn settings_tle_freqs(ui: &mut egui::Ui, io: &mut SettingsIo) {
                 }
                 ui.end_row();
                 for (k, l) in f.links.iter_mut().enumerate() {
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut l.label)
                             .desired_width(120.0)
                             .hint_text("FM repeater"),
                     );
                     freq_box(ui, (k, "down"), &mut l.downlink, "145.800");
                     freq_box(ui, (k, "up"), &mut l.uplink, "435.250");
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut l.mode).desired_width(90.0).hint_text("FM"),
                     );
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut l.note)
                             .desired_width(180.0)
                             .hint_text("CTCSS 67.0 Hz"),
@@ -484,12 +487,14 @@ fn settings_tle_freqs(ui: &mut egui::Ui, io: &mut SettingsIo) {
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut io.sat_ui.new_freq_id)
                 .desired_width(80.0)
                 .hint_text("NORAD"),
         );
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut io.sat_ui.new_freq_name)
                 .desired_width(160.0)
                 .hint_text("name"),
@@ -542,7 +547,10 @@ fn freq_box(
     let mut text = ui
         .data_mut(|d| d.get_temp::<String>(id))
         .unwrap_or_else(|| band.map(|b| b.to_string()).unwrap_or_default());
-    let resp = ui.add(egui::TextEdit::singleline(&mut text).desired_width(110.0).hint_text(hint));
+    let resp = crate::chrome::field(
+        ui,
+        egui::TextEdit::singleline(&mut text).desired_width(110.0).hint_text(hint),
+    );
     if resp.changed() {
         *band = sdroxide_types::Passband::parse(&text);
         ui.data_mut(|d| d.insert_temp(id, text));

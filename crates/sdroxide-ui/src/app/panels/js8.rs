@@ -1016,7 +1016,8 @@ impl SdroxideApp {
                         .weak(),
                     );
                 }
-                let resp = ui.add(
+                let resp = crate::chrome::field(
+                    ui,
                     egui::TextEdit::singleline(&mut self.text_tx)
                         .desired_width(ui.available_width().max(60.0))
                         .hint_text("Message…"),

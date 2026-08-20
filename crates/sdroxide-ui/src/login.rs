@@ -300,13 +300,15 @@ fn card(
 
     ui.add_enabled_ui(!checking, |ui| {
         ui.label(RichText::new("Username").size(11.5).weak());
-        let user = ui.add_sized(
+        let user = crate::chrome::field_sized(
+            ui,
             [ui.available_width(), field_h],
             egui::TextEdit::singleline(&mut form.username),
         );
         ui.add_space(8.0);
         ui.label(RichText::new("Password").size(11.5).weak());
-        let pass = ui.add_sized(
+        let pass = crate::chrome::field_sized(
+            ui,
             [ui.available_width(), field_h],
             egui::TextEdit::singleline(&mut form.password).password(true),
         );
@@ -331,7 +333,7 @@ fn card(
     ui.add_space(10.0);
     // The wording is the hint on a touched layout: there is no pointer to hover
     // with, so a tooltip there is a sentence nobody will ever read.
-    let remember = ui.checkbox(&mut form.remember, "Remember on this device");
+    let remember = crate::chrome::checkbox(ui, &mut form.remember, "Remember on this device");
     if !touch {
         remember.on_hover_text(
             "Signs in without asking next time, and lets the 3D view's tab in without asking at \

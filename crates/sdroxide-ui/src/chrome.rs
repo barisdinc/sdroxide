@@ -3,7 +3,7 @@
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontSelection, Mesh, Painter, Pos2, Rect, Response, RichText,
-    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetText, pos2, vec2,
+    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetText, layers::ShapeIdx, pos2, vec2,
 };
 use sdroxide_types::ChromeStyle;
 
@@ -607,9 +607,360 @@ pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
         ui.visuals_mut().widgets.inactive.bg_fill = theme::INPUT_BG();
         ui.visuals_mut().widgets.hovered.bg_fill = theme::INPUT_BG();
         ui.spacing_mut().slider_rail_height = rail;
-        ui.add(slider)
+        // The rail, the trailing fill and the knob are all chrome, so the whole
+        // widget goes through the skin — see [`reskin`].
+        reskin(ui, Skin::Whole, Depth::Recessed, |ui| ui.add(slider))
     })
     .inner
+}
+
+/// [`slider`] that may be greyed out — `ui.add_enabled`, with a skin.
+pub fn slider_enabled(ui: &mut Ui, enabled: bool, slider: egui::Slider<'_>) -> Response {
+    ui.add_enabled_ui(enabled, |ui| self::slider(ui, slider)).inner
+}
+
+// ---------------------------------------------------------------------------
+// Reskinning egui's own widgets
+// ---------------------------------------------------------------------------
+
+/// Which way a surface faces the light. A button, a dropdown's face and a
+/// slider's knob stand proud of the panel; a text box, a tick box and a
+/// slider's rail are sunk into it. Only the Gradient and 3D bevel styles read
+/// it, and it is the whole of what makes those two say *depth* rather than
+/// merely *decoration*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Depth {
+    Raised,
+    Recessed,
+}
+
+/// How much of what a widget painted counts as its chrome.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Skin {
+    /// The widget's own background — the first filled rect it painted, and
+    /// nothing after it. A text box paints its frame first and its selection
+    /// highlight later, and a highlight is content, not chrome.
+    Frame,
+    /// Every rect and every disc it painted: a slider's rail, its trailing
+    /// fill and its knob are all chrome, and they arrive in that order.
+    Whole,
+}
+
+/// Run `add` — a stock egui widget — and reshape the chrome it painted into
+/// the current button style.
+///
+/// egui draws its widgets as plain rects, which is all a `CornerRadius` can
+/// express: the Rectangular and Rounded styles are already exactly that, and
+/// the other three have nothing to hang on. Rather than reimplement
+/// `TextEdit`, `Slider` and `ComboBox` — three widgets whose *behaviour* is
+/// the hard part and is not what we want to change — this runs them untouched
+/// and rewrites the shapes they left behind in the paint list. The widget
+/// keeps every keystroke, every drag and every id it had; only its skin moves.
+///
+/// Two passes over the list, because the replacements may need to lay text out
+/// (the Terminal style draws its frames from characters) and the font atlas
+/// cannot be read while the graphics lock is held.
+fn reskin<R>(ui: &mut Ui, skin: Skin, depth: Depth, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let style = theme::button_style();
+    if matches!(style, ChromeStyle::Rectangular | ChromeStyle::Rounded) {
+        return add(ui);
+    }
+    let layer = ui.layer_id();
+    let from = ui.ctx().graphics_mut(|g| g.entry(layer).next_idx());
+    let out = add(ui);
+
+    let mut taken: Vec<(ShapeIdx, Shape)> = Vec::new();
+    ui.ctx().graphics_mut(|g| {
+        let list = g.entry(layer);
+        for i in from.0..list.next_idx().0 {
+            list.mutate_shape(ShapeIdx(i), |cs| {
+                if is_chrome(&cs.shape, skin) {
+                    taken.push((ShapeIdx(i), cs.shape.clone()));
+                }
+            });
+            if skin == Skin::Frame && !taken.is_empty() {
+                break;
+            }
+        }
+    });
+    let redone: Vec<(ShapeIdx, Shape)> =
+        taken.iter().filter_map(|(i, s)| Some((*i, reskin_shape(s, style, depth)?))).collect();
+    if !redone.is_empty() {
+        ui.ctx().graphics_mut(|g| {
+            let list = g.entry(layer);
+            for (i, shape) in redone {
+                list.mutate_shape(i, move |cs| cs.shape = shape);
+            }
+        });
+    }
+    out
+}
+
+/// Is this one of the shapes a widget paints as its own frame, rather than as
+/// its contents? Anything textured, blurred, invisible or smaller than a
+/// character is left alone — those are shadows, hairlines and text carets.
+fn is_chrome(shape: &Shape, skin: Skin) -> bool {
+    match shape {
+        Shape::Rect(r) => {
+            (r.fill.a() > 0 || r.stroke.width > 0.0)
+                && r.rect.width() >= 3.0
+                && r.rect.height() >= 3.0
+                && r.brush.is_none()
+                && r.blur_width == 0.0
+        }
+        // A disc in a widget's paint list is a slider knob; nothing else here
+        // draws one.
+        Shape::Circle(c) => skin == Skin::Whole && c.radius >= 2.0,
+        _ => false,
+    }
+}
+
+fn reskin_shape(shape: &Shape, style: ChromeStyle, depth: Depth) -> Option<Shape> {
+    match shape {
+        Shape::Rect(r) => Some(styled_surface(r, style, depth)),
+        Shape::Circle(c) => Some(styled_knob(c, style)),
+        _ => None,
+    }
+}
+
+/// One rect of widget chrome, redrawn in `style`.
+///
+/// Shared by the reskinned egui widgets and by the tick box [`checkbox`]
+/// paints by hand, so a text field and the checkbox beside it cannot come out
+/// wearing different corners.
+fn styled_surface(r: &egui::epaint::RectShape, style: ChromeStyle, depth: Depth) -> Shape {
+    let (rect, fill, stroke) = (r.rect, r.fill, r.stroke);
+    match style {
+        ChromeStyle::Rectangular | ChromeStyle::Rounded => Shape::Rect(r.clone()),
+        ChromeStyle::Angled => {
+            let cut = CHIP_CUT.min(rect.height() * 0.35).min(rect.width() * 0.35);
+            let pts = chip_outline(rect, cut);
+            let mut out = vec![Shape::convex_polygon(pts.clone(), fill, stroke)];
+            // The two chamfers, lit, each running on a little way along the
+            // edges it joins: the mark that says a corner was *cut* rather
+            // than merely missing, and the one accent with room to carry on a
+            // control this small. The spurs are what turn a chamfer into a
+            // bracket, so they wait until there is height to spend on them.
+            if stroke.width > 0.0 && cut > 1.5 {
+                let lit = Stroke::new(stroke.width + 1.0, lerp(stroke.color, theme::CYAN(), 0.7));
+                out.push(Shape::line_segment([pts[5], pts[0]], lit));
+                out.push(Shape::line_segment([pts[2], pts[3]], lit));
+                if rect.height() >= 14.0 {
+                    let spur = cut * 1.4;
+                    out.push(Shape::line_segment([pts[0], pts[0] + vec2(spur, 0.0)], lit));
+                    out.push(Shape::line_segment([pts[5], pts[5] + vec2(0.0, spur)], lit));
+                    out.push(Shape::line_segment([pts[2], pts[2] - vec2(0.0, spur)], lit));
+                    out.push(Shape::line_segment([pts[3], pts[3] - vec2(spur, 0.0)], lit));
+                }
+            }
+            Shape::Vec(out)
+        }
+        ChromeStyle::Gradient => {
+            let mut out = Vec::new();
+            if fill.a() > 0 {
+                // Light from above: a raised face catches it on top and falls
+                // away below, a sunken one is shadowed at the top and picks up
+                // the bounce along its bottom lip.
+                let (top, bottom) = match depth {
+                    Depth::Raised => {
+                        (lerp(fill, Color32::WHITE, 0.26), lerp(fill, Color32::BLACK, 0.32))
+                    }
+                    Depth::Recessed => {
+                        (lerp(fill, Color32::BLACK, 0.55), lerp(fill, Color32::WHITE, 0.17))
+                    }
+                };
+                out.push(grad_rect(rect, top, bottom));
+            }
+            if stroke.width > 0.0 {
+                out.push(Shape::Rect(egui::epaint::RectShape {
+                    fill: Color32::TRANSPARENT,
+                    ..r.clone()
+                }));
+            }
+            Shape::Vec(out)
+        }
+        ChromeStyle::Bevel => {
+            let mut out = vec![Shape::Rect(egui::epaint::RectShape {
+                corner_radius: CornerRadius::ZERO,
+                ..r.clone()
+            })];
+            // Overlaid white and black rather than shades of the fill: an
+            // input well is nearly black on most of these themes, and a bevel
+            // mixed out of *it* would have nothing left to darken.
+            let (near, far) = match depth {
+                Depth::Raised => (Color32::from_white_alpha(105), Color32::from_black_alpha(150)),
+                Depth::Recessed => (Color32::from_black_alpha(175), Color32::from_white_alpha(80)),
+            };
+            let rr = rect.shrink(stroke.width.max(0.5));
+            let w = (rect.height() * 0.14).clamp(1.2, 2.5);
+            out.push(Shape::line_segment([rr.left_bottom(), rr.left_top()], Stroke::new(w, near)));
+            out.push(Shape::line_segment([rr.left_top(), rr.right_top()], Stroke::new(w, near)));
+            out.push(Shape::line_segment([rr.right_top(), rr.right_bottom()], Stroke::new(w, far)));
+            out.push(Shape::line_segment(
+                [rr.right_bottom(), rr.left_bottom()],
+                Stroke::new(w, far),
+            ));
+            Shape::Vec(out)
+        }
+    }
+}
+
+/// A slider's knob, redrawn in `style`. Always raised — a knob is the one part
+/// of a slider a finger is meant to reach for.
+fn styled_knob(c: &egui::epaint::CircleShape, style: ChromeStyle) -> Shape {
+    let (centre, rad) = (c.center, c.radius);
+    match style {
+        ChromeStyle::Angled => {
+            // A hex grip rather than a disc, flat side up so it reads as
+            // machined rather than turned.
+            let pts = (0..6)
+                .map(|k| {
+                    let a = std::f32::consts::PI * (k as f32 / 3.0 + 1.0 / 6.0);
+                    centre + vec2(a.cos() * rad, a.sin() * rad)
+                })
+                .collect();
+            Shape::convex_polygon(pts, c.fill, c.stroke)
+        }
+        // A fader cap, square so it suits a vertical rail as well as a
+        // horizontal one — the disc carries no orientation for us to keep.
+        ChromeStyle::Gradient | ChromeStyle::Bevel => {
+            let cap = Rect::from_center_size(centre, egui::Vec2::splat(rad * 1.7));
+            styled_surface(
+                &egui::epaint::RectShape::new(
+                    cap,
+                    CornerRadius::ZERO,
+                    c.fill,
+                    c.stroke,
+                    StrokeKind::Inside,
+                ),
+                style,
+                Depth::Raised,
+            )
+        }
+        _ => Shape::Circle(*c),
+    }
+}
+
+/// A stock egui widget drawn as a sunken input surface — a text box, a
+/// numeric field — with its frame reshaped to the current button style.
+///
+/// Takes the built widget rather than its arguments so every `TextEdit`
+/// setting a caller reaches for keeps working: this is `ui.add`, with a skin.
+pub fn field(ui: &mut Ui, widget: impl egui::Widget) -> Response {
+    reskin(ui, Skin::Frame, Depth::Recessed, |ui| ui.add(widget))
+}
+
+/// [`field`] at an exact size — `ui.add_sized`, with a skin.
+pub fn field_sized(
+    ui: &mut Ui,
+    size: impl Into<egui::Vec2>,
+    widget: impl egui::Widget,
+) -> Response {
+    reskin(ui, Skin::Frame, Depth::Recessed, |ui| ui.add_sized(size, widget))
+}
+
+/// [`field`] that may be greyed out — `ui.add_enabled`, with a skin.
+pub fn field_enabled(ui: &mut Ui, enabled: bool, widget: impl egui::Widget) -> Response {
+    reskin(ui, Skin::Frame, Depth::Recessed, |ui| ui.add_enabled(enabled, widget))
+}
+
+/// A dropdown wearing the app's chrome: [`egui::ComboBox`], with its face
+/// reshaped to the current button style.
+///
+/// An extension trait rather than a free function because a combo is built by
+/// a chain (`ComboBox::from_id_salt(..).selected_text(..)`) and reads far
+/// better ended with `.show_styled(ui, ..)` than wrapped in a call whose
+/// opening paren is thirty characters back up the line.
+pub trait StyledCombo {
+    /// [`egui::ComboBox::show_ui`], with the button face restyled.
+    fn show_styled<R>(
+        self,
+        ui: &mut Ui,
+        menu_contents: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::InnerResponse<Option<R>>;
+}
+
+impl StyledCombo for egui::ComboBox {
+    fn show_styled<R>(
+        self,
+        ui: &mut Ui,
+        menu_contents: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::InnerResponse<Option<R>> {
+        reskin(ui, Skin::Frame, Depth::Raised, move |ui| self.show_ui(ui, menu_contents))
+    }
+}
+
+/// A checkbox in the app's chrome.
+///
+/// Drawn by hand rather than reskinned, because a checkbox *is* its tick box:
+/// the widget paints the box and its label a single rect apart, and there is
+/// no way to tell one from the other after the fact. The metrics follow
+/// egui's own so a column of these still lines up with everything beside it.
+pub fn checkbox(ui: &mut Ui, on: &mut bool, text: impl Into<WidgetText>) -> Response {
+    let (icon_w, gap) = (ui.spacing().icon_width, ui.spacing().icon_spacing);
+    let wrap = {
+        let a = ui.available_width() - icon_w - gap;
+        if a.is_finite() && a > 40.0 { a } else { f32::INFINITY }
+    };
+    let galley = WidgetText::from(text.into()).into_galley(
+        ui,
+        None,
+        wrap,
+        FontSelection::Style(TextStyle::Button),
+    );
+    let label = galley.size();
+    let mut size =
+        vec2(if label.x > 0.0 { icon_w + gap + label.x } else { icon_w }, label.y.max(icon_w));
+    size = size.max(egui::Vec2::splat(ui.spacing().interact_size.y));
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, galley.text())
+    });
+
+    if ui.is_rect_visible(rect) {
+        let v = *ui.style().interact(&resp);
+        let box_rect = Rect::from_center_size(
+            pos2(rect.left() + icon_w / 2.0, rect.center().y),
+            egui::Vec2::splat(icon_w),
+        );
+        paint_tick_box(ui, box_rect, *on, &v);
+        if label.x > 0.0 {
+            let pos = pos2(rect.left() + icon_w + gap, rect.center().y - label.y / 2.0);
+            ui.painter().galley(pos, galley, v.text_color());
+        }
+    }
+    resp
+}
+
+/// The tick box of a [`checkbox`], in the current button style.
+fn paint_tick_box(ui: &Ui, rect: Rect, on: bool, v: &egui::style::WidgetVisuals) {
+    let p = ui.painter();
+    p.add(styled_surface(
+        &egui::epaint::RectShape::new(
+            rect,
+            v.corner_radius,
+            v.bg_fill,
+            v.bg_stroke,
+            StrokeKind::Inside,
+        ),
+        theme::button_style(),
+        Depth::Recessed,
+    ));
+    if on {
+        let t = rect.shrink(rect.width() * 0.26);
+        p.add(Shape::line(
+            vec![
+                pos2(t.left(), t.center().y),
+                pos2(t.center().x, t.bottom()),
+                pos2(t.right(), t.top()),
+            ],
+            Stroke::new((rect.width() * 0.14).clamp(1.4, 2.4), v.fg_stroke.color),
+        ));
+    }
 }
 
 /// The draggable divider between two regions of a panel: allocates the strip,
@@ -1653,6 +2004,96 @@ mod tests {
         let (.., tab_hit, chip_hit) = strip_click(&ctx, Some(elsewhere));
         assert!(tab_hit, "clicking the tab itself did nothing");
         assert!(!chip_hit);
+    }
+
+    /// Every style has to keep what it paints inside the box the widget was
+    /// allocated. A reskin that spilled would draw over the control beside it —
+    /// and the operator would have no idea which widget the stray mark
+    /// belonged to.
+    #[test]
+    fn a_reskinned_surface_stays_inside_the_widget() {
+        let rect = Rect::from_min_max(pos2(20.0, 30.0), pos2(140.0, 52.0));
+        let base = egui::epaint::RectShape::new(
+            rect,
+            CornerRadius::same(3),
+            Color32::from_gray(20),
+            Stroke::new(1.0, Color32::from_gray(90)),
+            StrokeKind::Inside,
+        );
+        for style in ChromeStyle::ALL {
+            for depth in [Depth::Raised, Depth::Recessed] {
+                let got = styled_surface(&base, style, depth).visual_bounding_rect();
+                assert!(
+                    rect.expand(3.0).contains_rect(got),
+                    "{style:?} {depth:?} painted {got:?} outside {rect:?}"
+                );
+                assert!(got.is_positive(), "{style:?} painted nothing at all");
+            }
+        }
+    }
+
+    /// Same for a slider's knob: it is drawn at the value's position, and a
+    /// knob that grew would sit over the rail's own ends.
+    #[test]
+    fn a_reskinned_knob_stays_the_size_of_its_disc() {
+        let disc = egui::epaint::CircleShape {
+            center: pos2(80.0, 40.0),
+            radius: 7.0,
+            fill: Color32::from_gray(30),
+            stroke: Stroke::new(1.0, Color32::WHITE),
+        };
+        let bounds = Rect::from_center_size(disc.center, egui::Vec2::splat(2.0 * disc.radius));
+        for style in ChromeStyle::ALL {
+            let got = styled_knob(&disc, style).visual_bounding_rect();
+            assert!(bounds.expand(2.0).contains_rect(got), "{style:?} painted {got:?}");
+        }
+    }
+
+    /// Lay one checkbox out in a fresh context and report the size it took and
+    /// whether the click at its centre toggled it.
+    fn one_checkbox(label: &str, stock: bool) -> (egui::Vec2, bool) {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+        let mut on = false;
+        let (mut size, mut hit) = (egui::Vec2::ZERO, Pos2::ZERO);
+        let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        for pass in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                let r =
+                    if stock { ui.checkbox(&mut on, label) } else { checkbox(ui, &mut on, label) };
+                size = r.rect.size();
+                hit = r.rect.center();
+            });
+            if pass == 0 {
+                // egui hit-tests against the layout of the frame before, so the
+                // click can only be aimed once the box has been placed.
+                let button = |pressed| egui::Event::PointerButton {
+                    pos: hit,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                };
+                input.events = vec![egui::Event::PointerMoved(hit), button(true), button(false)];
+            }
+        }
+        (size, on)
+    }
+
+    /// The hand-drawn checkbox stands in for egui's everywhere in the program,
+    /// so it has to take the same room: a column of settings rows lines its
+    /// labels up against the boxes, and a control a few points wider or
+    /// shorter than the one it replaced knocks every row out of true.
+    #[test]
+    fn the_checkbox_matches_the_stock_one_it_replaced() {
+        for label in ["", "Report stations I decode"] {
+            let (ours, toggled) = one_checkbox(label, false);
+            let (stock, _) = one_checkbox(label, true);
+            assert!(toggled, "clicking the box did not tick it");
+            assert!(
+                (ours.y - stock.y).abs() < 0.5 && (ours.x - stock.x).abs() < 4.0,
+                "{label:?}: ours {ours:?} against egui's {stock:?}"
+            );
+        }
     }
 
     /// The Angled chip outline is the app's signature shape and must never

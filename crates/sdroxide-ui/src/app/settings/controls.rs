@@ -9,6 +9,7 @@ use eframe::egui::{self, Color32, ComboBox, RichText};
 use sdroxide_types::MemoryChannel;
 
 use crate::app::settings::SettingsIo;
+use crate::chrome::StyledCombo;
 
 /// The built-in TCI *server*: this app acting as a TCI rig for third-party
 /// clients (WSJT-X's TCI rig type, JTDX, MSHV, skimmers). Distinct from the TCI
@@ -25,7 +26,7 @@ fn action_combo(
 ) -> bool {
     use sdroxide_types::Action;
     let mut changed = false;
-    ComboBox::from_id_salt(id).width(210.0).selected_text(action.label()).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).width(210.0).selected_text(action.label()).show_styled(ui, |ui| {
         let mut group = "";
         let all =
             Action::all().into_iter().chain(memories.iter().map(|m| Action::MemoryRecall(m.id)));
@@ -108,7 +109,7 @@ pub(in crate::app) fn settings_controls_tab(
                         // The sign of `value` is the direction, so one
                         // action can have an up key and a down key.
                         let mut down = b.value < 0.0;
-                        if ui.checkbox(&mut down, "down").changed() {
+                        if crate::chrome::checkbox(ui, &mut down, "down").changed() {
                             b.value = if down { -1.0 } else { 1.0 };
                         }
                     });
@@ -126,7 +127,7 @@ pub(in crate::app) fn settings_controls_tab(
                 }
             }
 
-            ui.checkbox(&mut b.enabled, "");
+            crate::chrome::checkbox(ui, &mut b.enabled, "");
             if ui.small_button("✕").on_hover_text("Remove this binding").clicked() {
                 remove = Some(i);
             }
@@ -219,10 +220,14 @@ pub(in crate::app) fn settings_controls_tab(
         ui.end_row();
     });
     ui.add_space(4.0);
-    ui.checkbox(&mut w.invert, "Invert wheel direction");
-    ui.checkbox(&mut w.drag_tunes, "Left-drag tunes as well as pans")
+    crate::chrome::checkbox(ui, &mut w.invert, "Invert wheel direction");
+    crate::chrome::checkbox(ui, &mut w.drag_tunes, "Left-drag tunes as well as pans")
         .on_hover_text("Off makes left-drag pan the view only, like right-drag.");
-    ui.checkbox(&mut w.digit_wheel, "Scroll a digit on the frequency readout to tune it");
+    crate::chrome::checkbox(
+        ui,
+        &mut w.digit_wheel,
+        "Scroll a digit on the frequency readout to tune it",
+    );
     if w.wheel == WheelAction::Tune && w.wheel_shift == WheelAction::Tune {
         ui.label(
             RichText::new("Both wheel actions are Tune — there is no way left to zoom.")
@@ -256,7 +261,7 @@ pub(in crate::app) fn settings_controls_tab(
                 ComboBox::from_id_salt(("mb", i))
                     .width(130.0)
                     .selected_text(b.button.label())
-                    .show_ui(ui, |ui| {
+                    .show_styled(ui, |ui| {
                         for m in MouseButton::ALL {
                             if ui.selectable_label(b.button == m, m.label()).clicked() {
                                 b.button = m;
@@ -271,7 +276,7 @@ pub(in crate::app) fn settings_controls_tab(
                         }
                     }
                 });
-                ui.checkbox(&mut b.enabled, "");
+                crate::chrome::checkbox(ui, &mut b.enabled, "");
                 if ui.small_button("✕").clicked() {
                     remove = Some(i);
                 }
@@ -343,7 +348,7 @@ fn settings_midi_section(
         .weak(),
     );
     ui.add_space(6.0);
-    ui.checkbox(&mut cfg.midi.enabled, "Enable");
+    crate::chrome::checkbox(ui, &mut cfg.midi.enabled, "Enable");
     ui.add_space(6.0);
 
     ui.add_enabled_ui(cfg.midi.enabled, |ui| {
@@ -426,7 +431,7 @@ fn settings_midi_section(
                     ComboBox::from_id_salt(("midirel", i))
                         .width(170.0)
                         .selected_text(b.relative.label())
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for m in RelativeMode::ALL {
                                 if ui.selectable_label(b.relative == m, m.label()).clicked() {
                                     b.relative = m;
@@ -449,7 +454,7 @@ fn settings_midi_section(
                         // Sign/magnitude and 64-centred encoders are
                         // indistinguishable from small movements, so a wrong
                         // guess shows up as a knob that turns the wrong way.
-                        ui.checkbox(&mut b.tuning.invert, "rev");
+                        crate::chrome::checkbox(ui, &mut b.tuning.invert, "rev");
                     });
                 }
                 ActionKind::Momentary => {
@@ -464,9 +469,9 @@ fn settings_midi_section(
                 }
             }
 
-            ui.checkbox(&mut b.feedback, "")
+            crate::chrome::checkbox(ui, &mut b.feedback, "")
                 .on_hover_text("Send the current value back, to light an LED or move a fader");
-            ui.checkbox(&mut b.enabled, "");
+            crate::chrome::checkbox(ui, &mut b.enabled, "");
             if ui.small_button("✕").clicked() {
                 remove = Some(i);
             }
@@ -511,7 +516,7 @@ fn midi_port_combo(
     sel_name: &mut String,
 ) {
     let shown = if sel_name.is_empty() { "— none —" } else { sel_name.as_str() };
-    ComboBox::from_id_salt(id).width(280.0).selected_text(shown).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).width(280.0).selected_text(shown).show_styled(ui, |ui| {
         if ui.selectable_label(sel_name.is_empty(), "— none —").clicked() {
             sel_id.clear();
             sel_name.clear();
@@ -527,7 +532,7 @@ fn midi_port_combo(
 
 /// Dropdown over [`WheelAction`].
 fn wheel_action_combo(ui: &mut egui::Ui, id: &str, act: &mut sdroxide_types::WheelAction) {
-    ComboBox::from_id_salt(id).width(130.0).selected_text(act.label()).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).width(130.0).selected_text(act.label()).show_styled(ui, |ui| {
         for a in sdroxide_types::WheelAction::ALL {
             if ui.selectable_label(*act == a, a.label()).clicked() {
                 *act = a;

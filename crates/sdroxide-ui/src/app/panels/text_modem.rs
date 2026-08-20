@@ -182,7 +182,8 @@ impl SdroxideApp {
                                 .auto_shrink([false, false])
                                 .stick_to_bottom(true)
                                 .show_themed(ui, |ui| {
-                                    ui.add(
+                                    crate::chrome::field(
+                                        ui,
                                         egui::TextEdit::multiline(&mut self.text_tx)
                                             .id(tx_id)
                                             .layouter(&mut layouter)
@@ -335,8 +336,11 @@ impl SdroxideApp {
             let v = &mut self.view.hell;
             ui.label(RichText::new("Contrast").size(10.5).color(crate::theme::CYAN_DIM()));
             ui.spacing_mut().slider_width = 70.0;
-            ui.add(egui::Slider::new(&mut v.contrast, 0.4..=3.0).show_value(false))
-                .on_hover_text("Harder or softer dots — redraws the whole strip");
+            crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut v.contrast, 0.4..=3.0).show_value(false),
+            )
+            .on_hover_text("Harder or softer dots — redraws the whole strip");
             ui.add_space(6.0);
             ui.label(RichText::new("Width").size(10.5).color(crate::theme::CYAN_DIM()));
             for px in [1.0f32, 2.0, 3.0, 4.0] {
@@ -455,7 +459,8 @@ impl SdroxideApp {
                                 .auto_shrink([false, false])
                                 .stick_to_bottom(true)
                                 .show_themed(ui, |ui| {
-                                    ui.add(
+                                    crate::chrome::field(
+                                        ui,
                                         egui::TextEdit::multiline(&mut self.text_tx)
                                             .id(tx_id)
                                             .layouter(&mut layouter)

@@ -22,6 +22,7 @@ use sdroxide_types::{Band, Command, WSPR_SLOT_S, WsprSpot, power_label};
 use crate::app::panels::widgets::{SlotState, row_cell, slot_bar, slot_phase_s};
 use crate::app::util::fmt_age;
 use crate::app::{SdroxideApp, rx_only_hint};
+use crate::chrome::StyledCombo;
 use crate::time::{now_unix, now_unix_f64};
 
 /// How many receptions the panel keeps. Two hours of a busy 20 m evening.
@@ -388,7 +389,7 @@ impl SdroxideApp {
             egui::ComboBox::from_id_salt("wspr-power")
                 .selected_text(RichText::new(power_label(cur)).size(10.5))
                 .width(84.0)
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for p in sdroxide_types::WSPR_POWERS_DBM {
                         if ui.selectable_label(cur == p, power_label(p)).clicked() {
                             chosen = Some(p);

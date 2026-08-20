@@ -540,12 +540,14 @@ impl SdroxideApp {
                         .label(text);
                     };
                     let field = |ui: &mut egui::Ui, w: f32, s: &mut String| {
-                        ui.add(egui::TextEdit::singleline(s).desired_width(w));
+                        crate::chrome::field(ui, egui::TextEdit::singleline(s).desired_width(w));
                     };
                     ui.horizontal(|ui| {
                         lbl(ui, "Call");
-                        let cr =
-                            ui.add(egui::TextEdit::singleline(&mut f.call).desired_width(150.0));
+                        let cr = crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut f.call).desired_width(150.0),
+                        );
                         if has_provider
                             && crate::chrome::chip(ui, false, "LOOKUP")
                                 .on_hover_text("Look up name / QTH / grid")

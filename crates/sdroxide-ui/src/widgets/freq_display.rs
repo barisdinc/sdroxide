@@ -206,7 +206,8 @@ fn edit_field(
             )
             .size()
             .x;
-        let resp = ui.add(
+        let resp = crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut text)
                 .id(field_id)
                 .font(egui::FontId::monospace(size))

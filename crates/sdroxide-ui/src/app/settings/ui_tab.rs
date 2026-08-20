@@ -13,6 +13,7 @@ use crate::colormap;
 use crate::app::settings::enum_combo;
 use crate::app::settings::general::device_combo;
 use crate::app::speech::SpeechStatus;
+use crate::chrome::StyledCombo;
 
 pub(in crate::app) fn settings_ui_tab(
     ui: &mut egui::Ui,
@@ -54,7 +55,7 @@ pub(in crate::app) fn settings_ui_tab(
         ui.label("Screen update rate");
         ComboBox::from_id_salt("ui-fps")
             .selected_text(format!("{} fps", cfg.frame_rate_fps))
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for f in UiSettings::FPS_OPTIONS {
                     ui.selectable_value(&mut cfg.frame_rate_fps, f, format!("{f} fps"));
                 }
@@ -72,7 +73,7 @@ pub(in crate::app) fn settings_ui_tab(
         ui.label("Waterfall palette");
         ComboBox::from_id_salt("ui-palette")
             .selected_text(colormap::NAMES[cfg.waterfall_palette.min(colormap::NAMES.len() - 1)])
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 for (i, name) in colormap::NAMES.iter().enumerate() {
                     ui.selectable_value(&mut cfg.waterfall_palette, i, *name);
                 }
@@ -81,7 +82,7 @@ pub(in crate::app) fn settings_ui_tab(
 
         ui.label("Spectrum background");
         ui.horizontal(|ui| {
-            ui.checkbox(&mut cfg.spectrum_gradient, "Gradient");
+            crate::chrome::checkbox(ui, &mut cfg.spectrum_gradient, "Gradient");
             ui.add_enabled_ui(cfg.spectrum_gradient, |ui| {
                 ui.label("top");
                 ui.color_edit_button_srgb(&mut cfg.gradient_top);
@@ -116,7 +117,7 @@ pub(in crate::app) fn settings_ui_tab(
         ui.label("Cloud rendering");
         ComboBox::from_id_salt("ui-cloud-march")
             .selected_text(if *cloud_march { "Volumetric" } else { "Layered" })
-            .show_ui(ui, |ui| {
+            .show_styled(ui, |ui| {
                 ui.selectable_value(cloud_march, false, "Layered");
                 ui.selectable_value(cloud_march, true, "Volumetric");
             });
@@ -152,7 +153,7 @@ pub(in crate::app) fn speech_settings(
 ) {
     ui.label(RichText::new("Voice announcements").size(14.0).strong().color(crate::theme::CYAN()));
     ui.add_space(6.0);
-    ui.checkbox(&mut cfg.enabled, "Speak changes to the radio")
+    crate::chrome::checkbox(ui, &mut cfg.enabled, "Speak changes to the radio")
         .on_hover_text("Reads out what changed, so the radio can be operated without seeing it");
 
     ui.add_enabled_ui(cfg.enabled, |ui| {
@@ -160,7 +161,7 @@ pub(in crate::app) fn speech_settings(
             ui.label("Voice");
             let shown =
                 if cfg.voice.is_empty() { "Shipped voice".to_string() } else { cfg.voice.clone() };
-            ComboBox::from_id_salt("speech-voice").width(300.0).selected_text(shown).show_ui(
+            ComboBox::from_id_salt("speech-voice").width(300.0).selected_text(shown).show_styled(
                 ui,
                 |ui| {
                     if ui.selectable_label(cfg.voice.is_empty(), "Shipped voice").clicked() {
@@ -176,7 +177,8 @@ pub(in crate::app) fn speech_settings(
             ui.end_row();
 
             ui.label("Speed");
-            ui.add(
+            crate::chrome::slider(
+                ui,
                 egui::Slider::new(&mut cfg.rate, SpeechSettings::RATE_RANGE)
                     .step_by(0.1)
                     .suffix("×"),
@@ -188,7 +190,7 @@ pub(in crate::app) fn speech_settings(
             ui.end_row();
 
             ui.label("Volume");
-            ui.add(egui::Slider::new(&mut cfg.volume, 0.0..=1.0).step_by(0.05));
+            crate::chrome::slider(ui, egui::Slider::new(&mut cfg.volume, 0.0..=1.0).step_by(0.05));
             ui.end_row();
 
             ui.label("Output");
@@ -210,9 +212,12 @@ pub(in crate::app) fn speech_settings(
 
             ui.label("Duck receiver");
             ui.horizontal(|ui| {
-                ui.checkbox(&mut cfg.duck_rx, "While speaking");
+                crate::chrome::checkbox(ui, &mut cfg.duck_rx, "While speaking");
                 ui.add_enabled_ui(cfg.duck_rx, |ui| {
-                    ui.add(egui::Slider::new(&mut cfg.duck_level, 0.0..=1.0).step_by(0.05));
+                    crate::chrome::slider(
+                        ui,
+                        egui::Slider::new(&mut cfg.duck_level, 0.0..=1.0).step_by(0.05),
+                    );
                 });
             });
             ui.end_row();
@@ -237,22 +242,22 @@ pub(in crate::app) fn speech_settings(
         egui::CollapsingHeader::new("What to announce").default_open(false).show(ui, |ui| {
             egui::Grid::new("speech-cats").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
                 let c = &mut cfg.cat;
-                ui.checkbox(&mut c.frequency, "Frequency");
-                ui.checkbox(&mut c.mode_band, "Mode and band");
+                crate::chrome::checkbox(ui, &mut c.frequency, "Frequency");
+                crate::chrome::checkbox(ui, &mut c.mode_band, "Mode and band");
                 ui.end_row();
-                ui.checkbox(&mut c.vfo_split, "VFO and split");
-                ui.checkbox(&mut c.agc_gain, "AGC and gain");
+                crate::chrome::checkbox(ui, &mut c.vfo_split, "VFO and split");
+                crate::chrome::checkbox(ui, &mut c.agc_gain, "AGC and gain");
                 ui.end_row();
-                ui.checkbox(&mut c.levels, "Drive, tune and mic");
-                ui.checkbox(&mut c.ptt, "Transmit and receive");
+                crate::chrome::checkbox(ui, &mut c.levels, "Drive, tune and mic");
+                crate::chrome::checkbox(ui, &mut c.ptt, "Transmit and receive");
                 ui.end_row();
-                ui.checkbox(&mut c.rit_xit, "RIT and XIT");
-                ui.checkbox(&mut c.memory_scan, "Memories and scanning");
+                crate::chrome::checkbox(ui, &mut c.rit_xit, "RIT and XIT");
+                crate::chrome::checkbox(ui, &mut c.memory_scan, "Memories and scanning");
                 ui.end_row();
-                ui.checkbox(&mut c.band_edge, "Leaving an amateur band");
-                ui.checkbox(&mut c.notices, "Warnings and messages");
+                crate::chrome::checkbox(ui, &mut c.band_edge, "Leaving an amateur band");
+                crate::chrome::checkbox(ui, &mut c.notices, "Warnings and messages");
                 ui.end_row();
-                ui.checkbox(&mut c.filters, "Filters, squelch and noise reduction")
+                crate::chrome::checkbox(ui, &mut c.filters, "Filters, squelch and noise reduction")
                     .on_hover_text("Off by default: these move constantly while chasing a signal");
                 ui.end_row();
             });
@@ -261,21 +266,23 @@ pub(in crate::app) fn speech_settings(
             ui.label(RichText::new("Decoded messages").strong());
             egui::Grid::new("speech-decodes").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
                 let d = &mut cfg.decodes;
-                ui.checkbox(&mut d.ft8_to_me, "FT8 calls to me");
-                ui.checkbox(&mut d.ft8_cq_for_me, "FT8 CQs I could answer").on_hover_text(
-                    "A busy evening on twenty metres is a hundred of these a minute",
-                );
+                crate::chrome::checkbox(ui, &mut d.ft8_to_me, "FT8 calls to me");
+                crate::chrome::checkbox(ui, &mut d.ft8_cq_for_me, "FT8 CQs I could answer")
+                    .on_hover_text(
+                        "A busy evening on twenty metres is a hundred of these a minute",
+                    );
                 ui.end_row();
-                ui.checkbox(&mut d.js8, "JS8 messages to me");
-                ui.checkbox(&mut d.js8_allcall, "JS8 @ALLCALL too");
+                crate::chrome::checkbox(ui, &mut d.js8, "JS8 messages to me");
+                crate::chrome::checkbox(ui, &mut d.js8_allcall, "JS8 @ALLCALL too");
                 ui.end_row();
-                ui.checkbox(&mut d.fsq, "FSQ messages to me");
-                ui.checkbox(&mut d.include_snr, "Include the report").on_hover_text(
-                    "Only where the message carries none of its own — a decode that already \
+                crate::chrome::checkbox(ui, &mut d.fsq, "FSQ messages to me");
+                crate::chrome::checkbox(ui, &mut d.include_snr, "Include the report")
+                    .on_hover_text(
+                        "Only where the message carries none of its own — a decode that already \
                      reports a number does not also get ours",
-                );
+                    );
                 ui.end_row();
-                ui.checkbox(&mut d.ft8_qso, "My own FT8 exchange")
+                crate::chrome::checkbox(ui, &mut d.ft8_qso, "My own FT8 exchange")
                     .on_hover_text("What the sequencer is about to send, and the contact ending");
                 ui.end_row();
             });
@@ -283,11 +290,15 @@ pub(in crate::app) fn speech_settings(
             ui.add_space(8.0);
             ui.label(RichText::new("Reading decoded text aloud").strong());
             ui.horizontal(|ui| {
-                ui.checkbox(&mut cfg.text.cw, "CW");
-                ui.checkbox(&mut cfg.text.rtty_psk, "RTTY, PSK, Olivia, THOR, FSQ");
+                crate::chrome::checkbox(ui, &mut cfg.text.cw, "CW");
+                crate::chrome::checkbox(ui, &mut cfg.text.rtty_psk, "RTTY, PSK, Olivia, THOR, FSQ");
             });
-            ui.checkbox(&mut cfg.text.cw_only_when_locked, "CW only while the decoder is locked")
-                .on_hover_text("Reading an unlocked decoder's output is worse than silence");
+            crate::chrome::checkbox(
+                ui,
+                &mut cfg.text.cw_only_when_locked,
+                "CW only while the decoder is locked",
+            )
+            .on_hover_text("Reading an unlocked decoder's output is worse than silence");
             ui.label(
                 RichText::new(
                     "Both are off by default. A decoder produces text faster than speech reads \
@@ -299,19 +310,32 @@ pub(in crate::app) fn speech_settings(
 
             ui.add_space(8.0);
             ui.label(RichText::new("Tuning up").strong());
-            ui.checkbox(&mut cfg.tune.swr_while_tuning, "Read the SWR out while TUNE is held");
+            crate::chrome::checkbox(
+                ui,
+                &mut cfg.tune.swr_while_tuning,
+                "Read the SWR out while TUNE is held",
+            );
             ui.add_enabled_ui(cfg.tune.swr_while_tuning, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Every");
-                    ui.add(
+                    crate::chrome::slider(
+                        ui,
                         egui::Slider::new(&mut cfg.tune.period_s, 1.0..=10.0)
                             .step_by(0.5)
                             .suffix(" s"),
                     );
                 });
             });
-            ui.checkbox(&mut cfg.tune.summary_after_tune, "Report the best match on release");
-            ui.checkbox(&mut cfg.tune.alarm_always, "Warn about high SWR during any transmission");
+            crate::chrome::checkbox(
+                ui,
+                &mut cfg.tune.summary_after_tune,
+                "Report the best match on release",
+            );
+            crate::chrome::checkbox(
+                ui,
+                &mut cfg.tune.alarm_always,
+                "Warn about high SWR during any transmission",
+            );
 
             ui.add_space(8.0);
             ui.label(RichText::new("How things are read").strong());
@@ -337,10 +361,11 @@ pub(in crate::app) fn speech_settings(
             });
 
             ui.add_space(6.0);
-            ui.checkbox(&mut cfg.duck_on_ptt, "Stay quiet while transmitting").on_hover_text(
-                "Speech goes to your speakers, and therefore into your microphone. High-SWR \
+            crate::chrome::checkbox(ui, &mut cfg.duck_on_ptt, "Stay quiet while transmitting")
+                .on_hover_text(
+                    "Speech goes to your speakers, and therefore into your microphone. High-SWR \
                  warnings still get through.",
-            );
+                );
         });
     });
 

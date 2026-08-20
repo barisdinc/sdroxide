@@ -113,7 +113,8 @@ impl SdroxideApp {
 
     fn memories_ui(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         ui.horizontal(|ui| {
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut self.mem_name)
                     .hint_text("memory name")
                     .desired_width(ui.available_width() - 100.0),
@@ -125,7 +126,8 @@ impl SdroxideApp {
             }
         });
         ui.horizontal(|ui| {
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut self.mem_folder_name)
                     .hint_text("folder name")
                     .desired_width(ui.available_width() - 100.0),
@@ -222,7 +224,10 @@ impl SdroxideApp {
                     let editing = matches!(&self.mem_folder_edit, Some((id, _)) if *id == f.id);
                     if editing {
                         let (_, text) = self.mem_folder_edit.as_mut().expect("checked above");
-                        let edit = ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+                        let edit = crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(text).desired_width(150.0),
+                        );
                         if self.mem_folder_focus {
                             edit.request_focus();
                             self.mem_folder_focus = false;
@@ -360,7 +365,8 @@ impl SdroxideApp {
                             // desired width is clamped by the column width egui
                             // measured (and persisted) last frame, so a field
                             // that once came up narrow would stay narrow.
-                            let edit = ui.add_sized(
+                            let edit = crate::chrome::field_sized(
+                                ui,
                                 [190.0, 20.0],
                                 egui::TextEdit::singleline(&mut text)
                                     .hint_text(format!("Slot {}", i + 1)),

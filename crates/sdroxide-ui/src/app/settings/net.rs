@@ -19,7 +19,7 @@ pub(in crate::app) fn net_heading(ui: &mut egui::Ui, text: &str) {
 pub(in crate::app) fn net_row(ui: &mut egui::Ui, label: &str, val: &mut String, w: f32) {
     ui.horizontal(|ui| {
         ui.add_sized([96.0, 22.0], egui::Label::new(label));
-        ui.add(egui::TextEdit::singleline(val).desired_width(w));
+        crate::chrome::field(ui, egui::TextEdit::singleline(val).desired_width(w));
     });
 }
 
@@ -27,7 +27,7 @@ pub(in crate::app) fn net_row(ui: &mut egui::Ui, label: &str, val: &mut String, 
 pub(in crate::app) fn net_secret(ui: &mut egui::Ui, label: &str, val: &mut String, w: f32) {
     ui.horizontal(|ui| {
         ui.add_sized([96.0, 22.0], egui::Label::new(label));
-        ui.add(egui::TextEdit::singleline(val).password(true).desired_width(w));
+        crate::chrome::field(ui, egui::TextEdit::singleline(val).password(true).desired_width(w));
     });
 }
 
@@ -71,7 +71,7 @@ pub(in crate::app) fn settings_freedv_tab(
 ) {
     ui.label(RichText::new("FreeDV Reporter").size(14.0).strong().color(crate::theme::CYAN()));
     ui.add_space(6.0);
-    ui.checkbox(&mut net.freedv_reporter.enabled, "Enable").on_hover_text(
+    crate::chrome::checkbox(ui, &mut net.freedv_reporter.enabled, "Enable").on_hover_text(
         "Connects whenever enabled. Your station is only shown to others while the radio is \
          in RADE — in any other mode you stay connected but hidden.",
     );
@@ -84,7 +84,7 @@ pub(in crate::app) fn settings_freedv_tab(
 
         net_heading(ui, "Station");
         net_row(ui, "Message", &mut c.message, 260.0);
-        ui.checkbox(&mut c.rx_only, "Receive only (I cannot transmit)");
+        crate::chrome::checkbox(ui, &mut c.rx_only, "Receive only (I cannot transmit)");
 
         net_heading(ui, "Server");
         net_row(ui, "Host", &mut c.host, 220.0);
@@ -93,19 +93,20 @@ pub(in crate::app) fn settings_freedv_tab(
             ui.add(egui::DragValue::new(&mut c.port).range(1..=65535));
         });
         ui.add_enabled_ui(false, |ui| {
-            ui.checkbox(&mut c.tls, "TLS (wss://)")
+            crate::chrome::checkbox(ui, &mut c.tls, "TLS (wss://)")
                 .on_hover_text("Not yet implemented — FreeDV GUI uses plain ws:// too.");
         });
 
         net_heading(ui, "Reporting");
-        ui.checkbox(&mut c.report_rx, "Report stations I decode").on_hover_text(
+        crate::chrome::checkbox(ui, &mut c.report_rx, "Report stations I decode").on_hover_text(
             "Sends an rx_report for each callsign recovered from a RADE \
                             End-of-Over frame.",
         );
-        ui.checkbox(&mut c.show_spots, "Show other reporter stations as spots").on_hover_text(
-            "Adds them to the panadapter overlay, world map and SPOTS window \
+        crate::chrome::checkbox(ui, &mut c.show_spots, "Show other reporter stations as spots")
+            .on_hover_text(
+                "Adds them to the panadapter overlay, world map and SPOTS window \
                             under the FREEDV filter.",
-        );
+            );
     });
 
     ui.add_space(8.0);

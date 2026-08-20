@@ -64,12 +64,12 @@ impl SdroxideApp {
             }
             ui.add_space(8.0);
             ui.label(RichText::new("Call").size(10.5).strong().color(crate::theme::CYAN_DIM()));
-            if ui
-                .add(egui::TextEdit::singleline(&mut cfg.fsq_call).desired_width(76.0))
-                .on_hover_text(
-                    "Callsign for directed (FSQCALL) messages; defaults to your callsign",
-                )
-                .changed()
+            if crate::chrome::field(
+                ui,
+                egui::TextEdit::singleline(&mut cfg.fsq_call).desired_width(76.0),
+            )
+            .on_hover_text("Callsign for directed (FSQCALL) messages; defaults to your callsign")
+            .changed()
             {
                 cfg.fsq_call = cfg.fsq_call.to_uppercase();
                 changed = true;
@@ -362,7 +362,8 @@ impl SdroxideApp {
                                 .monospace()
                                 .color(crate::theme::CYAN_DIM()),
                         );
-                        let resp = ui.add(
+                        let resp = crate::chrome::field(
+                            ui,
                             egui::TextEdit::singleline(&mut self.text_tx)
                                 .desired_width((ui.available_width() - 62.0).max(60.0))
                                 .hint_text("Message…"),
@@ -439,7 +440,8 @@ impl SdroxideApp {
             .show(ctx, |ui| {
                 crate::chrome::window_body_bg(ui);
                 ui.horizontal(|ui| {
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::singleline(&mut self.fsq_new_contact)
                             .desired_width(140.0)
                             .hint_text("callsign"),
@@ -466,13 +468,13 @@ impl SdroxideApp {
                                 set_target = Some(c.call.clone());
                             }
                             ui.label(RichText::new(&c.call).monospace().strong());
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut c.name)
-                                        .hint_text("name")
-                                        .desired_width(120.0),
-                                )
-                                .changed()
+                            if crate::chrome::field(
+                                ui,
+                                egui::TextEdit::singleline(&mut c.name)
+                                    .hint_text("name")
+                                    .desired_width(120.0),
+                            )
+                            .changed()
                             {
                                 changed = true;
                             }

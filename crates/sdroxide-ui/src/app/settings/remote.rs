@@ -52,7 +52,8 @@ pub(in crate::app) fn settings_remote_tab(
     let mut entered = false;
     egui::Grid::new("remote-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label(RichText::new("Address").strong());
-        let addr = ui.add(
+        let addr = crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut cfg.host)
                 .desired_width(240.0)
                 .hint_text("host name or IP"),

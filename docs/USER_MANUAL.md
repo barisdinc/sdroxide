@@ -5677,9 +5677,14 @@ spoken announcements below them under `[speech]`:
   the band plan) are their own and do not change with the theme.
 
 - **Button style** / **Window style** — the shape the buttons and the floating
-  windows wear, chosen separately: **Angled** (the classic cut-corner look),
-  **Rectangular**, **Rounded**, **Gradient** (a vertical shaded fill), or
-  **3D bevel** (a raised lit edge). Also applied immediately.
+  windows wear, chosen separately: **Angled** (the classic cut-corner look,
+  with a lit chamfer bracket at each cut), **Rectangular**, **Rounded**,
+  **Gradient** (a vertical shaded fill) or **3D bevel** (a raised lit edge).
+  Also applied immediately. The button style reaches past the buttons: text
+  boxes, tick boxes, sliders and dropdowns all wear it too, with the controls
+  you type into or drag along sunk into the panel and the ones you press
+  standing proud of it — so Gradient and 3D bevel read as depth rather than as
+  decoration.
 - **Screen update rate** — the GUI/spectrum frame rate (5, 10, 15, 30, 60 or 90
   fps). Higher looks smoother and costs more CPU/GPU. The rates below 30 are
   there for machines that cannot keep up — a single-board computer, a big screen

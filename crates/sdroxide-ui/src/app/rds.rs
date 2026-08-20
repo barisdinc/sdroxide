@@ -13,6 +13,7 @@ use eframe::egui::{self, Color32, RichText};
 use sdroxide_types::{RdsData, RdsGroupLog, RdsStandard, pi_callsign, pty_name, rt_plus_class};
 
 use crate::app::SdroxideApp;
+use crate::chrome::StyledCombo;
 
 /// How many groups the diagnostics log keeps. About a minute at the eleven
 /// groups a second the standard runs at — enough to watch a marginal station
@@ -113,7 +114,7 @@ impl SdroxideApp {
                 } else {
                     chosen.label().to_string()
                 })
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     for s in RdsStandard::ALL {
                         ui.selectable_value(&mut self.view.rds_standard, s, s.label());
                     }

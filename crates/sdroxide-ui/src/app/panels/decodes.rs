@@ -267,19 +267,19 @@ impl SdroxideApp {
                     }
                     let resp = ui
                         .horizontal(|ui| {
-                            let r = ui
-                                .add_enabled(
-                                    !held,
-                                    egui::TextEdit::singleline(&mut self.digi_tx_hz_edit)
-                                        .id(tx_hz_id)
-                                        .desired_width(40.0),
-                                )
-                                .on_hover_text(
-                                    "Type the transmit offset in Hz, then press Enter. Where \
+                            let r = crate::chrome::field_enabled(
+                                ui,
+                                !held,
+                                egui::TextEdit::singleline(&mut self.digi_tx_hz_edit)
+                                    .id(tx_hz_id)
+                                    .desired_width(40.0),
+                            )
+                            .on_hover_text(
+                                "Type the transmit offset in Hz, then press Enter. Where \
                                      your licence is narrower than the band plan the whole \
                                      range below the edge is yours to pick from, so nothing \
                                      is suggested here.",
-                                );
+                            );
                             // The unit rides beside the box rather than inside
                             // it. As a suffix it would be text sitting in the
                             // buffer the operator is typing into, to be worked
@@ -1440,7 +1440,8 @@ impl SdroxideApp {
             // Free text: 13 characters is all FT8 carries, so cap the entry
             // there rather than letting the operator type a message that would
             // be silently cut on the air.
-            let entry = ui.add(
+            let entry = crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut self.digi_free_text)
                     .desired_width(ui.available_width() - 52.0)
                     .char_limit(13)

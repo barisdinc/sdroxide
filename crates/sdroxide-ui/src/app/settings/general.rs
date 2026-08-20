@@ -9,6 +9,7 @@ use sdroxide_types::{Command, Region, RemoteAccess, SWR_LIMIT_MAX, SWR_LIMIT_MIN
 
 use crate::app::SdroxideApp;
 use crate::app::persist::band_plan_path;
+use crate::chrome::StyledCombo;
 
 /// The IARU region dropdown: the number the band plans are published under,
 /// with the part of the world it covers next to it.
@@ -17,7 +18,7 @@ use crate::app::persist::band_plan_path;
 /// means nothing until you know it is the Americas, and the number is what
 /// every band-plan document and contest rule actually says.
 pub(in crate::app) fn region_combo(ui: &mut egui::Ui, region: &mut Region) {
-    ComboBox::from_id_salt("iaru-region").width(360.0).selected_text(region.label()).show_ui(
+    ComboBox::from_id_salt("iaru-region").width(360.0).selected_text(region.label()).show_styled(
         ui,
         |ui| {
             for r in Region::ALL {
@@ -38,7 +39,7 @@ pub(in crate::app) fn device_combo(
     mut pick: impl FnMut(Option<String>),
 ) {
     let shown = selected.clone().unwrap_or_else(|| "System default".into());
-    ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_styled(ui, |ui| {
         if ui.selectable_label(selected.is_none(), "System default").clicked() {
             pick(None);
         }
@@ -77,10 +78,14 @@ pub(in crate::app) fn remote_access_settings(ui: &mut egui::Ui, access: &mut Rem
     ui.add_space(8.0);
     egui::Grid::new("remote-access-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Username");
-        ui.add(egui::TextEdit::singleline(&mut access.username).desired_width(200.0));
+        crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut access.username).desired_width(200.0),
+        );
         ui.end_row();
         ui.label("Password");
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(&mut access.password).password(true).desired_width(200.0),
         );
         ui.end_row();
@@ -205,7 +210,8 @@ impl SdroxideApp {
         let mut limit = self.state.tx.swr_limit.clamp(SWR_LIMIT_MIN, SWR_LIMIT_MAX);
 
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut enabled, "Stop transmitting on high SWR").changed() {
+            if crate::chrome::checkbox(ui, &mut enabled, "Stop transmitting on high SWR").changed()
+            {
                 cmds.push(Command::SetSwrGuard { enabled, limit });
             }
         });

@@ -11,6 +11,7 @@
 //! the announcement has arrived yet — a client that has not been told cannot
 //! be allowed to apply defaults over the real thing.
 
+use crate::chrome::StyledCombo;
 use eframe::egui::{self, Color32, ComboBox, RichText};
 
 /// Live status of the built-in TCI server, from `RadioEvent::TciServerStatus`.
@@ -43,12 +44,13 @@ pub(in crate::app) fn settings_wsjtx_tab(
         .weak(),
     );
     ui.add_space(6.0);
-    ui.checkbox(&mut cfg.enabled, "Enable");
+    crate::chrome::checkbox(ui, &mut cfg.enabled, "Enable");
     ui.add_space(6.0);
     ui.add_enabled_ui(cfg.enabled, |ui| {
         egui::Grid::new("wsjtx-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Send to");
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.host)
                     .desired_width(160.0)
                     .hint_text("127.0.0.1"),
@@ -65,10 +67,11 @@ pub(in crate::app) fn settings_wsjtx_tab(
             ui.end_row();
 
             ui.label("Identify as");
-            ui.add(egui::TextEdit::singleline(&mut cfg.id).desired_width(160.0)).on_hover_text(
-                "The name clients see. Some loggers only accept traffic identifying itself \
+            crate::chrome::field(ui, egui::TextEdit::singleline(&mut cfg.id).desired_width(160.0))
+                .on_hover_text(
+                    "The name clients see. Some loggers only accept traffic identifying itself \
                  as WSJT-X.",
-            );
+                );
             ui.end_row();
         });
     });
@@ -106,13 +109,13 @@ pub(in crate::app) fn settings_rigctld_tab(
         return;
     }
     ui.add_space(2.0);
-    ui.checkbox(&mut cfg.enabled, "Enable");
+    crate::chrome::checkbox(ui, &mut cfg.enabled, "Enable");
     ui.add_space(6.0);
 
     ui.add_enabled_ui(cfg.enabled, |ui| {
         egui::Grid::new("rigctld-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Listen on");
-            ComboBox::from_id_salt("rigctld_bind").selected_text(&cfg.bind).show_ui(ui, |ui| {
+            ComboBox::from_id_salt("rigctld_bind").selected_text(&cfg.bind).show_styled(ui, |ui| {
                 for b in RigctldConfig::BINDS {
                     let label = if b == "127.0.0.1" {
                         "127.0.0.1 (this machine)"
@@ -132,7 +135,8 @@ pub(in crate::app) fn settings_rigctld_tab(
             ui.end_row();
 
             ui.label("Rig name");
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.rig_name)
                     .desired_width(160.0)
                     .hint_text("reported to clients"),
@@ -144,7 +148,7 @@ pub(in crate::app) fn settings_rigctld_tab(
             ui.end_row();
         });
         ui.add_space(4.0);
-        ui.checkbox(&mut cfg.allow_tx, "Allow clients to transmit").on_hover_text(
+        crate::chrome::checkbox(ui, &mut cfg.allow_tx, "Allow clients to transmit").on_hover_text(
             "Off refuses every key request and stops advertising a transmit range, so Hamlib \
              itself declines to key.",
         );
@@ -245,12 +249,13 @@ pub(in crate::app) fn settings_rotator_tab(
         .weak(),
     );
     ui.add_space(6.0);
-    ui.checkbox(&mut cfg.enabled, "Enable");
+    crate::chrome::checkbox(ui, &mut cfg.enabled, "Enable");
     ui.add_space(6.0);
     ui.add_enabled_ui(cfg.enabled, |ui| {
         egui::Grid::new("rotator-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Host");
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.host)
                     .desired_width(160.0)
                     .hint_text("127.0.0.1"),
@@ -358,13 +363,13 @@ pub(in crate::app) fn settings_tci_server_tab(
 
     ui.label(RichText::new("Built-in TCI server").size(14.0).strong().color(crate::theme::CYAN()));
     ui.add_space(6.0);
-    ui.checkbox(&mut cfg.enabled, "Enable");
+    crate::chrome::checkbox(ui, &mut cfg.enabled, "Enable");
     ui.add_space(6.0);
 
     ui.add_enabled_ui(cfg.enabled, |ui| {
         egui::Grid::new("tci-srv-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Listen on");
-            ComboBox::from_id_salt("tci_srv_bind").selected_text(&cfg.bind).show_ui(ui, |ui| {
+            ComboBox::from_id_salt("tci_srv_bind").selected_text(&cfg.bind).show_styled(ui, |ui| {
                 for b in TciServerConfig::BINDS {
                     let label = if b == "127.0.0.1" {
                         "127.0.0.1 (this machine)"
@@ -383,7 +388,8 @@ pub(in crate::app) fn settings_tci_server_tab(
             ui.end_row();
 
             ui.label("Device name");
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut cfg.device_name)
                     .desired_width(160.0)
                     .hint_text("reported to clients"),
@@ -395,7 +401,7 @@ pub(in crate::app) fn settings_tci_server_tab(
             ui.end_row();
         });
         ui.add_space(4.0);
-        ui.checkbox(&mut cfg.allow_tx, "Allow clients to transmit").on_hover_text(
+        crate::chrome::checkbox(ui, &mut cfg.allow_tx, "Allow clients to transmit").on_hover_text(
             "Off leaves control and the receive streams working, but every key request \
              is refused.",
         );

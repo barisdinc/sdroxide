@@ -753,8 +753,7 @@ impl SdroxideApp {
                                 );
                                 ui.add_enabled_ui(self.digi_cfg_seeded, |ui| {
                                     ui.spacing_mut().slider_width = 130.0;
-                                    let resp = ui.add(
-                                        egui::Slider::new(
+                                    let resp = crate::chrome::slider(ui, egui::Slider::new(
                                             &mut self.digi_cfg_edit.sstv_tx_ppm,
                                             -5000.0..=5000.0,
                                         )
@@ -1092,8 +1091,7 @@ impl SdroxideApp {
                     let mut buf = self.sstv.current_message().to_string();
                     let resp = ui
                         .push_id(sel, |ui| {
-                            ui.add_sized(
-                                egui::vec2(inner_w, msg_h),
+                            crate::chrome::field_sized(ui, egui::vec2(inner_w, msg_h),
                                 egui::TextEdit::multiline(&mut buf)
                                     .hint_text("Drawn on this slot's image"),
                             )
@@ -1500,7 +1498,8 @@ impl SdroxideApp {
                     "Sent in the manifest as the content hint, and shown under the picture by \
                      receivers. Travels as text — it is not drawn into the image.",
                 );
-                let resp = ui.add(
+                let resp = crate::chrome::field(
+                    ui,
                     egui::TextEdit::singleline(&mut self.digi_cfg_edit.rifp_content_hint)
                         .desired_width(f32::INFINITY)
                         .hint_text("What this picture is"),
@@ -1523,17 +1522,19 @@ impl SdroxideApp {
                      requests, so this is the only recovery a receiver gets.",
                 );
                 ui.spacing_mut().slider_width = 90.0;
-                changed |= ui
-                    .add(egui::Slider::new(&mut self.digi_cfg_edit.rifp_data_repeats, 1..=4))
-                    .drag_stopped();
+                changed |= crate::chrome::slider(
+                    ui,
+                    egui::Slider::new(&mut self.digi_cfg_edit.rifp_data_repeats, 1..=4),
+                )
+                .drag_stopped();
                 ui.label(RichText::new("Chunk").size(10.0).weak())
                     .on_hover_text("Payload octets per data frame (the profile recommends 192)");
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.digi_cfg_edit.rifp_chunk_size, 32..=1024)
-                            .step_by(16.0),
-                    )
-                    .drag_stopped();
+                changed |= crate::chrome::slider(
+                    ui,
+                    egui::Slider::new(&mut self.digi_cfg_edit.rifp_chunk_size, 32..=1024)
+                        .step_by(16.0),
+                )
+                .drag_stopped();
             });
             ui.separator();
             if st.tx_active {

@@ -819,7 +819,8 @@ impl SdroxideApp {
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("🔍").size(11.0));
-            ui.add(
+            crate::chrome::field(
+                ui,
                 egui::TextEdit::singleline(&mut win.search)
                     .desired_width(160.0)
                     .hint_text("name or NORAD"),

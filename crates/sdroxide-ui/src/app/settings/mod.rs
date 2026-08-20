@@ -50,6 +50,7 @@ use self::tle::settings_tle_tab;
 use self::ui_tab::settings_ui_tab;
 use crate::app::SdroxideApp;
 use crate::app::persist::{persist_speech_settings, persist_ui_settings};
+use crate::chrome::StyledCombo;
 use crate::theme::ThemedScroll as _;
 
 /// Settings dialog tabs: General (station identity + audio devices), the radio
@@ -323,7 +324,8 @@ fn net_seeded_note(ui: &mut egui::Ui, seeded: bool) -> bool {
 /// quietly stopped working — is a poor way to learn that a dash was a slash.
 fn freq_range_edit(ui: &mut egui::Ui, id: &str, text: &mut String, hover: &str) {
     ui.vertical(|ui| {
-        ui.add(
+        crate::chrome::field(
+            ui,
             egui::TextEdit::singleline(text)
                 .id_salt(id)
                 .desired_width(220.0)
@@ -366,7 +368,7 @@ pub(in crate::app) fn enum_combo<T: PartialEq + Copy>(
     all: &[T],
     label: impl Fn(T) -> &'static str,
 ) {
-    ComboBox::from_id_salt(id).selected_text(label(*cur)).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).selected_text(label(*cur)).show_styled(ui, |ui| {
         for &opt in all {
             if ui.selectable_label(*cur == opt, label(opt)).clicked() {
                 *cur = opt;
@@ -1296,12 +1298,20 @@ impl SdroxideApp {
                         ui,
                         |ui| {
                             ui.label("Callsign");
-                            if ui.text_edit_singleline(&mut io.digi_edit.my_call).changed() {
+                            if crate::chrome::field(
+                                ui,
+                                egui::TextEdit::singleline(&mut io.digi_edit.my_call),
+                            )
+                            .changed()
+                            {
                                 io.digi_edit.my_call = io.digi_edit.my_call.to_uppercase();
                             }
                             ui.end_row();
                             ui.label("Grid square");
-                            ui.text_edit_singleline(&mut io.digi_edit.my_grid);
+                            crate::chrome::field(
+                                ui,
+                                egui::TextEdit::singleline(&mut io.digi_edit.my_grid),
+                            );
                             ui.end_row();
                         },
                     );
@@ -1478,7 +1488,7 @@ impl SdroxideApp {
                     let named = sdroxide_types::converter_preset_name(*converter);
                     egui::ComboBox::from_id_salt("converter-preset")
                         .selected_text(named)
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for (name, hz) in sdroxide_types::CONVERTER_PRESETS {
                                 if ui.selectable_label(named == name, name).clicked() {
                                     *converter = hz;
@@ -1549,7 +1559,7 @@ impl SdroxideApp {
                             let tx = &mut cfg.converter_tx;
                             egui::ComboBox::from_id_salt("converter-tx")
                                 .selected_text(tx.label())
-                                .show_ui(ui, |ui| {
+                                .show_styled(ui, |ui| {
                                     for opt in [Tx::Off, Tx::Transverter, Tx::Own(0.0)] {
                                         // Matched on the *kind*, so choosing "its
                                         // own offset" again does not wipe the
@@ -1694,7 +1704,7 @@ impl SdroxideApp {
                             .color(crate::theme::CYAN()),
                     );
                     ui.add_space(4.0);
-                    ui.checkbox(&mut io.tx_eq_edit.enabled, "Enabled").on_hover_text(
+                    crate::chrome::checkbox(ui, &mut io.tx_eq_edit.enabled, "Enabled").on_hover_text(
                         "A 3-band parametric EQ on the microphone audio, ahead of the modulator. \
                          Voice modes only (SSB/AM/FM); digital modes and CW carry synthesized or \
                          keyed audio that never reaches it. Off by default and flat when turned \
@@ -1994,7 +2004,7 @@ impl SdroxideApp {
                 operator_identity_note(ui, io.digi_edit, io.digi_seeded);
 
                 net_heading(ui, "DX cluster (telnet)");
-                ui.checkbox(&mut io.net_edit.cluster.enabled, "Enabled");
+                crate::chrome::checkbox(ui, &mut io.net_edit.cluster.enabled, "Enabled");
                 net_row(ui, "Host", &mut io.net_edit.cluster.host, 220.0);
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 22.0], egui::Label::new("Port"));
@@ -2003,7 +2013,8 @@ impl SdroxideApp {
                 net_row(ui, "Login call", &mut io.net_edit.cluster.login, 140.0);
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 22.0], egui::Label::new("Commands"));
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::multiline(io.net_cmds)
                             .desired_rows(2)
                             .hint_text("one per line, e.g. SET/FT8")
@@ -2012,7 +2023,7 @@ impl SdroxideApp {
                 });
 
                 net_heading(ui, "Reverse Beacon Network");
-                ui.checkbox(&mut io.net_edit.rbn.enabled, "Enabled").on_hover_text(
+                crate::chrome::checkbox(ui, &mut io.net_edit.rbn.enabled, "Enabled").on_hover_text(
                     "Read the world's CW/RTTY skimmers and feed the propagation map with \
                      them. This is what makes the map show bands this radio is not \
                      listening to. On by default: it puts nothing on the air, needs no \
@@ -2028,7 +2039,8 @@ impl SdroxideApp {
                 net_row(ui, "Login call", &mut io.net_edit.rbn.login, 140.0);
                 ui.horizontal(|ui| {
                     ui.add_sized([96.0, 22.0], egui::Label::new("Commands"));
-                    ui.add(
+                    crate::chrome::field(
+                        ui,
                         egui::TextEdit::multiline(io.rbn_cmds)
                             .desired_rows(2)
                             .hint_text("one per line, e.g. set/filter cont=eu")
@@ -2051,19 +2063,28 @@ impl SdroxideApp {
                 );
 
                 net_heading(ui, "POTA / SOTA / PSK Reporter");
-                ui.checkbox(&mut io.net_edit.pota.enabled, "POTA activator spots");
-                ui.checkbox(&mut io.net_edit.sota.enabled, "SOTA spots");
-                ui.checkbox(&mut io.net_edit.psk.enabled, "PSK Reporter (current band)");
-                ui.checkbox(&mut io.net_edit.psk.report, "Upload my FT8/FT4/FT2 decodes")
-                    .on_hover_text(
-                        "Report what this station hears to pskreporter.info, so it appears \
+                crate::chrome::checkbox(ui, &mut io.net_edit.pota.enabled, "POTA activator spots");
+                crate::chrome::checkbox(ui, &mut io.net_edit.sota.enabled, "SOTA spots");
+                crate::chrome::checkbox(
+                    ui,
+                    &mut io.net_edit.psk.enabled,
+                    "PSK Reporter (current band)",
+                );
+                crate::chrome::checkbox(
+                    ui,
+                    &mut io.net_edit.psk.report,
+                    "Upload my FT8/FT4/FT2 decodes",
+                )
+                .on_hover_text(
+                    "Report what this station hears to pskreporter.info, so it appears \
                          there as a receiver. Uses the callsign and grid from the General tab.",
-                    );
+                );
                 if io.net_edit.psk.report {
                     net_row(ui, "Antenna", &mut io.net_edit.psk.antenna, 200.0);
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 22.0], egui::Label::new("Collector"));
-                        ui.add(
+                        crate::chrome::field(
+                            ui,
                             egui::TextEdit::singleline(&mut io.net_edit.psk.host)
                                 .desired_width(140.0),
                         );
@@ -2078,19 +2099,24 @@ impl SdroxideApp {
                 });
 
                 net_heading(ui, "WSPRnet");
-                ui.checkbox(&mut io.net_edit.wspr.upload, "Upload my WSPR decodes").on_hover_text(
-                    "Send every WSPR reception to wsprnet.org. On by default: it puts \
+                crate::chrome::checkbox(ui, &mut io.net_edit.wspr.upload, "Upload my WSPR decodes")
+                    .on_hover_text(
+                        "Send every WSPR reception to wsprnet.org. On by default: it puts \
                          nothing on the air, and reporting what you hear is what makes a WSPR \
                          receiver part of the network rather than a private curiosity. A slot \
                          that decoded nothing is reported too, which is how the network tells a \
                          shut band from a receiver that was switched off.",
-                );
-                ui.checkbox(&mut io.net_edit.wspr.download_heard_us, "Download who heard me")
-                    .on_hover_text(
-                        "Ask wsprnet.org which stations decoded this one. WSPR has no \
+                    );
+                crate::chrome::checkbox(
+                    ui,
+                    &mut io.net_edit.wspr.download_heard_us,
+                    "Download who heard me",
+                )
+                .on_hover_text(
+                    "Ask wsprnet.org which stations decoded this one. WSPR has no \
                          acknowledgement of any kind, so this is the only way a transmitting \
                          beacon learns anything about its own reach.",
-                    );
+                );
                 if io.net_edit.wspr.download_heard_us {
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 22.0], egui::Label::new("Ask every"));
@@ -2175,9 +2201,12 @@ impl SdroxideApp {
                     let mut via = wl.gateway_via.join(" ");
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 22.0], egui::Label::new("Via"));
-                        if ui
-                            .add_sized([200.0, 22.0], egui::TextEdit::singleline(&mut via))
-                            .changed()
+                        if crate::chrome::field_sized(
+                            ui,
+                            [200.0, 22.0],
+                            egui::TextEdit::singleline(&mut via),
+                        )
+                        .changed()
                         {
                             wl.gateway_via =
                                 via.split_whitespace().map(|s| s.to_uppercase()).collect();
@@ -2330,7 +2359,7 @@ impl SdroxideApp {
 
                 ui.add_space(6.0);
                 net_heading(ui, "Automatic connection");
-                ui.checkbox(&mut wl.auto_connect, "Connect on a timer");
+                crate::chrome::checkbox(ui, &mut wl.auto_connect, "Connect on a timer");
                 ui.add_enabled_ui(wl.auto_connect, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 22.0], egui::Label::new("Every"));
@@ -2370,14 +2399,15 @@ impl SdroxideApp {
                     ui.add_sized([96.0, 22.0], egui::Label::new("Provider"));
                     egui::ComboBox::from_id_salt("lookup_provider")
                         .selected_text(io.net_edit.lookup_provider.label())
-                        .show_ui(ui, |ui| {
+                        .show_styled(ui, |ui| {
                             for p in LookupProvider::ALL {
                                 let cur = &mut io.net_edit.lookup_provider;
                                 ui.selectable_value(cur, p, p.label());
                             }
                         });
                 });
-                ui.checkbox(
+                crate::chrome::checkbox(
+                    ui,
                     &mut io.net_edit.auto_lookup,
                     "Auto-fill name/QTH/grid on spot click & QSO",
                 );
@@ -2393,11 +2423,15 @@ impl SdroxideApp {
                 net_row(ui, "Club Log email", &mut io.net_edit.clublog.user, 200.0);
                 net_secret(ui, "Club Log pass", &mut io.net_edit.clublog.password, 140.0);
                 net_secret(ui, "Club Log key", &mut io.net_edit.clublog_api_key, 200.0);
-                ui.checkbox(&mut io.net_edit.auto_upload, "Auto-upload each new QSO");
+                crate::chrome::checkbox(
+                    ui,
+                    &mut io.net_edit.auto_upload,
+                    "Auto-upload each new QSO",
+                );
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut io.net_edit.auto_upload_eqsl, "eQSL");
-                    ui.checkbox(&mut io.net_edit.auto_upload_qrz, "QRZ");
-                    ui.checkbox(&mut io.net_edit.auto_upload_clublog, "Club Log");
+                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_eqsl, "eQSL");
+                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_qrz, "QRZ");
+                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_clublog, "Club Log");
                 });
 
                 // Only where the engine is in this process: the result is not
@@ -2659,7 +2693,7 @@ impl SdroxideApp {
                 .unwrap_or_else(|| "None".to_string());
             ComboBox::from_id_salt("pan-source")
                 .selected_text(selected)
-                .show_ui(ui, |ui| {
+                .show_styled(ui, |ui| {
                     if ui.selectable_label(pan.source_radio.is_none(), "None").clicked() {
                         pan.source_radio = None;
                     }
@@ -2717,7 +2751,7 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(RichText::new("Follow the dial").strong());
-            ui.checkbox(&mut pan.track, "").on_hover_text(
+            crate::chrome::checkbox(ui, &mut pan.track, "").on_hover_text(
                 "Keep the receiver on this radio's dial, and move the dial when you tune on \
                  the panadapter. Off parks the receiver where it is — a fixed watch on one \
                  segment while the radio goes elsewhere.",
@@ -2725,7 +2759,7 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(RichText::new("Invert spectrum").strong());
-            ui.checkbox(&mut pan.invert, "").on_hover_text(
+            crate::chrome::checkbox(ui, &mut pan.invert, "").on_hover_text(
                 "Mirror the receiver's span about its centre, for a tap whose oscillator sits \
                  above the signal and hands the band over the wrong way round. Leave it off \
                  unless the waterfall fills with signals that are all on the wrong side of the \
@@ -2734,7 +2768,7 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(RichText::new("Mute on transmit").strong());
-            ui.checkbox(&mut pan.mute_on_tx, "").on_hover_text(
+            crate::chrome::checkbox(ui, &mut pan.mute_on_tx, "").on_hover_text(
                 "Silence receive audio while this radio is transmitting. On by default: with \
                  the receiver on the same antenna, or on this radio's I.F., what it hears \
                  during an over is your own transmitter.",
@@ -2742,7 +2776,7 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(RichText::new("Blank on transmit").strong());
-            ui.checkbox(&mut pan.blank_on_tx, "").on_hover_text(
+            crate::chrome::checkbox(ui, &mut pan.blank_on_tx, "").on_hover_text(
                 "Stop the panadapter and waterfall while this radio is transmitting. On by \
                  default: a transmitter painted across the whole span erases the band behind \
                  it. Turn it off to watch the band — or your own signal — through an over, \
@@ -2767,7 +2801,7 @@ impl SdroxideApp {
                     for class in IfModeClass::ALL {
                         ui.label(RichText::new(class.label()).strong());
                         let mut on = pan.mode_offset(class).is_some();
-                        if ui.checkbox(&mut on, "").changed() {
+                        if crate::chrome::checkbox(ui, &mut on, "").changed() {
                             pan.set_mode_offset(class, on.then_some(pan.offset_hz));
                         }
                         match pan.mode_offset(class) {
@@ -2937,7 +2971,8 @@ impl SdroxideApp {
                     *name_edit = Some((chip.id, chip.name.clone()));
                 }
                 let buf = &mut name_edit.as_mut().expect("seeded above").1;
-                let resp = ui.add(
+                let resp = crate::chrome::field(
+                    ui,
                     egui::TextEdit::singleline(buf)
                         .hint_text(chip.default_name.as_str())
                         .desired_width(220.0),
