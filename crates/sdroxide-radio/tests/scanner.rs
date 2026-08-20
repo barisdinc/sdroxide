@@ -137,6 +137,10 @@ struct Watch {
     /// The settings as the engine last persisted them — which is where a skip
     /// taken during a scan has to end up if it is to survive the next run.
     scanner: Option<ScannerConfig>,
+    /// The memory store as the engine last announced it. `None` until it has
+    /// said anything at all, which is how "no memories" is told apart from
+    /// "not asked yet".
+    memories: Option<Vec<MemoryChannel>>,
 }
 
 struct Rig {
@@ -171,28 +175,36 @@ impl Rig {
         self.h.cmd_tx.send(cmd).unwrap();
     }
 
+    /// Take in everything the engine has said since the last look. One place,
+    /// so that a helper waiting on one kind of event does not drain the rest
+    /// onto the floor.
+    fn drain(&mut self) {
+        while let Ok(ev) = self.h.event_rx.try_recv() {
+            match ev {
+                RadioEvent::State(s) => {
+                    self.w.dial = s.active_freq_hz();
+                    self.w.running = s.scan.running;
+                    self.w.holding = s.scan.holding;
+                    if s.scan.holding && self.w.held_at.is_none() {
+                        self.w.held_at = Some(s.active_freq_hz());
+                    }
+                }
+                RadioEvent::Notice(Some(n)) => self.w.notices.push(n),
+                RadioEvent::Scanner(c) => self.w.scanner = Some(c),
+                RadioEvent::Memories(m) => self.w.memories = Some(m),
+                _ => {}
+            }
+        }
+        // Keep the speaker ring moving so the engine is never blocked on it.
+        while self.audio.pop().is_ok() {}
+    }
+
     /// Run the engine for up to `secs`, returning early once it has stopped on
     /// something if `until_hold`.
     fn pump(&mut self, secs: f64, until_hold: bool) -> &Watch {
         let deadline = Instant::now() + Duration::from_secs_f64(secs);
         while Instant::now() < deadline {
-            while let Ok(ev) = self.h.event_rx.try_recv() {
-                match ev {
-                    RadioEvent::State(s) => {
-                        self.w.dial = s.active_freq_hz();
-                        self.w.running = s.scan.running;
-                        self.w.holding = s.scan.holding;
-                        if s.scan.holding && self.w.held_at.is_none() {
-                            self.w.held_at = Some(s.active_freq_hz());
-                        }
-                    }
-                    RadioEvent::Notice(Some(n)) => self.w.notices.push(n),
-                    RadioEvent::Scanner(c) => self.w.scanner = Some(c),
-                    _ => {}
-                }
-            }
-            // Keep the speaker ring moving so the engine is never blocked on it.
-            while self.audio.pop().is_ok() {}
+            self.drain();
             if until_hold && self.w.held_at.is_some() {
                 break;
             }
@@ -201,28 +213,56 @@ impl Rig {
         &self.w
     }
 
-    /// Forget what has been seen so far, for an assertion about what happens
-    /// next rather than what has happened at all.
-    fn forget(&mut self) {
+    /// Forget what has been *seen* so far, for an assertion about what happens
+    /// next rather than what has happened at all. Nothing on the engine's side
+    /// is disturbed — in particular the stored memories stay stored, which is
+    /// what `clear_memories` is for.
+    fn forget_seen(&mut self) {
         self.w.held_at = None;
         self.w.notices.clear();
     }
 
-    fn memories(&mut self) -> Vec<MemoryChannel> {
+    /// The stored channels, once the engine has at least `want` of them.
+    /// Storing one is a command like any other, so the answer is only right
+    /// once it has been acted on; `want` of 0 still waits for the engine's
+    /// opening announcement, so an empty answer means empty.
+    fn memories(&mut self, want: usize) -> Vec<MemoryChannel> {
         let deadline = Instant::now() + Duration::from_secs(2);
-        let mut got = Vec::new();
-        while Instant::now() < deadline {
-            while let Ok(ev) = self.h.event_rx.try_recv() {
-                if let RadioEvent::Memories(m) = ev {
-                    got = m;
+        loop {
+            self.drain();
+            match &self.w.memories {
+                Some(m) if m.len() >= want => return m.clone(),
+                _ if Instant::now() >= deadline => {
+                    return self.w.memories.clone().unwrap_or_default();
                 }
+                _ => std::thread::sleep(Duration::from_millis(10)),
             }
-            if !got.is_empty() {
-                break;
+        }
+    }
+
+    /// Empty the memory store, for a test that asserts on what is in it.
+    ///
+    /// `isolate_config` redirects the config directory once per *process*, so
+    /// every test in this binary shares one store and an engine starts with
+    /// whatever the last test to save left in it. A test that cares how many
+    /// memories there are has to make that true rather than assume it. Only
+    /// this engine's own copy is at stake: these engines are built without a
+    /// `StoreSync`, so nothing re-reads the file behind one's back and a store
+    /// emptied here stays empty for the rest of the test, however many other
+    /// tests are storing memories at the same moment.
+    fn clear_memories(&mut self) {
+        for m in self.memories(0) {
+            self.send(Command::DeleteMemory(m.id));
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            self.drain();
+            if self.w.memories.as_ref().is_some_and(|m| m.is_empty()) {
+                return;
             }
+            assert!(Instant::now() < deadline, "the engine never emptied its memory store");
             std::thread::sleep(Duration::from_millis(10));
         }
-        got
     }
 }
 
@@ -342,12 +382,14 @@ fn tuning_by_hand_stops_the_scan() {
 fn a_memory_scan_passes_over_skipped_channels() {
     const SIGNAL: f64 = 145_600_000.0;
     let mut rig = Rig::new(Some(SIGNAL));
+    // The store is shared with the rest of the binary, so start from none.
+    rig.clear_memories();
     // Two channels: a quiet one, and the one the carrier is on.
     rig.send(Command::SetVfo { vfo: Vfo::A, hz: 145_200_000.0 });
     rig.send(Command::StoreMemory { name: "quiet".into() });
     rig.send(Command::SetVfo { vfo: Vfo::A, hz: SIGNAL });
     rig.send(Command::StoreMemory { name: "busy".into() });
-    let mems = rig.memories();
+    let mems = rig.memories(2);
     assert_eq!(mems.len(), 2, "both memories should have been stored");
     let busy = mems.iter().find(|m| m.name == "busy").expect("the busy memory").id;
 
@@ -366,7 +408,7 @@ fn a_memory_scan_passes_over_skipped_channels() {
     // Skip it, and now there is nothing left to stop on.
     rig.send(Command::SetScanning(false));
     rig.send(Command::SetScannerConfig(ScannerConfig { skip: vec![busy], ..cfg }));
-    rig.forget();
+    rig.forget_seen();
     rig.send(Command::SetScanning(true));
     assert_eq!(rig.pump(2.5, true).held_at, None, "it stopped on a channel it was told to skip");
 }
@@ -386,7 +428,7 @@ fn a_skipped_range_channel_stays_skipped_across_runs() {
     assert!((held - SIGNAL).abs() <= 12_500.0, "stopped on {held}, not near {SIGNAL}");
 
     rig.send(Command::ScanSkip);
-    rig.forget();
+    rig.forget_seen();
     let w = rig.pump(3.0, true);
     assert!(w.running, "SKIP is not STOP");
     assert_eq!(w.held_at, None, "it stopped again on the channel it was told to skip");
@@ -402,7 +444,7 @@ fn a_skipped_range_channel_stays_skipped_across_runs() {
     // A new run of the same range honours it.
     rig.send(Command::SetScanning(false));
     rig.send(Command::SetScanning(true));
-    rig.forget();
+    rig.forget_seen();
     let w = rig.pump(3.0, true);
     assert!(w.running, "the second run should be going");
     assert_eq!(w.held_at, None, "a fresh run forgot the skip");
@@ -420,7 +462,7 @@ fn retuning_the_range_forgets_its_skips() {
     rig.send(Command::SetScanning(true));
     assert!(rig.pump(6.0, true).held_at.is_some(), "did not stop on the carrier");
     rig.send(Command::ScanSkip);
-    rig.forget();
+    rig.forget_seen();
     assert_eq!(rig.pump(2.0, true).held_at, None, "the skip did not take");
 
     // Move the range, then move it back: the skip taken in the old one is gone.
@@ -432,7 +474,7 @@ fn retuning_the_range_forgets_its_skips() {
     }));
     rig.send(Command::SetScannerConfig(range_cfg()));
     rig.send(Command::SetScanning(true));
-    rig.forget();
+    rig.forget_seen();
     let w = rig.pump(6.0, true);
     let held = w.held_at.expect("the skip should not have followed the range away and back");
     assert!((held - SIGNAL).abs() <= 12_500.0, "stopped on {held}, not near {SIGNAL}");
@@ -457,8 +499,11 @@ fn an_impossible_scan_is_refused_with_a_reason() {
         w.notices
     );
 
-    // And a memory scan with nothing to scan.
-    rig.forget();
+    // And a memory scan with nothing to scan — which means emptying the store
+    // first, because it is shared with whatever else in this binary is running
+    // and another test stores two channels in it.
+    rig.forget_seen();
+    rig.clear_memories();
     rig.send(Command::SetScannerConfig(ScannerConfig { kind: ScanKind::Memories, ..range_cfg() }));
     rig.send(Command::SetScanning(true));
     let w = rig.pump(1.0, false);
