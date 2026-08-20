@@ -123,6 +123,15 @@ pub enum CatUpdate {
     /// maximum. Read once when the port opens, so the panel's Drive slider ends
     /// up where the radio's own power control already is.
     Power(f32),
+    /// Which antenna socket the rig says it is receiving on, by the name that
+    /// family gives the port (see [`Protocol::antennas`]).
+    ///
+    /// Read once when the port opens and never polled, so this is the radio's
+    /// own setting being *adopted* — the same shape as [`Self::Power`], and for
+    /// the same reason: the operator set it at the front panel, it survived the
+    /// power cycle, and imposing a remembered one on top would move an antenna
+    /// relay nobody asked to move.
+    Antenna(&'static str),
     /// The rig is transmitting under its *own* control — a hand on the mic
     /// button, a foot switch, its VOX, its keyer. `true` is keyed.
     ///
@@ -268,6 +277,27 @@ trait Protocol: Send {
     /// Whether [`Protocol::set_power`] reaches this family at all.
     fn commands_power(&self) -> bool {
         false
+    }
+
+    /// The antenna sockets this family can switch the *receiver* between, named
+    /// as the rest of sdroxide names ports. Empty — the default — for the
+    /// families with no such command, which is all of them but ELAD.
+    ///
+    /// Receive only, and deliberately: the one rig here with two sockets
+    /// transmits out of the same one either way, so there is no transmit port
+    /// to choose.
+    fn antennas(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Put the receiver on `name`, which is one of [`Protocol::antennas`].
+    fn set_antenna(&mut self, _name: &str) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    /// Frames asking which socket the rig is on, sent once when the port opens
+    /// so the panel adopts the radio's own setting (see
+    /// [`CatUpdate::Antenna`]). Empty for families with no such read.
+    fn read_antenna(&self) -> Vec<Vec<u8>> {
+        Vec::new()
     }
 
     /// Whether a mode change can move this rig's *dial*.
@@ -640,6 +670,8 @@ enum CatCmd {
     /// The rig's own receive filter: the mode it applies to, and the audio-band
     /// edges in Hz.
     Filter(Mode, f32, f32),
+    /// Which antenna socket to receive on, by name.
+    Antenna(String),
     Stop,
 }
 
@@ -652,6 +684,7 @@ pub struct CatHandle {
     cw_chunk_len: usize,
     commands_power: bool,
     commands_filter: bool,
+    antennas: &'static [&'static str],
 }
 
 impl CatHandle {
@@ -709,6 +742,20 @@ impl CatHandle {
         }
         let _ = self.cmd_tx.send(CatCmd::Filter(mode, lo_hz, hi_hz));
     }
+    /// The antenna sockets this rig can put its receiver on, or empty where the
+    /// family has no such command. What the caller publishes as
+    /// `DeviceCaps::antennas_rx`.
+    pub fn antennas(&self) -> &'static [&'static str] {
+        self.antennas
+    }
+    /// Put the receiver on `name`, one of [`Self::antennas`]. Silently ignored
+    /// on a rig with one socket, and on a name that rig has never heard of.
+    pub fn set_antenna(&self, name: &str) {
+        if !self.antennas.contains(&name) {
+            return;
+        }
+        let _ = self.cmd_tx.send(CatCmd::Antenna(name.to_string()));
+    }
     /// Non-blocking drain of rig-reported freq/mode changes.
     pub fn poll(&self) -> Vec<CatUpdate> {
         self.event_rx.try_iter().collect()
@@ -761,6 +808,7 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
                         CatUpdate::Swr(_)
                         | CatUpdate::Signal(_)
                         | CatUpdate::Power(_)
+                        | CatUpdate::Antenna(_)
                         | CatUpdate::Ptt(_) => {}
                     }
                 }
@@ -784,6 +832,10 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
     // before it commands anything.
     let commands_power = make_protocol(&cfg).commands_power();
     let commands_filter = make_protocol(&cfg).commands_filter();
+    // And the same again for the antenna sockets: the caps this device
+    // publishes are built before a single frame has gone out, so the list has
+    // to come from the framing rather than from the rig.
+    let antennas = make_protocol(&cfg).antennas();
     std::thread::Builder::new()
         .name("sdroxide-cat".into())
         .spawn(move || serial_thread(cfg, cmd_rx, event_tx, telem_tx, signal_tx))
@@ -796,6 +848,7 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
         cw_chunk_len,
         commands_power,
         commands_filter,
+        antennas,
     }
 }
 
@@ -1126,6 +1179,13 @@ fn serial_thread(
         for f in protocol.read_power() {
             write_frame(&mut *port, &f, &mut last_write);
         }
+        // Which socket the receiver is on, asked the same once-per-connection
+        // way and adopted the same way. The rig remembers it across power
+        // cycles, so this is the only moment the panel can find out what the
+        // operator left it on.
+        for f in protocol.read_antenna() {
+            write_frame(&mut *port, &f, &mut last_write);
+        }
 
         let mut rx = Vec::with_capacity(256);
         let mut read_buf = [0u8; 256];
@@ -1172,6 +1232,11 @@ fn serial_thread(
         let mut pending_filter: Option<(Mode, f32, f32)> = None;
         let mut last_sent_filter: Option<(Mode, f32, f32)> = None;
         let mut filter_deadline = Instant::now();
+        // The socket this end has put the receiver on since the port opened, so
+        // the opening read's answer can be told from the truth (see where it is
+        // parsed). `None` until something is commanded, which is where a rig
+        // nobody has switched stays.
+        let mut last_sent_antenna: Option<&'static str> = None;
         let mut mode_memory = ModeMemory::default();
         // Only forward genuine changes so the engine isn't re-notified every poll.
         let mut emit_freq: Option<f64> = None;
@@ -1329,6 +1394,26 @@ fn serial_thread(
                     // handed hundreds of them.
                     Ok(CatCmd::Filter(m, lo, hi)) => pending_filter = Some((m, lo, hi)),
                     Ok(CatCmd::Power(frac)) => pending_power = Some(frac), // coalesce
+                    // Not coalesced and not rate limited: an antenna is a click
+                    // on a two-entry list, not a slider being dragged, and it
+                    // is one frame either way.
+                    Ok(CatCmd::Antenna(name)) => {
+                        let frames = protocol.set_antenna(&name);
+                        // A name the family does not have produces no frames,
+                        // and must not be recorded as where the receiver is.
+                        if !frames.is_empty()
+                            && let Some(&port) = protocol.antennas().iter().find(|&&a| a == name)
+                        {
+                            last_sent_antenna = Some(port);
+                        }
+                        let mut failed = false;
+                        for f in frames {
+                            failed |= write_frame(&mut *port, &f, &mut last_write);
+                        }
+                        if failed {
+                            break 'io true;
+                        }
+                    }
                     Ok(CatCmd::Stop) => return,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return,
@@ -1567,6 +1652,20 @@ fn serial_thread(
                             let _ = event_tx.send(u);
                             continue;
                         }
+                        // The socket the rig says it is on. Forwarded whole —
+                        // it is asked for once per connection, so there are no
+                        // repeats to dedup — unless it disagrees with a socket
+                        // this end has already commanded on this connection, in
+                        // which case it is the answer to the opening read
+                        // crossing that command on the wire. Adopting it there
+                        // would put the panel back on the port the operator
+                        // just left, and leave it disagreeing with the radio.
+                        if let CatUpdate::Antenna(a) = u {
+                            if last_sent_antenna.is_none_or(|w| w == a) {
+                                let _ = event_tx.send(u);
+                            }
+                            continue;
+                        }
                         // Forward only genuine changes (poll repeats otherwise).
                         let changed = match u {
                             CatUpdate::Freq(hz) => {
@@ -1593,6 +1692,7 @@ fn serial_thread(
                             CatUpdate::Swr(_)
                             | CatUpdate::Signal(_)
                             | CatUpdate::Power(_)
+                            | CatUpdate::Antenna(_)
                             | CatUpdate::Ptt(_) => false,
                         };
                         if changed {

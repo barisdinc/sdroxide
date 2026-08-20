@@ -39,11 +39,15 @@ pub(in crate::app) fn settings_cat_tab(
     ui: &mut egui::Ui,
     serial_ports: &[String],
     radio_edit: &mut Option<sdroxide_types::RadioConfig>,
+    // Which antenna socket the radio says it is receiving on — for the one
+    // family here whose rig has two.
+    antenna_rx: &str,
     can_probe: bool,
+    cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        CatFamily, CwKeying, DigiMode, EladTxInput, IcomModel, KenwoodSend, LineState, ModeControl,
-        Parity, PttMethod, SoundFormat, StopBits,
+        CatFamily, CwKeying, DigiMode, Direction, EladAntenna, EladTxInput, IcomModel, KenwoodSend,
+        LineState, ModeControl, Parity, PttMethod, SoundFormat, StopBits,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -357,6 +361,32 @@ pub(in crate::app) fn settings_cat_tab(
                 &EladTxInput::ALL,
                 EladTxInput::label,
             );
+            ui.end_row();
+
+            ui.label("Antenna").on_hover_text(
+                "Which of the two sockets on the back the receiver listens on — \
+                 the rig's AN command, which is menu 31 \"ANTENNAS\" at the \
+                 front panel and the \"ANT 1 2\" indicator on its display.\n\n\
+                 \"RTX\" is one antenna doing both jobs, on the M-type socket \
+                 that also carries transmit. \"RX only\" moves receive to the \
+                 second socket and leaves transmit on RTX — a receiving \
+                 antenna, a loop or a beverage, with the beam still on the \
+                 transmitter.\n\n\
+                 Applies immediately, and is read back from the radio when the \
+                 port opens: this is the rig's own setting rather than a copy \
+                 kept here.",
+            );
+            let shown = if antenna_rx.is_empty() { "—" } else { antenna_rx };
+            ComboBox::from_id_salt("cat_elad_antenna").selected_text(shown).show_ui(ui, |ui| {
+                for a in EladAntenna::ALL {
+                    if ui.selectable_label(antenna_rx == a.label(), a.label()).clicked() {
+                        cmds.push(Command::SetAntenna {
+                            dir: Direction::Rx,
+                            name: a.label().to_string(),
+                        });
+                    }
+                }
+            });
             ui.end_row();
 
             ui.label("Radio");
@@ -2956,6 +2986,11 @@ pub(in crate::app) fn settings_elad_tab(
     ui: &mut egui::Ui,
     devices: &[sdroxide_types::EladDevice],
     serial_ports: &[String],
+    // Which antenna socket the radio says it is receiving on. The rig's own
+    // setting, read when the control port opens — not a config field, because
+    // the radio remembers it across power cycles and a third copy of it here
+    // could only ever disagree.
+    antenna_rx: &str,
     audio_outputs: Option<&[String]>,
     radio_edit: &mut Option<sdroxide_types::RadioConfig>,
     rescan: &mut bool,
@@ -2964,7 +2999,8 @@ pub(in crate::app) fn settings_elad_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        ELAD_ATTENUATOR_DB, ELAD_SAMPLE_RATES, EladConfig, EladTxInput, ModeControl, PttMethod,
+        Direction, ELAD_ATTENUATOR_DB, ELAD_SAMPLE_RATES, EladAntenna, EladConfig, EladTxInput,
+        ModeControl, PttMethod,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -3170,6 +3206,36 @@ pub(in crate::app) fn settings_elad_tab(
             &EladTxInput::ALL,
             EladTxInput::label,
         );
+        ui.end_row();
+
+        ui.label("Antenna").on_hover_text(
+            "Which of the two sockets on the back the receiver listens on — the \
+             rig's AN command, which is menu 31 \"ANTENNAS\" at the front panel \
+             and the \"ANT 1 2\" indicator on its display.\n\n\
+             \"RTX\" is one antenna doing both jobs, on the M-type socket that \
+             also carries transmit. \"RX only\" moves receive to the second \
+             socket and leaves transmit on RTX — a receiving antenna, a loop or \
+             a beverage, with the beam still on the transmitter.\n\n\
+             It moves this whole receiver: the panadapter, the demodulators and \
+             the rig's own audio all come from the socket selected here.\n\n\
+             Applies immediately, and is read back from the radio when the \
+             control port opens — this is the rig's own setting, not a copy of \
+             it kept here.",
+        );
+        // Live state rather than a config field, so what is shown is where the
+        // radio actually is. Blank until the rig has answered (or an operator
+        // has chosen), which is exactly the moment nothing here is known.
+        let shown = if antenna_rx.is_empty() { "—" } else { antenna_rx };
+        ComboBox::from_id_salt("elad_antenna").selected_text(shown).show_ui(ui, |ui| {
+            for a in EladAntenna::ALL {
+                if ui.selectable_label(antenna_rx == a.label(), a.label()).clicked() {
+                    cmds.push(Command::SetAntenna {
+                        dir: Direction::Rx,
+                        name: a.label().to_string(),
+                    });
+                }
+            }
+        });
         ui.end_row();
 
         ui.label("Mode control");

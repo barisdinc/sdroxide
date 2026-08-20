@@ -1763,9 +1763,14 @@ impl SdroxideApp {
                         io.can_probe,
                         cmds,
                     ),
-                    Backend::Cat => {
-                        settings_cat_tab(ui, &self.serial_ports, io.radio_edit, io.can_probe)
-                    }
+                    Backend::Cat => settings_cat_tab(
+                        ui,
+                        &self.serial_ports,
+                        io.radio_edit,
+                        &self.state.antenna_rx,
+                        io.can_probe,
+                        cmds,
+                    ),
                     Backend::Tci => settings_tci_tab(
                         ui,
                         io.radio_edit,
@@ -1839,6 +1844,7 @@ impl SdroxideApp {
                         ui,
                         &self.elad_devices,
                         &self.serial_ports,
+                        &self.state.antenna_rx,
                         self.radio_audio_devices.as_ref().map(|(_, o)| o.as_slice()),
                         io.radio_edit,
                         io.elad_rescan,

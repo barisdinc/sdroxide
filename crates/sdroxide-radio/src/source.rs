@@ -62,6 +62,15 @@ pub enum ControlUpdate {
     /// with a correction, or two engines sharing one LO would chase each
     /// other forever.
     Center(f64),
+    /// Which antenna socket the radio says its receiver is on, by the name the
+    /// device lists in `DeviceCaps::antennas_rx`.
+    ///
+    /// The radio's own setting arriving, not a request: it lives in the rig,
+    /// survives a power cycle, and is read when the control link opens. The
+    /// engine *adopts* it — state and remembered preference both — rather than
+    /// putting a session file's port back on top of the one the operator left
+    /// the radio on.
+    Antenna(&'static str),
     /// The state of the radio's own PTT line — a foot switch, a mic button, or
     /// whatever is wired to the board's PTT input. `true` is keyed.
     ///

@@ -2419,6 +2419,78 @@ impl Default for EladConfig {
     }
 }
 
+/// Which socket an ELAD FDM-DUO receives on — the rig's `AN` command, and menu
+/// 31 `ANTENNAS` at the front panel.
+///
+/// The radio has two M-type sockets on the back: `RTX`, which is the transmit
+/// output *and* the receive input when only one antenna is in use, and `RX`,
+/// which is a receive-only input. `AN` is published as "the number of antennas
+/// used" rather than as a port selector, and that is exactly what it switches:
+/// one antenna means everything on the RTX socket, two means receiving on the
+/// RX socket while transmitting still leaves by RTX.
+///
+/// So this is a *receive* choice and only a receive choice — there is no
+/// transmit port to pick, which is why nothing here ever reaches
+/// `DeviceCaps::antennas_tx`. It moves the whole receiver with it: the audio the
+/// rig demodulates for itself and the wideband I/Q its DDC puts on the USB
+/// interface both come from the socket this selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EladAntenna {
+    /// `AN1;` — one antenna, on the RTX socket. The rig's own default.
+    #[default]
+    Rtx,
+    /// `AN2;` — two antennas: receive on the RX socket, transmit out of RTX.
+    RxOnly,
+}
+
+impl EladAntenna {
+    pub const ALL: [EladAntenna; 2] = [EladAntenna::Rtx, EladAntenna::RxOnly];
+
+    /// Both ports' names, in the order [`Self::ALL`] has them — the list a
+    /// front end publishes as `DeviceCaps::antennas_rx`.
+    pub const LABELS: [&'static str; 2] = ["RTX", "RX only"];
+
+    /// The name this port is known by everywhere outside this enum: in
+    /// `DeviceCaps::antennas_rx`, in the `SetAntenna` command, in the combo box
+    /// and in `session.json`.
+    ///
+    /// Named for the socket on the back of the radio rather than for the
+    /// command's own "1" and "2", which say nothing about where to plug a
+    /// cable — and spelled far enough apart that `RTX` and `RX` cannot be
+    /// misread for each other at a glance in a two-line list.
+    pub fn label(self) -> &'static str {
+        match self {
+            EladAntenna::Rtx => EladAntenna::LABELS[0],
+            EladAntenna::RxOnly => EladAntenna::LABELS[1],
+        }
+    }
+
+    /// The `AN` parameter, which is a count of antennas and not an index.
+    pub fn digit(self) -> char {
+        match self {
+            EladAntenna::Rtx => '1',
+            EladAntenna::RxOnly => '2',
+        }
+    }
+
+    /// The port a [`Self::label`] names, or `None` for a name from some other
+    /// radio — which is what a `session.json` carried over from another
+    /// interface holds.
+    pub fn from_label(name: &str) -> Option<EladAntenna> {
+        EladAntenna::ALL.into_iter().find(|a| a.label().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// The port an `AN` answer reports.
+    pub fn from_digit(c: char) -> Option<EladAntenna> {
+        EladAntenna::ALL.into_iter().find(|a| a.digit() == c)
+    }
+
+    /// Both ports, as `DeviceCaps::antennas_rx` wants them.
+    pub fn names() -> Vec<String> {
+        EladAntenna::LABELS.iter().map(|a| a.to_string()).collect()
+    }
+}
+
 impl EladConfig {
     /// Gain-element name for the attenuator — the one real gain this hardware
     /// has, so it is what the main window's Gain slider drives.

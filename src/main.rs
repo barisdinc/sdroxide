@@ -1469,7 +1469,11 @@ fn open_cat_source(radio: &RadioConfig) -> anyhow::Result<(Box<dyn IqSource>, De
         radio.radio_audio_out.as_deref(),
     )
     .context("opening CAT rig")?;
-    let caps = cat_caps(radio);
+    // The antenna sockets are the family's, so they come off the open rig
+    // rather than out of the config: only an ELAD FDM-DUO has two, and it has
+    // them whether it is reached through this interface or its own.
+    let mut caps = cat_caps(radio);
+    caps.antennas_rx = src.antennas().iter().map(|a| a.to_string()).collect();
     Ok((Box::new(src), caps))
 }
 
@@ -1753,6 +1757,17 @@ fn elad_caps(src: &elad_source::EladSource) -> DeviceCaps {
             max_db: 0.0,
             step_db: sdroxide_types::ELAD_ATTENUATOR_DB,
         }],
+        // The transceiver's two antenna sockets, on either control path — the
+        // rig's `AN` command. Receive only, because that is all `AN` moves: it
+        // chooses whether the receiver listens on the shared RTX socket or on
+        // the RX-only one, and transmit leaves by RTX either way. An FDM-S has
+        // one input and no way to be told anything, so it lists nothing and the
+        // control never appears.
+        antennas_rx: if src.switches_antenna() {
+            sdroxide_types::EladAntenna::names()
+        } else {
+            Vec::new()
+        },
         has_swr_sensor: tx && src.reads_rig(),
         has_fwd_power_sensor: false,
         ..DeviceCaps::default()

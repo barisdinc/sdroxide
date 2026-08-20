@@ -65,6 +65,13 @@ pub struct AudioCatSource {
     /// the gap between two honest answers: a window shorter than it would blank
     /// the needle between every pair of them. See `sdroxide_cat::signal_max_age`.
     signal_max_age: std::time::Duration,
+    /// Which antenna socket the rig says its receiver is on, for the one family
+    /// that has two (an ELAD FDM-DUO's `AN`). Empty on every other rig, where
+    /// there is no port to choose and nothing publishes a list to choose from.
+    ///
+    /// Starts empty rather than at a guess: it is filled in by the rig's own
+    /// answer to the read the control port sends as it opens.
+    antenna: String,
 }
 
 impl AudioCatSource {
@@ -219,7 +226,14 @@ impl AudioCatSource {
             last_telem: None,
             last_signal: None,
             signal_max_age,
+            antenna: String::new(),
         })
+    }
+
+    /// The antenna sockets this rig can put its receiver on, for
+    /// `DeviceCaps::antennas_rx`. Empty on every family but ELAD.
+    pub fn antennas(&self) -> &'static [&'static str] {
+        self.cat.antennas()
     }
 
     /// Report capture frames the sound card dropped since the last look.
@@ -504,6 +518,14 @@ impl IqSource for AudioCatSource {
                     }
                 }
                 sdroxide_cat::CatUpdate::Mode(m) => out.push(ControlUpdate::Mode(m)),
+                // Which antenna socket the rig is receiving on, read once when
+                // the port opened — the same shape as the power below, and
+                // adopted for the same reason: the operator set it on the radio
+                // and the radio is where it survived a power cycle.
+                sdroxide_cat::CatUpdate::Antenna(name) => {
+                    self.antenna = name.to_string();
+                    out.push(ControlUpdate::Antenna(name));
+                }
                 // The power the rig came up on, read once when the port opened.
                 // The engine adopts it into the Drive slider rather than
                 // commanding the rig back — the radio's own setting is the
@@ -533,6 +555,27 @@ impl IqSource for AudioCatSource {
     fn set_control_mode(&mut self, mode: Mode) -> Result<()> {
         self.cat.set_mode(mode);
         Ok(())
+    }
+
+    /// Put the receiver on one of the rig's antenna sockets — an ELAD FDM-DUO's
+    /// `AN`, and nothing else in this family: every other rig here publishes an
+    /// empty port list, so nothing ever asks.
+    ///
+    /// Receive only. The DUO transmits out of its RTX socket whichever socket
+    /// it is *listening* on, so there is no transmit port to pick.
+    fn set_antenna(&mut self, name: &str) -> Result<()> {
+        // A name this rig does not have — the port of whatever front end was on
+        // this radio before — is dropped by the handle rather than sent.
+        if !self.cat.antennas().contains(&name) {
+            return Ok(());
+        }
+        self.cat.set_antenna(name);
+        self.antenna = name.to_string();
+        Ok(())
+    }
+
+    fn current_antenna(&self) -> String {
+        self.antenna.clone()
     }
 
     /// The panel's width control, sent to the only filter in the path.

@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use sdroxide_elad::{EladHandle, Model};
 use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
-use sdroxide_types::{CatConfig, CatFamily, EladConfig, Mode, TxTelemetry};
+use sdroxide_types::{CatConfig, CatFamily, EladAntenna, EladConfig, Mode, TxTelemetry};
 
 /// How long the device may deliver nothing before the connection counts as
 /// dead. Same three seconds as the other native USB backends: this is a local
@@ -88,6 +88,18 @@ pub struct EladSource {
     /// a round trip to the stream thread.
     attenuator: bool,
     preselector: bool,
+
+    /// Which of the two antenna sockets the receiver is on.
+    ///
+    /// A mirror, like the two switches above, but unlike them it starts as a
+    /// *guess*: the setting lives in the radio and survives a power cycle, so
+    /// what it is when sdroxide arrives is the rig's business. Over the serial
+    /// link the guess is corrected within a poll — the port asks `AN;` as it
+    /// opens and the answer is adopted. Over the USB gateway nothing can be
+    /// asked, so it stays the radio's own default (one antenna, on RTX) until
+    /// the operator picks a socket, and picking one is what makes the two
+    /// agree.
+    antenna: EladAntenna,
 
     /// The frequency last commanded to the rig, held until the rig reports it
     /// back.
@@ -192,6 +204,7 @@ impl EladSource {
             tx_scratch: Vec::new(),
             attenuator: cfg.attenuator,
             preselector: cfg.preselector,
+            antenna: EladAntenna::default(),
             expect_freq: None,
             last_telem: None,
             last_signal: None,
@@ -231,6 +244,13 @@ impl EladSource {
             Control::Gateway => self.handle.send_cat(sdroxide_cat::elad::ptt_frame(on)),
             Control::None => {}
         }
+    }
+
+    /// Whether this rig has two antenna sockets to choose between — the
+    /// transceiver, on either of its two control paths. An FDM-S has one input
+    /// and nothing to send a command down.
+    pub fn switches_antenna(&self) -> bool {
+        self.model == Model::Duo && !matches!(self.control, Control::None)
     }
 }
 
@@ -310,6 +330,43 @@ impl IqSource for EladSource {
         )]
     }
 
+    /// Put the receiver on one of the transceiver's two antenna sockets.
+    ///
+    /// The rig's `AN` command, which is published as *how many* antennas are in
+    /// use rather than as a port selector — and that is what it does: one
+    /// antenna puts receive and transmit both on the RTX socket, two moves
+    /// receive to the RX-only socket and leaves transmit on RTX. So there is no
+    /// transmit port to choose here, and `set_tx_antenna` stays a no-op.
+    ///
+    /// It moves the whole receiver, this stream included: the DDC behind this
+    /// USB interface is fed from the same front end as the audio the rig
+    /// demodulates for itself.
+    fn set_antenna(&mut self, name: &str) -> Result<()> {
+        // Names from another radio are dropped rather than guessed at — a
+        // session file remembers the port of whatever interface was last on
+        // this radio, and that is one an ELAD has never heard of.
+        let Some(ant) = EladAntenna::from_label(name) else {
+            return Ok(());
+        };
+        match &self.control {
+            Control::Serial(cat) => cat.set_antenna(name),
+            Control::Gateway => self.handle.send_cat(sdroxide_cat::elad::antenna_frame(ant)),
+            Control::None => return Ok(()),
+        }
+        self.antenna = ant;
+        Ok(())
+    }
+
+    fn current_antenna(&self) -> String {
+        // Nothing at all on a receiver with one input: the engine records what
+        // this answers in `session.json`, and a port name from a device that
+        // has no ports would be a claim about hardware that isn't there.
+        if !self.switches_antenna() {
+            return String::new();
+        }
+        self.antenna.label().to_string()
+    }
+
     // ── Rig control ──────────────────────────────────────────────────────────
 
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
@@ -335,6 +392,16 @@ impl IqSource for EladSource {
                     }
                 }
                 sdroxide_cat::CatUpdate::Mode(m) => out.push(ControlUpdate::Mode(m)),
+                // Which socket the rig came up on, read once as the port
+                // opened. Adopted rather than overridden: it is the operator's
+                // own front-panel setting, and the serial thread has already
+                // dropped an answer that crossed a command from this end.
+                sdroxide_cat::CatUpdate::Antenna(name) => {
+                    if let Some(a) = EladAntenna::from_label(name) {
+                        self.antenna = a;
+                        out.push(ControlUpdate::Antenna(name));
+                    }
+                }
                 // The power the rig came up on, read once when the port opened.
                 sdroxide_cat::CatUpdate::Power(frac) => out.push(ControlUpdate::TxDrive(frac)),
                 // The ELAD family asks for no transmit state (see

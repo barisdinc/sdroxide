@@ -3044,6 +3044,34 @@ impl Engine {
                     let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
                 }
             }
+            // Which socket the radio is receiving on, as the radio itself
+            // reports it when its control link opens. Adopted for the same
+            // reason the drive above is: the operator set it on the rig, the
+            // rig is where it survived the power cycle, and nothing here knew
+            // it until it was asked. Remembered as well as shown, so the next
+            // open puts the front end back on the port the radio was actually
+            // on rather than on one a session file from another day remembers.
+            //
+            // Ignored, though, where this end has already asserted a port —
+            // which [`Engine::restore_antennas`] does at every open, from the
+            // command line or the session. There the radio has been *told*, and
+            // a report that disagrees is its answer to a read that crossed that
+            // command on the wire; adopting it would show a port the radio just
+            // left. A preference the front end does not have is no assertion:
+            // it belonged to some other interface, nothing was sent, and what
+            // the radio says is then the only account there is.
+            ControlUpdate::Antenna(name) => {
+                let asserted =
+                    self.want_antenna.0.as_ref().is_some_and(|w| self.caps.antennas_rx.contains(w));
+                if asserted {
+                    return;
+                }
+                if self.state.antenna_rx != name {
+                    self.state.antenna_rx = name.to_string();
+                    let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+                }
+                self.want_antenna.0 = Some(name.to_string());
+            }
             ControlUpdate::Ptt(closed) => self.apply_hw_ptt(closed),
             // An over the operator started at the radio. Recorded, never
             // answered: see [`ControlUpdate::RigTx`] for why keying along with

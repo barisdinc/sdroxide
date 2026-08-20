@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sdroxide_radio::{Complex32, EngineConfig, IqSource, Result, start_engine};
+use sdroxide_radio::{Complex32, ControlUpdate, EngineConfig, IqSource, Result, start_engine};
 use sdroxide_types::{Command, DeviceCaps, Direction, RadioEvent};
 
 const RATE: f64 = 48_000.0;
@@ -84,6 +84,63 @@ impl IqSource for Rig {
     }
     fn current_tx_antenna(&self) -> String {
         self.ports.tx()
+    }
+}
+
+/// A front end whose antenna is a setting in the *radio* rather than a switch
+/// in the driver — an ELAD FDM-DUO's `AN`, which lives in the transceiver, keeps
+/// its value across a power cycle, and is read back when the control link opens.
+/// Such a rig announces its port instead of being asked for one.
+struct ReportingRig {
+    ports: Ports,
+    /// The port the radio reports, once, the first time it is polled.
+    report: Option<&'static str>,
+}
+
+impl IqSource for ReportingRig {
+    fn sample_rate(&self) -> f64 {
+        RATE
+    }
+    fn center_hz(&self) -> f64 {
+        CENTER
+    }
+    fn set_center_hz(&mut self, _hz: f64) -> Result<()> {
+        Ok(())
+    }
+    fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = buf.len().min(256);
+        buf[..n].fill(Complex32::new(0.0, 0.0));
+        Ok(n)
+    }
+    fn describe(&self) -> String {
+        "rig that reports its own port".into()
+    }
+    fn poll_control(&mut self) -> Vec<ControlUpdate> {
+        match self.report.take() {
+            // Recorded as where the hardware is, but not as something that was
+            // *asked* of it: the operator set this at the front panel, and all
+            // that has happened here is finding out.
+            //
+            // Unless something *has* been asked of it since, in which case this
+            // is a stale answer that crossed that command on the wire — the
+            // radio has moved on, and the report says where it used to be.
+            Some(name) => {
+                if self.ports.asked.lock().unwrap().is_empty() {
+                    *self.ports.rx.lock().unwrap() = name.into();
+                }
+                vec![ControlUpdate::Antenna(name)]
+            }
+            None => Vec::new(),
+        }
+    }
+    fn set_antenna(&mut self, name: &str) -> Result<()> {
+        self.ports.asked.lock().unwrap().push((Direction::Rx, name.into()));
+        *self.ports.rx.lock().unwrap() = name.into();
+        Ok(())
+    }
+    fn current_antenna(&self) -> String {
+        self.ports.rx()
     }
 }
 
@@ -221,6 +278,103 @@ fn a_reconnect_returns_to_the_selected_antenna() {
         "the reopened front end must be put back on the operator's port"
     );
     assert_eq!(after.rx(), "LNAW", "and the new device is the one that was asked");
+
+    drop(h);
+    let _ = thread.map(|t| t.join());
+}
+
+/// A radio that carries its own antenna switch is *asked* which port it is on,
+/// not told — the setting is in the rig and survived its last power cycle. What
+/// it answers has to end up on screen, and has to be remembered: the next time
+/// this front end is opened, putting a session file's port back on top of the
+/// one the operator left the radio on would move an antenna relay nobody
+/// touched.
+#[test]
+fn the_port_the_radio_reports_is_adopted_and_remembered() {
+    // The replacement a reconnect hands back: a fresh device, on its default.
+    let after = Ports::fresh();
+    let handed = after.clone();
+    let reopen: sdroxide_radio::ReopenFn = Box::new(move |_center: f64| {
+        Ok((
+            Box::new(ReportingRig { ports: handed.clone(), report: None }) as Box<dyn IqSource>,
+            caps(),
+        ))
+    });
+
+    let before = Ports::fresh();
+    let cfg = EngineConfig { reopen: Some(reopen), ..Default::default() };
+    let mut h = start_engine(
+        Box::new(ReportingRig { ports: before.clone(), report: Some("LNAW") }),
+        caps(),
+        cfg,
+    );
+    let thread = h.thread.take();
+
+    assert!(
+        wait_for_state(&h.event_rx, |s| s.antenna_rx == "LNAW"),
+        "the port the radio reported must be the one on screen"
+    );
+    assert!(
+        before.asked().is_empty(),
+        "adopting a port must not command the radio back to anything"
+    );
+
+    // Rebuild the interface: the new device comes up on its driver default, and
+    // the port the *radio* reported is the one that has to be put back.
+    h.swap_tx.send(sdroxide_radio::EngineSwap::ReopenSource).unwrap();
+    assert!(wait_for_state(&h.event_rx, |s| s.antenna_rx == "LNAW"));
+    assert_eq!(after.rx(), "LNAW", "the reported port outlived the device that reported it");
+
+    drop(h);
+    let _ = thread.map(|t| t.join());
+}
+
+/// The other half of the rule above: a port this end has already *asserted*
+/// outranks what the radio says about itself.
+///
+/// Every open re-asserts the remembered port, and the radio is read at the same
+/// moment, so the two cross on the wire as a matter of course: the answer
+/// describes the socket the rig was on a fraction of a second before it was told
+/// to move. Adopting that would show — and then remember — the port the operator
+/// had just left, on a radio that is no longer on it.
+#[test]
+fn a_port_the_operator_asked_for_outranks_what_the_radio_reports() {
+    let ports = Ports::fresh();
+    let cfg = EngineConfig {
+        // What the operator wants, from the command line or the session.
+        initial_antenna: (Some("LNAW".into()), None),
+        ..Default::default()
+    };
+    // What the radio answers: where it was before the command reached it.
+    let mut h = start_engine(
+        Box::new(ReportingRig { ports: ports.clone(), report: Some("LNAH") }),
+        caps(),
+        cfg,
+    );
+    let thread = h.thread.take();
+
+    assert!(wait_for_state(&h.event_rx, |s| s.antenna_rx == "LNAW"));
+    assert_eq!(ports.rx(), "LNAW", "the radio was told, and that is where it is");
+
+    // Every state published from here on has to still say LNAW. The report is
+    // polled within a loop or two of the engine starting, and adopting it would
+    // publish a state saying otherwise — which is precisely what an operator
+    // would see on screen.
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        if let Ok(RadioEvent::State(s)) = h.event_rx.recv_timeout(Duration::from_millis(50)) {
+            assert_eq!(
+                s.antenna_rx, "LNAW",
+                "a stale report must not move the panel off the port that was asked for"
+            );
+        }
+    }
+    assert_eq!(ports.rx(), "LNAW", "and the radio must be left where it was told");
+    assert_eq!(
+        ports.asked(),
+        vec![(Direction::Rx, "LNAW".to_string())],
+        "nothing may be re-commanded on the strength of the report either"
+    );
 
     drop(h);
     let _ = thread.map(|t| t.join());

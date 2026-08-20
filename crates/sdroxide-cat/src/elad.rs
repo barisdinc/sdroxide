@@ -22,6 +22,11 @@
 //!   behind one command, and the mode digit selects which — see [`filter_index`].
 //! * **Split is `SP`, and `FR0;` does not cancel it.** `SP0;` is the only thing
 //!   that does.
+//! * **The antenna is a *count*, not a port index.** `AN1;` is one antenna, on
+//!   the RTX socket; `AN2;` is two — receive on the RX-only socket, transmit
+//!   still out of RTX. It is read once at open (`AN;`) and otherwise left
+//!   alone, because it is the operator's own front-panel setting (menu 31
+//!   `ANTENNAS`) and it survives a power cycle.
 //!
 //! There is no DATA mode and no `DA` flag: `MD` has six positions and none of
 //! them is a data position. Digital modes therefore go out as plain USB or LSB,
@@ -39,7 +44,7 @@
 //! available. Everything below is transcribed from the command tables.
 
 use crate::{CatUpdate, Protocol};
-use sdroxide_types::{EladTxInput, Mode};
+use sdroxide_types::{EladAntenna, EladTxInput, Mode};
 use tracing::{debug, info};
 
 /// Digits in the `FA`/`FB` frequency field — "Frequency in Hz (11 digit)",
@@ -135,6 +140,26 @@ pub fn ptt_frame(on: bool) -> String {
     // TUNE — a keyed carrier, not an over. The bare `TX;` the manual's own
     // examples use is what goes out; `RX;` unkeys.
     if on { "TX;".to_string() } else { "RX;".to_string() }
+}
+
+/// The `AN` frame that puts the receiver on `ant`.
+///
+/// Public for the same reason the three above are: an FDM-DUO on nothing but
+/// its receive cable is driven through the USB gateway, and the antenna is one
+/// of the things that still works there.
+pub fn antenna_frame(ant: EladAntenna) -> String {
+    format!("AN{};", ant.digit())
+}
+
+/// The frame that asks which socket the rig is receiving on.
+///
+/// Sent once when the port opens and never polled. The setting lives in the
+/// radio and survives a power cycle, so what it is at the moment sdroxide
+/// arrives is a question with an answer worth having — but it is also a
+/// front-panel menu item nobody changes mid-over, and this family's answer
+/// costs the same bus time as a dial poll.
+pub fn read_antenna_frame() -> String {
+    "AN;".to_string()
 }
 
 pub struct Elad {
@@ -380,6 +405,25 @@ impl Protocol for Elad {
         true
     }
 
+    fn antennas(&self) -> &'static [&'static str] {
+        &EladAntenna::LABELS
+    }
+
+    fn set_antenna(&mut self, name: &str) -> Vec<Vec<u8>> {
+        // A name this family does not have is dropped rather than guessed at.
+        // It arrives when a session file remembers the port of whatever radio
+        // was on this interface last, and a guess would move an antenna relay
+        // on the strength of a name from another rig.
+        match EladAntenna::from_label(name) {
+            Some(a) => vec![antenna_frame(a).into_bytes()],
+            None => Vec::new(),
+        }
+    }
+
+    fn read_antenna(&self) -> Vec<Vec<u8>> {
+        vec![read_antenna_frame().into_bytes()]
+    }
+
     fn parse(&mut self, buf: &mut Vec<u8>) -> Vec<CatUpdate> {
         self.buf.push_str(&String::from_utf8_lossy(buf));
         buf.clear();
@@ -420,6 +464,12 @@ impl Protocol for Elad {
                         *TX_POWER_STEPS_W.get(code as usize).unwrap_or(&0.0)
                     };
                     out.push(CatUpdate::Power((w / FULL_POWER_W).clamp(0.0, 1.0)));
+                }
+            } else if let Some(rest) = msg.strip_prefix("AN") {
+                // "How many antennas" as the rig puts it, which is the same
+                // question as "which socket is the receiver on".
+                if let Some(a) = rest.chars().next().and_then(EladAntenna::from_digit) {
+                    out.push(CatUpdate::Antenna(a.label()));
                 }
             } else if let Some(rest) = msg.strip_prefix("RI") {
                 // Not reported, only logged. The manual gives P2 as the "RSSI
@@ -488,6 +538,57 @@ mod tests {
         // Yaesu's nine and Icom's decimal form are not frequencies here.
         assert!(parse_str(&mut e, "FA014074000;").is_empty());
         assert!(parse_str(&mut e, "FAxxxxxxxxxxx;").is_empty());
+    }
+
+    /// `AN` is published as a *count* of antennas, not a port index, and the
+    /// count is what goes on the wire: one antenna is the shared RTX socket,
+    /// two is the receive-only one. Getting this backwards would move the
+    /// receiver to a socket with nothing on it and look exactly like a dead
+    /// band.
+    #[test]
+    fn the_antenna_command_carries_a_count_of_antennas() {
+        let mut e = elad();
+        assert_eq!(frames(e.set_antenna("RTX")), vec!["AN1;"]);
+        assert_eq!(frames(e.set_antenna("RX only")), vec!["AN2;"]);
+        assert_eq!(frames(e.read_antenna()), vec!["AN;"]);
+        // Both sockets are offered, and by the names the rest of sdroxide uses.
+        assert_eq!(e.antennas(), &["RTX", "RX only"]);
+    }
+
+    /// A name from another radio must not move an antenna relay. `session.json`
+    /// remembers the port of whatever front end was last on this radio, and a
+    /// LimeSDR's LNAH is what that looks like on the way in.
+    #[test]
+    fn a_port_this_family_does_not_have_is_not_guessed_at() {
+        let mut e = elad();
+        assert!(e.set_antenna("LNAH").is_empty());
+        assert!(e.set_antenna("").is_empty());
+        assert!(e.set_antenna("ANT 2").is_empty());
+        // The rig's own names still work whatever case they come back in — an
+        // operator's hand-edited session file is a file like any other.
+        assert_eq!(frames(e.set_antenna("rx only")), vec!["AN2;"]);
+    }
+
+    /// What the rig answers has to be the name it was asked for, or the panel
+    /// and the radio spend the session disagreeing about where the aerial is.
+    #[test]
+    fn every_socket_survives_a_round_trip() {
+        for a in EladAntenna::ALL {
+            let mut e = elad();
+            let sent = String::from_utf8(e.set_antenna(a.label()).concat()).unwrap();
+            let reply = sent.clone(); // the ANSWER form and the SET form are the same
+            assert_eq!(
+                parse_str(&mut e, &reply),
+                vec![CatUpdate::Antenna(a.label())],
+                "{} was set with {sent} and read back as something else",
+                a.label()
+            );
+        }
+        // A count the rig has no meaning for is not a socket.
+        let mut e = elad();
+        assert!(parse_str(&mut e, "AN0;").is_empty());
+        assert!(parse_str(&mut e, "AN3;").is_empty());
+        assert!(parse_str(&mut e, "AN;").is_empty());
     }
 
     #[test]

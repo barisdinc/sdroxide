@@ -3819,6 +3819,14 @@ setup and for radios whose keyer sdroxide cannot drive.
 > the family selects where the radio takes transmit audio from: leave it on
 > `USB audio` unless you talk into the radio's own microphone.
 >
+> **Antenna** picks which of the radio's two rear sockets the receiver listens
+> on — its `AN` command, menu 31 `ANTENNAS`, the `ANT 1 2` indicator on its
+> display. `RTX` is one antenna doing both jobs; `RX only` moves receive to the
+> second socket and leaves transmit on RTX, which is the arrangement for a
+> receiving antenna with the beam still on the transmitter. It applies
+> immediately and is remembered, and until you have picked one it shows the rig's
+> own setting, read when the port opens.
+>
 > There is no DATA mode on an FDM-DUO, so digital modes go out as plain USB or
 > LSB and which input the radio transmits is the **Transmit input** setting
 > rather than anything the mode says. There is no text keyer either — `SW` plays
@@ -5363,6 +5371,35 @@ window's Gain slider. The filters are the low-pass bank in front of the ADC:
 bypassing them gives the widest view and the worst behaviour near strong
 out-of-band signals, so leave them in unless you are deliberately listening
 outside the filtered range.
+
+**Antenna (FDM-DUO only).** The radio has two M-type sockets on the back and
+this chooses which one the receiver listens on — the rig's `AN` command, which
+is menu 31 `ANTENNAS` at the front panel and the `ANT 1 2` indicator on its
+display:
+
+| Setting | The radio's menu | What is where |
+|---|---|---|
+| **RTX** | ANTENNAS = 1 | One antenna doing both jobs, on the socket that also carries transmit |
+| **RX only** | ANTENNAS = 2 | Receive on the second socket, transmit still out of RTX |
+
+"RX only" is the arrangement for a receiving antenna — a loop, a beverage, a
+low-band wire — with the beam left on the transmitter. It moves the *whole*
+receiver: the panadapter, the demodulators, the skimmers and the radio's own
+audio all come from the socket selected here, because they are all fed from the
+one ADC behind it.
+
+The choice applies immediately and is remembered, and every start re-asserts it
+on the radio — the antenna belongs to the station's coax rather than to the
+radio's memory. Until you have picked one, what is shown is the rig's own
+setting, read when the control port opens: a socket chosen at the front panel
+with sdroxide not running is adopted rather than overridden. On an FDM-DUO
+reached through its receive cable alone the command still goes out, but nothing
+can be read back, so the setting shown is the one you last picked rather than one
+the radio confirmed.
+
+The same control is on the **CAT radios** tab for an FDM-DUO driven over CAT
+alone ([6.2.2](#622-cat-radios-serial-control--usb-audio)) — it is a rig
+command, so it works wherever the rig is reached.
 
 **Rig control (FDM-DUO only).** Set the serial port and the baud rate to match
 menu 70 `CAT BAUD` on the radio, which ships at **38400**. With the port set you
