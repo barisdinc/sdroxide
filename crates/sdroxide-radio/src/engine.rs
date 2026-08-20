@@ -1336,6 +1336,12 @@ struct Engine {
     /// only while a digital mode is active.
     digi: Option<Box<dyn DigiEngine>>,
     digi_config: DigiConfig,
+    /// The band the running controller's transmit offset belongs to, so a move
+    /// to another one can be noticed. `None` means "not yet applied", which is
+    /// how a fresh controller asks for its band's stored offset: startup and a
+    /// mode change both go through the same path as a retune that way, rather
+    /// than each needing its own hook.
+    digi_tx_band: Option<sdroxide_types::Band>,
     /// True while the current TX burst is driven by the digi engine.
     digi_tx: bool,
     /// WSPR band hopping has been stood down because the operator moved the
@@ -1937,6 +1943,7 @@ fn engine_thread(
         audio_nr_level: NrLevel::Off,
         digi: None,
         digi_config,
+        digi_tx_band: None,
         digi_tx: false,
         hop_suspended: false,
         voice: VoiceKeyer::load(),
@@ -3382,6 +3389,32 @@ impl Engine {
 
     /// Tick the FT8/FT4 controller and apply its actions (emit events, key/
     /// unkey PTT). Owned actions avoid a `&mut self.digi` / `&mut self` clash.
+    /// Apply the transmit offset stored for the band the dial is on, when that
+    /// band has changed since the last one applied.
+    ///
+    /// Called from the poll rather than hooked onto the places that assign
+    /// `state.band`, of which there are four: two retune paths, a region change
+    /// and a band-plan reload, the last two moving the band under a dial that
+    /// never moved. One check at a known point covers all four and cannot be
+    /// forgotten by a fifth.
+    ///
+    /// A band with nothing stored is left alone rather than reset to 1500. The
+    /// operator is mid-session on a frequency they chose, and the memory has
+    /// nothing better to offer than what is already there.
+    fn follow_band_tx_offset(&mut self) {
+        let band = self.state.band;
+        if self.digi_tx_band == Some(band) {
+            return;
+        }
+        self.digi_tx_band = Some(band);
+        let Some(hz) = self.digi_config.tx_audio_hz.get(&band).copied() else { return };
+        if let Some(d) = self.digi.as_mut() {
+            // `restore_audio_hz`, not `set_audio_hz`: this is the one move that
+            // goes through a hold. See the trait method.
+            d.restore_audio_hz(hz);
+        }
+    }
+
     fn poll_digi(&mut self) {
         // A message the radio was keying itself has run its length: it is off
         // the air, so the station interlock goes back. Not while an ordinary
@@ -3394,6 +3427,7 @@ impl Engine {
                 self.release_tx_gate();
             }
         }
+        self.follow_band_tx_offset();
         let Some(digi) = self.digi.as_mut() else { return };
         let dial = self.state.rx_freq_hz();
         let actions = digi.poll(SystemTime::now(), dial);
@@ -3649,6 +3683,11 @@ impl Engine {
         // session a port whose other end has gone.
         self.packet_port = None;
         self.digi = Some(self.make_digi(mode, tap_rate));
+        // The new controller starts at the mode's default 1500 Hz whatever the
+        // last one was on, so the band's stored offset has to be applied again.
+        // Clearing this leaves that to `follow_band_tx_offset` on the next poll
+        // rather than repeating it here.
+        self.digi_tx_band = None;
         if mode == Mode::Cw {
             self.source.set_cw_wpm(self.digi_config.cw_wpm);
         }
@@ -4549,6 +4588,7 @@ impl Engine {
 
             // Digital modes (FT8/FT4).
             SetDigiConfig(c) => {
+                let c = keep_engine_owned(c, &self.digi_config);
                 self.digi_config = c.clone();
                 if let Some(d) = self.digi.as_mut() {
                     d.set_config(c);
@@ -4577,6 +4617,29 @@ impl Engine {
                     d.set_audio_hz(hz);
                 }
                 self.sync_cw_filter();
+                // Remembered against the band, and only here: this arm is the
+                // operator's own route (the offset box, the nudge chips, a click
+                // on a decode or the waterfall). The automatic movers never
+                // reach it, which is intended — the quietest slot this over is
+                // not a preference, and saving it would overwrite the figure
+                // that was chosen on purpose.
+                //
+                // Read back from the controller rather than stored as asked,
+                // because `hz` is a request: a hold refuses it outright and the
+                // Fox zone floors it, so the value on the air is the only one
+                // worth restoring later.
+                if let Some(actual) = self.digi.as_ref().map(|d| d.audio_hz()) {
+                    let band = self.state.band;
+                    if self.digi_config.tx_audio_hz.insert(band, actual) != Some(actual) {
+                        // Saved on every change, as every other setting here is.
+                        // The nudge chips can write repeatedly, which is a few
+                        // hundred bytes of JSON either way; the alternative is a
+                        // debounce that loses the last move on a crash.
+                        if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
+                            warn!("saving digi config: {e}");
+                        }
+                    }
+                }
             }
             DigiCallCq => {
                 if let Some(d) = self.digi.as_mut() {
@@ -8072,6 +8135,51 @@ impl Engine {
                      --oob-tx, if you are licensed to transmit here)",
                 );
             }
+            // The dial is not what goes out. A digital mode transmits at the
+            // dial PLUS its audio offset, so every check above — this radio's
+            // range, the amateur-band rail — has been vetting a frequency we do
+            // not radiate. On most bands the gap does not matter, because the
+            // conventional dial sits kilohertz below the edge. Where a licence
+            // is narrower than the band plan it matters entirely.
+            //
+            // UK 60 m is the case that earned it: on a 5357 kHz dial the
+            // allocation ends at 5358.0, an audio offset over 1 kHz is out of
+            // band, and `Band::containing` says 60 m throughout because the
+            // built-in table carries the WRC-15 allocation (5351.5–5366.5) that
+            // most of Region 1 actually has.
+            //
+            // So this is checked against the SUB-SEGMENTS rather than the band
+            // edges, because `bandplan.json` holds one range per band and eleven
+            // would be needed. An operator whose licence is narrower says so by
+            // narrowing the segments in that file; nothing here is UK-specific.
+            //
+            // It fails OPEN where the table says nothing: unless the dial is
+            // inside a listed segment, no opinion is offered. A band plan with a
+            // gap in it must not become a transmit lockout for the operator who
+            // is legitimately in that gap.
+            if self.tx_ham_only
+                && let Some(d) = self.digi.as_ref()
+                && let Some(bw) = d.mode().occupied_bw_hz()
+                && sdroxide_types::segment_kind_at(txf).is_some()
+            {
+                // Upper sideband, and the offset is the signal's LOWEST tone —
+                // the figure the waterfall shows and the one WSJT-X's Tx Freq
+                // means — so the emission runs from there up by its bandwidth.
+                let lo = txf + f64::from(d.audio_hz());
+                let hi = lo + f64::from(bw);
+                if !sdroxide_types::span_within_segment(lo, hi) {
+                    return self.deny_tx(&format!(
+                        "{:.3} kHz dial + {:.0} Hz offset puts {} from {:.3} to {:.3} kHz, which \
+                         leaves the band plan's segment — lower the transmit offset, or widen \
+                         the segment in bandplan.json if your licence allows it",
+                        txf / 1e3,
+                        d.audio_hz(),
+                        d.mode().label(),
+                        lo / 1e3,
+                        hi / 1e3,
+                    ));
+                }
+            }
             // Assert the app's current mode and power levels to the rig before
             // keying, so a CAT/TCI rig transmits in the right modulation at the
             // right drive even when the operator hasn't touched those controls
@@ -9167,6 +9275,52 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageLuma8(img).write_to(&mut buf, image::ImageFormat::Png).ok()?;
     Some(buf.into_inner())
+}
+
+/// Replace the fields of an incoming [`DigiConfig`] that the engine owns rather
+/// than the client, leaving every genuine setting as sent.
+///
+/// Only `tx_audio_hz` so far, the per-band transmit offsets. They ride in
+/// `DigiConfig` because that is what reaches the config file, not because a
+/// client has any business setting them, and the panel seeds its editable copy
+/// from the first status and owns it from then on. So an incoming map is always
+/// a stale snapshot, and taking it discards every offset learned since that
+/// client started.
+///
+/// Found the hard way, minutes after the offsets went in. 60 m's was set,
+/// recorded and saved; ticking Hold TX a moment later sent a copy seeded before
+/// it existed, and the empty map went over the good file. Nothing reported a
+/// fault, because the write succeeded. A merge here cannot be defeated by a
+/// client that means no harm, where asking clients to send the map back
+/// faithfully could be defeated by any of them.
+fn keep_engine_owned(mut incoming: DigiConfig, current: &DigiConfig) -> DigiConfig {
+    incoming.tx_audio_hz = current.tx_audio_hz.clone();
+    incoming
+}
+
+#[cfg(test)]
+mod digi_config_tests {
+    use super::*;
+
+    #[test]
+    fn a_client_config_cannot_wipe_the_band_offsets() {
+        use sdroxide_types::Band;
+        // What the engine has learned: an offset the operator set on 60 m.
+        let mut current = DigiConfig::default();
+        current.tx_audio_hz.insert(Band::M60, 370.0);
+
+        // What a panel sends when a chip is toggled: its own copy, seeded
+        // before that offset existed, carrying an empty map and one real edit.
+        let incoming = DigiConfig { hold_tx_freq: true, ..DigiConfig::default() };
+
+        let merged = keep_engine_owned(incoming, &current);
+        assert_eq!(
+            merged.tx_audio_hz.get(&Band::M60).copied(),
+            Some(370.0),
+            "a chip toggle wiped the band offsets"
+        );
+        assert!(merged.hold_tx_freq, "and the edit the client actually made was lost");
+    }
 }
 
 #[cfg(test)]

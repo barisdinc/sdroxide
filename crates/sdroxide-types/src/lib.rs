@@ -69,7 +69,8 @@ pub use band_segments::{
     WSPR_DIALS, digi_channels, digi_channels_for, digi_channels_in, digi_channels_in_region,
     is_auto_digi, is_cw_segment, is_digi_segment, is_psk_segment, is_psk_segment_in,
     is_rtty_segment, is_rtty_segment_in, psk_ranges, psk_ranges_in, rtty_ranges, rtty_ranges_in,
-    segment_kind_at, segment_kind_at_in, segments, segments_in, sstv_dials_in,
+    segment_kind_at, segment_kind_at_in, segments, segments_in, span_within_segment,
+    span_within_segment_in, sstv_dials_in,
 };
 pub use bandplan::{BandPlan, BandPlanError, RegionPlan, band_plan, set_band_plan};
 pub use broadcast::{BroadcastStation, BroadcastStations};

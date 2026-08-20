@@ -897,10 +897,60 @@ pub struct DigiConfig {
     /// tells us nothing about who is transmitting there when *we* do — and the
     /// station that is will not hear a word. With this on, the engine picks the
     /// quietest spot in the period we are about to transmit in, from the
-    /// stations it has actually decoded there. Turn it off to hold a frequency
-    /// by hand. Ignored in DXpedition mode, where both roles have their
-    /// frequencies decided for them.
+    /// stations it has actually decoded there. Ignored in DXpedition mode, where
+    /// both roles have their frequencies decided for them.
+    ///
+    /// Turning it OFF does not hold the frequency: it selects the other mover,
+    /// answering on the frequency of the station being called. To hold, see
+    /// [`hold_tx_freq`](Self::hold_tx_freq).
     pub auto_tx_freq: bool,
+    /// FT8/FT4: never move the transmit tone by itself, whatever else asks.
+    ///
+    /// The third state the pair above cannot express. `auto_tx_freq` chooses
+    /// *which* automatic mover runs, not whether one does: on, the engine hunts
+    /// the quietest slot between 400 and 2600 Hz; off, it jumps onto whichever
+    /// station is being answered. Both are wrong where the licence, and not the
+    /// band plan, sets the ceiling.
+    ///
+    /// The case that earned it is UK 60 m. On a 5357 kHz dial the allocation
+    /// ends at 5358.0, so the transmit tone must stay under 1 kHz, and either
+    /// mover will walk out of the band unprompted between one over and the next.
+    ///
+    /// With this on nothing moves the tone: not answering a station, not the
+    /// call queue walking on, not calling CQ, not a click on a decode or on the
+    /// waterfall. Turn it off to move, then on again.
+    ///
+    /// Two exceptions, both of them moves the operator has effectively asked
+    /// for. A Hound follows the Fox that answered it, which is the
+    /// DXpedition's frequency to give and not ours to hold. And a change of
+    /// band restores that band's own entry in
+    /// [`tx_audio_hz`](Self::tx_audio_hz), because holding through a band
+    /// change is what carries a licence-edge figure onto a band that does not
+    /// want it.
+    #[serde(default)]
+    pub hold_tx_freq: bool,
+    /// FT8/FT4: the transmit tone offset last chosen on each band, in Hz.
+    ///
+    /// Per band and not one figure for the station, because the constraint that
+    /// makes an offset worth remembering belongs to the band rather than to the
+    /// operator. UK 60 m holds the tone under 1 kHz; carrying that figure onto
+    /// 20 m would sit us at the bottom of the passband for no reason, and
+    /// carrying 20 m's usual 1500 back onto 60 m is out of band. WSJT-X
+    /// remembers this by MODE instead, which does not help here: the edge is a
+    /// property of where the dial is, not of what is being sent.
+    ///
+    /// Only the operator's own moves are recorded. An automatic hop (the
+    /// quietest-slot hunt, or answering a station where it transmits) is the
+    /// engine's choice for one over and not a preference to restore next time.
+    ///
+    /// A band with no entry starts at the mode's usual 1500 Hz.
+    ///
+    /// `HashMap` rather than `BTreeMap` because [`Band`](crate::Band) has no
+    /// `Ord` and should not gain one: its declaration order is a postcard wire
+    /// index with later bands appended out of place, so a derived ordering
+    /// would read as frequency order without being it.
+    #[serde(default)]
+    pub tx_audio_hz: std::collections::HashMap<crate::Band, f32>,
     /// FT8: which side of a DXpedition pile-up to operate (see [`DxpedMode`]).
     /// Ignored in every other mode.
     pub dxped_mode: DxpedMode,
@@ -1202,6 +1252,8 @@ impl Default for DigiConfig {
             sstv_tx_ppm: 0.0,
             rf_paint_speed: 0.25,
             auto_tx_freq: true,
+            hold_tx_freq: false,
+            tx_audio_hz: std::collections::HashMap::new(),
             dxped_mode: DxpedMode::Normal,
             fox_slots: 3,
             rade_mute_analog: false,
@@ -1678,6 +1730,34 @@ pub fn qso_log_to_text(records: &[QsoRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_band_keyed_offset_survives_the_config_file() {
+        // The failure this guards compiles perfectly and only shows at runtime:
+        // serde_json requires map keys to be strings, so a key type that
+        // serialises as anything else would make `save_digi_config` fail at the
+        // moment the operator sets an offset, leaving a log line and no saved
+        // figure. `Band` is a unit-variant enum and serialises as its name, and
+        // this pins that rather than trusting it.
+        let mut cfg = DigiConfig { my_call: "G4MQL".into(), ..DigiConfig::default() };
+        cfg.tx_audio_hz.insert(crate::Band::M60, 370.0);
+        cfg.tx_audio_hz.insert(crate::Band::M20, 1500.0);
+        let text = serde_json::to_string(&cfg).expect("a band-keyed map must serialise");
+        assert!(text.contains(r#""M60":370.0"#), "60 m's offset is not in the file: {text}");
+
+        let back: DigiConfig = serde_json::from_str(&text).expect("and must load again");
+        assert_eq!(back.tx_audio_hz.get(&crate::Band::M60).copied(), Some(370.0));
+        assert_eq!(back.tx_audio_hz.get(&crate::Band::M20).copied(), Some(1500.0));
+
+        // And a `digi.json` written before this field existed still loads, which
+        // is what `#[serde(default)]` is there for. Anything else would greet an
+        // operator with a config reset to defaults on the first run after an
+        // update, callsign included.
+        let old = r#"{"my_call":"G4MQL","my_grid":"IO81VS"}"#;
+        let loaded: DigiConfig = serde_json::from_str(old).expect("an old config must still load");
+        assert_eq!(loaded.my_call, "G4MQL");
+        assert!(loaded.tx_audio_hz.is_empty(), "a band with no entry must have none");
+    }
 
     #[test]
     fn report_formatting() {

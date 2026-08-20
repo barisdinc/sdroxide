@@ -327,6 +327,13 @@ pub struct SdroxideApp {
     /// by the round-tripped status echo. Seeded once from the first status.
     digi_cfg_edit: sdroxide_types::DigiConfig,
     digi_cfg_seeded: bool,
+    /// The FT8/FT4 transmit-offset box, as typed. Kept as text rather than a
+    /// number so a half-finished figure survives between frames: parsing every
+    /// keystroke would rewrite "8" to 200 before the 2 was pressed.
+    ///
+    /// Refreshed from the engine only while the box is NOT focused, so the
+    /// operator's typing is never overwritten by the value they are replacing.
+    digi_tx_hz_edit: String,
     /// SSTV image-mode panel state (gallery, TX slots, message, textures).
     sstv: SstvUi,
     /// RF Paint (Spectrum Painting) panel state (text/image + previews).
@@ -920,6 +927,7 @@ impl SdroxideApp {
             fsq_rx_images: Vec::new(),
             fsq_img_inbox: std::sync::Arc::new(std::sync::Mutex::new(None)),
             digi_cfg_seeded: false,
+            digi_tx_hz_edit: String::new(),
             digi_preview: None,
             map_view: Default::default(),
             band_conditions: None,
