@@ -5682,8 +5682,9 @@ spoken announcements below them under `[speech]`:
   **Gradient** (a vertical shaded fill), **3D bevel** (a raised lit edge) or
   **Terminal** (drawn as if the screen were a character display — buttons read
   `[ LABEL ]` and invert when they are on, tick boxes read `[X]`, a slider is
-  an `=====#=====` gauge, a dropdown ends in a `v`, and it is all set in the
-  monospace face). Also applied immediately. The button style reaches past the
+  an `=====#=====` gauge, a dropdown ends in a `v`, tabs are folder edges made
+  of `+`, `-` and `|` standing open at the bottom, a multi-line text box is
+  framed the same way, and it is all set in the monospace face). Also applied immediately. The button style reaches past the
   buttons: text boxes, tick boxes, sliders and dropdowns all wear it too, with
   the controls you type into or drag along sunk into the panel and the ones
   you press standing proud of it — so Gradient and 3D bevel read as depth
