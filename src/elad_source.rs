@@ -15,22 +15,37 @@
 //! An FDM-S1 or FDM-S2 has only the first of the three and comes up
 //! receive-only, with no control path at all.
 //!
-//! # The dial is not the centre
+//! # The dial is not the centre — the rig's VFO is
 //!
 //! Unlike a CAT rig, this front end hands over a whole DDC window — 192 kHz at
 //! the least — so [`IqSource::center_is_dial`] is false and the engine tunes
-//! inside it in software. The transceiver's own VFO is put where sdroxide will
-//! *transmit* (see [`EladSource::set_tx_freq_hz`]), which is the dial in
-//! ordinary use and the transmit frequency under split or XIT.
+//! inside it in software.
+//!
+//! What that window is centred *on* is the transceiver's own VFO. The DDC is
+//! not a second receiver alongside the one the radio tunes for itself: move the
+//! VFO and the window moves with it, hertz for hertz. So the VFO is parked on
+//! the panadapter centre and left there for as long as the radio is receiving,
+//! the front-panel knob is read back as the *centre* being panned rather than
+//! the dial being tuned ([`EladSource::poll_control`]), and the transmit
+//! frequency is asserted at key-down and the centre put back on unkey.
+//!
+//! This file used to do the opposite — it pushed the receive dial at the VFO,
+//! which is what [`IqSource::set_tx_freq_hz`] invites — and the result was
+//! [issue #111]: every click on the waterfall slid the window by the distance
+//! clicked, underneath a panadapter that believed it had not moved, so the
+//! station being clicked on ran away across the screen instead of being tuned.
+//!
+//! [issue #111]: https://github.com/dividebysandwich/sdroxide/issues/111
 //!
 //! # Not verified against hardware
 //!
-//! Nothing here has been run against a radio. Two assumptions in particular
-//! deserve checking by the first person who can: that the DDC feeding this USB
-//! interface is independent of the receiver the transceiver uses for its own
-//! audio (so moving one does not move the other), and that the stream survives
-//! a transmit cycle. The second is assumed *not* to hold — the interface is
-//! declared half duplex — which is the safe way to be wrong.
+//! Almost nothing here has been run against a radio. One of the two assumptions
+//! this file was written on has now been settled the hard way, by an operator
+//! with an FDM-DUO: the DDC feeding this USB interface is emphatically *not*
+//! independent of the receiver the transceiver tunes for its own audio. The
+//! other still wants checking — whether the stream survives a transmit cycle.
+//! It is assumed *not* to (the interface is declared half duplex), which is the
+//! safe way to be wrong.
 
 use std::time::Duration;
 
@@ -42,6 +57,19 @@ use sdroxide_types::{CatConfig, CatFamily, EladAntenna, EladConfig, Mode, TxTele
 /// dead. Same three seconds as the other native USB backends: this is a local
 /// device, so there is no network to be briefly slow.
 const SILENCE_BEFORE_REOPEN: Duration = Duration::from_secs(3);
+
+/// How long a frequency we have commanded stands as an expectation before a
+/// disagreeing report is believed instead.
+///
+/// A radio does not move the instant it is told to, and the answer to a poll
+/// sent before our command can arrive after it — so for a moment after every
+/// re-centre the rig is honestly reporting a frequency we are in the middle of
+/// moving it away from. Adopting that as the window centre is how opening the
+/// interface with the radio parked on another band used to drag the dial to the
+/// edge of a window it was never in. Bounded rather than held until the
+/// expectation is met, because a command the rig quietly refused would
+/// otherwise leave every turn of the operator's knob ignored for ever.
+const FREQ_SETTLE: Duration = Duration::from_millis(1200);
 
 /// How long a reading from the rig's S-meter stands in for the next one — the
 /// same window `AudioCatSource` uses, and for the same reason: a gap between
@@ -104,14 +132,22 @@ pub struct EladSource {
     /// The frequency last commanded to the rig, held until the rig reports it
     /// back.
     ///
-    /// Without this, split and XIT feed back on themselves: we put the rig's
-    /// VFO on the *transmit* frequency ahead of key-down, the rig dutifully
-    /// reports having moved there, and the engine — which cannot tell that
-    /// report from the operator turning the knob — follows it with the receive
-    /// dial. Suppressing exactly one report per command leaves genuine
-    /// front-panel movements getting through, which is the whole point of
-    /// reading the rig at all.
-    expect_freq: Option<f64>,
+    /// Without this, our own commands feed back on themselves: we move the
+    /// VFO — to re-centre the window, or onto the transmit frequency for an
+    /// over — the rig dutifully reports having moved there, and this file,
+    /// which cannot tell that report from the operator turning the knob, reads
+    /// it as the window having been panned by hand. Suppressing our own
+    /// commands coming back — and, for [`FREQ_SETTLE`], whatever the rig says
+    /// on its way there — leaves genuine front-panel movements getting through,
+    /// which is the whole point of reading the rig at all.
+    expect_freq: Option<(f64, std::time::Instant)>,
+    /// Whether sdroxide is holding the rig keyed.
+    ///
+    /// For the length of an over the VFO is the *transmit* frequency rather
+    /// than the receive window's centre, so what the rig reports about its
+    /// frequency means something else and is ignored until [`Self::tx_end`] has
+    /// put the centre back.
+    keyed: bool,
     /// Latest SWR the rig reported while keyed, and the latest S-meter reading
     /// with the time it arrived. Held for the same reason `AudioCatSource`
     /// holds them: the engine's meter tick is far faster than the rig answers.
@@ -192,7 +228,7 @@ impl EladSource {
             .and_then(|(o, _)| sdroxide_dsp::MonoResampler::new(48_000.0, o.sample_rate));
 
         tracing::info!("ELAD source ready: {label}, center {center_hz:.0} Hz");
-        Ok(EladSource {
+        let mut src = EladSource {
             handle,
             control,
             center: center_hz,
@@ -206,11 +242,20 @@ impl EladSource {
             preselector: cfg.preselector,
             antenna: EladAntenna::default(),
             expect_freq: None,
+            keyed: false,
             last_telem: None,
             last_signal: None,
             signal_max_age,
             status,
-        })
+        };
+        // Put the transceiver's VFO on the window centre before the first
+        // sample is looked at. On a DUO that is where the window *is*, so the
+        // two agreeing is what makes the frequency axis true; the device was
+        // told the same number as it opened, and setting both leaves nothing
+        // resting on which of the two the radio's firmware actually obeys.
+        // Nothing to do on an FDM-S, which has no VFO and no way to be told.
+        src.command_freq(center_hz);
+        Ok(src)
     }
 
     pub fn model(&self) -> Model {
@@ -235,7 +280,7 @@ impl EladSource {
             Control::Gateway => self.handle.send_cat(sdroxide_cat::elad::freq_frame(hz)),
             Control::None => return,
         }
-        self.expect_freq = Some(hz);
+        self.expect_freq = Some((hz, std::time::Instant::now()));
     }
 
     fn command_ptt(&self, on: bool) {
@@ -263,15 +308,30 @@ impl IqSource for EladSource {
         self.center
     }
 
+    /// Move the window, which on a transceiver means moving its VFO.
+    ///
+    /// Both are commanded to the same frequency: the DDC tuning word through
+    /// the streaming interface, and the rig's VFO through whichever control
+    /// path there is. On an FDM-S only the first exists. On a DUO the VFO is
+    /// the one that decides — see the module header — and sending the tuning
+    /// word as well costs one control transfer and keeps this working whichever
+    /// way round it turns out to be.
+    ///
+    /// Not the VFO while keyed, though: it is carrying the transmit frequency
+    /// for the length of the over, and [`Self::tx_end`] is what puts it back.
     fn set_center_hz(&mut self, hz: f64) -> Result<()> {
         self.center = hz;
         self.handle.set_center_hz(hz);
+        if !self.keyed {
+            self.command_freq(hz);
+        }
         Ok(())
     }
 
     /// The DDC window is the panadapter and the dial moves inside it, the same
-    /// as any other SDR here. The transceiver's own VFO follows the *transmit*
-    /// frequency instead — see [`IqSource::set_tx_freq_hz`].
+    /// as any other SDR here. The transceiver's own VFO holds the *centre* of
+    /// that window rather than the dial, because on this radio the two are one
+    /// knob — see the module header.
     fn center_is_dial(&self) -> bool {
         false
     }
@@ -377,18 +437,37 @@ impl IqSource for EladSource {
         for u in cat.poll() {
             match u {
                 sdroxide_cat::CatUpdate::Freq(hz) => {
-                    // One report per command is ours coming back; see
-                    // `expect_freq`. Anything else is the operator's knob.
-                    let ours = self.expect_freq.is_some_and(|w| (w - hz).abs() < 1.0);
-                    // Retired either way, and the "either way" is the point: a
-                    // command the rig ignored because it was already there
-                    // never produces a report, and a guard left standing would
-                    // then swallow the operator's own next move to that same
-                    // frequency — leaving the dial and the radio silently a
-                    // band apart.
-                    self.expect_freq = None;
-                    if !ours {
-                        out.push(ControlUpdate::Freq(hz));
+                    // Nothing the rig says about its frequency means anything
+                    // while we are keying it: the VFO is the transmit frequency
+                    // for the length of the over, and reading that as the
+                    // window having moved would slide the panadapter sideways
+                    // on every key-down. `tx_end` puts it back, and the report
+                    // that follows is the honest one.
+                    if self.keyed {
+                        continue;
+                    }
+                    match self.expect_freq {
+                        // The rig arriving where we sent it. Retire the
+                        // expectation and say nothing: the centre is already
+                        // the number we commanded.
+                        Some((want, _)) if (want - hz).abs() < 1.0 => self.expect_freq = None,
+                        // Something else, with a command of ours still in
+                        // flight — the rig on its way, or an answer that
+                        // crossed our command on the wire. See `FREQ_SETTLE`.
+                        Some((_, at)) if at.elapsed() < FREQ_SETTLE => {}
+                        // The operator's knob, turned by hand. On this radio
+                        // that pans the DDC window rather than tuning inside
+                        // it, so it is the *centre* that has moved: the engine
+                        // adopts it, keeps the dial on the station it was
+                        // listening to (clamped into the new span), and — the
+                        // point of `Center` rather than `Freq` — sends nothing
+                        // back, so the operator's hand and our own re-centring
+                        // cannot fight over the knob.
+                        _ => {
+                            self.expect_freq = None;
+                            self.center = hz;
+                            out.push(ControlUpdate::Center(hz));
+                        }
                     }
                 }
                 sdroxide_cat::CatUpdate::Mode(m) => out.push(ControlUpdate::Mode(m)),
@@ -438,17 +517,23 @@ impl IqSource for EladSource {
         }
     }
 
-    /// Keep the transceiver's VFO on the frequency it would transmit on.
+    /// Deliberately nothing, on a radio whose VFO is carrying the receive
+    /// window.
     ///
-    /// The engine pushes this whenever it changes and while receiving, which is
-    /// exactly what a transmitter wants: the radio is already on frequency when
-    /// the key goes down rather than retuning into the first tens of
-    /// milliseconds of the over. In ordinary use it is the dial; under split or
-    /// XIT it is the transmit frequency, which is also what the radio's own
-    /// display should then be showing.
-    fn set_tx_freq_hz(&mut self, hz: f64) {
-        self.command_freq(hz);
-    }
+    /// The engine offers this so a rig can be moved onto the transmit frequency
+    /// *while still receiving* — an amplifier, a transverter or an antenna
+    /// tuner downstream has to be on the right band before any RF appears. This
+    /// radio has none of that behind it, only its own filter bank, and taking
+    /// the offer up is what caused [issue #111]: the VFO carries the DDC
+    /// window, so every dial move slid the window by the same amount and a
+    /// click on a station 30 kHz down the band walked that station 30 kHz up
+    /// the screen instead of tuning it.
+    ///
+    /// The transmit frequency is asserted at key-down instead — see
+    /// [`IqSource::tx_begin`], and [`IqSource::tx_end`] for the way back.
+    ///
+    /// [issue #111]: https://github.com/dividebysandwich/sdroxide/issues/111
+    fn set_tx_freq_hz(&mut self, _hz: f64) {}
 
     fn set_tx_drive(&mut self, frac: f64) {
         if let Control::Serial(cat) = &self.control {
@@ -476,11 +561,12 @@ impl IqSource for EladSource {
     // ── Transmit ─────────────────────────────────────────────────────────────
 
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {
-        // The engine has already pushed this frequency through
-        // `set_tx_freq_hz`, so this is a re-assertion rather than a retune —
-        // and the CAT driver drops a write that would not change anything.
-        // It is sent anyway because "the radio is where we last told it" is an
-        // assumption with a transmitter on the end of it.
+        // The VFO has been sitting on the receive window's centre, so this is a
+        // real retune and it has to land before the key does: it is the only
+        // thing that decides what frequency the over goes out on. Ordinarily
+        // the centre and the transmit frequency are within a window of each
+        // other; under split or XIT they need not be.
+        self.keyed = true;
         self.command_freq(center_hz);
         self.command_ptt(true);
         Ok(self.out.as_ref().map(|(o, _)| o.sample_rate).unwrap_or(48_000.0))
@@ -488,6 +574,12 @@ impl IqSource for EladSource {
 
     fn tx_end(&mut self) -> Result<()> {
         self.command_ptt(false);
+        // Give the receive window its centre back, in that order: the VFO is
+        // moved once the transmitter is off, never while it is on. Without
+        // this the panadapter would spend the rest of the session looking at
+        // wherever the last over went out.
+        self.keyed = false;
+        self.command_freq(self.center);
         self.last_telem = None; // drop the stale SWR reading on unkey
         Ok(())
     }

@@ -5403,10 +5403,10 @@ command, so it works wherever the rig is reached.
 
 **Rig control (FDM-DUO only).** Set the serial port and the baud rate to match
 menu 70 `CAT BAUD` on the radio, which ships at **38400**. With the port set you
-get everything a CAT radio gives: the dial follows the front-panel knob and vice
-versa, the mode, PTT, the radio's own S-meter and SWR, and its transmit power on
-the Drive slider (nine fixed steps from 0.3 W to 5 W, which is what the radio
-has rather than a continuous control).
+get everything a CAT radio gives: the front-panel knob moves the display (it
+pans the whole window — see below), the mode, PTT, the radio's own S-meter and
+SWR, and its transmit power on the Drive slider (nine fixed steps from 0.3 W to
+5 W, which is what the radio has rather than a continuous control).
 
 Leave the port **empty** and an FDM-DUO is still usable on its receive cable
 alone: the driver tunes, changes mode and keys through the CAT gateway on the
@@ -5423,12 +5423,28 @@ which is why this is a visible setting rather than an assumption. Pick the
 radio's own USB Audio device beside it, or under Settings → General → Radio
 audio.
 
-**The dial is not the panadapter centre.** Unlike a CAT radio feeding audio, this
-front end hands over a whole down-converter window, so the dial moves inside it
-in software the way it does on any other SDR here. The transceiver's own VFO is
-put where sdroxide will *transmit* — the dial in ordinary use, the transmit
-frequency under split or XIT — and it is put there while receiving, so the radio
-is already on frequency when the key goes down.
+**The dial is not the panadapter centre — the radio's VFO is.** Unlike a CAT
+radio feeding audio, this front end hands over a whole down-converter window, so
+the dial moves inside it in software the way it does on any other SDR here.
+
+What the window is centred on is the transceiver's own VFO: the receiver being
+streamed is the one the radio tunes for itself, so moving the VFO moves the
+window with it. sdroxide therefore parks the VFO on the **centre** of the
+panadapter and leaves it there while receiving — clicking a station 30 kHz down
+the band tunes it without the radio moving at all — and re-centres, which does
+move the radio, only when the dial would otherwise leave the window. Turning the
+**front-panel knob** pans the whole window and the dial stays on the station it
+was on, rather than the two fighting each other.
+
+The transmit frequency is asserted at key-down instead of being held ahead of
+time, and the centre is put back on unkey. That costs a few milliseconds at the
+start of an over and is invisible in use; what it buys is a panadapter that does
+not slide sideways every time you touch the dial.
+
+> Earlier versions held the VFO on the transmit frequency while receiving, which
+> on this radio dragged the window along with the dial: a click on a signal moved
+> that signal across the screen by the same distance instead of tuning it
+> ([issue #111](https://github.com/dividebysandwich/sdroxide/issues/111)).
 
 **CW is keyed by the radio's own key or paddle.** The FDM-DUO has no command
 that accepts text — its `SW` command plays one of the ten messages stored *in
@@ -5444,10 +5460,12 @@ the radio* — so the CW panel cannot key it over CAT. Menu 37 `CW IN` set to
 > sdroxide-elad --example probe` does the same from a terminal and also settles
 > what rate the device is really in.
 >
-> Two things in particular want checking by the first person who can: whether
-> the down-converter feeding this USB interface is independent of the receiver
-> the transceiver uses for its own audio, and whether the stream survives a
-> transmit cycle. The second is assumed *not* to hold — receive stops for the
+> One of the two things that wanted checking has now been answered on a real
+> FDM-DUO, and the answer was no: the down-converter feeding this USB interface
+> is *not* independent of the receiver the transceiver uses for its own audio —
+> they are one receiver, and the paragraph on the panadapter centre above is
+> what sdroxide now does about it. The other still stands: whether the stream
+> survives a transmit cycle. It is assumed *not* to — receive stops for the
 > length of an over — which is the safe way to be wrong.
 
 #### 6.2.17 LimeSDR family + LimeRFE (LimeSuite)
