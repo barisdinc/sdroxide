@@ -412,7 +412,14 @@ use sdroxide_types::{
 /// self-describing and `DeviceCaps` is sent whole: a v68 client would stop
 /// reading where the struct used to end and treat the remainder as the next
 /// message. Same reasoning as every other `DeviceCaps` append.
-pub const PROTO_VERSION: u16 = 69;
+///
+/// **70** — the flrig CAT family. `CatConfig` gained `flrig_addr` and
+/// `CatFamily` a trailing `Flrig` variant. The variant alone would be safe —
+/// postcard numbers variants by declaration index, and nobody sends a value
+/// they don't have — but the field sits mid-struct and `CatConfig` rides
+/// `Command::SetRadioConfig` whole, so for a v69 peer every byte after it
+/// shifts. `#[serde(default)]` covers the config file on disk, not the wire.
+pub const PROTO_VERSION: u16 = 70;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

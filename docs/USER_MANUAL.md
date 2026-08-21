@@ -3025,7 +3025,7 @@ release PTT teaches you nothing and lets you carry on transmitting into it. See
 trip; in `config.toml` the pair are `swr_guard` and `swr_limit`.
 
 It needs a rig that measures SWR and reports it over CAT or TCI — the Icom CI-V
-dialect, the Yaesu/Kenwood/Elecraft/ELAD dialects, `rigctld`, and TCI. On anything
+dialect, the Yaesu/Kenwood/Elecraft/ELAD dialects, `rigctld`, flrig, and TCI. On anything
 that never sends a figure (any IQ radio: HackRF, Pluto, RTL-SDR, an HPSDR
 board) the setting is simply inert, which is why it costs nothing to leave on.
 
@@ -3546,10 +3546,11 @@ is recording at all. Raising the rate raises that ceiling with it.
 
 - **Serial port** — the radio's CAT serial port. On Linux, USB-style ports
   (`/dev/ttyACM*`, `/dev/ttyUSB*`) are listed first.
-- **CAT family** — `Xiegu`, `Icom`, `Yaesu`, `Kenwood`, `Elecraft`, `ELAD`, or
-  `Hamlib rigctld (network)`. The six native profiles drive one manufacturer's
-  rigs each; the seventh talks to an already-running Hamlib daemon and covers
-  everything else, less well (see **rigctld address** below).
+- **CAT family** — `Xiegu`, `Icom`, `Yaesu`, `Kenwood`, `Elecraft`, `ELAD`,
+  `Hamlib rigctld (network)`, or `flrig (network)`. The six native profiles
+  drive one manufacturer's rigs each; the last two talk to an already-running
+  daemon — Hamlib's `rigctld`, or flrig — and cover everything else (see
+  **rigctld address** and **flrig address** below).
 
   Four of the native ones speak ASCII commands ending in `;` and look
   interchangeable, but they are not. A Kenwood driven as a Yaesu rejects every
@@ -3572,6 +3573,32 @@ is recording at all. Raising the rate raises that ceiling with it.
   does more, so prefer it. The serial settings disappear when this is selected,
   because the link is a socket; `PTT method` `DTR` and `RTS` key nothing over
   one, so use `CAT` or `VOX`.
+- **flrig address** (flrig only) — `host:port` of a running
+  [flrig](http://www.w1hkj.com/). `127.0.0.1:12345` is flrig's own default, on
+  this machine; the port is under flrig's **Config → Setup → Server**, and its
+  XML-RPC interface is on whenever flrig is running.
+
+  The other catch-all, and the one to pick where flrig already drives your
+  radio well: like the Hamlib option it talks to a daemon rather than the
+  radio, but through flrig's own per-model driver, and on a number of rigs
+  flrig's handling of the transmit power and the filter is the more faithful
+  of the two. It reaches the frequency, mode (by the rig's own mode names,
+  learned from flrig at connect), PTT both ways, transmit power — in whole
+  watts, scaled by the maximum the rig reports, so the **Drive** slider spans
+  the right range automatically — the receive bandwidth (flrig snaps a dragged
+  filter to the nearest one the rig has), the S-meter, and the SWR and
+  power-out meters while transmitting. It also shares the rig: flrig's own
+  panel and every other program pointed at flrig stay live alongside sdroxide.
+
+  What it does not reach: flrig's interface has no RIT/XIT clear (only split),
+  so unlike the native profiles a rig left with RIT on offsets the dial
+  unseen — check the radio's own display. Power is whole watts, so levels
+  under 1 W cannot be asked for. CW under `Rig keyer (CAT)` goes through
+  flrig's **cwio** keyer — a DTR/RTS line on a serial port configured inside
+  flrig itself (its **CW keying** dialog), not the rig's internal keyer — and
+  keys nothing until that port is set up there. The serial settings disappear
+  here too, and `PTT method` `DTR`/`RTS` key nothing over a socket: use `CAT`
+  or `VOX`.
 - **Radio** (Elecraft only) — not a setting, just a reminder of what the profile
   covers: the K3 command set, which the K3S, KX3, KX2 and K4 all answer. How
   many watts the **Drive** slider spans is read from the rig itself when the
@@ -3707,6 +3734,7 @@ Which radios can report it, and how:
 | Elecraft | `TQ;` | |
 | Kenwood | `IF;` | One character of the status reply, taken by position. A rig whose status string is a different length reports nothing rather than a guess. |
 | Hamlib `rigctld` | `t` | Whatever the daemon's own backend supports. |
+| flrig | `rig.get_ptt` | Whatever flrig's own driver for the rig supports. |
 | ELAD | — | No such read; an over keyed at the radio goes unnoticed. |
 
 **These reads need to be verified against real radios.** Each is taken

@@ -13,6 +13,7 @@ pub mod civ;
 /// carry a second copy of them.
 pub mod elad;
 mod elecraft;
+mod flrig;
 mod kenwood;
 mod rigctld;
 mod yaesu;
@@ -213,6 +214,14 @@ trait Protocol: Send {
         Vec::new()
     }
 
+    /// Frames written once when the link opens, before anything else — for a
+    /// profile that must ask what is on the other end before its other frames
+    /// mean anything: the model, the power scale, the mode names. Empty — the
+    /// default — for every family that needs no introduction.
+    fn open_requests(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
     /// Frames that switch the rig's *own* RIT, XIT and split off, sent once
     /// when the port opens. sdroxide carries all three on the dial (the rig's
     /// dial is the only frequency control a CAT rig gives us), so anything the
@@ -355,6 +364,21 @@ trait Protocol: Send {
     }
 
     fn parse(&mut self, buf: &mut Vec<u8>) -> Vec<CatUpdate>;
+
+    /// Called with every protocol-generated frame the moment it is actually
+    /// written to the link — and only then. What a profile *generates* is not
+    /// what goes out: `set_mode` is also called purely to compute a frame for
+    /// comparison (see [`ModeMemory`]), and a frame the dedup discards was
+    /// never sent. A profile whose replies do not name the request they answer
+    /// — flrig's XML-RPC — correlates on this instead of on the reply.
+    fn wrote(&mut self, _frame: &[u8]) {}
+
+    /// The link has (re)opened. Anything a profile holds that describes bytes
+    /// in flight — a half-read reply, a queue of requests awaiting answers —
+    /// is about a connection that no longer exists and must be dropped here.
+    /// The protocol object itself outlives reconnects on purpose (what it has
+    /// *learned* about the rig is still true); this is only about the wire.
+    fn link_opened(&mut self) {}
 }
 
 /// CI-V protocol (Icom + Xiegu). `radio` is the CI-V transceiver address.
@@ -672,6 +696,7 @@ fn make_protocol(cfg: &CatConfig) -> Box<dyn Protocol> {
         CatFamily::Elecraft => Box::new(elecraft::Elecraft::new()),
         CatFamily::Elad => Box::new(elad::Elad::new(cfg.elad_tx_input)),
         CatFamily::Rigctld => Box::new(rigctld::Rigctld::new()),
+        CatFamily::Flrig => Box::new(flrig::Flrig::new(cfg.flrig_addr.trim().to_string())),
     }
 }
 
@@ -806,8 +831,10 @@ impl Drop for CatHandle {
 pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
     let mut port = open_link(cfg).ok()?;
     let mut protocol = make_protocol(cfg);
+    protocol.link_opened();
     for req in protocol.poll_requests() {
         let _ = port.write_all(&req);
+        protocol.wrote(&req);
     }
     let _ = port.flush();
     let mut rx = Vec::new();
@@ -926,12 +953,26 @@ const FILTER_GAP: Duration = Duration::from_millis(250);
 
 /// Write one frame, leaving at least [`FRAME_GAP`] since the last one went out.
 /// Returns true on a write error — the caller's signal to reconnect.
-fn write_frame(port: &mut dyn Link, frame: &[u8], last_write: &mut Instant) -> bool {
+///
+/// The protocol is told about every frame that goes out ([`Protocol::wrote`])
+/// — here, and nowhere else, so that "generated" and "written" cannot drift
+/// apart on it. An empty frame is a profile saying "nothing to send" (an
+/// unmappable mode, say) and writes nothing, waits for nothing, tells nothing.
+fn write_frame(
+    port: &mut dyn Link,
+    protocol: &mut dyn Protocol,
+    frame: &[u8],
+    last_write: &mut Instant,
+) -> bool {
+    if frame.is_empty() {
+        return false;
+    }
     let since = last_write.elapsed();
     if since < FRAME_GAP {
         std::thread::sleep(FRAME_GAP - since);
     }
     let failed = port.write_all(frame).is_err();
+    protocol.wrote(frame);
     *last_write = Instant::now();
     failed
 }
@@ -954,7 +995,7 @@ fn write_power(
     }
     let mut failed = false;
     for f in protocol.set_power(frac) {
-        failed |= write_frame(port, &f, last_write);
+        failed |= write_frame(port, protocol, &f, last_write);
     }
     if !failed {
         *last_sent = Some(frac);
@@ -1054,8 +1095,12 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Open whichever link this configuration describes.
 fn open_link(cfg: &CatConfig) -> std::io::Result<Box<dyn Link>> {
-    if cfg.family == CatFamily::Rigctld {
-        let stream = std::net::TcpStream::connect(cfg.rigctld_addr.trim())?;
+    if cfg.family.is_network() {
+        let addr = match cfg.family {
+            CatFamily::Flrig => cfg.flrig_addr.trim(),
+            _ => cfg.rigctld_addr.trim(),
+        };
+        let stream = std::net::TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(READ_TIMEOUT))?;
         // Every command here is a handful of bytes that wants to be on the wire
         // now: a key-down waiting on Nagle for another 40 ms is an over that
@@ -1078,6 +1123,7 @@ fn open_link(cfg: &CatConfig) -> std::io::Result<Box<dyn Link>> {
 pub fn link_label(cfg: &CatConfig) -> String {
     match cfg.family {
         CatFamily::Rigctld => format!("rigctld at {}", cfg.rigctld_addr.trim()),
+        CatFamily::Flrig => format!("flrig at {}", cfg.flrig_addr.trim()),
         _ => format!("{} at {} baud", cfg.serial.path, cfg.serial.baud),
     }
 }
@@ -1190,12 +1236,21 @@ fn serial_thread(
         // When the last frame went out, so consecutive writes can be spaced
         // (see `FRAME_GAP`). Backdated: the first write waits for nothing.
         let mut last_write = Instant::now() - FRAME_GAP;
+        // A fresh connection: whatever the protocol still holds about bytes in
+        // flight on the old one is now about nothing.
+        protocol.link_opened();
+        // Introductions first, for the profile that needs them: the answers to
+        // these (a power scale, a mode list) are what its later frames are
+        // interpreted against, and write order is reply order.
+        for f in protocol.open_requests() {
+            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
+        }
         // Don't force a mode on connect — adopt the rig's current mode (read via
         // `query_once`/poll); the app commands mode only when the operator picks one.
         // RIT/XIT/split are the exception: those we do own, so clear the rig's
         // own copies rather than let them offset us invisibly.
         for f in protocol.clear_offsets() {
-            write_frame(&mut *port, &f, &mut last_write);
+            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
         }
         // The transmit power is the rig's, not ours: ask what it is set to and
         // let the panel adopt it, the same way the dial and the mode are
@@ -1203,14 +1258,14 @@ fn serial_thread(
         // who has never touched the slider on the air at whatever it defaults
         // to — on a radio they had already set the power on.
         for f in protocol.read_power() {
-            write_frame(&mut *port, &f, &mut last_write);
+            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
         }
         // Which socket the receiver is on, asked the same once-per-connection
         // way and adopted the same way. The rig remembers it across power
         // cycles, so this is the only moment the panel can find out what the
         // operator left it on.
         for f in protocol.read_antenna() {
-            write_frame(&mut *port, &f, &mut last_write);
+            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
         }
 
         let mut rx = Vec::with_capacity(256);
@@ -1287,7 +1342,7 @@ fn serial_thread(
                         if let Some(mm) = mode_cmd(m) {
                             let f = protocol.set_mode(mm);
                             if mode_memory.needs(&f) {
-                                if write_frame(&mut *port, &f, &mut last_write) {
+                                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                                     break 'io true;
                                 }
                                 // On a rig that shifts its VFO with the mode,
@@ -1336,7 +1391,7 @@ fn serial_thread(
                             && last_sent_freq != Some(hz)
                         {
                             let f = protocol.set_freq(hz);
-                            if write_frame(&mut *port, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                                 break 'io true;
                             }
                             last_sent_freq = Some(hz);
@@ -1356,7 +1411,7 @@ fn serial_thread(
                             PttMethod::Cat => {
                                 let f = protocol.ptt(on);
                                 ptt_written = on.then(Instant::now);
-                                write_frame(&mut *port, &f, &mut last_write)
+                                write_frame(&mut *port, &mut *protocol, &f, &mut last_write)
                             }
                         };
                         if failed {
@@ -1404,21 +1459,21 @@ fn serial_thread(
                             break 'io true;
                         }
                         for f in protocol.send_cw(&text) {
-                            if write_frame(&mut *port, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                                 break 'io true;
                             }
                         }
                     }
                     Ok(CatCmd::CwAbort) => {
                         for f in protocol.abort_cw() {
-                            if write_frame(&mut *port, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                                 break 'io true;
                             }
                         }
                     }
                     Ok(CatCmd::CwWpm(wpm)) => {
                         for f in protocol.set_cw_wpm(wpm) {
-                            if write_frame(&mut *port, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                                 break 'io true;
                             }
                         }
@@ -1443,7 +1498,7 @@ fn serial_thread(
                         }
                         let mut failed = false;
                         for f in frames {
-                            failed |= write_frame(&mut *port, &f, &mut last_write);
+                            failed |= write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
                         }
                         if failed {
                             break 'io true;
@@ -1487,7 +1542,8 @@ fn serial_thread(
                     if last_sent_filter != Some(f) {
                         let mut failed = false;
                         for frame in protocol.set_filter(f.0, f.1, f.2) {
-                            failed |= write_frame(&mut *port, &frame, &mut last_write);
+                            failed |=
+                                write_frame(&mut *port, &mut *protocol, &frame, &mut last_write);
                         }
                         if failed {
                             break 'io true;
@@ -1502,7 +1558,7 @@ fn serial_thread(
                 let now = Instant::now();
                 if last_sent_freq != Some(hz) && now >= freq_deadline {
                     let f = protocol.set_freq(hz);
-                    if write_frame(&mut *port, &f, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
                         break 'io true;
                     }
                     last_sent_freq = Some(hz);
@@ -1555,7 +1611,7 @@ fn serial_thread(
                 let reqs =
                     if with_mode { protocol.poll_requests() } else { protocol.dial_requests() };
                 for req in reqs {
-                    if write_frame(&mut *port, &req, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write) {
                         break 'io true;
                     }
                 }
@@ -1589,7 +1645,7 @@ fn serial_thread(
                     reqs.extend(protocol.tx_state_requests());
                 }
                 for req in reqs {
-                    if write_frame(&mut *port, &req, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write) {
                         break 'io true;
                     }
                 }
@@ -2051,6 +2107,7 @@ mod tests {
             CatFamily::Elecraft,
             CatFamily::Elad,
             CatFamily::Rigctld,
+            CatFamily::Flrig,
         ] {
             let p = make_protocol(&CatConfig { family: f, ..CatConfig::default() });
             let (full, dial) = (p.poll_requests(), p.dial_requests());
@@ -2083,7 +2140,13 @@ mod tests {
     #[test]
     fn only_civ_rigs_report_themselves() {
         let family = |f| make_protocol(&CatConfig { family: f, ..CatConfig::default() });
-        for f in [CatFamily::Yaesu, CatFamily::Kenwood, CatFamily::Elecraft, CatFamily::Rigctld] {
+        for f in [
+            CatFamily::Yaesu,
+            CatFamily::Kenwood,
+            CatFamily::Elecraft,
+            CatFamily::Rigctld,
+            CatFamily::Flrig,
+        ] {
             assert!(!family(f).pushes_updates(), "{f:?}");
         }
     }

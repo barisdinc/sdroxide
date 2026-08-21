@@ -309,10 +309,33 @@ pub enum CatFamily {
     /// or the per-model filter tables. Prefer a native profile where one fits
     /// the radio.
     Rigctld,
+    /// Not a radio either: an already-running flrig, over its XML-RPC port.
+    ///
+    /// The other daemon, and the other catch-all. Like [`CatFamily::Rigctld`]
+    /// this drives a program that is already driving the rig — but through
+    /// flrig's own per-model driver, and on a number of radios flrig's handling
+    /// of the transmit power and the receive bandwidth is the more faithful of
+    /// the two. It also shares the rig: flrig's panel and everything else
+    /// pointed at it stay live while this end is connected, which no serial
+    /// family can offer.
+    ///
+    /// Reaches the frequency, mode, PTT, transmit power (in whole watts, scaled
+    /// by what the rig says its maximum is), the receive bandwidth (flrig snaps
+    /// to the nearest filter its driver has), the S-meter (flrig hands it over
+    /// already in dBm), and the SWR and power-out meters while transmitting.
+    /// CW goes through flrig's own `cwio` keyer — a DTR/RTS line on a port
+    /// configured inside flrig, not the rig's internal keyer — so it keys
+    /// nothing until that port is set up there. No RIT/XIT clear exists in
+    /// flrig's interface (only split), and no antenna switching.
+    ///
+    /// Appended last on purpose: `CatFamily` is postcard-encoded by declaration
+    /// index inside [`RadioConfig`], so a new variant may only go at the end.
+    /// Where it appears in the picker is [`CatFamily::ALL`]'s business.
+    Flrig,
 }
 
 impl CatFamily {
-    pub const ALL: [CatFamily; 7] = [
+    pub const ALL: [CatFamily; 8] = [
         CatFamily::Xiegu,
         CatFamily::Icom,
         CatFamily::Yaesu,
@@ -320,12 +343,13 @@ impl CatFamily {
         CatFamily::Elecraft,
         CatFamily::Elad,
         CatFamily::Rigctld,
+        CatFamily::Flrig,
     ];
 
     /// Whether this family reaches the radio over the network rather than a
     /// serial port, in which case the serial settings mean nothing.
     pub fn is_network(self) -> bool {
-        self == CatFamily::Rigctld
+        matches!(self, CatFamily::Rigctld | CatFamily::Flrig)
     }
     pub fn label(self) -> &'static str {
         match self {
@@ -336,6 +360,7 @@ impl CatFamily {
             CatFamily::Elecraft => "Elecraft",
             CatFamily::Elad => "ELAD",
             CatFamily::Rigctld => "Hamlib rigctld (network)",
+            CatFamily::Flrig => "flrig (network)",
         }
     }
 }
@@ -784,6 +809,10 @@ pub struct CatConfig {
     /// existed still loads.
     #[serde(default = "default_rigctld_addr")]
     pub rigctld_addr: String,
+    /// `host:port` of the flrig to drive, for [`CatFamily::Flrig`]. Defaulted
+    /// so a config written before this existed still loads.
+    #[serde(default = "default_flrig_addr")]
+    pub flrig_addr: String,
     /// Which `TX` command keys a Kenwood.
     pub kenwood_send: KenwoodSend,
     /// Where an ELAD FDM-DUO takes its transmit audio from, asserted when the
@@ -898,6 +927,12 @@ fn default_rigctld_addr() -> String {
     "127.0.0.1:4532".to_string()
 }
 
+/// Where an flrig serves XML-RPC unless told otherwise — its own default port,
+/// on this machine.
+fn default_flrig_addr() -> String {
+    "127.0.0.1:12345".to_string()
+}
+
 impl Default for CatConfig {
     fn default() -> Self {
         CatConfig {
@@ -911,6 +946,7 @@ impl Default for CatConfig {
             icom_radio_id: 0x70,
             icom_model: IcomModel::default(),
             rigctld_addr: default_rigctld_addr(),
+            flrig_addr: default_flrig_addr(),
             kenwood_send: KenwoodSend::default(),
             elad_tx_input: EladTxInput::default(),
             format: SoundFormat::default(),
@@ -4509,12 +4545,26 @@ mod tests {
         assert_eq!(loaded, CatConfig::default(), "and nothing else moved");
     }
 
+    /// Same contract for the flrig address: a config written before the family
+    /// existed must still load, and come up pointing at flrig's own default
+    /// port.
+    #[test]
+    fn a_config_from_before_the_flrig_family_still_loads() {
+        let before = serde_json::to_value(CatConfig::default()).unwrap();
+        let mut before = before.as_object().unwrap().clone();
+        assert!(before.remove("flrig_addr").is_some(), "the field is in the written form");
+
+        let loaded: CatConfig = serde_json::from_value(before.into()).unwrap();
+        assert_eq!(loaded.flrig_addr, "127.0.0.1:12345");
+        assert_eq!(loaded, CatConfig::default(), "and nothing else moved");
+    }
+
     /// Every family the combo box offers has to reach a profile. The array
     /// length is hard-coded, so a variant added without touching it silently
     /// disappears from the dialog instead of failing to build.
     #[test]
     fn every_cat_family_is_offered_and_labelled() {
-        assert_eq!(CatFamily::ALL.len(), 7);
+        assert_eq!(CatFamily::ALL.len(), 8);
         for f in CatFamily::ALL {
             assert!(!f.label().is_empty(), "{f:?}");
         }
@@ -4522,6 +4572,8 @@ mod tests {
         // ELAD is a serial family: the FDM-DUO's CAT port is an FTDI bridge,
         // not a socket.
         assert!(!CatFamily::Elad.is_network());
+        // flrig is the other daemon: a socket, never a serial port.
+        assert!(CatFamily::Flrig.is_network());
     }
 
     /// The offset is a position inside the digitised window, so what may be

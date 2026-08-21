@@ -644,8 +644,8 @@ starting sdroxide before the rig is fine:
   user manual, §5.4).
 
 - **CAT / Audio** — a CAT-controlled rig (Icom/CI-V, Kenwood, Yaesu, Elecraft,
-  Xiegu, ELAD, or anything Hamlib's `rigctld` drives) with audio over a USB
-  sound card, as either demodulated mono audio or stereo IQ.
+  Xiegu, ELAD, or anything Hamlib's `rigctld` or **flrig** drives) with audio
+  over a USB sound card, as either demodulated mono audio or stereo IQ.
 
 - **TCI** — a TCI (Transceiver Control Interface) server such as ExpertSDR3 
   over WebSocket (default `127.0.0.1:50001`): wideband IQ receive plus 

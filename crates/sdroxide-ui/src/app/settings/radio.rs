@@ -173,6 +173,28 @@ pub(in crate::app) fn settings_cat_tab(
             ui.end_row();
         }
 
+        if cfg.cat.family == CatFamily::Flrig {
+            ui.label("flrig address").on_hover_text(
+                "host:port of a running flrig — 127.0.0.1:12345 is its own \
+                 default, on this machine. flrig serves XML-RPC whenever it is \
+                 running; the port is under its Config → Setup → Server.\n\n\
+                 Like the Hamlib option this drives a daemon rather than the \
+                 radio, but through flrig's own per-model driver — on a number \
+                 of rigs its power and filter handling is the more faithful of \
+                 the two. It reaches the frequency, mode, PTT, transmit power \
+                 (in whole watts), the receive bandwidth, the S-meter, SWR and \
+                 power-out. CW keys through flrig's own cwio port, which must \
+                 be configured in flrig itself.",
+            );
+            crate::chrome::field(
+                ui,
+                egui::TextEdit::singleline(&mut cfg.cat.flrig_addr)
+                    .desired_width(200.0)
+                    .hint_text("127.0.0.1:12345"),
+            );
+            ui.end_row();
+        }
+
         if serial {
             ui.label("Serial port");
             let shown = if cfg.cat.serial.path.is_empty() {
