@@ -467,6 +467,10 @@ impl SdroxideApp {
             // radio is still on the old one, and the box should say so.
             self.converter_edit_hz = None;
             self.range_edit = None;
+            // The next open starts at the tab bar, not wherever the window was
+            // last scrolled to — the offset is one shared egui memory for all
+            // the tabs, and it outlives the process.
+            self.settings_scroll_top = true;
             return;
         } else if !self.audio_devices_queried {
             self.audio_devices = self.ctrl.audio_devices();
@@ -727,6 +731,20 @@ impl SdroxideApp {
             .show(ctx, |ui| {
                 crate::chrome::window_body_bg(ui);
                 bars.restore(ui);
+                // On the frame the dialog opens, jump back to the origin so
+                // the tab bar is on screen. Instant, not animated: a leftover
+                // offset gliding away would look like the window scrolling by
+                // itself. Two calls, because a scroll area only acts on
+                // targets set inside its own content and discards the axis it
+                // doesn't scroll — this one reaches the window's vertical bar,
+                // the one below reaches the horizontal region.
+                let jump_to_origin = std::mem::take(&mut self.settings_scroll_top);
+                if jump_to_origin {
+                    ui.scroll_to_cursor_animation(
+                        Some(egui::Align::TOP),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
                 // The tabs that are wider than the window get a scrollbar
                 // instead of widening it: the Controls tables and the TLE
                 // element editors are laid out at fixed widths, and egui grows a
@@ -736,6 +754,12 @@ impl SdroxideApp {
                 // inside a horizontally scrollable region.
                 let body_w = ui.available_width();
                 egui::ScrollArea::horizontal().show_themed(ui, |ui| {
+                    if jump_to_origin {
+                        ui.scroll_to_cursor_animation(
+                            Some(egui::Align::TOP),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                    }
                     ui.set_max_width(body_w);
                     self.settings_body(
                         ui,

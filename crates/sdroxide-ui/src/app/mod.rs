@@ -270,6 +270,11 @@ pub struct SdroxideApp {
     ism_sort: ism::IsmSort,
     ism_sort_desc: bool,
     show_settings: bool,
+    /// Scroll the Settings window back to its tab bar on the frame it opens.
+    /// The window's scroll offset is egui memory, which outlives both the
+    /// dialog and the process — without this, a restart shows wherever the
+    /// operator last scrolled to, with the tabs off the top of the window.
+    settings_scroll_top: bool,
     /// Voice keyer: the engine's slot list and what it is doing, the window's
     /// open state, and the one slot label being typed into (only the focused
     /// row is UI-owned, so the status echo can't fight the keyboard).
@@ -890,6 +895,7 @@ impl SdroxideApp {
             ism_sort: ism::IsmSort::default(),
             ism_sort_desc: true,
             show_settings: false,
+            settings_scroll_top: true,
             voice: sdroxide_types::VoiceStatus::default(),
             show_voice: false,
             voice_name_edit: None,
