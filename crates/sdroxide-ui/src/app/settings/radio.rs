@@ -47,8 +47,9 @@ pub(in crate::app) fn settings_cat_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        CatFamily, CwKeying, DigiMode, Direction, EladAntenna, EladTxInput, IcomModel, KenwoodSend,
-        LineState, ModeControl, Parity, PttMethod, SoundFormat, StopBits,
+        CAT_SCOPE_MIN_BAUD, CatFamily, CwKeying, DigiMode, Direction, EladAntenna, EladTxInput,
+        IcomModel, IcomScopeSpan, KenwoodSend, LineState, ModeControl, Parity, PttMethod,
+        SoundFormat, StopBits,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -472,6 +473,45 @@ pub(in crate::app) fn settings_cat_tab(
                 }
             }
             ui.end_row();
+        }
+
+        if cfg.cat.family == CatFamily::Icom {
+            ui.label("");
+            crate::chrome::checkbox(ui, &mut cfg.cat.scope, "Show the radio's spectrum scope")
+                .on_hover_text(format!(
+                    "Streams the radio's own scope sweep over the CI-V link and draws it \
+                     as the panadapter — the only picture of the band a demod-audio rig \
+                     can give, since the audio it sends is what already came through its \
+                     filter.\n\n\
+                     Needs the radio set up for it: CI-V USB Baud Rate to 115200 and \
+                     CI-V USB Port to \"Unlink from [REMOTE]\" (both under SET > \
+                     Connectors > CI-V), and the baud rate above set to match — below \
+                     {CAT_SCOPE_MIN_BAUD} the sweeps do not fit down the link and the \
+                     scope stays off.\n\n\
+                     The sweeps share the radio's internal USB bus with its own sound \
+                     card. If received audio starts to drop out with the scope on, this \
+                     box is the first thing to try turning off.",
+                ));
+            ui.end_row();
+
+            if cfg.cat.scope {
+                ui.label("Scope span").on_hover_text(
+                    "How wide to sweep it. The radio keeps whatever span was last chosen \
+                     on its own screen — often a few kHz. Setting a span here also puts \
+                     the scope into centre mode, so it follows the dial. It changes the \
+                     radio's own display too; \"As set on the radio\" leaves it alone.",
+                );
+                ComboBox::from_id_salt("cat_scope_span")
+                    .selected_text(cfg.cat.scope_span.label())
+                    .show_styled(ui, |ui| {
+                        for sp in IcomScopeSpan::ALL {
+                            if ui.selectable_label(cfg.cat.scope_span == sp, sp.label()).clicked() {
+                                cfg.cat.scope_span = sp;
+                            }
+                        }
+                    });
+                ui.end_row();
+            }
         }
     });
     ui.add_space(6.0);

@@ -59,6 +59,44 @@ const METER_FLOOR: Duration = Duration::from_millis(200);
 /// poll it replaces is gone as a source of traffic.
 const PUSHED_POLL_PERIOD: Duration = Duration::from_secs(3);
 
+/// A scope that has sent nothing for this long has stopped. Sweeps arrive
+/// several times a second, so this is a silence, not a slow sweep — and it is
+/// long enough to sit through a band change or a menu opened on the radio.
+/// Mirrors the LAN backend's watchdog, which exists for the same reasons: the
+/// enables are fire-and-forget, and several ordinary things stop the sweeps.
+const SCOPE_STALL: Duration = Duration::from_secs(3);
+
+/// How soon after a stall to ask the radio again, and the ceiling the interval
+/// backs off to while it stays quiet. The enables are idempotent, but a rig
+/// with no scope at all — or one whose CI-V USB port is still linked to
+/// [REMOTE], so the waveform never reaches this side — must not be asked twice
+/// a second forever on a link where every frame is bus time the audio pays for.
+const SCOPE_RETRY: Duration = Duration::from_secs(2);
+const SCOPE_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// One finished sweep of the rig's own spectrum scope: what it covers, and its
+/// amplitudes on the radio's 0..=160 scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeFrame {
+    pub center_hz: f64,
+    /// Full width, low edge to high edge.
+    pub span_hz: f64,
+    pub bins: Vec<u8>,
+}
+
+/// Whether this configuration streams the rig's scope over the serial link.
+///
+/// Three gates, all needed: the operator asked for it, the family is Icom (the
+/// only serial dialect with `27 00`), and the link is fast enough to carry the
+/// sweeps at all — below [`sdroxide_types::CAT_SCOPE_MIN_BAUD`] they would
+/// bury every poll and PTT, so a slow link silently declines rather than
+/// degrading the control channel. The caller surfaces the note for that case.
+pub fn scope_active(cfg: &CatConfig) -> bool {
+    cfg.scope
+        && cfg.family == CatFamily::Icom
+        && cfg.serial.baud >= sdroxide_types::CAT_SCOPE_MIN_BAUD
+}
+
 /// How many dial polls the mode rides along with one of.
 ///
 /// The dial has to keep up with a hand on the VFO knob. The mode is a discrete
@@ -220,6 +258,21 @@ trait Protocol: Send {
     /// default — for every family that needs no introduction.
     fn open_requests(&self) -> Vec<Vec<u8>> {
         Vec::new()
+    }
+
+    /// Frames that ask the rig to run its spectrum scope and stream the sweeps
+    /// here — written when the link opens, and again by the watchdog whenever
+    /// the sweeps stop. All idempotent, for exactly that reason. Empty — the
+    /// default — for every family without a streamable scope, which is every
+    /// family but Icom.
+    fn scope_requests(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    /// The sweep [`Protocol::parse`] most recently completed, if one has since
+    /// the last call. Sweeps carry no sequence and only the newest can be
+    /// drawn, so this is a take of the latest rather than a queue.
+    fn take_scope_sweep(&mut self) -> Option<ScopeFrame> {
+        None
     }
 
     /// Frames that switch the rig's *own* RIT, XIT and split off, sent once
@@ -404,6 +457,16 @@ struct Civ {
     /// that disagrees with these is a change nobody was told about.
     seen_freq: Option<f64>,
     seen_mode: Option<u8>,
+    /// Whether this session streams the rig's scope, and the half-span to
+    /// command it to (`None` leaves the radio's own span alone). See
+    /// [`scope_active`] for the gates.
+    scope: bool,
+    scope_half_span: Option<f64>,
+    /// Reassembles the `27 00` sweeps, which arrive in ~11 fragments over
+    /// serial where the LAN delivers them whole.
+    scope_assembler: civ::ScopeAssembler,
+    /// The newest finished sweep, until [`Protocol::take_scope_sweep`] takes it.
+    scope_finished: Option<ScopeFrame>,
 }
 
 /// How long after a broadcast a disagreeing polled answer is put down to the
@@ -424,7 +487,19 @@ impl Civ {
             last_push: None,
             seen_freq: None,
             seen_mode: None,
+            scope: false,
+            scope_half_span: None,
+            scope_assembler: civ::ScopeAssembler::default(),
+            scope_finished: None,
         }
+    }
+
+    /// Stream the rig's scope this session, sweeping `half_span` either side of
+    /// the dial (`None` keeps whatever span the radio's own screen is on).
+    fn with_scope(mut self, half_span: Option<f64>) -> Civ {
+        self.scope = true;
+        self.scope_half_span = half_span;
+        self
     }
 
     /// Whether the rig turning up at `now`, where we believed `seen`, disproves
@@ -509,6 +584,25 @@ impl Protocol for Civ {
     }
     fn commands_power(&self) -> bool {
         true
+    }
+    /// The same enable sequence the LAN backend sends, because it is the same
+    /// scope: run it, stream it here, and — when a span is chosen — put it in
+    /// centre mode so it follows the dial, since a scope left in a fixed mode
+    /// ignores the span command and sits on a slice of band the dial is not in.
+    fn scope_requests(&self) -> Vec<Vec<u8>> {
+        if !self.scope {
+            return Vec::new();
+        }
+        let mut out =
+            vec![civ::scope_on_frame(self.radio, true), civ::scope_output_frame(self.radio, true)];
+        if let Some(half) = self.scope_half_span {
+            out.push(civ::scope_mode_frame(self.radio, civ::ScopeMode::Center));
+            out.push(civ::scope_span_frame(self.radio, half));
+        }
+        out
+    }
+    fn take_scope_sweep(&mut self) -> Option<ScopeFrame> {
+        self.scope_finished.take()
     }
     fn refused(&mut self) -> bool {
         std::mem::take(&mut self.nak)
@@ -602,6 +696,22 @@ impl Protocol for Civ {
                         out.push(CatUpdate::Ptt(on));
                     }
                 }
+                // A scope sweep fragment (`27 00`), unsolicited once the
+                // enables have taken. Over serial a sweep spans ~11 frames;
+                // only a completed reassembly is worth surfacing, and only the
+                // newest — see `Protocol::take_scope_sweep`.
+                0x27 => {
+                    if let Some((info, bins)) = civ::parse_scope_frame(&reply.data)
+                        .and_then(|s| self.scope_assembler.push(s))
+                        && !bins.is_empty()
+                    {
+                        self.scope_finished = Some(ScopeFrame {
+                            center_hz: info.center_hz,
+                            span_hz: info.span_hz,
+                            bins,
+                        });
+                    }
+                }
                 civ::NG => self.nak = true,
                 _ => {}
             }
@@ -690,7 +800,14 @@ fn make_protocol(cfg: &CatConfig) -> Box<dyn Protocol> {
         // A Xiegu speaks the dialect but is not an Icom: none of the model
         // table applies to it, so it gets the plain mode command.
         CatFamily::Xiegu => Box::new(Civ::new(cfg.icom_radio_id, None)),
-        CatFamily::Icom => Box::new(Civ::new(cfg.icom_radio_id, cfg.icom_model.data_mode_sub())),
+        CatFamily::Icom => {
+            let civ = Civ::new(cfg.icom_radio_id, cfg.icom_model.data_mode_sub());
+            Box::new(if scope_active(cfg) {
+                civ.with_scope(cfg.scope_span.half_span_hz())
+            } else {
+                civ
+            })
+        }
         CatFamily::Yaesu => Box::new(yaesu::Yaesu::new()),
         CatFamily::Kenwood => Box::new(kenwood::Kenwood::new(cfg.kenwood_send)),
         CatFamily::Elecraft => Box::new(elecraft::Elecraft::new()),
@@ -725,6 +842,11 @@ pub struct CatHandle {
     event_rx: Receiver<CatUpdate>,
     telem_rx: Receiver<TxTelemetry>,
     signal_rx: Receiver<f32>,
+    /// The newest finished scope sweep, written by the serial thread and taken
+    /// by [`CatHandle::take_scope_sweep`]. A slot rather than a channel because
+    /// only the latest sweep can be drawn — one falling behind must overwrite,
+    /// not queue.
+    scope: std::sync::Arc<std::sync::Mutex<Option<ScopeFrame>>>,
     cw_chunk_len: usize,
     commands_power: bool,
     commands_filter: bool,
@@ -817,6 +939,14 @@ impl CatHandle {
     pub fn poll_signal(&self) -> Option<f32> {
         self.signal_rx.try_iter().last()
     }
+
+    /// The newest finished sweep of the rig's own spectrum scope, or `None`
+    /// when nothing new has completed since the last take. Only an Icom with
+    /// [`CatConfig::scope`] on and a fast enough link ever produces one — see
+    /// [`scope_active`].
+    pub fn take_scope_sweep(&self) -> Option<ScopeFrame> {
+        self.scope.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
 }
 
 impl Drop for CatHandle {
@@ -884,15 +1014,18 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
     // publishes are built before a single frame has gone out, so the list has
     // to come from the framing rather than from the rig.
     let antennas = make_protocol(&cfg).antennas();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let scope_in = scope.clone();
     std::thread::Builder::new()
         .name("sdroxide-cat".into())
-        .spawn(move || serial_thread(cfg, cmd_rx, event_tx, telem_tx, signal_tx))
+        .spawn(move || serial_thread(cfg, cmd_rx, event_tx, telem_tx, signal_tx, scope_in))
         .expect("spawn cat thread");
     CatHandle {
         cmd_tx,
         event_rx,
         telem_rx,
         signal_rx,
+        scope,
         cw_chunk_len,
         commands_power,
         commands_filter,
@@ -1178,6 +1311,7 @@ fn serial_thread(
     event_tx: Sender<CatUpdate>,
     telem_tx: Sender<TxTelemetry>,
     signal_tx: Sender<f32>,
+    scope_out: std::sync::Arc<std::sync::Mutex<Option<ScopeFrame>>>,
 ) {
     let mut protocol = make_protocol(&cfg);
     let poll_period = poll_period(&cfg);
@@ -1279,6 +1413,21 @@ fn serial_thread(
         for f in protocol.read_antenna() {
             write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
         }
+        // Start the rig's scope streaming, where this session wants it. The
+        // enables are fire-and-forget — a rig without a scope answers NG and
+        // that is the end of it — and the watchdog below re-sends them when
+        // the sweeps stop, so a lost enable is a delay rather than a session
+        // with no picture.
+        let scope_wanted = {
+            let reqs = protocol.scope_requests();
+            for f in &reqs {
+                write_frame(&mut *port, &mut *protocol, f, &mut last_write);
+            }
+            !reqs.is_empty()
+        };
+        let mut last_sweep = Instant::now();
+        let mut next_scope_nudge = Instant::now() + SCOPE_STALL;
+        let mut scope_retry = SCOPE_RETRY;
 
         let mut rx = Vec::with_capacity(256);
         let mut read_buf = [0u8; 256];
@@ -1663,6 +1812,30 @@ fn serial_thread(
                 }
             }
 
+            // Start the scope again when its sweeps stop. Several ordinary
+            // things stop them — the enable lost on the wire, the radio's own
+            // scope screen closed, a menu opened — and nothing reports it, so
+            // the strip would otherwise sit dead until a reconnect. The
+            // enables are idempotent; the backoff keeps a rig that will never
+            // sweep (no scope, or its CI-V USB port still linked to [REMOTE])
+            // from being asked twice a second forever.
+            if scope_wanted {
+                let now = Instant::now();
+                if ptt || emit_rig_tx == Some(true) {
+                    // A rig does not sweep while it transmits, and an over is
+                    // not a stall: hold the clock instead of nudging through it.
+                    last_sweep = now;
+                } else if now.duration_since(last_sweep) > SCOPE_STALL && now >= next_scope_nudge {
+                    next_scope_nudge = now + scope_retry;
+                    scope_retry = (scope_retry * 2).min(SCOPE_RETRY_MAX);
+                    for f in protocol.scope_requests() {
+                        if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                            break 'io true;
+                        }
+                    }
+                }
+            }
+
             // A rig that has stopped answering is not a rig that is still
             // transmitting. Without this, one lost reply at the wrong moment
             // would leave the app believing an over is in progress for as long
@@ -1679,6 +1852,11 @@ fn serial_thread(
                 Ok(n) => {
                     rx.extend_from_slice(&read_buf[..n]);
                     let mut updates = protocol.parse(&mut rx);
+                    if let Some(sweep) = protocol.take_scope_sweep() {
+                        last_sweep = Instant::now();
+                        scope_retry = SCOPE_RETRY;
+                        *scope_out.lock().unwrap_or_else(|e| e.into_inner()) = Some(sweep);
+                    }
                     // A reply can teach the framing how this particular rig
                     // addresses its frequency (see `Protocol::reframed`). What
                     // we sent before that was refused and the rig never moved,
@@ -1882,6 +2060,73 @@ mod tests {
             icom_model: sdroxide_types::IcomModel::Ic7300,
             ..CatConfig::default()
         })
+    }
+
+    fn icom_with_scope(baud: u32) -> Box<dyn Protocol> {
+        make_protocol(&CatConfig {
+            family: CatFamily::Icom,
+            icom_radio_id: 0x94,
+            icom_model: sdroxide_types::IcomModel::Ic7300,
+            scope: true,
+            serial: sdroxide_types::SerialConfig { baud, ..Default::default() },
+            ..CatConfig::default()
+        })
+    }
+
+    /// One `27 00` fragment as the rig sends it over serial: division `div` of
+    /// `divs`, with `body` carrying the wave information (division 1) or bins.
+    fn sweep_fragment(div: u8, divs: u8, body: &[u8]) -> Vec<u8> {
+        let mut b = vec![0xFE, 0xFE, civ::CONTROLLER_ADDR, 0x94, 0x27, 0x00, 0x00, div, divs];
+        b.extend_from_slice(body);
+        b.push(0xFD);
+        b
+    }
+
+    #[test]
+    fn the_scope_is_asked_for_only_on_a_link_its_sweeps_fit_down() {
+        // 115200 carries the sweeps; the enable sequence is the LAN backend's:
+        // scope on, output on, centre mode, span.
+        let fast = icom_with_scope(115_200);
+        let reqs = fast.scope_requests();
+        assert_eq!(reqs.len(), 4);
+        assert_eq!(reqs[0], vec![0xFE, 0xFE, 0x94, 0xE0, 0x27, 0x10, 0x01, 0xFD]);
+        assert_eq!(reqs[1], vec![0xFE, 0xFE, 0x94, 0xE0, 0x27, 0x11, 0x01, 0xFD]);
+        assert_eq!(&reqs[2][4..7], &[0x27, 0x14, 0x00]);
+        assert_eq!(&reqs[3][4..6], &[0x27, 0x15]);
+        // 19200 cannot: the sweeps would bury every poll and PTT, so the box
+        // being ticked must not put them on the wire.
+        assert!(icom_with_scope(19_200).scope_requests().is_empty());
+        // And a rig that was never asked sends nothing either.
+        assert!(icom().scope_requests().is_empty());
+    }
+
+    #[test]
+    fn a_fragmented_sweep_reassembles_and_is_taken_once() {
+        let mut p = icom_with_scope(115_200);
+        // Division 1 carries the wave information and no bins — centre mode,
+        // dial at 14.074 MHz, ±50 kHz — exactly as the serial transport splits
+        // a sweep the LAN would deliver whole.
+        let mut info = vec![0x00];
+        info.extend_from_slice(&civ::encode_freq(14_074_000.0));
+        info.extend_from_slice(&civ::encode_freq(50_000.0));
+        info.push(0x00);
+        let mut buf = sweep_fragment(1, 3, &info);
+        assert!(p.parse(&mut buf).is_empty());
+        assert!(p.take_scope_sweep().is_none(), "half a sweep must not be drawn");
+
+        let mut buf = sweep_fragment(2, 3, &[10u8; 200]);
+        assert!(p.parse(&mut buf).is_empty());
+        let mut buf = sweep_fragment(3, 3, &[20u8; 275]);
+        assert!(p.parse(&mut buf).is_empty());
+
+        let sweep = p.take_scope_sweep().expect("a finished sweep");
+        assert_eq!(sweep.center_hz, 14_074_000.0);
+        assert_eq!(sweep.span_hz, 100_000.0, "a centred half-span reads as the full width");
+        assert_eq!(sweep.bins.len(), 475);
+        assert!(sweep.bins[..200].iter().all(|&b| b == 10));
+        assert!(sweep.bins[200..].iter().all(|&b| b == 20));
+        // A take is a take: the same sweep must not be drawn twice.
+        assert!(p.take_scope_sweep().is_none());
     }
 
     /// The rig's mode is asserted on every key-down. Writing it every time is

@@ -896,7 +896,31 @@ pub struct CatConfig {
     pub iq_rate_hz: u32,
     /// Displayed panadapter bandwidth for demod-audio mode (Hz).
     pub audio_bw_hz: f64,
+    /// Stream the rig's own spectrum scope over the serial CI-V link and draw
+    /// it as the panadapter — the same `27 00` sweeps the LAN backend uses
+    /// (see [`IcomNetConfig::scope`]), on the transport the IC-7300 generation
+    /// actually has. Icom family only; every other family ignores it.
+    ///
+    /// **Off by default**, deliberately, where the LAN default is on: over USB
+    /// the sweeps share one full-speed bus with the rig's own sound card, and
+    /// measured experience with this generation (see [`Self::poll_hz`]) is
+    /// that control traffic there is paid for in received-audio dropouts. An
+    /// operator who turns it on is choosing the picture over that risk — and
+    /// must also set the radio's CI-V USB port to 115200 baud and "Unlink from
+    /// [REMOTE]", or the sweeps do not fit down the link at all.
+    #[serde(default)]
+    pub scope: bool,
+    /// How wide to sweep that scope — shared with the LAN backend, and like
+    /// there it also puts the scope into centre mode so it follows the dial.
+    #[serde(default)]
+    pub scope_span: IcomScopeSpan,
 }
+
+/// The slowest CI-V link the scope sweeps fit down. A sweep is ~500 bytes of
+/// frame ten-ish times a second — roughly 60% of a 115200 line and several
+/// times more than a 19200 one carries at all — so asking a slower link for it
+/// would bury every poll and PTT under sweep fragments.
+pub const CAT_SCOPE_MIN_BAUD: u32 = 115_200;
 
 /// The rates a rig's I/Q sound card may be opened at, in Hz — what the operator
 /// picks between, and so what panadapter widths are on offer.
@@ -957,6 +981,8 @@ impl Default for CatConfig {
             iq_offset_hz: 0.0,
             iq_rate_hz: default_iq_rate_hz(),
             audio_bw_hz: 4000.0,
+            scope: false,
+            scope_span: IcomScopeSpan::default(),
         }
     }
 }

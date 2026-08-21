@@ -421,7 +421,13 @@ use sdroxide_types::{
 /// they don't have — but the field sits mid-struct and `CatConfig` rides
 /// `Command::SetRadioConfig` whole, so for a v69 peer every byte after it
 /// shifts. `#[serde(default)]` covers the config file on disk, not the wire.
-pub const PROTO_VERSION: u16 = 70;
+///
+/// **71** — the serial CI-V scope (issue #96 on USB). `CatConfig` gained
+/// `scope` and `scope_span`, appended last — but postcard is not
+/// self-describing and `CatConfig` rides `Command::SetRadioConfig` whole, so a
+/// v70 peer stops reading where the struct used to end and treats the two new
+/// fields as the next message. Same reasoning as v69's `DeviceCaps` append.
+pub const PROTO_VERSION: u16 = 71;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

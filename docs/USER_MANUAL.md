@@ -3724,6 +3724,35 @@ is recording at all. Raising the rate raises that ceiling with it.
   IC-7000 is listed but has no such command either: its data input is selected
   at the radio.
 - **Radio ID (hex)** — the CI-V address, for Icom and Xiegu radios.
+- **Show the radio's spectrum scope** (Icom only) — stream the radio's own
+  scope sweep over the CI-V link and draw it as the panadapter, the same way
+  the [Icom LAN interface](#6210-icom-lan-network-radios) does. On **Demod
+  audio** this is the only picture of the *band* the rig can give: the audio it
+  sends has already been through its filter, so the audio-band panadapter is
+  never wider than that filter however far you zoom out — which is exactly the
+  "the spectrum barely covers one broadcast station" complaint. With the scope
+  on, the main panadapter becomes the radio's sweep, centred on the dial and as
+  wide as **Scope span**, and the full-band strip (the **WIDE** chip) carries
+  it too. The digital modes switch back to the audio band, which is where FT8
+  and the keyboard modes place their signals.
+
+  It needs the radio set up for it, both under **MENU » SET > Connectors >
+  CI-V**: **CI-V USB Baud Rate** = `115200`, and **CI-V USB Port** = `Unlink
+  from [REMOTE]`. Then set the **Baud** above to 115200 to match. Below that
+  rate the sweeps physically do not fit down the link, so sdroxide declines to
+  ask for them and says so in the status line rather than burying every poll
+  and PTT under sweep fragments.
+
+  **Off by default**, unlike the LAN interface, and deliberately: over USB the
+  sweeps ride the same bus inside the radio as its sound card (see **Poll
+  rate** above), and a sweep stream is far more traffic than the polls. If the
+  received audio starts breaking up with the scope on, this box is the first
+  thing to try clearing. Everything the LAN chapter says about the scope
+  applies here too: it is the radio's *picture* — click it to tune, but nothing
+  can be demodulated or skimmed inside it — its levels are auto-ranged because
+  Icom publishes no dB scale, a stopped scope restarts itself after a few
+  seconds, and **Scope span** also puts it into centre mode (changing the
+  radio's own screen, which is the price of the wider view).
 
 Scroll down for **Apply / reconnect**, which reopens the rig with the new
 settings.
@@ -8540,9 +8569,17 @@ All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
   setting is assigned to that line, and an IC-7300 ships with it off.
 - **CI-V Transceive** on in the radio's menu is welcome: sdroxide notices the
   broadcasts and stands its dial poll down on its own.
+- A panadapter no wider than one station is the rig's demodulated audio, which
+  is all **Demod audio** can ever show. Turn on **Show the radio's spectrum
+  scope** to draw the radio's own sweep instead — it needs **CI-V USB Baud
+  Rate** `115200` and **CI-V USB Port** `Unlink from [REMOTE]` on the radio,
+  and the matching baud in sdroxide. See
+  [§6.2.2](#622-cat-radios-serial-control--usb-audio).
 - Received audio breaking up is usually the **Poll rate**, not the DSP: a
   modern Icom is a USB hub with the CI-V bridge and the audio codec behind it,
-  and every control frame steals bus time. Turn the poll down.
+  and every control frame steals bus time. Turn the poll down. The scope
+  stream above is the same trade several times over — if the audio breaks up
+  with it on, the scope is the first thing to try switching off.
 - Two Icoms are two of the same USB codec under one name — the device list
   tags the second (`[#a3f1]`-style) so they can be told apart.
 

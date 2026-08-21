@@ -212,6 +212,29 @@ impl AudioCatSource {
         // Either sound format: even an IQ-format rig transmits what arrives at
         // its sound card, so MCW rides a sideband there too.
         let cw_mcw = cfg.cw_keying == sdroxide_types::CwKeying::Audio;
+        // The scope, asked for on a link its sweeps do not fit down, is
+        // declined rather than allowed to bury the polls and the PTT — and
+        // that has to be said on screen, because nothing else explains a
+        // panadapter that stayed narrow with the box ticked.
+        let status = if cfg.scope
+            && cfg.family == sdroxide_types::CatFamily::Icom
+            && !sdroxide_cat::scope_active(&cfg)
+        {
+            let note = format!(
+                "The rig scope needs a {} baud CI-V link and this one is set to {}. On the \
+                 radio set CI-V USB Baud Rate to 115200 and CI-V USB Port to \"Unlink from \
+                 [REMOTE]\", then match the baud rate here.",
+                sdroxide_types::CAT_SCOPE_MIN_BAUD,
+                cfg.serial.baud
+            );
+            tracing::warn!("{note}");
+            Some(match status {
+                Some(s) => format!("{s}\n{note}"),
+                None => note,
+            })
+        } else {
+            status
+        };
         let cat = sdroxide_cat::spawn(cfg);
 
         Ok(AudioCatSource {
@@ -511,6 +534,24 @@ impl IqSource for AudioCatSource {
 
     fn display_bandwidth(&self) -> Option<f64> {
         matches!(self.format, SoundFormat::DemodAudio).then_some(self.audio_bw)
+    }
+
+    /// The rig's own scope, when [`sdroxide_types::CatConfig::scope`] streams
+    /// it over the serial link — the same `27 00` sweeps, and the same two
+    /// lanes, as the Icom LAN backend: the full-band strip always, and on the
+    /// demod-audio path the *main* panadapter too (the engine decides — see
+    /// its `scope_main_window`). Finished magnitude bins on the radio's
+    /// 0..=160 scale, mapped to dB with the same uncalibrated slope the LAN
+    /// backend uses; the engine's auto-levelling makes the picture right even
+    /// where the absolute numbers are not.
+    fn wide_spectrum_db(&mut self, out: &mut Vec<f32>) -> Option<(f64, f64)> {
+        let sweep = self.cat.take_scope_sweep()?;
+        if sweep.bins.is_empty() || sweep.span_hz <= 0.0 {
+            return None;
+        }
+        out.clear();
+        out.extend(sweep.bins.iter().map(|&b| (f32::from(b) - 160.0) * 0.5));
+        Some((sweep.center_hz, sweep.span_hz))
     }
 
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
