@@ -49,6 +49,8 @@ jobs:
     name: ${{ matrix.label }} (${{ matrix.variant }})
     needs: web
     runs-on: ${{ matrix.os }}
+    # Empty for every non-compat entry, which means "no container".
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,12 +58,26 @@ jobs:
         # `cat` (--no-default-features: no SoapySDR, runs without libSoapySDR
         # installed; drive a CAT rig over serial + a sound card instead).
         variant: [soapy, cat]
-        label: [linux-x86_64, linux-aarch64, windows-x86_64, macos-aarch64, macos-x86_64]
+        label: [linux-x86_64, linux-aarch64, linux-x86_64-compat, linux-aarch64-compat, windows-x86_64, macos-aarch64, macos-x86_64]
         include:
           - label: linux-x86_64
             os: ubuntu-latest
           - label: linux-aarch64
             os: ubuntu-24.04-arm
+          # The -compat builds are the same two Linux builds compiled inside an
+          # Ubuntu 22.04 container, so the binaries link glibc 2.35 and run on
+          # stable/LTS distributions (Ubuntu 22.04, Mint 21, Debian 12,
+          # Raspberry Pi OS bookworm) that the regular builds refuse with
+          # "version `GLIBC_2.39' not found" (issue report 2026-08). A
+          # container rather than `runs-on: ubuntu-22.04` because GitHub
+          # retires that runner image on 2027-04-17 with brownouts from
+          # 2026-09-17, while a container image keeps working on any runner.
+          - label: linux-x86_64-compat
+            os: ubuntu-latest
+            container: ubuntu:22.04
+          - label: linux-aarch64-compat
+            os: ubuntu-24.04-arm
+            container: ubuntu:22.04
           - label: windows-x86_64
             os: windows-latest
           - label: macos-aarch64
@@ -72,6 +88,26 @@ jobs:
       run:
         shell: bash
     steps:
+      # The -compat jobs start from a bare Ubuntu 22.04 image rather than the
+      # runner image, so everything the runner normally provides is installed
+      # here (as root — the image has no sudo). This must run BEFORE checkout:
+      # without git in the container, actions/checkout silently falls back to
+      # the REST API download, which cannot fetch the vendor/ submodules.
+      # curl is for rustup, wget for the Opus model download that RADE's
+      # autogen.sh does, zstd for the cache archives, and build-essential also
+      # brings binutils (strip) and dpkg-dev (dpkg-shlibdeps, which cargo-deb
+      # runs to compute the .deb's Depends).
+      - name: Install build environment (compat container)
+        if: matrix.container
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl wget zstd build-essential \
+            libasound2-dev pkg-config cmake autoconf automake libtool libclang-dev
+          if [[ "${{ matrix.variant }}" == "soapy" ]]; then
+            apt-get install -y --no-install-recommends libsoapysdr-dev
+          fi
+
       # `submodules` pulls vendor/rade_c, which the RADE codec is built from.
       - uses: actions/checkout@v4
         with:
@@ -96,7 +132,8 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+        # The -compat container jobs installed everything above, pre-checkout.
+        if: runner.os == 'Linux' && !matrix.container
         run: |
           sudo apt-get update
           # ALSA + pkg-config are needed by both variants; SoapySDR only by `soapy`.
@@ -596,6 +633,15 @@ jobs:
             dynamic link against **SoapySDR**, for devices that have no native
             driver here (HackRF, Airspy R2/Mini, PlutoSDR, …). Ships as a portable
             archive only.
+
+          On Linux both builds additionally come as a **`-compat`** artifact
+          (e.g. `linux-x86_64-compat`), compiled against an older glibc (2.35).
+          Take the `-compat` file if the regular one refuses to start with
+          ``version `GLIBC_2.39' not found`` — which is what happens on
+          stable/LTS distributions such as Ubuntu 22.04, Linux Mint 21,
+          Debian 12 and Raspberry Pi OS (bookworm). The regular Linux builds
+          need glibc 2.39 or newer (Ubuntu 24.04 / Mint 22 / Debian 13); the
+          `-compat` builds and `.deb`s work on both old and new distributions.
 
           ### Requirements (SoapySDR builds)
 
