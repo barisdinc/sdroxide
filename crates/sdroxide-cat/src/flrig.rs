@@ -33,6 +33,30 @@
 //! — and reads each complete HTTP response against the head of that queue.
 //! [`Protocol::link_opened`] drops the queue with the connection it describes.
 //!
+//! # One question at a time
+//!
+//! Order is only worth correlating on if every request is answered, and
+//! flrig's server does not manage that. It is XmlRpc++ 0.8, one `select` loop
+//! on one thread shared by every client, and it reads its socket with
+//! `nbRead`, which drains *everything* waiting there into one buffer. It finds
+//! the first request in that buffer, answers it, and then clears the buffer
+//! whole (`_header = ""; _request = "";` in `writeResponse`). A second request
+//! that arrived while the first was being served is therefore discarded — no
+//! response, no fault, no error, no close — and a client correlating by order
+//! spends the rest of the session reading every answer against the wrong
+//! question: the dial takes the S-meter's number, the transmit read takes a
+//! frequency and reports an over nobody keyed.
+//!
+//! Nothing makes that likelier than transmitting: `rig.set_ptt` sits in
+//! flrig's server thread for up to a second waiting for the radio to confirm
+//! the change, and everything sent meanwhile piles up to be thrown away.
+//!
+//! So this profile reports what it has outstanding ([`Protocol::in_flight`])
+//! and the driver holds the next frame until the answer is in. Hamlib's flrig
+//! backend arrived at the same place from the other direction — it flushes its
+//! socket before every command, with the comment "appears we can lose sync if
+//! we don't clear things out".
+//!
 //! # The wire
 //!
 //! Requests are `POST` with `Content-Type: text/xml`, HTTP/1.1 and no
@@ -52,10 +76,31 @@ use tracing::{debug, info, warn};
 /// — the same assumption the ASCII families make for good.
 const DEFAULT_MAX_W: f32 = 100.0;
 
+/// The lowest dial a reply to `rig.get_vfo` may claim and still be believed.
+///
+/// Not a limit on where a radio can tune: it is the line between a frequency
+/// and a *meter reading*, which is what lands here when the correlation has
+/// slipped — flrig's S-meter, SWR and power faces are all 0–100, and 7 on the
+/// dial is what an operator sees. No transceiver flrig drives, nor any general
+/// coverage receiver in its list, tunes below a kilohertz, so nothing real is
+/// refused by this and everything below it is proof the answers have lost
+/// their place. Zero is not: a VFO flrig has not read yet reads back as one.
+const MIN_DIAL_HZ: f64 = 1000.0;
+
+/// The largest number a `rig.get_ptt` reply may carry and still be read as a
+/// transmit state rather than as somebody else's answer. flrig sends 0 or 1;
+/// the room above that is for a driver with its own idea of "keyed", which
+/// costs one reading if it is wrong. A frequency is five figures and up.
+const MAX_PTT_STATE: i64 = 9;
+
 /// flrig's SWR face, raw 0–100 → ratio. The face is drawn with marks at 1,
 /// 1.5, 2, 3 and >5, evenly spaced — but what a given transceiver driver puts
 /// on it is that driver's business, so this table is APPROXIMATE and worth
 /// checking against a live rig before trusting the protection trip to it.
+/// How many connections in a row may end in a lost step before the driver
+/// stops remaking the link over it. See [`Flrig::lose_step`].
+const GIVE_UP_AFTER: u8 = 3;
+
 const SWR_CAL: [(f32, f32); 5] = [(0.0, 1.0), (25.0, 1.5), (50.0, 2.0), (75.0, 3.0), (100.0, 5.0)];
 
 /// One request written and not yet answered — the kinds whose replies carry a
@@ -127,6 +172,16 @@ pub struct Flrig {
     /// A fault or an HTTP error arrived since last asked — see
     /// [`Protocol::refused`].
     failed: bool,
+    /// An answer arrived that cannot belong to the request it was read against
+    /// — see [`Protocol::desynced`]. The driver holds one question at a time
+    /// precisely so this cannot happen; it is here because the cost of being
+    /// wrong about that is silent and lasts the whole session, and one
+    /// reconnect is the whole of the cure.
+    lost_step: bool,
+    /// How many connections in a row have ended in one, counted across
+    /// reconnects on purpose — see [`Flrig::lose_step`]. A cure that has been
+    /// tried this often and not worked is not the cure.
+    slips_in_a_row: u8,
 }
 
 impl Flrig {
@@ -139,6 +194,8 @@ impl Flrig {
             max_w: DEFAULT_MAX_W,
             xcvr: None,
             failed: false,
+            lost_step: false,
+            slips_in_a_row: 0,
         }
     }
 
@@ -191,12 +248,26 @@ impl Flrig {
         }
         match sent {
             Sent::GetVfo => {
-                // flrig carries the frequency as a *string* of hertz.
-                if let Some(hz) = scalar(&doc).and_then(|v| v.parse::<f64>().ok())
-                    && hz.is_finite()
-                    && hz > 0.0
-                {
-                    out.push(CatUpdate::Freq(hz.round()));
+                // flrig carries the frequency as a *string* of hertz — always
+                // a number, so anything else here is somebody else's answer.
+                let raw = scalar(&doc).unwrap_or_default();
+                match raw.parse::<f64>() {
+                    Ok(hz) if hz.is_finite() && hz >= MIN_DIAL_HZ => {
+                        // A frequency where a frequency was asked for is the
+                        // one positive proof the two sides are in step.
+                        self.slips_in_a_row = 0;
+                        out.push(CatUpdate::Freq(hz.round()));
+                    }
+                    // A VFO flrig has not read yet reads back as zero: nothing
+                    // to report, and nothing wrong. A *negative* one is not
+                    // that — it is the S-meter's dBm in the dial's place.
+                    Ok(0.0) => {}
+                    // An empty value is flrig's way of having nothing to say —
+                    // it is what every setter answers — and is not evidence of
+                    // anything. Only a value that is a real answer to some
+                    // *other* question is.
+                    _ if raw.is_empty() => {}
+                    _ => self.lose_step(&format!("a frequency read was answered {raw:?}")),
                 }
             }
             Sent::GetMode => {
@@ -268,12 +339,52 @@ impl Flrig {
                 }
             }
             Sent::GetPtt => {
-                if let Some(n) = scalar(&doc).and_then(|v| v.parse::<i32>().ok()) {
-                    out.push(CatUpdate::Ptt(n != 0));
+                // Keyed or not, and every non-zero counts as keyed — the same
+                // reading every other profile here takes of a transmit state.
+                // What is refused is only what no transmit state could be: a
+                // *frequency*, which parses as a perfectly good non-zero and
+                // would otherwise be an over nobody keyed, blanking the S-meter
+                // and refusing the operator's own next one. An odd small number
+                // from some driver costs one reading; five figures is proof the
+                // answers have slipped.
+                let raw = scalar(&doc).unwrap_or_default();
+                match raw.parse::<i64>() {
+                    Ok(n) if n.abs() <= MAX_PTT_STATE => out.push(CatUpdate::Ptt(n != 0)),
+                    // Nothing said is not something said wrong — see the
+                    // frequency read above.
+                    _ if raw.is_empty() => {}
+                    _ => self.lose_step(&format!("a transmit read was answered {raw:?}")),
                 }
             }
             Sent::Other => {}
         }
+    }
+
+    /// Note that an answer cannot belong to the request it was read against,
+    /// and say so — once per connection, because what follows is a reconnect
+    /// and this line is the only record of why.
+    fn lose_step(&mut self, why: &str) {
+        if !self.lost_step {
+            if self.slips_in_a_row < GIVE_UP_AFTER {
+                warn!(
+                    "flrig and this end have lost step ({why}); remaking the link, because until \
+                     it is remade every answer belongs to some other question"
+                );
+            } else {
+                // Remaking the link cures a slip — one request lost, after
+                // which the order is wrong for good. It cannot cure an answer
+                // flrig gives every time, and a session that spends itself
+                // reconnecting into the same reply is worse than one that
+                // simply refuses that reply: the refusing is what keeps the
+                // meter off the dial, and it goes on working.
+                warn!(
+                    "flrig has answered this way on {} connections in a row ({why}); leaving the \
+                     link alone and refusing the answer instead",
+                    self.slips_in_a_row
+                );
+            }
+        }
+        self.lost_step = true;
     }
 }
 
@@ -521,6 +632,20 @@ impl Protocol for Flrig {
         std::mem::take(&mut self.failed)
     }
 
+    /// The requests written and not yet answered — see the module note on why
+    /// this profile is never allowed more than one.
+    fn in_flight(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn desynced(&mut self) -> bool {
+        if !std::mem::take(&mut self.lost_step) {
+            return false;
+        }
+        self.slips_in_a_row = self.slips_in_a_row.saturating_add(1);
+        self.slips_in_a_row <= GIVE_UP_AFTER
+    }
+
     fn parse(&mut self, buf: &mut Vec<u8>) -> Vec<CatUpdate> {
         self.buf.extend_from_slice(buf);
         buf.clear();
@@ -548,9 +673,10 @@ impl Protocol for Flrig {
             let body = String::from_utf8_lossy(&self.buf[head_end + 4..total]).into_owned();
             self.buf.drain(..total);
             let Some(sent) = self.pending.pop_front() else {
-                // A response nobody is waiting for. Cannot happen on a stream
-                // this file opened — but read past it rather than guess.
-                debug!("flrig: unsolicited response dropped");
+                // A response nobody is waiting for: one answer too many, which
+                // puts every later one a place ahead of its question exactly
+                // as a lost request puts them a place behind.
+                self.lose_step("an answer arrived for a question nobody asked");
                 continue;
             };
             if status != Some(200) {
@@ -587,6 +713,7 @@ impl Protocol for Flrig {
         self.buf.clear();
         self.pending.clear();
         self.failed = false;
+        self.lost_step = false;
     }
 }
 
@@ -908,6 +1035,121 @@ mod tests {
         let frame = text(f.set_filter(Mode::Cw, 300.0, 800.0).remove(0));
         assert!(frame.contains("<methodName>rig.set_bandwidth</methodName>"));
         assert!(frame.contains("<i4>500</i4>"));
+    }
+
+    /// The failure users hit: flrig's S-meter, SWR and power faces are all
+    /// 0-100, and one of those numbers read as a dial is a radio apparently
+    /// tuned to 7 Hz. It cannot be believed, and it cannot be quietly dropped
+    /// either — an answer in the wrong place means every later one is too.
+    #[test]
+    fn a_meter_reading_is_not_a_dial() {
+        let mut f = flrig();
+        ask(&mut f, "rig.get_vfo");
+        assert!(respond(&mut f, &ok("7")).is_empty(), "7 Hz is a meter, not a frequency");
+        assert!(f.desynced(), "and being handed one is proof the answers have slipped");
+        assert!(!f.desynced(), "reported exactly once");
+    }
+
+    /// The other half of the same slip, and the more expensive one: a
+    /// frequency parses perfectly well as a transmit state, and every non-zero
+    /// number would be an over. That blanks the S-meter and refuses the
+    /// operator's own next key-down.
+    #[test]
+    fn a_frequency_is_not_a_transmit_state() {
+        let mut f = flrig();
+        ask(&mut f, "rig.get_ptt");
+        assert!(respond(&mut f, &ok("<i4>14074000</i4>")).is_empty());
+        assert!(f.desynced());
+        // Both of the answers this read really has still read.
+        for (raw, on) in [("<i4>0</i4>", false), ("<i4>1</i4>", true)] {
+            ask(&mut f, "rig.get_ptt");
+            assert_eq!(respond(&mut f, &ok(raw)), vec![CatUpdate::Ptt(on)]);
+        }
+        assert!(!f.desynced(), "and nothing about those is a slip");
+    }
+
+    /// A driver with its own idea of "keyed" costs one reading, not a link:
+    /// any small number is a transmit state, and only a number no transmit
+    /// state could be — a frequency — is a slip.
+    #[test]
+    fn an_odd_transmit_state_is_still_a_transmit_state() {
+        let mut f = flrig();
+        ask(&mut f, "rig.get_ptt");
+        assert_eq!(respond(&mut f, &ok("<i4>2</i4>")), vec![CatUpdate::Ptt(true)]);
+        assert!(!f.desynced(), "an odd number is odd, not proof of anything");
+    }
+
+    /// Remaking the link cures a slip — one request lost, after which the order
+    /// is wrong for good. It cannot cure an answer flrig gives every time, and
+    /// a session spent reconnecting into the same reply is worse than one that
+    /// simply refuses it: the refusing is what keeps a meter reading off the
+    /// dial, and it goes on working.
+    #[test]
+    fn a_slip_that_survives_every_reconnect_stops_being_reconnected_over() {
+        let mut f = flrig();
+        for attempt in 1..=GIVE_UP_AFTER {
+            ask(&mut f, "rig.get_vfo");
+            assert!(respond(&mut f, &ok("7")).is_empty());
+            assert!(f.desynced(), "attempt {attempt} is still worth a fresh connection");
+            f.link_opened();
+        }
+        ask(&mut f, "rig.get_vfo");
+        assert!(respond(&mut f, &ok("7")).is_empty(), "and the answer is still refused");
+        assert!(!f.desynced(), "but the link is left alone now");
+    }
+
+    /// ...and a link that comes back working starts that count again, so a
+    /// second genuine slip an hour later still gets its reconnect.
+    #[test]
+    fn an_answer_in_its_right_place_clears_the_count() {
+        let mut f = flrig();
+        for _ in 0..GIVE_UP_AFTER {
+            ask(&mut f, "rig.get_vfo");
+            respond(&mut f, &ok("7"));
+            assert!(f.desynced());
+            f.link_opened();
+        }
+        ask(&mut f, "rig.get_vfo");
+        assert_eq!(respond(&mut f, &ok("14074000")), vec![CatUpdate::Freq(14_074_000.0)]);
+        ask(&mut f, "rig.get_vfo");
+        assert!(respond(&mut f, &ok("7")).is_empty());
+        assert!(f.desynced(), "a working link earns the next slip its reconnect");
+    }
+
+    /// A VFO flrig has not read yet answers zero, and an flrig with nothing
+    /// to say answers an empty value. Neither is a slip: reconnecting over an
+    /// flrig sitting there with no radio attached would be a loop.
+    #[test]
+    fn a_dial_flrig_has_not_read_is_not_a_slip() {
+        let mut f = flrig();
+        for raw in ["0", ""] {
+            ask(&mut f, "rig.get_vfo");
+            assert!(respond(&mut f, &ok(raw)).is_empty());
+            assert!(!f.desynced(), "{raw:?} is flrig having nothing to report");
+        }
+        ask(&mut f, "rig.get_ptt");
+        assert!(respond(&mut f, &ok("")).is_empty());
+        assert!(!f.desynced());
+    }
+
+    /// What the driver holds its next frame on — see the module note. The
+    /// count is the queue: one per request written, one off per answer read.
+    #[test]
+    fn what_is_outstanding_is_what_has_not_been_answered() {
+        let mut f = flrig();
+        assert_eq!(f.in_flight(), 0);
+        for req in f.poll_requests() {
+            f.wrote(&req);
+        }
+        assert_eq!(f.in_flight(), 2);
+        respond(&mut f, &ok("14074000"));
+        assert_eq!(f.in_flight(), 1);
+        respond(&mut f, &ok("USB"));
+        assert_eq!(f.in_flight(), 0);
+        // An answer with nothing outstanding is a slip of its own: one too
+        // many puts every later answer a place ahead of its question.
+        respond(&mut f, &ok("14074000"));
+        assert!(f.desynced());
     }
 
     #[test]

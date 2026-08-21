@@ -426,6 +426,35 @@ trait Protocol: Send {
     /// — flrig's XML-RPC — correlates on this instead of on the reply.
     fn wrote(&mut self, _frame: &[u8]) {}
 
+    /// How many requests are on the wire with no answer back yet, for a family
+    /// that can only tell its answers apart by the order they arrive in.
+    ///
+    /// Where this is not zero the driver keeps exactly one request in flight:
+    /// it waits for the answer before writing anything else (see
+    /// [`await_answers`]). That is not politeness — it is the only way to
+    /// survive a far end that reads its socket in one go and answers only the
+    /// first request it finds there, throwing the rest away unanswered. One
+    /// request lost that way costs no reading at all; it costs the correlation
+    /// itself, and every answer after it is read against the wrong question
+    /// until the connection is remade.
+    ///
+    /// Zero — the default — for every family whose replies say what they
+    /// answer: an Icom names the command, rigctld echoes the line it was given,
+    /// and a reply lost there is one missing reading and nothing more.
+    fn in_flight(&self) -> usize {
+        0
+    }
+
+    /// A reply arrived that cannot be an answer to the request it was read
+    /// against — a frequency read answered with a word, a transmit read
+    /// answered with a frequency. Only a family correlating by order can find
+    /// itself here, and once it has, nothing it reads means anything: the
+    /// caller drops the link, and the fresh one starts the correlation again.
+    /// Reported once, like [`Self::refused`].
+    fn desynced(&mut self) -> bool {
+        false
+    }
+
     /// The link has (re)opened. Anything a profile holds that describes bytes
     /// in flight — a half-read reply, a queue of requests awaiting answers —
     /// is about a connection that no longer exists and must be dropped here.
@@ -955,6 +984,14 @@ impl Drop for CatHandle {
     }
 }
 
+/// How long the startup query waits for one answer before giving up on the
+/// rest of its questions. Shorter than [`REPLY_TIMEOUT`] on purpose: the app is
+/// waiting on this before it shows anything, and a daemon that is not answering
+/// should cost a moment here rather than the driver's whole patience — the
+/// driver, which has all session to be patient in, opens its own link behind
+/// this and adopts the dial the moment it does answer.
+const QUERY_WAIT: Duration = Duration::from_millis(300);
+
 /// Blocking one-shot query of the rig's current frequency + mode, used at
 /// startup so the app adopts the radio's state instead of overwriting it.
 /// Returns `None` if the port can't be opened or the rig doesn't answer.
@@ -962,34 +999,46 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
     let mut port = open_link(cfg).ok()?;
     let mut protocol = make_protocol(cfg);
     protocol.link_opened();
+    let mut io = Exchange::default();
+    let mut last_write = Instant::now() - FRAME_GAP;
+    // Through [`write_frame`] rather than straight at the port, for the rule
+    // it carries: a family that can only read its answers by their order gets
+    // one question at a time here too. Two reads written back to back is
+    // exactly what flrig throws half of away, and the half it kept was the
+    // dial — which is how a startup query came to adopt a frequency and no
+    // mode.
     for req in protocol.poll_requests() {
-        let _ = port.write_all(&req);
-        protocol.wrote(&req);
+        if write_frame_within(
+            &mut *port,
+            &mut *protocol,
+            &req,
+            &mut last_write,
+            &mut io,
+            QUERY_WAIT,
+        ) {
+            break;
+        }
     }
     let _ = port.flush();
-    let mut rx = Vec::new();
-    let mut buf = [0u8; 128];
     let (mut freq, mut mode) = (None, None);
     let deadline = Instant::now() + Duration::from_millis(600);
     while Instant::now() < deadline && (freq.is_none() || mode.is_none()) {
-        if let Ok(n) = port.read(&mut buf) {
-            if n > 0 {
-                rx.extend_from_slice(&buf[..n]);
-                for u in protocol.parse(&mut rx) {
-                    match u {
-                        CatUpdate::Freq(hz) => freq = Some(hz),
-                        CatUpdate::Mode(m) => mode = Some(m),
-                        // No meter, the power, or the transmit state is
-                        // requested during the startup query.
-                        CatUpdate::Swr(_)
-                        | CatUpdate::Alc(_)
-                        | CatUpdate::Po(_)
-                        | CatUpdate::Signal(_)
-                        | CatUpdate::Power(_)
-                        | CatUpdate::Antenna(_)
-                        | CatUpdate::Ptt(_) => {}
-                    }
-                }
+        if io.read_once(&mut *port, &mut *protocol).is_none() {
+            break;
+        }
+        for u in io.updates.drain(..) {
+            match u {
+                CatUpdate::Freq(hz) => freq = Some(hz),
+                CatUpdate::Mode(m) => mode = Some(m),
+                // No meter, the power, or the transmit state is requested
+                // during the startup query.
+                CatUpdate::Swr(_)
+                | CatUpdate::Alc(_)
+                | CatUpdate::Po(_)
+                | CatUpdate::Signal(_)
+                | CatUpdate::Power(_)
+                | CatUpdate::Antenna(_)
+                | CatUpdate::Ptt(_) => {}
             }
         }
     }
@@ -1084,6 +1133,119 @@ const POWER_GAP: Duration = Duration::from_millis(100);
 /// change on some families, and nothing about a receive filter is urgent.
 const FILTER_GAP: Duration = Duration::from_millis(250);
 
+/// What has been read from the link but not yet acted on: bytes still short of
+/// a whole reply, and the updates the whole ones yielded.
+///
+/// One of each per connection, shared by the loop's own read and by the waits
+/// inside [`await_answers`] — two buffers would cut a reply in half between
+/// them, and updates parsed while waiting to write have to reach the loop that
+/// dispatches them.
+#[derive(Default)]
+struct Exchange {
+    rx: Vec<u8>,
+    updates: Vec<CatUpdate>,
+}
+
+impl Exchange {
+    /// One read, parsed into whatever it completes. Returns how many bytes it
+    /// took, or `None` on a read error — the caller's signal to reconnect.
+    fn read_once(&mut self, port: &mut dyn Link, protocol: &mut dyn Protocol) -> Option<usize> {
+        let mut buf = [0u8; 256];
+        match port.read(&mut buf) {
+            Ok(0) if port.closed_on_empty_read() => {
+                warn!("the CAT link was closed from the other end");
+                None
+            }
+            Ok(0) => Some(0),
+            Ok(n) => {
+                self.rx.extend_from_slice(&buf[..n]);
+                self.updates.extend(protocol.parse(&mut self.rx));
+                Some(n)
+            }
+            // A read that found nothing in its window. Which of the two kinds
+            // arrives is the transport's business — a serial port times out, a
+            // socket would block — and neither is an error.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Some(0)
+            }
+            Err(e) => {
+                warn!("CAT read error: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// How long an answer is waited for before the link is given up on.
+///
+/// Only a family that correlates by order waits at all, and the wait is
+/// normally the length of one round trip to a program on the same machine.
+/// This is the other end of it: a daemon wedged, gone, or one that lost the
+/// request.
+///
+/// Three seconds because of what the slowest ordinary call costs: flrig's
+/// `rig.set_ptt` holds its server for up to a second waiting for the radio to
+/// confirm the change, that server is one thread shared by every program
+/// pointed at it, and an operator running sdroxide beside fldigi can have two
+/// of those queued ahead of the answer being waited for here. Reconnecting
+/// through a daemon that was merely busy would cost more than the wait does.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Wait until the profile has no request outstanding, reading and parsing
+/// whatever arrives meanwhile. Returns true if the answer never came, or the
+/// link failed — the caller's signal to reconnect, which is also the only way
+/// to put a lost correlation right.
+fn await_answers(
+    port: &mut dyn Link,
+    protocol: &mut dyn Protocol,
+    io: &mut Exchange,
+    patience: Duration,
+) -> bool {
+    if protocol.in_flight() == 0 {
+        return false;
+    }
+    let deadline = Instant::now() + patience;
+    while protocol.in_flight() > 0 {
+        match io.read_once(port, protocol) {
+            None => return true,
+            // A link at the far end's own timeout paces this loop for us; a
+            // socket whose peer has gone answers "nothing" the instant it is
+            // asked, forever, and would otherwise spin here until the deadline.
+            Some(0) => std::thread::sleep(Duration::from_millis(2)),
+            Some(_) => {}
+        }
+        if protocol.in_flight() > 0 && Instant::now() >= deadline {
+            warn!(
+                outstanding = protocol.in_flight(),
+                "the daemon left a request unanswered for {patience:?}; reconnecting, because \
+                 from here on nothing it says can be matched to what was asked"
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// How long to wait before remaking a link that has just failed, so a daemon
+/// that is down is not hammered with a connection per loop.
+const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
+
+/// Wait out [`RECONNECT_PAUSE`] on the command channel rather than on a bare
+/// sleep, so a thread that is being shut down does not first spend a second
+/// waiting to reconnect to something nobody is listening to any more. Returns
+/// true if the thread should stop.
+fn pause_before_reconnect(cmd_rx: &Receiver<CatCmd>) -> bool {
+    matches!(
+        cmd_rx.recv_timeout(RECONNECT_PAUSE),
+        Ok(CatCmd::Stop) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    )
+}
+
 /// Write one frame, leaving at least [`FRAME_GAP`] since the last one went out.
 /// Returns true on a write error — the caller's signal to reconnect.
 ///
@@ -1091,14 +1253,37 @@ const FILTER_GAP: Duration = Duration::from_millis(250);
 /// — here, and nowhere else, so that "generated" and "written" cannot drift
 /// apart on it. An empty frame is a profile saying "nothing to send" (an
 /// unmappable mode, say) and writes nothing, waits for nothing, tells nothing.
+///
+/// A family that tells its answers apart only by their order gets one question
+/// at a time: the answer to the last one is waited for here, before this frame
+/// is allowed onto the wire. See [`Protocol::in_flight`] for what is being
+/// avoided.
 fn write_frame(
     port: &mut dyn Link,
     protocol: &mut dyn Protocol,
     frame: &[u8],
     last_write: &mut Instant,
+    io: &mut Exchange,
+) -> bool {
+    write_frame_within(port, protocol, frame, last_write, io, REPLY_TIMEOUT)
+}
+
+/// [`write_frame`] with the caller's own patience for the answer still owed —
+/// for the startup query, which somebody is waiting on and must not spend the
+/// driver's whole timeout discovering that a daemon is not answering.
+fn write_frame_within(
+    port: &mut dyn Link,
+    protocol: &mut dyn Protocol,
+    frame: &[u8],
+    last_write: &mut Instant,
+    io: &mut Exchange,
+    patience: Duration,
 ) -> bool {
     if frame.is_empty() {
         return false;
+    }
+    if await_answers(port, protocol, io, patience) {
+        return true;
     }
     let since = last_write.elapsed();
     if since < FRAME_GAP {
@@ -1122,13 +1307,14 @@ fn write_power(
     frac: f32,
     last_sent: &mut Option<f32>,
     last_write: &mut Instant,
+    io: &mut Exchange,
 ) -> bool {
     if *last_sent == Some(frac) {
         return false;
     }
     let mut failed = false;
     for f in protocol.set_power(frac) {
-        failed |= write_frame(port, protocol, &f, last_write);
+        failed |= write_frame(port, protocol, &f, last_write, io);
     }
     if !failed {
         *last_sent = Some(frac);
@@ -1189,6 +1375,17 @@ trait Link: Send {
     /// method` of RTS or DTR keys nothing there — see [`PttMethod`].
     fn set_rts(&mut self, _on: bool) {}
     fn set_dtr(&mut self, _on: bool) {}
+    /// Whether a read of no bytes means the far end has gone.
+    ///
+    /// On a socket it does — that is exactly what EOF looks like — and reading
+    /// it as "nothing yet" leaves the driver re-reading a connection that has
+    /// already been closed until something else notices, which on a family that
+    /// waits for its answers is the whole of [`REPLY_TIMEOUT`]. A serial port
+    /// reports an idle window as a timeout instead, so there a zero-byte read
+    /// says nothing at all.
+    fn closed_on_empty_read(&self) -> bool {
+        false
+    }
 }
 
 impl Link for Box<dyn serialport::SerialPort> {
@@ -1210,6 +1407,9 @@ impl Link for Box<dyn serialport::SerialPort> {
 }
 
 impl Link for std::net::TcpStream {
+    fn closed_on_empty_read(&self) -> bool {
+        true
+    }
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         std::io::Read::read(self, buf)
     }
@@ -1382,36 +1582,76 @@ fn serial_thread(
         // When the last frame went out, so consecutive writes can be spaced
         // (see `FRAME_GAP`). Backdated: the first write waits for nothing.
         let mut last_write = Instant::now() - FRAME_GAP;
+        // Everything read from this connection and not yet acted on. Declared
+        // with it and dropped with it: half a reply belongs to the link it
+        // came from and to nothing else.
+        let mut io = Exchange::default();
         // A fresh connection: whatever the protocol still holds about bytes in
         // flight on the old one is now about nothing.
         protocol.link_opened();
-        // Introductions first, for the profile that needs them: the answers to
-        // these (a power scale, a mode list) are what its later frames are
-        // interpreted against, and write order is reply order.
-        for f in protocol.open_requests() {
-            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
-        }
-        // Don't force a mode on connect — adopt the rig's current mode (read via
-        // `query_once`/poll); the app commands mode only when the operator picks one.
-        // RIT/XIT/split are the exception: those we do own, so clear the rig's
-        // own copies rather than let them offset us invisibly.
-        for f in protocol.clear_offsets() {
-            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
-        }
-        // The transmit power is the rig's, not ours: ask what it is set to and
-        // let the panel adopt it, the same way the dial and the mode are
-        // adopted. Imposing a remembered level instead would put an operator
-        // who has never touched the slider on the air at whatever it defaults
-        // to — on a radio they had already set the power on.
-        for f in protocol.read_power() {
-            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
-        }
-        // Which socket the receiver is on, asked the same once-per-connection
-        // way and adopted the same way. The rig remembers it across power
-        // cycles, so this is the only moment the panel can find out what the
-        // operator left it on.
-        for f in protocol.read_antenna() {
-            write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
+        // The opening sequence, and the one place a failed write is worth
+        // stopping for rather than pressing on through: everything here is
+        // asked once per connection, so a link that cannot carry the first
+        // frame cannot carry the rest either — and on a family that waits for
+        // its answers, pressing on means spending the whole timeout again per
+        // frame while the operator waits to find out the daemon is not there.
+        // The opening sequence, and the one place a failed write is worth
+        // stopping for rather than pressing on through: everything here is
+        // asked once per connection, so a link that cannot carry the first
+        // frame will not carry the rest — and on a family that waits for its
+        // answers, pressing on spends the whole patience again per frame while
+        // the operator waits to be told the daemon is not there.
+        let opening_failed = 'opening: {
+            // Introductions first, for the profile that needs them: the answers
+            // to these (a power scale, a mode list) are what its later frames
+            // are interpreted against, and write order is reply order.
+            for f in protocol.open_requests() {
+                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                    break 'opening true;
+                }
+            }
+            // Don't force a mode on connect — adopt the rig's current mode
+            // (read via `query_once`/poll); the app commands mode only when the
+            // operator picks one. RIT/XIT/split are the exception: those we do
+            // own, so clear the rig's own copies rather than let them offset us
+            // invisibly.
+            for f in protocol.clear_offsets() {
+                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                    break 'opening true;
+                }
+            }
+            // The transmit power is the rig's, not ours: ask what it is set to
+            // and let the panel adopt it, the same way the dial and the mode
+            // are adopted. Imposing a remembered level instead would put an
+            // operator who has never touched the slider on the air at whatever
+            // it defaults to — on a radio they had already set the power on.
+            for f in protocol.read_power() {
+                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                    break 'opening true;
+                }
+            }
+            // Which socket the receiver is on, asked the same
+            // once-per-connection way and adopted the same way. The rig
+            // remembers it across power cycles, so this is the only moment the
+            // panel can find out what the operator left it on.
+            //
+            // Each group is generated where it is written rather than all four
+            // up front: on a family that waits, the answers to one group are in
+            // hand before the next is built, and a profile is entitled to use
+            // them.
+            for f in protocol.read_antenna() {
+                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                    break 'opening true;
+                }
+            }
+            false
+        };
+        if opening_failed {
+            warn!(link = %link_label(&cfg), "CAT link failed while opening; reconnecting");
+            if pause_before_reconnect(&cmd_rx) {
+                return;
+            }
+            continue;
         }
         // Start the rig's scope streaming, where this session wants it. The
         // enables are fire-and-forget — a rig without a scope answers NG and
@@ -1421,7 +1661,9 @@ fn serial_thread(
         let scope_wanted = {
             let reqs = protocol.scope_requests();
             for f in &reqs {
-                write_frame(&mut *port, &mut *protocol, f, &mut last_write);
+                if write_frame(&mut *port, &mut *protocol, f, &mut last_write, &mut io) {
+                    break;
+                }
             }
             !reqs.is_empty()
         };
@@ -1429,8 +1671,6 @@ fn serial_thread(
         let mut next_scope_nudge = Instant::now() + SCOPE_STALL;
         let mut scope_retry = SCOPE_RETRY;
 
-        let mut rx = Vec::with_capacity(256);
-        let mut read_buf = [0u8; 256];
         let mut next_poll = Instant::now();
         // Backdated so the first poll of a connection carries the mode: the app
         // adopts the rig's mode rather than commanding one, and waiting a mode
@@ -1503,7 +1743,13 @@ fn serial_thread(
                         if let Some(mm) = mode_cmd(m) {
                             let f = protocol.set_mode(mm);
                             if mode_memory.needs(&f) {
-                                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                                if write_frame(
+                                    &mut *port,
+                                    &mut *protocol,
+                                    &f,
+                                    &mut last_write,
+                                    &mut io,
+                                ) {
                                     break 'io true;
                                 }
                                 // On a rig that shifts its VFO with the mode,
@@ -1538,6 +1784,7 @@ fn serial_thread(
                                 frac,
                                 &mut last_sent_power,
                                 &mut last_write,
+                                &mut io,
                             )
                         {
                             break 'io true;
@@ -1552,7 +1799,8 @@ fn serial_thread(
                             && last_sent_freq != Some(hz)
                         {
                             let f = protocol.set_freq(hz);
-                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io)
+                            {
                                 break 'io true;
                             }
                             last_sent_freq = Some(hz);
@@ -1572,7 +1820,13 @@ fn serial_thread(
                             PttMethod::Cat => {
                                 let f = protocol.ptt(on);
                                 ptt_written = on.then(Instant::now);
-                                write_frame(&mut *port, &mut *protocol, &f, &mut last_write)
+                                write_frame(
+                                    &mut *port,
+                                    &mut *protocol,
+                                    &f,
+                                    &mut last_write,
+                                    &mut io,
+                                )
                             }
                         };
                         if failed {
@@ -1615,26 +1869,30 @@ fn serial_thread(
                                 frac,
                                 &mut last_sent_power,
                                 &mut last_write,
+                                &mut io,
                             )
                         {
                             break 'io true;
                         }
                         for f in protocol.send_cw(&text) {
-                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io)
+                            {
                                 break 'io true;
                             }
                         }
                     }
                     Ok(CatCmd::CwAbort) => {
                         for f in protocol.abort_cw() {
-                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io)
+                            {
                                 break 'io true;
                             }
                         }
                     }
                     Ok(CatCmd::CwWpm(wpm)) => {
                         for f in protocol.set_cw_wpm(wpm) {
-                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                            if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io)
+                            {
                                 break 'io true;
                             }
                         }
@@ -1659,7 +1917,13 @@ fn serial_thread(
                         }
                         let mut failed = false;
                         for f in frames {
-                            failed |= write_frame(&mut *port, &mut *protocol, &f, &mut last_write);
+                            failed |= write_frame(
+                                &mut *port,
+                                &mut *protocol,
+                                &f,
+                                &mut last_write,
+                                &mut io,
+                            );
                         }
                         if failed {
                             break 'io true;
@@ -1684,6 +1948,7 @@ fn serial_thread(
                         frac,
                         &mut last_sent_power,
                         &mut last_write,
+                        &mut io,
                     ) {
                         break 'io true;
                     }
@@ -1703,8 +1968,13 @@ fn serial_thread(
                     if last_sent_filter != Some(f) {
                         let mut failed = false;
                         for frame in protocol.set_filter(f.0, f.1, f.2) {
-                            failed |=
-                                write_frame(&mut *port, &mut *protocol, &frame, &mut last_write);
+                            failed |= write_frame(
+                                &mut *port,
+                                &mut *protocol,
+                                &frame,
+                                &mut last_write,
+                                &mut io,
+                            );
                         }
                         if failed {
                             break 'io true;
@@ -1719,7 +1989,7 @@ fn serial_thread(
                 let now = Instant::now();
                 if last_sent_freq != Some(hz) && now >= freq_deadline {
                     let f = protocol.set_freq(hz);
-                    if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
                         break 'io true;
                     }
                     last_sent_freq = Some(hz);
@@ -1772,7 +2042,7 @@ fn serial_thread(
                 let reqs =
                     if with_mode { protocol.poll_requests() } else { protocol.dial_requests() };
                 for req in reqs {
-                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write, &mut io) {
                         break 'io true;
                     }
                 }
@@ -1806,7 +2076,7 @@ fn serial_thread(
                     reqs.extend(protocol.tx_state_requests());
                 }
                 for req in reqs {
-                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write) {
+                    if write_frame(&mut *port, &mut *protocol, &req, &mut last_write, &mut io) {
                         break 'io true;
                     }
                 }
@@ -1829,7 +2099,7 @@ fn serial_thread(
                     next_scope_nudge = now + scope_retry;
                     scope_retry = (scope_retry * 2).min(SCOPE_RETRY_MAX);
                     for f in protocol.scope_requests() {
-                        if write_frame(&mut *port, &mut *protocol, &f, &mut last_write) {
+                        if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
                             break 'io true;
                         }
                     }
@@ -1846,177 +2116,152 @@ fn serial_thread(
                 let _ = event_tx.send(CatUpdate::Ptt(false));
             }
 
-            // Read whatever arrived; parse and emit updates.
-            match port.read(&mut read_buf) {
-                Ok(0) => {}
-                Ok(n) => {
-                    rx.extend_from_slice(&read_buf[..n]);
-                    let mut updates = protocol.parse(&mut rx);
-                    if let Some(sweep) = protocol.take_scope_sweep() {
-                        last_sweep = Instant::now();
-                        scope_retry = SCOPE_RETRY;
-                        *scope_out.lock().unwrap_or_else(|e| e.into_inner()) = Some(sweep);
-                    }
-                    // A reply can teach the framing how this particular rig
-                    // addresses its frequency (see `Protocol::reframed`). What
-                    // we sent before that was refused and the rig never moved,
-                    // so the operator's last dial has to go out again — now in
-                    // terms the rig accepts.
-                    if protocol.reframed()
-                        && let Some(hz) = last_sent_freq.take()
-                    {
-                        pending_freq = Some(hz);
-                        freq_deadline = Instant::now();
-                        // The frequency in this same batch is where the refused
-                        // set left the rig — not somewhere the operator asked
-                        // to be. Reporting it would walk the app's dial back to
-                        // it for the moment before the re-issue lands.
-                        updates.retain(|u| !matches!(u, CatUpdate::Freq(_)));
-                    }
-                    // A refusal on its own says nothing — rigs answer that way
-                    // for every sub-command they don't have, and the offsets
-                    // cleared at open collect a few. One arriving on the heels
-                    // of a key-down is worth saying out loud: the operator is
-                    // looking at a transmitter that did not key, with no other
-                    // sign of why.
-                    if protocol.refused()
-                        && ptt_written.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
-                    {
-                        ptt_written = None;
-                        warn!(
-                            "the radio refused a command at key-down — if it did not transmit, \
-                             check its CI-V settings, or the PTT method in Settings → Radio"
-                        );
-                    }
-                    for u in updates {
-                        // The meters are telemetry, not control changes: they go
-                        // to their own channels and skip the freq/mode dedup
-                        // below — a reading that repeats is still current, and
-                        // dropping it would freeze the meter.
-                        // ⛔ SWR and ALC arrive as SEPARATE replies, and the
-                        // consumer keeps only the LAST message
-                        // (`poll_telemetry` is `try_iter().last()`). So sending
-                        // one field at a time would make each reading blank the
-                        // other, and the casualty would be the SWR guard: it
-                        // reads `None` as "the rig has not said anything yet"
-                        // and would sit at that forever, never tripping. Both
-                        // are therefore held here and sent together, so every
-                        // message carries the latest of each.
-                        let send = |swr, alc, po| {
-                            let _ = telem_tx.send(TxTelemetry { fwd_w: None, swr, alc, po });
-                        };
-                        if let CatUpdate::Swr(v) = u {
-                            last_swr = Some(v);
-                            send(last_swr, last_alc, last_po);
-                            continue;
-                        }
-                        if let CatUpdate::Alc(v) = u {
-                            last_alc = Some(v);
-                            send(last_swr, last_alc, last_po);
-                            continue;
-                        }
-                        if let CatUpdate::Po(v) = u {
-                            last_po = Some(v);
-                            send(last_swr, last_alc, last_po);
-                            continue;
-                        }
-                        if let CatUpdate::Signal(dbm) = u {
-                            let _ = signal_tx.send(dbm);
-                            continue;
-                        }
-                        // The rig's own transmit state. Deduped like the dial
-                        // (a level re-reported five times a second is not five
-                        // key-downs), and dropped entirely across one of our
-                        // own PTT edges, where the answer in hand describes
-                        // whichever side of the edge the read was issued on.
-                        if let CatUpdate::Ptt(on) = u {
-                            last_tx_reply = Instant::now();
-                            if ptt || ptt_edge.elapsed() < PTT_SETTLE {
-                                // Still worth recording: this is what the poll
-                                // above switches meters on, and after our own
-                                // over it must not be left saying "keyed".
-                                emit_rig_tx = Some(false);
-                                continue;
-                            }
-                            if emit_rig_tx != Some(on) {
-                                emit_rig_tx = Some(on);
-                                let _ = event_tx.send(u);
-                            }
-                            continue;
-                        }
-                        // The power the rig reports goes straight out: it is
-                        // asked for once per connection, and the engine adopts
-                        // it without answering, so there is nothing here to
-                        // dedup and no loop to break. Recording it as sent is
-                        // what makes the adoption free — the engine asserts the
-                        // level it adopted before the first key-down, and that
-                        // is now a level the rig is already on.
-                        if let CatUpdate::Power(frac) = u {
-                            last_sent_power = Some(frac);
-                            let _ = event_tx.send(u);
-                            continue;
-                        }
-                        // The socket the rig says it is on. Forwarded whole —
-                        // it is asked for once per connection, so there are no
-                        // repeats to dedup — unless it disagrees with a socket
-                        // this end has already commanded on this connection, in
-                        // which case it is the answer to the opening read
-                        // crossing that command on the wire. Adopting it there
-                        // would put the panel back on the port the operator
-                        // just left, and leave it disagreeing with the radio.
-                        if let CatUpdate::Antenna(a) = u {
-                            if last_sent_antenna.is_none_or(|w| w == a) {
-                                let _ = event_tx.send(u);
-                            }
-                            continue;
-                        }
-                        // Forward only genuine changes (poll repeats otherwise).
-                        let changed = match u {
-                            CatUpdate::Freq(hz) => {
-                                let c = emit_freq.map(|f| (f - hz).abs() >= 1.0).unwrap_or(true);
-                                if c {
-                                    emit_freq = Some(hz);
-                                }
-                                c
-                            }
-                            CatUpdate::Mode(m) => {
-                                // Also where the rig's mode is learned: what it
-                                // reports is the truth about what it is in, and
-                                // anything that isn't what we last set means the
-                                // next mode command has to go out for real.
-                                mode_memory.reported(&protocol.set_mode(m));
-                                let c = emit_mode != Some(m);
-                                if c {
-                                    emit_mode = Some(m);
-                                }
-                                c
-                            }
-                            // The meters, the power and the transmit state are
-                            // handled above.
-                            CatUpdate::Swr(_)
-                            | CatUpdate::Alc(_)
-                            | CatUpdate::Po(_)
-                            | CatUpdate::Signal(_)
-                            | CatUpdate::Power(_)
-                            | CatUpdate::Antenna(_)
-                            | CatUpdate::Ptt(_) => false,
-                        };
-                        if changed {
-                            let _ = event_tx.send(u);
-                        }
-                    }
+            // Act on whatever has arrived — from the read here and from the
+            // waits inside `write_frame`, which leave their bytes and their
+            // updates in the same exchange.
+            if io.read_once(&mut *port, &mut *protocol).is_none() {
+                break 'io true;
+            }
+            if let Some(sweep) = protocol.take_scope_sweep() {
+                last_sweep = Instant::now();
+                scope_retry = SCOPE_RETRY;
+                *scope_out.lock().unwrap_or_else(|e| e.into_inner()) = Some(sweep);
+            }
+            // A reply can teach the framing how this particular rig addresses its frequency (see
+            // `Protocol::reframed`). What we sent before that was refused and the rig never moved,
+            // so the operator's last dial has to go out again — now in terms the rig accepts.
+            if protocol.reframed()
+                && let Some(hz) = last_sent_freq.take()
+            {
+                pending_freq = Some(hz);
+                freq_deadline = Instant::now();
+                // The frequency in this same batch is where the refused set left the rig — not
+                // somewhere the operator asked to be. Reporting it would walk the app's dial back
+                // to it for the moment before the re-issue lands.
+                io.updates.retain(|u| !matches!(u, CatUpdate::Freq(_)));
+            }
+            // A refusal on its own says nothing — rigs answer that way for every sub-command they
+            // don't have, and the offsets cleared at open collect a few. One arriving on the heels
+            // of a key-down is worth saying out loud: the operator is looking at a transmitter that
+            // did not key, with no other sign of why.
+            if protocol.refused()
+                && ptt_written.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+            {
+                ptt_written = None;
+                warn!(
+                    "the radio refused a command at key-down — if it did not transmit, \
+                     check its CI-V settings, or the PTT method in Settings → Radio"
+                );
+            }
+            // A profile that reads its answers by the order they come back has just proved they no
+            // longer line up with the questions. Nothing it has parsed describes this radio and
+            // nothing it parses later will either, so the batch in hand goes with the link.
+            if protocol.desynced() {
+                break 'io true;
+            }
+            for u in io.updates.drain(..) {
+                // The meters are telemetry, not control changes: they go to their own channels and
+                // skip the freq/mode dedup below — a reading that repeats is still current, and
+                // dropping it would freeze the meter.
+                // ⛔ SWR and ALC arrive as SEPARATE replies, and the consumer keeps only the LAST
+                // message (`poll_telemetry` is `try_iter().last()`). So sending one field at a time
+                // would make each reading blank the other, and the casualty would be the SWR guard:
+                // it reads `None` as "the rig has not said anything yet" and would sit at that
+                // forever, never tripping. Both are therefore held here and sent together, so every
+                // message carries the latest of each.
+                let send = |swr, alc, po| {
+                    let _ = telem_tx.send(TxTelemetry { fwd_w: None, swr, alc, po });
+                };
+                if let CatUpdate::Swr(v) = u {
+                    last_swr = Some(v);
+                    send(last_swr, last_alc, last_po);
+                    continue;
                 }
-                // A read that found nothing in its window. Which of the two
-                // kinds arrives is the transport's business — a serial port
-                // times out, a socket would block — and neither is an error.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                    ) => {}
-                Err(e) => {
-                    warn!("CAT read error: {e}");
-                    break 'io true;
+                if let CatUpdate::Alc(v) = u {
+                    last_alc = Some(v);
+                    send(last_swr, last_alc, last_po);
+                    continue;
+                }
+                if let CatUpdate::Po(v) = u {
+                    last_po = Some(v);
+                    send(last_swr, last_alc, last_po);
+                    continue;
+                }
+                if let CatUpdate::Signal(dbm) = u {
+                    let _ = signal_tx.send(dbm);
+                    continue;
+                }
+                // The rig's own transmit state. Deduped like the dial (a level re-reported five
+                // times a second is not five key-downs), and dropped entirely across one of our own
+                // PTT edges, where the answer in hand describes whichever side of the edge the read
+                // was issued on.
+                if let CatUpdate::Ptt(on) = u {
+                    last_tx_reply = Instant::now();
+                    if ptt || ptt_edge.elapsed() < PTT_SETTLE {
+                        // Still worth recording: this is what the poll above switches meters on,
+                        // and after our own over it must not be left saying "keyed".
+                        emit_rig_tx = Some(false);
+                        continue;
+                    }
+                    if emit_rig_tx != Some(on) {
+                        emit_rig_tx = Some(on);
+                        let _ = event_tx.send(u);
+                    }
+                    continue;
+                }
+                // The power the rig reports goes straight out: it is asked for once per connection,
+                // and the engine adopts it without answering, so there is nothing here to dedup and
+                // no loop to break. Recording it as sent is what makes the adoption free — the
+                // engine asserts the level it adopted before the first key-down, and that is now a
+                // level the rig is already on.
+                if let CatUpdate::Power(frac) = u {
+                    last_sent_power = Some(frac);
+                    let _ = event_tx.send(u);
+                    continue;
+                }
+                // The socket the rig says it is on. Forwarded whole — it is asked for once per
+                // connection, so there are no repeats to dedup — unless it disagrees with a socket
+                // this end has already commanded on this connection, in which case it is the answer
+                // to the opening read crossing that command on the wire. Adopting it there would
+                // put the panel back on the port the operator just left, and leave it disagreeing
+                // with the radio.
+                if let CatUpdate::Antenna(a) = u {
+                    if last_sent_antenna.is_none_or(|w| w == a) {
+                        let _ = event_tx.send(u);
+                    }
+                    continue;
+                }
+                // Forward only genuine changes (poll repeats otherwise).
+                let changed = match u {
+                    CatUpdate::Freq(hz) => {
+                        let c = emit_freq.map(|f| (f - hz).abs() >= 1.0).unwrap_or(true);
+                        if c {
+                            emit_freq = Some(hz);
+                        }
+                        c
+                    }
+                    CatUpdate::Mode(m) => {
+                        // Also where the rig's mode is learned: what it reports is the truth about
+                        // what it is in, and anything that isn't what we last set means the next
+                        // mode command has to go out for real.
+                        mode_memory.reported(&protocol.set_mode(m));
+                        let c = emit_mode != Some(m);
+                        if c {
+                            emit_mode = Some(m);
+                        }
+                        c
+                    }
+                    // The meters, the power and the transmit state are handled above.
+                    CatUpdate::Swr(_)
+                    | CatUpdate::Alc(_)
+                    | CatUpdate::Po(_)
+                    | CatUpdate::Signal(_)
+                    | CatUpdate::Power(_)
+                    | CatUpdate::Antenna(_)
+                    | CatUpdate::Ptt(_) => false,
+                };
+                if changed {
+                    let _ = event_tx.send(u);
                 }
             }
 
@@ -2025,7 +2270,9 @@ fn serial_thread(
 
         if broke {
             warn!("CAT link error; reconnecting");
-            std::thread::sleep(Duration::from_secs(1));
+            if pause_before_reconnect(&cmd_rx) {
+                return;
+            }
         } else {
             return;
         }
