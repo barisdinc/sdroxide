@@ -57,6 +57,11 @@ pub struct SimOptions {
     /// Which interface to answer on. Loopback by default — answering on the LAN
     /// puts a phantom radio on somebody else's network, so it takes a flag.
     pub bind: Ipv4Addr,
+    /// Ignore everything on the CI-V and audio ports while still naming them in
+    /// the status packet. This is what a radio wedged by an earlier session
+    /// looks like from outside: control answers, login succeeds, the data ports
+    /// are named — and nothing ever answers on them.
+    pub mute_data_ports: bool,
 }
 
 impl Default for SimOptions {
@@ -74,6 +79,7 @@ impl Default for SimOptions {
             freq_hz: 14_074_000.0,
             port: 0,
             bind: Ipv4Addr::LOCALHOST,
+            mute_data_ports: false,
         }
     }
 }
@@ -88,6 +94,13 @@ struct Recorded {
     streaming: bool,
     /// Set when the client asked for something to be resent.
     served_retransmit: bool,
+    /// Set when the client said goodbye on any stream.
+    disconnected: bool,
+    /// Set when the client gave its token back (the `0x01` token request).
+    token_returned: bool,
+    /// Set when the client pinged the audio stream — the keepalive that stops
+    /// a radio timing out a receive-only session's silent uplink.
+    audio_pinged: bool,
 }
 
 /// A running simulated radio. Dropping it stops the thread.
@@ -117,11 +130,15 @@ impl Sim {
         // on the radio's own display streams nothing until `27 11`.
         let scope_out = Arc::new(AtomicBool::new(false));
 
+        let mut civ = SimStream::new(civ, "civ");
+        let mut audio_stream = SimStream::new(audio, "audio");
+        civ.mute = opts.mute_data_ports;
+        audio_stream.mute = opts.mute_data_ports;
         let radio = SimRadio {
             opts,
             control: SimStream::new(control, "control"),
-            civ: SimStream::new(civ, "civ"),
-            audio: SimStream::new(audio, "audio"),
+            civ,
+            audio: audio_stream,
             alive: alive.clone(),
             recorded: recorded.clone(),
             scope_out: scope_out.clone(),
@@ -164,6 +181,21 @@ impl Sim {
         self.recorded.lock().unwrap_or_else(|e| e.into_inner()).served_retransmit
     }
 
+    /// Whether the client said goodbye — on any stream.
+    pub fn client_disconnected(&self) -> bool {
+        self.recorded.lock().unwrap_or_else(|e| e.into_inner()).disconnected
+    }
+
+    /// Whether the client gave its token back on the way out.
+    pub fn token_returned(&self) -> bool {
+        self.recorded.lock().unwrap_or_else(|e| e.into_inner()).token_returned
+    }
+
+    /// Whether the client has pinged the audio stream.
+    pub fn audio_pinged(&self) -> bool {
+        self.recorded.lock().unwrap_or_else(|e| e.into_inner()).audio_pinged
+    }
+
     /// Stop the sweeps without saying so, the way a radio does when its scope
     /// screen closes — and the way a session looks when the `27 11` that should
     /// have started them was lost. Only a fresh enable starts them again, which
@@ -201,6 +233,17 @@ fn bind_on(ip: Ipv4Addr, port: u16) -> io::Result<UdpSocket> {
     Ok(s)
 }
 
+/// What one [`SimStream::poll`] observed besides an application packet.
+#[derive(Default)]
+struct PollFlags {
+    /// The client asked for a retransmit.
+    served: bool,
+    /// The client said goodbye.
+    disconnected: bool,
+    /// The client sent a ping probe.
+    pinged: bool,
+}
+
 /// The radio's half of one stream: enough sequencing to be a credible peer.
 struct SimStream {
     sock: UdpSocket,
@@ -209,6 +252,8 @@ struct SimStream {
     peer_id: u32,
     send_seq: u16,
     sent: VecDeque<(u16, Vec<u8>)>,
+    /// Read and discard everything — a port wedged by an earlier session.
+    mute: bool,
     tag: &'static str,
 }
 
@@ -227,6 +272,7 @@ impl SimStream {
             peer_id: 0,
             send_seq: 0,
             sent: VecDeque::new(),
+            mute: false,
             tag,
         }
     }
@@ -262,12 +308,16 @@ impl SimStream {
 
     /// Deal with the handshake and reliability layer. Returns an application
     /// packet for the caller when there is one.
-    fn poll(&mut self, out: &mut Vec<u8>, served: &mut bool) -> bool {
+    fn poll(&mut self, out: &mut Vec<u8>, flags: &mut PollFlags) -> bool {
         let mut buf = [0u8; 2048];
         let (n, from) = match self.sock.recv_from(&mut buf) {
             Ok(v) => v,
             Err(_) => return false,
         };
+        if self.mute {
+            // Drained but never answered: the wedged-port case.
+            return false;
+        }
         self.peer = Some(from);
         let pkt = &buf[..n];
         let Some(h) = Header::parse(pkt) else { return false };
@@ -287,12 +337,13 @@ impl SimStream {
             }
             ctrl::PING => {
                 if let Some(ping) = proto::parse_ping(pkt).filter(|p| !p.reply) {
+                    flags.pinged = true;
                     let r = proto::ping(ping.seq, true, ping.time, self.my_id, self.peer_id);
                     self.write(&r);
                 }
             }
             ctrl::RETRANSMIT => {
-                *served = true;
+                flags.served = true;
                 let mut wanted = Vec::new();
                 if n == proto::CONTROL_SIZE {
                     wanted.push(h.seq);
@@ -314,7 +365,10 @@ impl SimStream {
                     }
                 }
             }
-            ctrl::DISCONNECT | ctrl::IDLE if n == proto::CONTROL_SIZE => {}
+            ctrl::DISCONNECT if n == proto::CONTROL_SIZE => {
+                flags.disconnected = true;
+            }
+            ctrl::IDLE if n == proto::CONTROL_SIZE => {}
             _ => {
                 // A real radio drops a payload addressed to a session id it
                 // never issued, and a client that writes into a stream before
@@ -356,15 +410,15 @@ impl SimRadio {
         let mut buf = Vec::<u8>::with_capacity(2048);
         while self.alive.load(Ordering::Relaxed) {
             let mut worked = false;
-            let mut served = false;
+            let mut flags = PollFlags::default();
 
-            while self.control.poll(&mut buf, &mut served) {
+            while self.control.poll(&mut buf, &mut flags) {
                 worked = true;
                 let pkt = std::mem::take(&mut buf);
                 self.on_control(&pkt);
                 buf = pkt;
             }
-            while self.civ.poll(&mut buf, &mut served) {
+            while self.civ.poll(&mut buf, &mut flags) {
                 worked = true;
                 if let Some(frame) = proto::parse_civ_data(&buf) {
                     let frame = frame.to_vec();
@@ -377,7 +431,8 @@ impl SimRadio {
             // An open/close packet is the same length as a retransmit-range
             // packet, so it arrives through the application path above only
             // when it is long enough; catch the short form here.
-            while self.audio.poll(&mut buf, &mut served) {
+            let mut audio_flags = PollFlags::default();
+            while self.audio.poll(&mut buf, &mut audio_flags) {
                 worked = true;
                 if let Some(pcm) = proto::parse_audio_data(&buf) {
                     let mut decoded = Vec::new();
@@ -385,8 +440,16 @@ impl SimRadio {
                     self.record(|r| r.tx_audio.extend_from_slice(&decoded));
                 }
             }
-            if served {
+            if audio_flags.pinged {
+                self.record(|r| r.audio_pinged = true);
+            }
+            flags.served |= audio_flags.served;
+            flags.disconnected |= audio_flags.disconnected;
+            if flags.served {
                 self.record(|r| r.served_retransmit = true);
+            }
+            if flags.disconnected {
+                self.record(|r| r.disconnected = true);
             }
 
             if self.audio_started.is_some() {
@@ -424,7 +487,10 @@ impl SimRadio {
             }
             proto::TOKEN_SIZE => {
                 let magic = pkt[0x15];
-                if magic == 0x02 {
+                if magic == 0x01 {
+                    // The client is giving its token back on the way out.
+                    self.record(|r| r.token_returned = true);
+                } else if magic == 0x02 {
                     // The token is claimed; introduce ourselves.
                     let caps = self.capabilities();
                     let drop_it = self.should_drop();

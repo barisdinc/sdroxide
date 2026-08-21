@@ -87,6 +87,12 @@ pub mod timing {
     pub const TOKEN_RENEWAL: u64 = 60_000;
     /// Nothing heard for this long means the link is gone.
     pub const STALE_MS: u64 = 15_000;
+    /// How long a *named* data port gets to answer its handshake probes. A
+    /// radio that is really there answers the first one in milliseconds; six
+    /// unanswered probes means the port is wedged — commonly by an earlier
+    /// session the radio is still holding — and the session should fail with a
+    /// reason rather than sit half-open behind a healthy control stream.
+    pub const HANDSHAKE_MS: u64 = 3_000;
     /// How many sent packets to keep for retransmit.
     pub const TX_BUFFER: usize = 500;
     /// More missing than this is a broken network, not a lost packet — drop the

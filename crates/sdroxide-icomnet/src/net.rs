@@ -112,6 +112,15 @@ pub enum Error {
     NoRadios,
     #[error("timed out after {0:?} waiting for the audio and CI-V streams")]
     Timeout(Duration),
+    #[error("the radio closed the connection")]
+    Closed,
+    #[error(
+        "the radio never answered on its data ports — it may still be holding an \
+         earlier session; waiting a minute, or powering the radio off and on, clears it"
+    )]
+    StreamsSilent,
+    #[error("the session hit a bug ({0}) — please attach the session trace to a report")]
+    Internal(String),
 }
 
 /// A message for the session thread.
@@ -145,7 +154,14 @@ impl IcomNetDevice {
     /// Connect, log in, and open the CI-V and audio streams. Blocks until the
     /// radio is streaming or `opts.timeout` runs out.
     pub fn connect(opts: IcomNetOptions) -> Result<IcomNetDevice, Error> {
-        let trace = Trace::new();
+        IcomNetDevice::connect_traced(opts, Trace::new())
+    }
+
+    /// [`IcomNetDevice::connect`], recording into a trace the caller supplied
+    /// and keeps. The point is the failure case: a connect that never becomes a
+    /// device would otherwise take its trace down with it, and the trace of a
+    /// *failed* connect is exactly the one a bug report needs.
+    pub fn connect_traced(opts: IcomNetOptions, trace: Trace) -> Result<IcomNetDevice, Error> {
         let peer = resolve(&opts.address, opts.control_port)?;
         let local_ip = local_ip_towards(peer);
         trace.note(format!("connecting to {peer} from {local_ip}"));
@@ -347,10 +363,23 @@ fn send_civ(c: &mut Stream, frame: &[u8], inner_seq: &mut u16, trace: &Trace) {
 
 impl SessionThread {
     fn run(mut self) {
-        if let Err(e) = self.drive() {
-            self.trace.note(format!("session ended: {e}"));
-            tracing::warn!(target: "icomnet", error = %e, "session ended");
-            self.report(Err(e));
+        // A panic must not leave a zombie: without the catch, `alive` stays
+        // true forever, the source never reports `needs_reopen`, and the
+        // operator is left with a dead session that says it is connected.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drive()));
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                self.trace.note(format!("session ended: {e}"));
+                tracing::warn!(target: "icomnet", error = %e, "session ended");
+                self.report(Err(e));
+            }
+            Err(panic) => {
+                let what = panic_text(panic.as_ref());
+                self.trace.note(format!("session thread panicked: {what}"));
+                tracing::error!(target: "icomnet", panic = %what, "session thread panicked");
+                self.report(Err(Error::Internal(what)));
+            }
         }
         self.alive.store(false, Ordering::Relaxed);
     }
@@ -403,9 +432,17 @@ impl SessionThread {
         let mut buf = Vec::<u8>::with_capacity(2048);
         let codec = AudioCodec::Lpcm16Mono;
 
-        loop {
+        // Every way out of the loop — orderly shutdown, an error, the radio
+        // hanging up, the application going away — funnels through the one
+        // `break 'session`, so `teardown` below runs on all of them. A session
+        // that leaves without saying goodbye leaves the radio holding a dead
+        // session, and the next connect finds a control port that answers late
+        // and data ports that never answer at all (a field-reported IC-R8600
+        // wedged exactly this way).
+        let outcome: Result<(), Error> = 'session: loop {
             if !self.alive.load(Ordering::Relaxed) {
-                break;
+                self.trace.note("closing");
+                break 'session Ok(());
             }
             let mut worked = false;
 
@@ -439,19 +476,13 @@ impl SessionThread {
                     }
                     Ok(Ctrl::Shutdown) => {
                         self.trace.note("shutdown requested");
-                        teardown(
-                            &mut control,
-                            &mut civ,
-                            &mut audio,
-                            civ_inner,
-                            token_request,
-                            token,
-                            &mut auth_seq,
-                        );
-                        return Ok(());
+                        break 'session Ok(());
                     }
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return Ok(()),
+                    Err(TryRecvError::Disconnected) => {
+                        self.trace.note("the application dropped the session");
+                        break 'session Ok(());
+                    }
                 }
             }
 
@@ -481,11 +512,11 @@ impl SessionThread {
                         worked = true;
                     }
                     Event::Disconnect => {
-                        return Err(Error::NoAnswer);
+                        break 'session Err(Error::Closed);
                     }
                     Event::Data => {
                         worked = true;
-                        let status = self.on_control_packet(
+                        let status = match self.on_control_packet(
                             &buf,
                             &mut control,
                             &mut phase,
@@ -497,29 +528,44 @@ impl SessionThread {
                             civ_port,
                             audio_port,
                             codec,
-                        )?;
+                        ) {
+                            Ok(s) => s,
+                            Err(e) => break 'session Err(e),
+                        };
                         // A status packet naming both ports is the go-ahead to
                         // bring the data streams up. The radio repeats it
                         // whenever another client comes or goes, so this only
                         // acts the first time.
                         if let (Some(status), None) = (status, civ.as_ref()) {
-                            let radio = chosen.clone().ok_or(Error::NoRadios)?;
-                            civ = Some(Stream::bind(
-                                self.local_ip,
-                                SocketAddrV4::new(*self.peer.ip(), status.civ_port),
-                                civ_port,
-                                true,
-                                self.trace.clone(),
-                                "civ",
-                            )?);
-                            audio = Some(Stream::bind(
-                                self.local_ip,
-                                SocketAddrV4::new(*self.peer.ip(), status.audio_port),
-                                audio_port,
-                                false,
-                                self.trace.clone(),
-                                "audio",
-                            )?);
+                            let Some(radio) = chosen.clone() else {
+                                break 'session Err(Error::NoRadios);
+                            };
+                            civ = Some(
+                                match Stream::bind(
+                                    self.local_ip,
+                                    SocketAddrV4::new(*self.peer.ip(), status.civ_port),
+                                    civ_port,
+                                    true,
+                                    self.trace.clone(),
+                                    "civ",
+                                ) {
+                                    Ok(s) => s,
+                                    Err(e) => break 'session Err(e.into()),
+                                },
+                            );
+                            audio = Some(
+                                match Stream::bind(
+                                    self.local_ip,
+                                    SocketAddrV4::new(*self.peer.ip(), status.audio_port),
+                                    audio_port,
+                                    false,
+                                    self.trace.clone(),
+                                    "audio",
+                                ) {
+                                    Ok(s) => s,
+                                    Err(e) => break 'session Err(e.into()),
+                                },
+                            );
                             phase = Phase::Streaming;
                             let model = proto::model_for(radio.civ_address);
                             let i = SessionInfo {
@@ -586,11 +632,12 @@ impl SessionThread {
                                 civ_preamble.clear();
                                 self.trace.civ_rx(frame);
                                 if self.civ_tx.send(frame.to_vec()).is_err() {
-                                    return Ok(());
+                                    self.trace.note("the application dropped the session");
+                                    break 'session Ok(());
                                 }
                             }
                         }
-                        Event::Disconnect => return Ok(()),
+                        Event::Disconnect => break 'session Err(Error::Closed),
                         _ => worked = true,
                     }
                 }
@@ -614,6 +661,20 @@ impl SessionThread {
                     }
                 }
                 c.tick();
+                // The control stream proving healthy says nothing about this
+                // one: a radio still holding an earlier session answers control
+                // and leaves its data ports dead, and only the CI-V stream can
+                // notice. Probes unanswered → wedged; answered once but silent
+                // since (its ping replies count as traffic) → the link died.
+                // Either way, fail with a reason rather than sit half-open.
+                if !c.handshaken() && c.quiet_for() > Duration::from_millis(timing::HANDSHAKE_MS) {
+                    self.trace.note("the radio named its CI-V port but never answered on it");
+                    break 'session Err(Error::StreamsSilent);
+                }
+                if c.handshaken() && c.is_stale() {
+                    self.trace.note("the radio's CI-V stream went silent");
+                    break 'session Err(Error::StreamsSilent);
+                }
             }
 
             // --- audio stream -------------------------------------------------
@@ -648,7 +709,7 @@ impl SessionThread {
                                 }
                             }
                         }
-                        Event::Disconnect => return Ok(()),
+                        Event::Disconnect => break 'session Err(Error::Closed),
                         _ => worked = true,
                     }
                 }
@@ -694,16 +755,16 @@ impl SessionThread {
             }
 
             if info.is_none() && started.elapsed() > self.opts.timeout {
-                return Err(Error::Timeout(self.opts.timeout));
+                break 'session Err(Error::Timeout(self.opts.timeout));
             }
             if control.is_stale() {
-                return Err(Error::NoAnswer);
+                break 'session Err(Error::NoAnswer);
             }
 
             if !worked {
                 std::thread::sleep(Duration::from_millis(1));
             }
-        }
+        };
         teardown(
             &mut control,
             &mut civ,
@@ -712,8 +773,9 @@ impl SessionThread {
             token_request,
             token,
             &mut auth_seq,
+            &self.trace,
         );
-        Ok(())
+        outcome
     }
 
     /// Handle one application packet on the control stream. Returns the status
@@ -873,6 +935,11 @@ impl SessionThread {
 
 /// Say goodbye on all three streams, giving the token back so the radio does
 /// not hold the session open for the next client.
+///
+/// This runs on *every* way out of a session, errors included. Skipping it on
+/// the failure paths is what used to wedge the radio: it kept the dead
+/// session's token and streams, and the next connect found a control port that
+/// answered seconds late and data ports that never answered at all.
 #[allow(clippy::too_many_arguments)]
 fn teardown(
     control: &mut Stream,
@@ -882,7 +949,13 @@ fn teardown(
     token_request: u16,
     token: u32,
     auth_seq: &mut u16,
+    trace: &Trace,
 ) {
+    trace.note(if token != 0 {
+        "goodbye: token returned, streams disconnected"
+    } else {
+        "goodbye: streams disconnected"
+    });
     if let Some(c) = civ.as_mut() {
         let (a, b) = c.ids();
         let p = proto::open_close(false, civ_inner, a, b);
@@ -904,6 +977,18 @@ fn next_seq(seq: &mut u16) -> u16 {
     let v = *seq;
     *seq = seq.wrapping_add(1);
     v
+}
+
+/// The message inside a panic payload, for the trace. A payload is almost
+/// always one of the two string forms; anything else gets a placeholder.
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).into()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".into()
+    }
 }
 
 /// Icom's own client picks this at random; the radio only checks that our

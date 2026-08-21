@@ -296,8 +296,45 @@ fn shutting_down_stops_the_thread_and_tells_the_radio() {
     assert!(dev.is_alive());
     dev.shutdown();
     assert!(!dev.is_alive());
+    // The goodbye must actually reach the radio: a DISCONNECT on the streams
+    // and the token handed back, or the radio holds the session and the next
+    // client finds ports that never answer.
+    wait_for("the goodbye", Duration::from_secs(2), || {
+        sim.client_disconnected() && sim.token_returned()
+    });
     // Idempotent: the source calls `release()` and then drops.
     dev.shutdown();
+}
+
+#[test]
+fn dead_data_ports_fail_the_session_with_a_reason_and_still_say_goodbye() {
+    // The wedged-radio case from the field: control answers and login succeeds,
+    // but the CI-V and audio ports — still held by an earlier session — never
+    // answer. The session must not sit half-open behind the healthy control
+    // stream: it fails with a reason, and it still cleans up on the way out.
+    let sim = Sim::start(SimOptions { mute_data_ports: true, ..Default::default() }).unwrap();
+    let dev = connect(&sim, |_| {}).expect("the control-plane handshake still completes");
+    wait_for("the data-port watchdog", Duration::from_secs(6), || !dev.is_alive());
+
+    let dump = dev.trace().dump();
+    assert!(dump.contains("never answered on it"), "{dump}");
+    assert!(dump.contains("session ended"), "{dump}");
+    // The goodbye ran despite the error exit — this is what un-wedges the
+    // radio for the *next* attempt.
+    assert!(dump.contains("goodbye: token returned"), "{dump}");
+    wait_for("the goodbye", Duration::from_secs(2), || {
+        sim.client_disconnected() && sim.token_returned()
+    });
+}
+
+#[test]
+fn the_audio_stream_is_pinged_so_a_receive_only_session_is_never_silent() {
+    // Nothing is ever *sent* on the audio stream of a receive-only session —
+    // no TX audio, no idles — so the pings are the only sign of life the radio
+    // gets on that port. The reference clients ping all three streams.
+    let sim = Sim::start(SimOptions { scope: false, ..Default::default() }).unwrap();
+    let _dev = connect(&sim, |_| {}).expect("connect");
+    wait_for("an audio-stream ping", Duration::from_secs(3), || sim.audio_pinged());
 }
 
 #[test]

@@ -181,18 +181,32 @@ impl IcomNetSource {
     /// Connect, then put the radio into the state this session needs.
     pub fn open(cfg: &IcomNetConfig) -> anyhow::Result<IcomNetSource> {
         let rx_source = cfg.effective_rx_source();
-        let dev = IcomNetDevice::connect(IcomNetOptions {
-            address: cfg.address.clone(),
-            control_port: cfg.control_port,
-            username: cfg.username.clone(),
-            password: cfg.password.clone(),
-            client_name: "sdroxide".into(),
-            rx_sample_rate: cfg.sample_rate_hz,
-            tx_sample_rate: cfg.sample_rate_hz,
-            tx_buffer_ms: cfg.tx_latency_ms,
-            civ_address_override: cfg.civ_address_override,
-            timeout: Duration::from_secs(10),
-        })?;
+        // The trace lives out here so a connect that *fails* still leaves one
+        // behind — the wedged-radio and wrong-address sessions are exactly the
+        // ones a bug report is filed about, and they never become a device.
+        let trace = sdroxide_icomnet::Trace::new();
+        let dev = IcomNetDevice::connect_traced(
+            IcomNetOptions {
+                address: cfg.address.clone(),
+                control_port: cfg.control_port,
+                username: cfg.username.clone(),
+                password: cfg.password.clone(),
+                client_name: "sdroxide".into(),
+                rx_sample_rate: cfg.sample_rate_hz,
+                tx_sample_rate: cfg.sample_rate_hz,
+                tx_buffer_ms: cfg.tx_latency_ms,
+                civ_address_override: cfg.civ_address_override,
+                timeout: Duration::from_secs(10),
+            },
+            trace.clone(),
+        );
+        let dev = match dev {
+            Ok(dev) => dev,
+            Err(e) => {
+                *LAST_TRACE.lock().unwrap_or_else(|x| x.into_inner()) = Some(trace.dump());
+                return Err(e.into());
+            }
+        };
 
         let info = dev.info().clone();
         let audio = dev.take_audio_rx().ok_or_else(|| anyhow::anyhow!("no receive stream"))?;

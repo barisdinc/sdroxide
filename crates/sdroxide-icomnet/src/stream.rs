@@ -63,10 +63,17 @@ pub(crate) struct Stream {
     next_retransmit: Instant,
     /// Stops once the peer says "I am here".
     probing: bool,
-    /// Whether this stream fills silence with idle and ping packets. The
-    /// control and CI-V streams do; the audio stream does not, and adding them
-    /// there would depart from the only client these radios are tested against.
-    keepalive: bool,
+    /// Whether this stream fills silence with pings. All three streams do —
+    /// the established clients (wfview, kappanhang) ping every stream, and a
+    /// stream the radio never hears from is one it may time out. This matters
+    /// most on the audio stream of a receive-only session, where nothing else
+    /// is ever sent after the handshake.
+    ping: bool,
+    /// Whether this stream fills silence with sequenced idle packets. The
+    /// control and CI-V streams do; the audio stream does not — its own data
+    /// is its filler, and a receive-only session's silence is covered by the
+    /// pings above without putting empty packets into the audio sequence space.
+    idle: bool,
 
     trace: Trace,
     tag: &'static str,
@@ -82,7 +89,7 @@ impl Stream {
         local_ip: Ipv4Addr,
         peer: SocketAddrV4,
         local_port: u16,
-        keepalive: bool,
+        idle: bool,
         trace: Trace,
         tag: &'static str,
     ) -> io::Result<Stream> {
@@ -109,7 +116,8 @@ impl Stream {
             next_are_you_there: now,
             next_retransmit: now,
             probing: true,
-            keepalive,
+            ping: true,
+            idle,
             trace,
             tag,
         })
@@ -132,6 +140,19 @@ impl Stream {
     /// Nothing heard for [`timing::STALE_MS`].
     pub(crate) fn is_stale(&self) -> bool {
         self.last_rx.elapsed() >= Duration::from_millis(timing::STALE_MS)
+    }
+
+    /// Whether the peer has ever answered on this stream. False on a socket
+    /// whose "are you there" probes are going into a void — which is what a
+    /// radio still holding an earlier session looks like on its data ports.
+    pub(crate) fn handshaken(&self) -> bool {
+        !self.probing
+    }
+
+    /// How long since anything at all arrived — handshake answers, pings and
+    /// idles included, so this reads as time-connected on a fresh stream.
+    pub(crate) fn quiet_for(&self) -> Duration {
+        self.last_rx.elapsed()
     }
 
     /// Send without a sequence number: handshake probes and ping replies, which
@@ -169,12 +190,12 @@ impl Stream {
             self.send_untracked(ctrl::ARE_YOU_THERE, 0);
         }
         if !self.probing {
-            if self.keepalive && now >= self.next_ping {
+            if self.ping && now >= self.next_ping {
                 self.next_ping = now + Duration::from_millis(timing::PING_PERIOD);
                 let p = proto::ping(self.ping_seq, false, uptime_ms(), self.my_id, self.peer_id);
                 self.write(&p);
             }
-            if self.keepalive && now >= self.next_idle {
+            if self.idle && now >= self.next_idle {
                 // `send_tracked` pushes this out again; an idle only goes when
                 // nothing else has.
                 let p = proto::control(ctrl::IDLE, 0, self.my_id, self.peer_id);
