@@ -85,6 +85,9 @@ pub struct LimeHandle {
     /// Set when a stream was found stopped and put back. Reported once through
     /// `open_status` rather than every tick.
     note: Option<String>,
+    /// Set once [`LimeHandle::close`] has run: the streams are destroyed and
+    /// the device is closed, so nothing here may touch either again.
+    closed: bool,
 }
 
 impl LimeHandle {
@@ -264,7 +267,15 @@ impl LimeHandle {
             underruns: 0,
             restarts: 0,
             note: None,
+            closed: false,
         })
+    }
+
+    /// Refuse a control call on a handle [`Self::close`] has already been
+    /// through. The engine keeps a released source callable while the
+    /// replacement is opened, so this is an answer, not an assertion.
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed { Err(Error::Closed) } else { Ok(()) }
     }
 
     pub fn label(&self) -> &str {
@@ -304,12 +315,17 @@ impl LimeHandle {
         self.tx.is_some()
     }
     pub fn chip_temp_c(&self) -> Option<f64> {
+        if self.closed {
+            return None;
+        }
         self.ctl().chip_temp_c()
     }
     pub fn lo_range(&self, tx: bool) -> Result<ffi::Range> {
+        self.ensure_open()?;
         self.ctl().lo_range(tx)
     }
     pub fn rate_range(&self, tx: bool) -> Result<ffi::Range> {
+        self.ensure_open()?;
         self.ctl().rate_range(tx)
     }
 
@@ -321,6 +337,7 @@ impl LimeHandle {
     /// from open remains good across a retune of ordinary size; a band change
     /// can be recalibrated explicitly from the settings panel.
     pub fn set_center_hz(&mut self, hz: f64) -> Result<()> {
+        self.ensure_open()?;
         self.ctl().set_lo(false, hz)?;
         self.center = hz;
         // A port chosen automatically follows the frequency, because LNAL and
@@ -337,6 +354,7 @@ impl LimeHandle {
     }
 
     pub fn set_gain_db(&mut self, tx: bool, db: f64) -> Result<()> {
+        self.ensure_open()?;
         self.ctl().set_gain_db(tx, db)?;
         // Read back rather than storing the request: LimeSuite takes an
         // integer, so what the chip got is not always what was asked for, and
@@ -351,6 +369,7 @@ impl LimeHandle {
     }
 
     pub fn set_antenna(&mut self, tx: bool, name: &str) -> Result<()> {
+        self.ensure_open()?;
         self.ctl().set_antenna_named(tx, name)?;
         if tx {
             self.antenna_tx = name.to_string();
@@ -361,6 +380,7 @@ impl LimeHandle {
     }
 
     pub fn set_lpf_bw(&mut self, tx: bool, hz: f64) -> Result<()> {
+        self.ensure_open()?;
         let hz = if hz > 0.0 {
             hz
         } else {
@@ -376,6 +396,7 @@ impl LimeHandle {
     /// Run LimeSuite's calibration now. Only ever from an explicit request:
     /// it stalls whatever thread calls it for the better part of a second.
     pub fn calibrate(&mut self) -> Result<()> {
+        self.ensure_open()?;
         let bw = self.analog_bw;
         self.ctl().calibrate(false, bw)?;
         if self.tx.is_some() {
@@ -461,6 +482,58 @@ impl LimeHandle {
         !self.rx_running
     }
 
+    /// Stop both streams and close the device *now*, ahead of `Drop`, leaving
+    /// the handle inert but callable: reads deliver nothing, controls answer
+    /// [`Error::Closed`], and [`Self::needs_reopen`] says yes. Idempotent.
+    ///
+    /// This is `IqSource::release`'s half of a reopen. The engine builds this
+    /// front end's replacement *before* the old source is dropped, and what a
+    /// second `LMS_Open` does against a board still held here depends on the
+    /// platform — both answers are wrong. On Linux, libusb refuses the second
+    /// interface claim, so every Apply failed as "held by another program"
+    /// (us). On Windows, CyAPI opens the device *shared*, so the open
+    /// succeeded and the replacement's `LMS_Init` and stream setup landed on
+    /// top of the running stream — both sessions came out of that dead, which
+    /// is how changing the sample rate froze the waterfall until the program
+    /// was restarted.
+    ///
+    /// Ordering contract: a LimeRFE reached through this board's GPIO (see
+    /// [`Self::shared_device`]) must be dropped first — its handle keeps a
+    /// pointer into the device this closes, and LimeSuite would dereference it.
+    pub fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        self.teardown_streams();
+        self.ctl().close();
+    }
+
+    /// Stop and destroy both streams, in the order that leaves the radio
+    /// quiet: stop transmitting, stop receiving, then let go of the streams.
+    /// Shared by [`Self::close`] and `Drop`; runs at most once, which the
+    /// `closed` flag guards.
+    fn teardown_streams(&mut self) {
+        let api = Arc::clone(&self.api);
+        // The device pointer is read once, before anything borrows a stream:
+        // holding the guard across those calls would overlap the two borrows,
+        // and the pointer is stable for the life of the device anyway.
+        let dev = self.ctl().raw();
+        if let Some(tx) = self.tx.as_mut() {
+            if self.tx_running {
+                unsafe { (api.stop_stream)(tx) };
+            }
+            unsafe { (api.destroy_stream)(dev, tx) };
+        }
+        self.tx = None;
+        self.tx_running = false;
+        if self.rx_running {
+            unsafe { (api.stop_stream)(&mut self.rx) };
+        }
+        unsafe { (api.destroy_stream)(dev, &mut self.rx) };
+        self.rx_running = false;
+    }
+
     /// Standing conditions worth telling the operator about.
     pub fn status_note(&self) -> Option<String> {
         self.note.clone()
@@ -468,6 +541,7 @@ impl LimeHandle {
 
     /// Start transmitting on `center_hz`. Returns the transmit sample rate.
     pub fn tx_begin(&mut self, center_hz: f64) -> Result<f64> {
+        self.ensure_open()?;
         if self.tx.is_none() {
             return Err(Error::api("LMS_StartStream", "the transmitter is not armed".into()));
         }
@@ -572,23 +646,12 @@ impl LimeHandle {
 
 impl Drop for LimeHandle {
     fn drop(&mut self) {
-        // Best-effort and unconditional, in the order that leaves the radio
-        // quiet: stop transmitting, stop receiving, then let go of the streams.
-        let api = Arc::clone(&self.api);
-        // The device pointer is read once, before anything borrows a stream:
-        // holding the guard across those calls would overlap the two borrows,
-        // and the pointer is stable for the life of the device anyway.
-        let dev = self.ctl().raw();
-        if let Some(tx) = self.tx.as_mut() {
-            if self.tx_running {
-                unsafe { (api.stop_stream)(tx) };
-            }
-            unsafe { (api.destroy_stream)(dev, tx) };
+        if self.closed {
+            return; // `close` already ran, on the engine's release path.
         }
-        if self.rx_running {
-            unsafe { (api.stop_stream)(&mut self.rx) };
-        }
-        unsafe { (api.destroy_stream)(dev, &mut self.rx) };
-        // `DevCtl::drop` closes the device.
+        self.teardown_streams();
+        // Not `ctl().close()`: on this path a LimeRFE's board link may still
+        // hold the shared device, so `DevCtl::drop` closes it only once the
+        // last holder lets go.
     }
 }

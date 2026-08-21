@@ -258,12 +258,25 @@ impl DevCtl {
     }
 }
 
-impl Drop for DevCtl {
-    fn drop(&mut self) {
+impl DevCtl {
+    /// Close the device now rather than waiting for the last holder to drop —
+    /// the reopen path needs the board free *before* the replacement's
+    /// `LMS_Open`. Idempotent, so `Drop` running afterwards is harmless.
+    ///
+    /// The caller answers for ordering: nothing else may be using the pointer
+    /// when this runs — see `LimeHandle::close` for what that means for the
+    /// LimeRFE's board link.
+    pub(crate) fn close(&mut self) {
         if !self.dev.is_null() {
             unsafe { (self.api.close)(self.dev) };
             self.dev = std::ptr::null_mut();
         }
+    }
+}
+
+impl Drop for DevCtl {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

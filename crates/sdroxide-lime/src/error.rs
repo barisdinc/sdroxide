@@ -31,6 +31,11 @@ pub enum Error {
     )]
     NoRfeSupport,
 
+    /// The session was closed ahead of a reopen (see `LimeHandle::close`);
+    /// its replacement owns the board now, or is about to.
+    #[error("this LimeSDR session is closed while its replacement is opened — retry in a moment")]
+    Closed,
+
     /// Any other API failure, with the call that failed named and LimeSuite's
     /// own words for it.
     #[error("LimeSuite {call} failed: {text}")]

@@ -378,10 +378,22 @@ impl IqSource for LimeSource {
         self.handle.needs_reopen()
     }
 
-    /// Hand the device back before the engine opens its replacement; without
-    /// this, Apply fails with "in use" — by us.
+    /// Hand the hardware back before the engine opens its replacement.
+    ///
+    /// Two halves, in this order. The LimeRFE first: dropping the handle joins
+    /// its thread, and where the link is the board's GPIO that thread bit-bangs
+    /// I²C through the very device the second half closes — and where it is the
+    /// RFE's own serial port, this is what frees the port for the replacement.
+    /// Then the board itself: `LimeHandle::close` stops the streams and closes
+    /// the device, because a board still held here fails the replacement's
+    /// open on Linux (libusb refuses the second claim, as "in use" — by us)
+    /// and *shares* it on Windows, where CyAPI opens the device non-exclusive
+    /// and the replacement's `LMS_Init` and stream setup land on top of the
+    /// running stream — both sessions dead until a program restart (changing
+    /// the sample rate froze the waterfall exactly this way, issue #118).
     fn release(&mut self) {
         self.rfe = None;
+        self.handle.close();
     }
 
     fn open_status(&self) -> Option<String> {
