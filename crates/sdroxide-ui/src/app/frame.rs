@@ -70,6 +70,29 @@ fn qsy_clears_decodes(prev: Band, now: Band, mode: Mode) -> bool {
     now != prev && !mode.is_wspr()
 }
 
+/// The banner palette above the panadapter — (wash, rule, mark, ink), one
+/// look shared by the radio warnings and the update notice. Amber wash, amber
+/// rule, readable ink; the light-theme set is the same banner turned the
+/// other way up, for a theme whose panels are white and which would otherwise
+/// get pale text on a dark strip in the middle of a bright page.
+fn notice_banner_colors() -> (Color32, Color32, Color32, Color32) {
+    if crate::theme::is_light() {
+        (
+            Color32::from_rgb(255, 243, 205),
+            Color32::from_rgb(178, 122, 0),
+            Color32::from_rgb(140, 92, 0),
+            Color32::from_rgb(58, 44, 8),
+        )
+    } else {
+        (
+            Color32::from_rgb(60, 45, 10),
+            Color32::from_rgb(210, 160, 40),
+            Color32::from_rgb(255, 190, 70),
+            Color32::from_rgb(240, 220, 180),
+        )
+    }
+}
+
 impl eframe::App for SdroxideApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -196,25 +219,7 @@ impl eframe::App for SdroxideApp {
         // rides above the panadapter with a dismiss button, so a silent RX
         // failure is explained rather than reading as "waiting for spectrum".
         if let Some(notice) = self.radio_notice.clone() {
-            // Amber wash, amber rule, readable ink — the second pair is the
-            // same banner turned the other way up, for a theme whose panels
-            // are white and which would otherwise get pale text on a dark
-            // strip in the middle of a bright page.
-            let (wash, rule, mark, ink) = if crate::theme::is_light() {
-                (
-                    Color32::from_rgb(255, 243, 205),
-                    Color32::from_rgb(178, 122, 0),
-                    Color32::from_rgb(140, 92, 0),
-                    Color32::from_rgb(58, 44, 8),
-                )
-            } else {
-                (
-                    Color32::from_rgb(60, 45, 10),
-                    Color32::from_rgb(210, 160, 40),
-                    Color32::from_rgb(255, 190, 70),
-                    Color32::from_rgb(240, 220, 180),
-                )
-            };
+            let (wash, rule, mark, ink) = notice_banner_colors();
             egui::Frame::new()
                 .fill(wash)
                 .stroke(egui::Stroke::new(1.0, rule))
@@ -247,6 +252,53 @@ impl eframe::App for SdroxideApp {
                                 }
                             } else if ui.small_button("Dismiss").clicked() {
                                 self.radio_notice = None;
+                            }
+                        });
+                    });
+                });
+        }
+        // The startup version check landing. At most one message ever comes:
+        // the worker only sends a release that differs from this build and
+        // was not already dismissed, then hangs up — as it also does, without
+        // sending, when the site is unreachable or nothing is new.
+        if let Some(rx) = &self.update_fetch {
+            match rx.try_recv() {
+                Ok(v) => {
+                    self.update_notice = Some(v);
+                    self.update_fetch = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_fetch = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // A different release on sdroxide.com — the radio warnings' banner in
+        // the same place, but its Dismiss also remembers the version, so the
+        // banner stays away until the *next* release ships.
+        if let Some(version) = self.update_notice.clone() {
+            let (wash, rule, mark, ink) = notice_banner_colors();
+            egui::Frame::new()
+                .fill(wash)
+                .stroke(egui::Stroke::new(1.0, rule))
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("⚠").size(15.0).color(mark));
+                        ui.label(
+                            RichText::new(format!(
+                                "SDRoxide {version} has been released — this is {}.",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .size(13.0)
+                            .color(ink),
+                        );
+                        ui.hyperlink_to(
+                            RichText::new("Get it at sdroxide.com").size(13.0),
+                            "https://sdroxide.com/",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Dismiss").clicked() {
+                                crate::app::persist::persist_dismissed_update(&version);
+                                self.update_notice = None;
                             }
                         });
                     });
