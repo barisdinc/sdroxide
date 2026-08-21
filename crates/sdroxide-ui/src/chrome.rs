@@ -1331,6 +1331,40 @@ pub fn chip(ui: &mut Ui, selected: bool, text: impl Into<RichText>) -> Response 
     chip_impl(ui, selected, text.into(), None, Sense::click(), None)
 }
 
+/// A chip carrying the IEC power symbol (⏻) instead of a label, at an exact
+/// size. The symbol is painted, not typed: no bundled font has U+23FB, so as
+/// text it would come out as a tofu box. It takes the ink the label would
+/// have taken — the same choice [`chip_impl`] makes — so it follows the chip
+/// through selection and hover under every chrome style.
+pub fn chip_power(ui: &mut Ui, selected: bool, size: egui::Vec2) -> Response {
+    let resp = chip_impl(ui, selected, RichText::new(""), None, Sense::click(), Some(size));
+    if ui.is_rect_visible(resp.rect) {
+        let v = ui.style().interact_selectable(&resp, selected);
+        let ink = if selected { theme::INK_ON_CYAN() } else { v.fg_stroke.color };
+        let stroke = Stroke::new((size.y * 0.07).clamp(1.4, 2.2), ink);
+        let r = resp.rect.height() * 0.26;
+        // The symbol's extent runs from the top of the stem to the bottom of
+        // the ring; centring that extent, not the ring, is what makes it sit
+        // optically centred in the chip.
+        let c = resp.rect.center() + vec2(0.0, 0.22 * r);
+        // The ring, broken at the top where the stem passes through.
+        let gap = std::f32::consts::FRAC_PI_4;
+        let start = -std::f32::consts::FRAC_PI_2 + gap;
+        let sweep = std::f32::consts::TAU - 2.0 * gap;
+        let n = 24;
+        let pts: Vec<Pos2> = (0..=n)
+            .map(|i| {
+                let a = start + sweep * i as f32 / n as f32;
+                Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        let p = ui.painter();
+        p.add(Shape::line(pts, stroke));
+        p.line_segment([Pos2::new(c.x, c.y - r * 1.45), Pos2::new(c.x, c.y - r * 0.2)], stroke);
+    }
+    resp
+}
+
 /// A chip stretched to an exact `size` rather than hugging its label — for the
 /// compact strip's button grid, whose rows divide the width they were given
 /// between them instead of clustering at one end of it. The label stays

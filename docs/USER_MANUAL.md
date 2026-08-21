@@ -264,6 +264,10 @@ See the [appendix](#16-appendix) for what each mode is.
 The **VFO** module has:
 
 - **A / B** select buttons in the Frequency module (the active VFO is highlighted).
+- Above them, the **⏻ power button**: the same ON/OFF switch the radio's tab on
+  the strip carries (see [§2.17](#217-running-more-than-one-radio)), lit while
+  the radio is on. It is on the main window so that a *single*-radio session —
+  which has no tab strip — can still put its radio down and pick it back up.
 - **Swap VFOs** — exchange A and B.
 - **Copy A to B** — copy the active VFO to the other.
 - **SPLIT** — transmit on one VFO and receive on the other.
@@ -1191,7 +1195,10 @@ whole Settings → Radio page is still there to be read and edited. Press the
 switch again and the radio opens where it left off.
 
 The same switch is in the roster at the top of **Settings → Radio**, which is
-where the choice is easiest to see across all the radios at once. It is
+where the choice is easiest to see across all the radios at once — and on the
+main window itself, as the **⏻ power button** above the A/B selector in the
+Frequency module, which switches whichever radio the pane it sits on is
+showing. All three are one switch: press any of them and the others follow. It is
 remembered: a radio switched off is still switched off after a restart, and
 sdroxide never touches its device at start-up. That is what makes it the right
 place to leave the rig that is boxed for the summer, or the dongle somebody has
@@ -1199,13 +1206,16 @@ borrowed — rather than deleting the radio and setting it up again later.
 
 A radio that is switched off has no mute button (there is nothing coming out of
 it) and shows no **⚠**: it is not reaching for a device and failing, it has been
-told not to reach. The first radio is not treated specially here — the station's
+told not to reach. Its spectrum and waterfall hold the last picture they drew
+and stop scrolling — the waterfall's vertical axis is time, and rows repeated
+while nothing is being received would be time that never happened. The first radio is not treated specially here — the station's
 own radio can be switched off like any other, and its shared services keep
 running. Two tabs have no switch: a receiver lent out as another radio's
 panadapter, whose front end is the borrower's to hold, and a radio reached over
-the network, which is switched on and off at the station it lives on. The switch
-appears once a station has more than one radio; with a single radio there is
-nothing to switch between and the strip stays out of the way entirely.
+the network, which is switched on and off at the station it lives on. With a
+single radio the strip stays out of the way entirely and the Settings roster
+offers no switch — the Frequency module's power button is then the one place
+the radio is switched off and back on.
 
 **Split view.** The **⊞** toggle gives a radio a pane of its own: toggle it
 on a second radio and the main area splits into two equal columns, side by

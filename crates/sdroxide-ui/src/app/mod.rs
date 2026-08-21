@@ -154,6 +154,11 @@ pub struct SdroxideApp {
     /// of the frame rate (keeps the waterfall and time gridlines in lockstep).
     wf_last_now: f64,
     wf_row_accum: f32,
+    /// The wall-clock time the waterfall's newest row stands for. Tracks the
+    /// clock while rows are being appended and holds still while they are not
+    /// (a switched-off radio, a stalled stream), so the time gridlines stay
+    /// pinned to the rows they label instead of sliding over a frozen picture.
+    wf_now_pin: f64,
     /// Cached spectrum polylines (recomputed only when frame/view/rect change).
     trace_cache: spectrum_view::TraceCache,
     /// Switchable sound devices, queried once each time the settings dialog
@@ -845,6 +850,7 @@ impl SdroxideApp {
             last_spectrum_at: 0.0,
             wf_last_now: 0.0,
             wf_row_accum: 0.0,
+            wf_now_pin: 0.0,
             trace_cache: spectrum_view::TraceCache::default(),
             audio_devices: None,
             audio_devices_queried: false,
@@ -1176,6 +1182,17 @@ impl SdroxideApp {
     /// borrower's side.
     pub(crate) fn lent_to(&self) -> Option<u32> {
         self.radio_roster.iter().find(|c| c.id == self.radio_id)?.attached_to
+    }
+
+    /// Whether this radio is switched on, where this station is the one
+    /// holding the switch — what the top bar's power chip shows. `None` when
+    /// there is no switch to draw: the roster is empty (a remote client, the
+    /// browser), the radio lives at the far end of a connection and is
+    /// switched on and off there, or its front end is lent out as somebody's
+    /// panadapter receiver — the same radios the strip offers no switch for.
+    pub(crate) fn own_power_state(&self) -> Option<bool> {
+        let chip = self.radio_roster.iter().find(|c| c.id == self.radio_id)?;
+        (chip.switchable && chip.attached_to.is_none()).then_some(chip.enabled)
     }
 
     /// The other radios of the station this tab is connected to, and the

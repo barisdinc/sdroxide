@@ -259,16 +259,18 @@ impl SdroxideApp {
     /// elapsed since the last tick into a whole number of rows to append (at the
     /// configured rows/second), carrying the fraction. Returns the tuning the
     /// widget needs; the same rows/second also spaces the time gridlines, so the
-    /// line and the waterfall move together. `has_frame` gates scrolling so a
-    /// stalled stream doesn't keep duplicating rows.
-    pub(in crate::app) fn wf_tick(&mut self, has_frame: bool) -> spectrum_view::WfTuning {
+    /// line and the waterfall move together. `live` gates scrolling — false
+    /// once the stream has stalled (a radio switched off, a device gone quiet),
+    /// so the last frame is not duplicated down the screen as time that never
+    /// happened. The callers judge staleness; this only stops the rows.
+    pub(in crate::app) fn wf_tick(&mut self, live: bool) -> spectrum_view::WfTuning {
         let now = now_unix_f64();
         let rows_per_sec = self.ui_settings.waterfall_rows_per_sec();
         // Clamp dt so a hitch/tab-away can't dump a huge run of rows at once.
         let dt =
             if self.wf_last_now > 0.0 { (now - self.wf_last_now).clamp(0.0, 0.3) } else { 0.0 };
         self.wf_last_now = now;
-        let rows_to_write = if has_frame {
+        let rows_to_write = if live {
             self.wf_row_accum += dt as f32 * rows_per_sec;
             let n = self.wf_row_accum.floor();
             self.wf_row_accum -= n;
@@ -276,6 +278,13 @@ impl SdroxideApp {
         } else {
             0
         };
+        // The time axis belongs to the rows. While they scroll, the newest row
+        // is "now" and the gridlines ride the wall clock; frozen, the clock is
+        // pinned where the rows stopped, or the timestamps would slide over
+        // history that is not moving.
+        if live || self.wf_now_pin == 0.0 {
+            self.wf_now_pin = now;
+        }
         // Spectrum-line smoothing: convert the time constant to a per-frame EMA
         // coefficient using the frame rate, so the reaction time is the same at
         // any fps (0 tc = no smoothing = raw frames).
@@ -291,7 +300,7 @@ impl SdroxideApp {
         spectrum_view::WfTuning {
             rows_to_write,
             rows_per_sec,
-            now_unix: now,
+            now_unix: self.wf_now_pin,
             spectrum_alpha,
             palette: s.waterfall_palette,
             gradient,

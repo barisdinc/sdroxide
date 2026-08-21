@@ -35,6 +35,13 @@ use crate::chrome::StyledCombo;
 
 /// Width of the VFO A/B column in the frequency box.
 const AB_W: f32 = 68.0;
+/// Text size whose chip height the power chip above the A/B selector takes —
+/// the size the radio strip's ON/OFF switch uses, because it is the same
+/// switch. (The chip itself carries a painted symbol, not text: see
+/// [`crate::chrome::chip_power`].)
+const POWER_TEXT: f32 = 11.0;
+/// Vertical gap between the power chip and the A/B selector under it.
+const POWER_GAP: f32 = 4.0;
 /// Width of the frequency box's right column (inactive VFO + band/mode chip).
 const RIGHT_W: f32 = 96.0;
 /// Width of the S-meter box at its design size. It has no ceiling: the bar and
@@ -1248,15 +1255,47 @@ impl SdroxideApp {
             let active = self.state.active_vfo;
             let full_h = ui.available_height();
 
-            // VFO A/B selector, vertically centred in the full box height.
-            ui.allocate_ui_with_layout(
-                egui::vec2(ab_w, full_h),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    vfo_ab_chips(ui, active, cmds);
-                },
-            );
+            // VFO A/B selector, vertically centred in the full box height —
+            // with the radio's power switch stacked above it where this
+            // station holds the switch and the box has room for both rows.
+            // The touched tiers' taller chips leave no such room, and lose
+            // nothing: their radio strip carries the same switch. Measured,
+            // not assumed by tier, so a style change cannot overflow the box.
+            let power = self.own_power_state();
+            let ab_h = crate::chrome::chip_height(ui, Some(15.0));
+            let power_h = crate::chrome::chip_height(ui, Some(POWER_TEXT));
+            let stacked = power.is_some() && ab_h + POWER_GAP + power_h <= full_h;
+            if let Some(on) = power.filter(|_| stacked) {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ab_w, full_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        ui.add_space(((full_h - power_h - POWER_GAP - ab_h) / 2.0).max(0.0));
+                        // As wide as the A/B pair under it: the two rows read
+                        // as one block, and the symbol earns a target worth
+                        // clicking instead of a chip hugging a glyph.
+                        let pair_w = 2.0 * crate::chrome::chip_width(ui, "A", Some(15.0)) + 6.0;
+                        ui.horizontal(|ui| {
+                            self.power_chip(ui, on, egui::vec2(pair_w, power_h));
+                        });
+                        ui.add_space(POWER_GAP);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            vfo_ab_chips(ui, active, cmds);
+                        });
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ab_w, full_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        vfo_ab_chips(ui, active, cmds);
+                    },
+                );
+            }
             ui.add_space(10.0);
 
             // Big frequency readout, centred vertically by measured height.
@@ -1320,6 +1359,24 @@ impl SdroxideApp {
                 },
             );
         });
+    }
+
+    /// The radio's power switch, above the A/B selector: the same switch this
+    /// radio's tab on the strip carries, wired to the same shell request, so
+    /// the two can never disagree. Having it on the main window is what lets a
+    /// *single*-radio session — which has no strip, and whose settings roster
+    /// offers no switch — put its radio down and pick it back up.
+    fn power_chip(&mut self, ui: &mut egui::Ui, on: bool, size: egui::Vec2) {
+        let chip = crate::chrome::chip_power(ui, on, size);
+        let tip = if on {
+            "Switch this radio off: its interface is closed, its settings are kept"
+        } else {
+            "Switch this radio on"
+        };
+        if chip.on_hover_text(tip).clicked() {
+            self.radio_tab_requests
+                .push(crate::app::RadioTabRequest::Power { id: self.radio_id, on: !on });
+        }
     }
 
     /// The frequency box for a phone: which VFO is being tuned, the digits, and

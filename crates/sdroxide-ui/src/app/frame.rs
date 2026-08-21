@@ -471,7 +471,12 @@ impl eframe::App for SdroxideApp {
                 digi_split(total, divider, self.view.digi_panel_fraction)
             };
 
-            let wf_tuning = self.wf_tick(frame.is_some());
+            // Scroll only while frames are actually arriving. The last frame is
+            // kept for the spectrum line, but rows of it repeated down the
+            // waterfall would be time that never happened — a switched-off
+            // radio (or any stalled stream) freezes instead.
+            let live = frame.is_some() && now - self.last_spectrum_at < STREAM_STALE_S;
+            let wf_tuning = self.wf_tick(live);
             if show_wf {
                 ui.allocate_ui(egui::vec2(width, wf_h), |ui| {
                     spectrum_view::show_ext(
@@ -600,7 +605,9 @@ impl eframe::App for SdroxideApp {
             }
             let (cw_spots, cw_alpha) = self.cw_overlay(now);
             let frame = self.frame.take();
-            let wf_tuning = self.wf_tick(frame.is_some());
+            // As on the digital path: no fresh frames, no scroll.
+            let live = frame.is_some() && now - self.last_spectrum_at < STREAM_STALE_S;
+            let wf_tuning = self.wf_tick(live);
             // CW is the one analog mode with a panel under the panadapter. It
             // is not a digital mode and does not take the digital path — the
             // demodulated tone stays audible and the view stays wherever the
