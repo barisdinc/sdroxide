@@ -1424,9 +1424,12 @@ fn adif_field(name: &str, value: &str) -> String {
 
 /// Render a session's QSOs as an ADIF (.adi) document importable into
 /// standard logging software.
+///
+/// Lines end in CRLF: ADIF readers are tag-delimited and indifferent, but
+/// Windows logging software can refuse a file with bare LF endings.
 pub fn qso_log_to_adif(records: &[QsoRecord]) -> String {
     let mut out = String::from(
-        "ADIF export from sdroxide\n<ADIF_VER:5>3.1.4\n<PROGRAMID:8>sdroxide\n<EOH>\n",
+        "ADIF export from sdroxide\r\n<ADIF_VER:5>3.1.4\r\n<PROGRAMID:8>sdroxide\r\n<EOH>\r\n",
     );
     for r in records {
         let (date, time) = adif_date_time(r.start_utc);
@@ -1509,7 +1512,7 @@ pub fn qso_log_to_adif(records: &[QsoRecord]) -> String {
         yn(&mut out, "QSL_RCVD", r.qsl_rcvd);
         out.push_str(&adif_field("STATION_CALLSIGN", &r.my_call));
         out.push_str(&adif_field("MY_GRIDSQUARE", &r.my_grid));
-        out.push_str("<EOR>\n");
+        out.push_str("<EOR>\r\n");
     }
     out
 }
@@ -1697,10 +1700,11 @@ fn parse_adif_datetime(date: &str, time: &str) -> i64 {
     ymd_hms_to_unix(y, mo, d, h, mi, s)
 }
 
-/// Render a session's QSOs as a human-readable text log.
+/// Render a session's QSOs as a human-readable text log. CRLF line endings,
+/// like the ADIF export, so the file opens correctly on Windows.
 pub fn qso_log_to_text(records: &[QsoRecord]) -> String {
     let mut out = String::from(
-        "sdroxide QSO log\nUTC date/time        call       grid  freq(MHz)  mode  sent rcvd\n",
+        "sdroxide QSO log\r\nUTC date/time        call       grid  freq(MHz)  mode  sent rcvd\r\n",
     );
     for r in records {
         let (date, time) = adif_date_time(r.start_utc);
@@ -1714,7 +1718,7 @@ pub fn qso_log_to_text(records: &[QsoRecord]) -> String {
             &time[4..6]
         );
         out.push_str(&format!(
-            "{:19}  {:10} {:5} {:10.6}  {:4}  {:>4} {:>4}\n",
+            "{:19}  {:10} {:5} {:10.6}  {:4}  {:>4} {:>4}\r\n",
             d,
             r.call,
             r.grid.as_deref().unwrap_or("-"),
@@ -1915,6 +1919,34 @@ mod tests {
         assert!(adif.contains("<GRIDSQUARE:4>EM48"));
         assert!(adif.contains("<EOR>"));
         assert_eq!(adif_band(14_074_000.0), "20m");
+    }
+
+    /// Both exports land in front of Windows software — the .adi in loggers
+    /// that can refuse a bare-LF file — so every line ending is CRLF, with no
+    /// stray LF or CR anywhere.
+    #[test]
+    fn exports_end_lines_with_crlf() {
+        let rec = QsoRecord {
+            call: "W9XYZ".into(),
+            freq_hz: 14_074_000.0,
+            mode: "FT8".into(),
+            band: "20m".into(),
+            start_utc: 1_609_459_200,
+            end_utc: 1_609_459_260,
+            my_call: "AB1CD".into(),
+            my_grid: "FN42".into(),
+            ..Default::default()
+        };
+        let adif = qso_log_to_adif(std::slice::from_ref(&rec));
+        let txt = qso_log_to_text(&[rec]);
+        for text in [adif, txt] {
+            assert!(text.ends_with("\r\n"), "export does not end in CRLF: {text:?}");
+            let stripped = text.replace("\r\n", "");
+            assert!(
+                !stripped.contains('\n') && !stripped.contains('\r'),
+                "a bare LF or CR survives in the export: {text:?}"
+            );
+        }
     }
 
     /// Every band sdroxide has gets its own ADIF name, and a contact anywhere
