@@ -44,6 +44,10 @@ pub struct AudioCatSource {
     tx_scratch: Vec<f32>,
 
     cat: sdroxide_cat::CatHandle,
+    /// Whether the CW panel keys this rig as audio (`CwKeying::Audio`), so the
+    /// rig must be held on a sideband instead of being put in CW. See
+    /// [`IqSource::cw_audio_keyed`].
+    cw_mcw: bool,
     dial: Dial,
     label: String,
     /// Warning captured at open time (RX device unavailable / mono-for-IQ),
@@ -205,6 +209,9 @@ impl AudioCatSource {
         // reading stands in for the next one follows the rate that thread polls
         // at (see `sdroxide_cat::signal_max_age`).
         let signal_max_age = sdroxide_cat::signal_max_age(&cfg);
+        // Either sound format: even an IQ-format rig transmits what arrives at
+        // its sound card, so MCW rides a sideband there too.
+        let cw_mcw = cfg.cw_keying == sdroxide_types::CwKeying::Audio;
         let cat = sdroxide_cat::spawn(cfg);
 
         Ok(AudioCatSource {
@@ -220,6 +227,7 @@ impl AudioCatSource {
             tx_resampler,
             tx_scratch: Vec::new(),
             cat,
+            cw_mcw,
             dial: Dial::at(center),
             label,
             status,
@@ -619,6 +627,12 @@ impl IqSource for AudioCatSource {
     // transmitter — so the panel's keyer hands it text instead of sidetone.
     fn cw_text_keying(&self) -> Option<usize> {
         self.cat.cw_chunk_len()
+    }
+    // …and when the panel keys as audio instead, the CAT thread commands the
+    // digi sideband rather than CW (see `commanded_mode`); this tells the
+    // engine to expect the sideband back from the mode poll.
+    fn cw_audio_keyed(&self) -> bool {
+        self.cw_mcw
     }
     fn send_cw(&mut self, text: &str) {
         self.cat.send_cw(text.to_string());

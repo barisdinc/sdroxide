@@ -283,15 +283,16 @@ pub(in crate::app) fn settings_cat_tab(
         ui.end_row();
 
         ui.label("CW keying").on_hover_text(
-            "How the CW panel's keyer transmits. A rig in CW keys its own \
-             transmitter and ignores what arrives at its sound card, so \"Rig keyer\" \
-             — handing the text to the radio to send — is the only route that puts \
-             CW on the air there. It uses the rig's keyer speed (set from the panel's \
-             WPM), needs break-in on, and on Yaesu it sends by way of keyer memory 1, \
-             overwriting whatever was stored in it.\n\n\
-             \"Sound card\" sends the keyed sidetone as audio instead: nothing at all \
-             on a rig in CW, and a tone on the sideband (MCW) at dial + pitch if you \
-             keep the rig in USB/DATA.",
+            "How the CW panel's keyer transmits. \"Rig keyer\" puts the radio in CW \
+             and hands it the text to send with its own keyer. It uses the rig's \
+             keyer speed (set from the panel's WPM), needs break-in on, and on Yaesu \
+             it sends by way of keyer memory 1, overwriting whatever was stored in it.\n\n\
+             \"Sound card\" sends the keyed sidetone as audio instead (MCW), a tone at \
+             dial + pitch — and because a rig in CW would ignore its sound card \
+             entirely, selecting CW then follows the Digimode mode setting (USB, DATA, \
+             or Radio controlled) instead of switching the rig to CW. Pick \"Radio \
+             controlled\" there for rigs whose data position can't be commanded over \
+             CAT (a Xiegu's U-D) and park the rig on it yourself, as for FT8.",
         );
         enum_combo(ui, "cwkey", &mut cfg.cat.cw_keying, &CwKeying::ALL, CwKeying::label);
         ui.end_row();
@@ -1794,7 +1795,14 @@ pub(in crate::app) fn settings_icomnet_tab(
             ui.end_row();
         }
 
-        ui.label("CW keying");
+        ui.label("CW keying").on_hover_text(
+            "How the CW panel's keyer transmits. \"Rig keyer\" puts the radio in CW \
+             and hands it the text to send with its own keyer (CI-V 0x17). \"Sound \
+             card\" sends the keyed sidetone over the LAN as audio instead (MCW), a \
+             tone at dial + pitch — and because a rig in CW would ignore its \
+             modulator input, selecting CW then keeps the radio in plain USB, the \
+             same mode the digital modes ride.",
+        );
         ComboBox::from_id_salt("icomnet_cw").selected_text(net.cw_keying.label()).show_styled(
             ui,
             |ui| {

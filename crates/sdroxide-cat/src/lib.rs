@@ -1139,6 +1139,39 @@ fn apply_line(port: &mut dyn Link, forced: LineState, rts: bool) {
     if rts { port.set_rts(level) } else { port.set_dtr(level) }
 }
 
+/// What mode to command the rig into for a given app mode. FT8/FT4 use the
+/// separate `digi_mode` setting; every other mode obeys `mode_control`
+/// (CAT = mirror the selected mode to the rig; Radio = don't touch it).
+///
+/// `digi_mode` is a choice between two *sidebands* — plain USB or the rig's
+/// DATA-U position — so it only makes sense for a mode that rides a
+/// sideband. The carrier-centred modes (RIFP, VHF packet) frequency-modulate
+/// the carrier instead: sending them as USB puts the rig in the wrong
+/// modulation entirely, and nothing downstream would say so. Those fall
+/// through to `mode_control`, where each protocol's own map answers DATA-FM.
+///
+/// CW keyed as audio (`CwKeying::Audio`) rides the digi sideband too: a rig
+/// put in CW keys its own transmitter and never modulates what arrives at its
+/// sound card, so the keyed sidetone (MCW) only reaches the air from USB or
+/// DATA-U. Commanding CW there was the issue #119 dead key — a Xiegu G90
+/// switched out of U-D made no power at all.
+fn commanded_mode(cfg: &CatConfig, app_mode: Mode) -> Option<Mode> {
+    let rides_digi_sideband =
+        (app_mode.is_digital() && !app_mode.is_sstv() && !app_mode.is_carrier_centered())
+            || (app_mode == Mode::Cw && cfg.cw_keying == CwKeying::Audio);
+    if rides_digi_sideband {
+        return match cfg.digi_mode {
+            DigiMode::Radio => None,
+            DigiMode::Usb => Some(Mode::Usb),
+            DigiMode::Data => Some(Mode::Digu),
+        };
+    }
+    match cfg.mode_control {
+        ModeControl::Cat => Some(app_mode),
+        ModeControl::Radio => None,
+    }
+}
+
 fn serial_thread(
     cfg: CatConfig,
     cmd_rx: Receiver<CatCmd>,
@@ -1169,29 +1202,8 @@ fn serial_thread(
     let mut last_swr: Option<f32> = None;
     let mut last_alc: Option<f32> = None;
     let mut last_po: Option<f32> = None;
-    // What mode to command the rig into for a given app mode. FT8/FT4 use the
-    // separate `digi_mode` setting; every other mode obeys `mode_control`
-    // (CAT = mirror the selected mode to the rig; Radio = don't touch it).
-    //
-    // `digi_mode` is a choice between two *sidebands* — plain USB or the rig's
-    // DATA-U position — so it only makes sense for a mode that rides a
-    // sideband. The carrier-centred modes (RIFP, VHF packet) frequency-modulate
-    // the carrier instead: sending them as USB puts the rig in the wrong
-    // modulation entirely, and nothing downstream would say so. Those fall
-    // through to `mode_control`, where each protocol's own map answers DATA-FM.
-    let mode_cmd = |app_mode: Mode| -> Option<Mode> {
-        if app_mode.is_digital() && !app_mode.is_sstv() && !app_mode.is_carrier_centered() {
-            return match cfg.digi_mode {
-                DigiMode::Radio => None,
-                DigiMode::Usb => Some(Mode::Usb),
-                DigiMode::Data => Some(Mode::Digu),
-            };
-        }
-        match cfg.mode_control {
-            ModeControl::Cat => Some(app_mode),
-            ModeControl::Radio => None,
-        }
-    };
+    // See `commanded_mode` for the app-mode → rig-mode policy.
+    let mode_cmd = |app_mode: Mode| -> Option<Mode> { commanded_mode(&cfg, app_mode) };
 
     loop {
         // (Re)open the port, retrying on failure.
@@ -1933,6 +1945,52 @@ mod tests {
         assert!(family(CatFamily::Elecraft).mode_moves_dial());
         for f in [CatFamily::Icom, CatFamily::Xiegu, CatFamily::Yaesu, CatFamily::Kenwood] {
             assert!(!family(f).mode_moves_dial(), "{f:?}");
+        }
+    }
+
+    /// Issue #119: a rig put in CW keys its own transmitter and ignores its
+    /// sound card, so CW keyed as audio (MCW) must ride the digi sideband.
+    /// Commanding CW anyway was a dead key on a Xiegu G90 — switched out of
+    /// U-D, it made no power at all.
+    #[test]
+    fn cw_keyed_as_audio_rides_the_digi_sideband() {
+        let cfg = |digi| CatConfig {
+            family: CatFamily::Xiegu,
+            cw_keying: CwKeying::Audio,
+            mode_control: ModeControl::Cat,
+            digi_mode: digi,
+            ..CatConfig::default()
+        };
+        assert_eq!(commanded_mode(&cfg(DigiMode::Radio), Mode::Cw), None);
+        assert_eq!(commanded_mode(&cfg(DigiMode::Usb), Mode::Cw), Some(Mode::Usb));
+        assert_eq!(commanded_mode(&cfg(DigiMode::Data), Mode::Cw), Some(Mode::Digu));
+    }
+
+    /// The rig's own keyer can only send with the rig *in* CW, so that route
+    /// still commands it — the Icom/Yaesu/Kenwood/Elecraft text keying path
+    /// must not change shape.
+    #[test]
+    fn cw_keyed_by_the_rig_is_still_commanded_as_cw() {
+        let cfg =
+            |mc| CatConfig { cw_keying: CwKeying::Cat, mode_control: mc, ..CatConfig::default() };
+        assert_eq!(commanded_mode(&cfg(ModeControl::Cat), Mode::Cw), Some(Mode::Cw));
+        assert_eq!(commanded_mode(&cfg(ModeControl::Radio), Mode::Cw), None);
+    }
+
+    /// DIGU picked at the panel is a rig mode, not a decode layer: it obeys
+    /// Mode control verbatim rather than the digi sideband mapping.
+    #[test]
+    fn an_on_screen_digu_still_obeys_mode_control_not_digi_mode() {
+        let cfg = CatConfig { digi_mode: DigiMode::Radio, ..CatConfig::default() };
+        assert_eq!(commanded_mode(&cfg, Mode::Digu), Some(Mode::Digu));
+    }
+
+    /// The digital modes' sideband choice is not disturbed by how CW is keyed.
+    #[test]
+    fn ft8_ignores_the_cw_keying_setting() {
+        for k in CwKeying::ALL {
+            let cfg = CatConfig { cw_keying: k, digi_mode: DigiMode::Data, ..CatConfig::default() };
+            assert_eq!(commanded_mode(&cfg, Mode::Ft8), Some(Mode::Digu), "{k:?}");
         }
     }
 

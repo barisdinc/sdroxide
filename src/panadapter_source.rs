@@ -530,6 +530,10 @@ impl IqSource for PanadapterSource {
         self.ctrl.cw_text_keying()
     }
 
+    fn cw_audio_keyed(&self) -> bool {
+        self.ctrl.cw_audio_keyed()
+    }
+
     fn send_cw(&mut self, text: &str) {
         self.ctrl.send_cw(text);
     }

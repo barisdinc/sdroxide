@@ -445,6 +445,19 @@ pub trait IqSource: Send {
     fn cw_text_keying(&self) -> Option<usize> {
         None
     }
+    /// True when CW typed at the panel goes out as keyed audio (MCW) through
+    /// this radio's transmit sound path, so the radio must be kept on a
+    /// sideband rather than put in CW — in CW it would not modulate its sound
+    /// card at all (issue #119: a Xiegu G90 switched out of U-D made no power).
+    ///
+    /// Deliberately not `cw_text_keying().is_none()`: that is also `None` for
+    /// an SDR (which keys the sidetone through its own TX chain and has no rig
+    /// mode to protect) and for rigs whose keyer sdroxide cannot drive but
+    /// that genuinely belong in CW (ELAD paddle CW, rigctld). Only an explicit
+    /// "Sound card (MCW)" choice answers true.
+    fn cw_audio_keyed(&self) -> bool {
+        false
+    }
     /// Hand `text` to the radio's own keyer, at most `cw_text_keying()` worth,
     /// and not again until the last lot has been sent.
     ///
@@ -902,6 +915,9 @@ impl IqSource for ConvertedSource {
     /// Keying is text, not a frequency: the converter has nothing to add.
     fn cw_text_keying(&self) -> Option<usize> {
         self.inner.cw_text_keying()
+    }
+    fn cw_audio_keyed(&self) -> bool {
+        self.inner.cw_audio_keyed()
     }
     fn send_cw(&mut self, text: &str) {
         self.inner.send_cw(text);

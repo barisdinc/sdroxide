@@ -27,7 +27,8 @@ or connects to a remote sdroxide server.
 12. [Command-line reference](#12-command-line-reference)
 13. [Configuration files](#13-configuration-files)
 14. [Troubleshooting](#14-troubleshooting)
-15. [Appendix: keyboard shortcuts, modes, bands](#15-appendix)
+15. [Radio-specific notes](#15-radio-specific-notes)
+16. [Appendix: keyboard shortcuts, modes, bands](#16-appendix)
 
 ---
 
@@ -256,7 +257,7 @@ popup with three rows:
 
 ![The band and mode selector popup](images/04-band-mode-popup.jpg)
 
-See the [appendix](#15-appendix) for what each mode is.
+See the [appendix](#16-appendix) for what each mode is.
 
 ### 2.5 VFOs, split, and the sub-receiver
 
@@ -976,10 +977,11 @@ characters as well, or it will drop out between them however the text arrives.
   signal. Worth turning on for a signal too weak for the speed search to settle
   when you already know how fast the other station sends.
 
-> **Transmitting** needs an IQ radio (SoapySDR, HPSDR, TCI, SmartSDR): the keyer
-> builds its own sideband signal. A CAT radio that takes demodulated audio will
-> decode perfectly well but cannot be keyed this way — its CW keying is the
-> rig's own.
+> **Transmitting** on an IQ radio (SoapySDR, HPSDR, TCI, SmartSDR) is the
+> keyer building its own sideband signal. On a CAT radio the keyer transmits by
+> the route the **CW keying** setting picks: text handed to the rig's own keyer
+> with the rig in CW, or the keyed tone as audio (MCW) with the rig held on a
+> sideband ([§6.2.2](#622-cat-radios-serial-control--usb-audio)).
 
 ### 2.15 Band conditions
 
@@ -3807,12 +3809,19 @@ What that needs on the radio:
   the rig's own power control, commanded over the same serial link before each
   message ([2.10](#210-transmit)).
 
-`Sound card (MCW)` is the other route: the keyed sidetone goes out as audio.
-That is silent on a rig in CW, and only reaches the air if you keep the rig in
-USB or DATA (set **Mode control** to `Radio controlled`), where it goes out as a
-tone on the sideband — audible as CW, but sitting at dial + pitch rather than on
-the dial frequency, and outside the rig's CW filtering. It is here for that
-setup and for radios whose keyer sdroxide cannot drive.
+`Sound card (MCW)` is the other route: the keyed sidetone goes out as audio, a
+tone on the sideband sitting at dial + pitch — which is exactly where the
+panadapter draws the stations, so a clicked station is answered on its own
+frequency. Because a rig *in* CW would ignore that audio entirely, selecting CW
+with this route follows the **Digimode mode** setting instead of switching the
+rig to CW: `USB` or `DIGI` command that sideband, `Radio controlled` leaves the
+rig on whatever mode you parked it in. It is here for radios whose keyer
+sdroxide cannot drive — on a Xiegu G90, set **CW keying** to `Sound card (MCW)`
+and **Digimode mode** to `Radio controlled`, and park the rig in its U-D
+position, exactly as for FT8: the G90's U-D cannot be selected over CI-V, and
+its other modes take audio from the microphone rather than the interface. What
+you give up against a rig in CW is its CW filtering; the sideband filter is
+what does the selecting.
 
 > **Note (Kenwood):** at connect sdroxide turns the rig's auto-information off
 > (`AI0`), clears RIT and XIT, and selects **VFO A** for receive, which is also
@@ -4798,7 +4807,9 @@ sdroxide follows it back after about a second.
 - **Displayed bandwidth** (AF only) — the width of the audio-band panadapter.
 - **CW keying** — as for a CAT rig. A radio *in* CW ignores the audio it is
   sent and keys its own transmitter, so **Rig keyer (CAT)** is what puts CW on
-  the air at the dial frequency ([§6.2.2](#622-cat-radios-serial-control--usb-audio)).
+  the air at the dial frequency; **Sound card (MCW)** sends the keyed tone as
+  audio instead and keeps the radio in plain USB — the same mode the digital
+  modes ride here ([§6.2.2](#622-cat-radios-serial-control--usb-audio)).
 - **Transmit buffer** — how much audio the radio holds before modulating. More
   survives a worse network, at the cost of transmit latency.
 - **Show the radio's spectrum scope** — stream the sweep into the full-band
@@ -5889,7 +5900,7 @@ The table lists every shortcut, one per row: the key **Shortcut**, what it
 binding without deleting it. Click the shortcut button to rebind it, then press
 the key combination you want (Esc cancels). **+ Add shortcut** creates a row,
 **✕** removes one, and **Restore defaults** puts back the shipped set listed in
-[15](#15-appendix). Shortcuts are ignored while you are typing in a text field
+[16](#16-appendix). Shortcuts are ignored while you are typing in a text field
 or a control has keyboard focus.
 
 **Push-to-talk deserves a note.** No PTT key ships bound, on purpose: a
@@ -8390,17 +8401,22 @@ at the radio), so choosing 57600 or 115200 here leaves the link mute in both
 directions. Only a K4 runs above that.
 
 **CW transmits nothing.**
-Set **CW keying** to **Rig keyer (CAT)** on the Radio tab — see
+Check **CW keying** on the Radio tab — see
 [6.2.2](#622-cat-radios-serial-control--usb-audio). A rig in CW
-ignores audio sent to its sound card, so it can only be keyed from text. On
-Yaesu also check that CW memory 1 is free to be overwritten; on Kenwood, that
-break-in is on (sdroxide only asserts it when the rig has reported CW, because
-the same command is the VOX switch in every other mode); on Elecraft, that the
-rig is not sitting in a limited-access state such as BSET or VFO REV, where it
-answers `?;` and does nothing; on any rig, that
+ignores audio sent to its sound card, so it can only be keyed from text: with
+**Rig keyer (CAT)**, on Yaesu check that CW memory 1 is free to be overwritten;
+on Kenwood, that break-in is on (sdroxide only asserts it when the rig has
+reported CW, because the same command is the VOX switch in every other mode);
+on Elecraft, that the rig is not sitting in a limited-access state such as BSET
+or VFO REV, where it answers `?;` and does nothing; on any rig, that
 the radio is actually in CW (**Mode control** = `CAT`) and that the **Drive**
 slider — which *is* the rig's output power on a CAT rig, in CW as in every other
-mode — is not down at the bottom.
+mode — is not down at the bottom. On a radio whose keyer sdroxide cannot drive
+at all — a Xiegu G90 keys up with no power out, and rigctld and the ELAD have
+no text keying — choose **Sound card (MCW)** instead: the keyed tone goes out
+as audio and the rig is kept on the **Digimode mode** sideband rather than
+switched to CW (on the G90, `Radio controlled` with the rig parked in U-D, as
+for FT8).
 
 **Two identical USB sound cards are hard to tell apart.**
 Device names include the manufacturer, model, ALSA card id, and USB id in
@@ -8451,7 +8467,344 @@ is how to force the steady path on a GPU sdroxide does not know about.
 
 ---
 
-## 15. Appendix
+## 15. Radio-specific notes
+
+Everything in this chapter is said somewhere else in the manual, in the
+section it belongs to. It is collected here a second time, radio by radio, so
+that the owner of one particular model can read their page and nothing else:
+the settings that model needs, the radio-side menus involved, and the traps
+with that model's name on them. Each entry links to the section that carries
+the full detail.
+
+### 15.1 Xiegu G90
+
+- Configured under [CAT radios](#622-cat-radios-serial-control--usb-audio):
+  **CAT family** `Xiegu`, **Radio ID** the rig's CI-V address, **Sound format**
+  `Demod audio` for the audio arriving through a DE-19 or any USB audio
+  interface.
+- **Digital modes:** set **Digimode mode** to `Radio controlled` and park the
+  rig in its **U-D** position yourself. U-D cannot be selected over CI-V, and
+  the G90's other modes take transmit audio from the microphone rather than
+  the interface — commanded into plain USB it keys up and transmits the room,
+  or nothing.
+- **CW:** set **CW keying** to `Sound card (MCW)`. The `Rig keyer (CAT)` route
+  keys the G90 with **no power out** — sdroxide cannot drive its keyer. With
+  MCW, sdroxide keeps the rig on the Digimode-mode sideband (with the recipe
+  above: leaves it in U-D), the keyed tone goes out at dial + pitch, and a
+  clicked station is answered on its own frequency.
+- An over keyed at the rig's own mic is noticed — the family answers the Icom
+  `1C 00` PTT read.
+
+### 15.2 Xiegu X6100
+
+- The canonical `Demod audio` rig: serial at **19200 8N1**, CI-V address
+  **`70h`** in **Radio ID**, and **Panadapter BW** setting the width of the
+  audio-band panadapter
+  ([§6.2.2](#622-cat-radios-serial-control--usb-audio)). A wrong address is
+  silent — frequency stops working along with everything else.
+
+### 15.3 Icom over USB (IC-7300 and family)
+
+All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
+
+- Pick your **Radio model**. It fills in the transceiver's CI-V address (every
+  model ships with a different one, and a frame to the wrong address is
+  silently ignored) and enables the DATA-mode command — without which a
+  digital over goes out through the **microphone input**, speech processor and
+  SSB transmit filter included. `Other` for an unlisted radio; the IC-7000 is
+  listed but selects its data input at the radio.
+- **PTT method** `CAT`. `DTR`/`RTS` only key if the radio's **USB SEND**
+  setting is assigned to that line, and an IC-7300 ships with it off.
+- **CI-V Transceive** on in the radio's menu is welcome: sdroxide notices the
+  broadcasts and stands its dial poll down on its own.
+- Received audio breaking up is usually the **Poll rate**, not the DSP: a
+  modern Icom is a USB hub with the CI-V bridge and the audio codec behind it,
+  and every control frame steals bus time. Turn the poll down.
+- Two Icoms are two of the same USB codec under one name — the device list
+  tags the second (`[#a3f1]`-style) so they can be told apart.
+
+### 15.4 Icom over LAN (IC-705, IC-7300MK2, IC-7610, IC-9700, IC-905)
+
+All in [§6.2.10](#6210-icom-lan-network-radios):
+
+- Three radio-side settings under **MENU » SET** first: **Network Control**
+  = ON, a **Network User1/User2** name and password (the same pair goes in
+  sdroxide), and **Connectors > MOD Input**: `DATA OFF MOD` and `DATA MOD` =
+  `LAN` (`WLAN` on an IC-705). sdroxide writes the third one for you only on
+  the IC-7300MK2 and IC-705; on other models it says so and leaves the menu
+  alone.
+- No discovery — read the IP off the radio's **Network** screen. Port 50001
+  unless changed there.
+- **No Icom outputs I/Q on any interface.** The full-band view is the radio's
+  own scope; the panadapter on AF is the demodulated audio, on the 12 kHz IF
+  (which needs the **48000 Hz** audio rate) about ±12 kHz around the dial.
+- **CW keying** `Sound card (MCW)` keeps the radio in plain USB, the same
+  mode the digital modes ride here.
+
+### 15.5 Icom IC-R8600
+
+- Connects over the same [Icom LAN](#6210-icom-lan-network-radios) interface.
+  It is a receiver: sdroxide offers **no PTT, drive, tune or SWR controls at
+  all** — regardless of what its capability block claims, because at least
+  one advertises a transmit stream despite having no transmitter — and the
+  MOD-input menu step neither runs nor warns.
+
+### 15.6 Kenwood (TS-480, TS-590, TS-890, TS-990, TS-2000)
+
+All in [§6.2.2](#622-cat-radios-serial-control--usb-audio) and
+[§14](#14-troubleshooting):
+
+- Get the **CAT family** right: a Kenwood driven as a Yaesu rejects every
+  retune and **keys up without unkeying** (`TX0;` is a transmit command here).
+- **Send command** must match the generation: `TS-590 style (TX1;)` for a
+  TS-590S/SG, TS-890 or TS-990 — wrongly left on TS-2000 style they key and
+  transmit *silence* — and `TS-2000 style (TX;)` for a TS-480, TS-570, TS-870
+  or TS-2000, which transmits on the **sub-band** under `TX1;`.
+- Take the rig off VFO B and out of memory mode: sdroxide selects and tunes
+  **VFO A**, and a rig parked elsewhere answers every read and ignores every
+  retune.
+- S-meter and SWR scales are carried for the TS-480, TS-590S/SG, TS-890S,
+  TS-990S and TS-2000. On any other model the S-meter reads on a generic line
+  and the SWR stays blank — the log line `Kenwood CAT: rig reports model ID …`
+  is what to report to get yours added.
+- **CW:** break-in (`VX`) is only asserted once the rig reports CW, because
+  the same command is the VOX switch in every other mode — keying CW with
+  **Mode control** `Radio controlled` means turning break-in on at the radio
+  yourself. Text keying streams `KY` and leaves your stored keyer messages
+  alone.
+
+### 15.7 Yaesu (FT-891, FT-991A, FT-710, FTDX10, FTDX101, FTDX1200/3000/5000)
+
+All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
+
+- Use the **Enhanced** USB serial port for CAT, and **PTT method** `CAT` —
+  the Standard port carries the RTS/DTR key lines and sdroxide does not use
+  it.
+- **CW memory 1 is scratch space:** sending CW from the panel overwrites
+  whatever was stored in it (Yaesu has no streaming keying command). The
+  FT-710's inverted playback command is handled automatically via `ID;`.
+- On an FTDX3000 or FTDX5000 with the tuner in line, the rig only answers the
+  SWR read when its **own front-panel meter is already set to SWR** — set it
+  there or the meter sits at the bottom of the scale.
+- Transmit power is watts with no way to ask the maximum, so the Drive slider
+  is scaled against 100 W — low, never high, on bigger rigs.
+
+### 15.8 Elecraft (K3, K3S, KX2, KX3, K4)
+
+All in [§6.2.2](#622-cat-radios-serial-control--usb-audio) and
+[§14](#14-troubleshooting):
+
+- **CAT family** `Elecraft`, not `Kenwood` — driven as a Kenwood it tunes and
+  keys correctly and then goes out **on the wrong sideband in every digital
+  mode**, because DATA is a mode here, not a flag.
+- **Baud:** a K3, K3S, KX3 or KX2 goes no faster than **38400**
+  (`CONFIG:RS232` at the radio); a faster pick leaves the link mute both
+  ways. Only a K4 runs above that.
+- `MENU:RX SHFT` at `8.0` moves the I.F. 8 kHz off the dial: set **I/Q centre
+  offset** to `8000` to match (`-8000` if signals land at twice the offset).
+  Never put it in the Converter field — that retunes the radio.
+- Only **DATA A** is the sound-card path; sdroxide pins it with `DT0;` when it
+  commands DATA, and follows the rig into DATA only when the rig reports
+  DATA A. A rig stuck in AFSK A / FSK D / PSK D decodes nothing.
+- The Drive slider spans what `OM;` finds: 110 W with a KPA3/KXPA100
+  detected, 12 W without — a slider stuck at QRP means the amplifier module
+  was not seen.
+- **CW** keys directly (`KY`, no break-in setup), clamped to the keyer's
+  8–50 WPM. A rig sitting in BSET or VFO REV answers `?;` and does nothing.
+
+### 15.9 ELAD FDM-DUO / FDM-S1 / FDM-S2
+
+All in [§6.2.16](#6216-elad-fdm-duo--fdm-s-usb):
+
+- A DUO's rear panel is **three USB devices** — RX (wideband I/Q), CAT
+  (FTDI serial) and USB Audio (transmit in) — and the one ELAD interface
+  drives all three. With only the CAT cable connected, the CAT-family route in
+  [§6.2.2](#622-cat-radios-serial-control--usb-audio) works instead, without
+  the wideband panadapter.
+- **The sample rate cannot be commanded.** The device sits at whatever it
+  powered up in (192 kHz on a fresh DUO) or whatever FDM-SW2 last left it in;
+  set sdroxide to match, and let its measured-throughput notice name the rate
+  if unsure. 6144 kHz halves the sample width — a wrong guess there is noise.
+- **Baud** matches menu 70 `CAT BAUD` (ships at 38400); **Transmit input**
+  asserts menu 32 `TX IN` — `USB audio` is what makes transmit work, and a
+  radio left on Microphone transmits the room with nothing on screen to say
+  so.
+- **CW:** there is no text keyer — use the radio's own key or paddle, or
+  menu 37 `CW IN` = `Key+DTR` with the CAT cable's DTR line as a straight
+  key, or `Sound card (MCW)`.
+- Linux needs the packaged udev rule; Windows needs the receive interface on
+  WinUSB via Zadig (which hides it from FDM-SW2 until the driver is put
+  back).
+
+### 15.10 SunSDR / ExpertSDR3 / Thetis (TCI)
+
+All in [§6.2.4](#624-tci-network-expertsdr3-and-thetis):
+
+- Enable **TCI** in the SDR software first; the default `127.0.0.1:50001` is
+  ExpertSDR3's listener.
+- A SunSDR2DX serves two radio tabs from one connection: a second radio at
+  the same address on **RX2**. The transmitter belongs to the RX1 radio, and
+  the I/Q rate to whichever radio connects first.
+- A Drive level set in ExpertSDR3 or at the radio is adopted at connect, not
+  overwritten.
+- Running sdroxide's own [TCI server](#682-built-in-tci-server) on the same
+  machine: port 50001 is likely already taken by ExpertSDR3 or Thetis — pick
+  another (50002).
+
+### 15.11 Hermes Lite 2 (and other HPSDR)
+
+All in [§6.2.3](#623-hpsdr-network-radios):
+
+- **LNA gain** is the HL2's only analogue gain: start around **+20 dB**; too
+  high clips the ADC, too low goes deaf.
+- **Power amplifier** is on by default. Off, the radio still keys — relay,
+  PTT, accessory bus — but the antenna jack makes no power. Turn it off only
+  when driving an external amplifier from RF1.
+- **Invert spectrum is on by default because a Hermes Lite 2 needs it.**
+- **Filter board:** leave at `None` unless one really is fitted — the J16
+  pins are general-purpose outputs that operators also wire to amp PTT and
+  antenna relays, and driving them from band data would operate whatever is
+  connected.
+- Over WiFi or a VPN raise **Transmit buffer** to 100–200 ms.
+- Protocol 1 boards (the HL2 among them) top out at 384 kHz and have DDC1
+  only; a Protocol 2 board gives a second band to a second radio tab on
+  DDC2.
+
+### 15.12 FlexRadio (FLEX-6000 / FLEX-8000, SmartSDR)
+
+All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
+
+- sdroxide registers as a **GUI client** and takes a DAX IQ stream — a radio
+  already claimed by another GUI client shows greyed out unless multiFLEX is
+  enabled on it. Behind a router or VPN the broadcast never arrives: enter
+  the address by hand.
+- **192 kHz is the radio's DAX IQ maximum**, so that is the widest span.
+- The radio remembers a client by its **Station name** — renaming makes it
+  treat sdroxide as a brand-new client.
+
+### 15.13 RTL-SDR dongles (Blog V3 / V4 and generic)
+
+[§6.2.5](#625-rtl-sdr-usb-dongles) and, remotely,
+[§6.2.11](#6211-rtl-sdr-over-rtl_tcp-network-dongles):
+
+- **HF:** a Blog V4 upconverts in hardware — HF just works, no offset
+  anywhere (and don't put one in Converter: below 28.8 MHz the dongle would
+  shift it a second time). Any other dongle reaches HF by direct-sampling
+  the Q branch — a V3's HF port — with `Automatic` switching at 28.8 MHz.
+- **You do not have to guess ppm:** `RUST_LOG=sdroxide_rtlsdr=debug` prints a
+  measured figure after ~20 s. Over `rtl_tcp` that measurement is
+  meaningless — calibrate on USB once and carry the number across.
+- Dongles ship with serial `00000001`; program distinct serials with
+  `rtl_eeprom` before running more than one.
+- Over `rtl_tcp` the server cannot say what the tuner sits on, so a plain
+  R828D that hears nothing on HF needs `Direct sampling (Q branch)` picked
+  explicitly — and a V4 needs `Automatic` left alone.
+- **Bias tee:** ~4.5 V DC onto the feedline — never with a transceiver, a
+  DC-grounded antenna, or a preamp powered from the far end.
+
+### 15.14 SDRplay RSP (RSP1/1A/1B/2, RSPduo, RSPdx)
+
+All in [§6.2.8](#628-sdrplay-rsp-usb):
+
+- Needs the **vendor API v3.x** and its background service
+  (`sudo systemctl enable --now sdrplay` on Linux); `sdroxide --probe` names
+  the missing piece.
+- The controls are the RSP's own units: **IF gain reduction** runs backwards
+  (20 dB is maximum gain, 59 minimum) and **LNA state 0 is maximum** — the
+  default of 4 exists because full front-end gain on a real antenna overloads
+  the ADC.
+- An **RSPduo** runs one tuner at a time, chosen at open; dual-tuner and
+  master/slave modes are not supported. **HDR mode** below 2 MHz is the
+  RSPdx / RSPdx R2 path.
+- Above 6.048 Msps the ADC trades bit depth for speed — worth knowing before
+  picking 10 Msps for weak-signal work.
+
+### 15.15 Airspy HF+ and Airspy R2 / Mini
+
+Two different receivers: different silicon, USB ids, protocols, and udev
+rules — [§6.2.9](#629-airspy-hf-usb) and
+[§6.2.13](#6213-airspy-r2--mini-usb) respectively; neither interface
+substitutes for the other.
+
+- **HF+ (Dual/Discovery/Ranger):** calibration is in parts per *billion*, and
+  nothing is ever written to the receiver's flash. The synthesiser tunes in
+  whole kHz with a fine-tuning oscillator doing the rest — below 180 kHz
+  (zero-IF) the oscillator does *all* the tuning, which is how it reaches
+  VLF. Leave **Host DSP** on.
+- **R2 / Mini:** a real-ADC receiver, so the DC offset lands at the *edge* of
+  the span, not the centre. Gain is a step (0–21) along the Linearity or
+  Sensitivity curve, not a dB figure. An R2 offers 10 and 2.5 Msps, a Mini 6
+  and 3 — the same USB id otherwise.
+
+### 15.16 HackRF One / Pro
+
+All in [§6.2.12](#6212-hackrf-one--pro-usb):
+
+- The only USB interface here that transmits, and the only **half-duplex**
+  one: receive stops for every over.
+- **Transmit safety:** poor harmonic suppression — low-pass filter for the
+  band, or a dummy load until you have measured harmonics and carrier
+  leakage. Leave **Drive** high and set level with **TX VGA**; the carrier
+  sits on your signal by design.
+- The 14 dB RF amp is **one switch for both directions**; sdroxide
+  reprograms it on every direction change. Via SoapySDR this cannot be
+  expressed — there the receive amp dies after the first over.
+- Leave **Baseband filter** on `Automatic` — a hand-narrowed filter silently
+  withdraws the DC-avoiding LO offset, which looks like the offset being
+  broken.
+- A **Pro** reaches 100 kHz and gets four extra low rates; its
+  half/extended-precision gateware modes are not driven — a Pro left in one
+  by `hackrf_debug -P` shows noise until unplugged.
+
+### 15.17 PlutoSDR (ADALM-Pluto, Pluto+, LibreSDR)
+
+All in [§6.2.7](#627-plutosdr-adalm-pluto):
+
+- **A Pluto is a network device even on USB** — the radio takes
+  `192.168.2.1`, your computer `192.168.2.10`; the tab wants an address, not
+  a serial. **Test connection** reports model, firmware, and the tuning range
+  this particular board has (stock AD9363: 325 MHz–3.8 GHz; the well-known
+  AD9364 firmware change: 70 MHz–6 GHz).
+- A stock Pluto cannot go below about **2.084 Msps**; leave the analog filter
+  on `auto`; the RX gain slider only works in **Manual** AGC (the AD9361 owns
+  the register otherwise). TX gain is attenuation — 0 dB is full output — and
+  multiplies with the Drive slider.
+- **Full duplex** (the QO-100 arrangement) only works on real Ethernet — a
+  LibreSDR or a Pluto behind a gigabit adapter; an over then costs twice the
+  sample rate in bandwidth. A stock 1R1T Pluto also refuses RX2.
+- First transmission: TX gain to minimum, into a dummy load, verify the
+  signal is where the dial says. A steady carrier where modulation should be
+  means the AD9361's own tone generators won — report it.
+
+### 15.18 LimeSDR + LimeRFE
+
+All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
+
+- Leave **Analog filter** at `0`: a filter narrower than a quarter of the
+  span silently puts LO leakage back on the dial, and below 30 MHz the filter
+  opens wide on purpose (the LMS7002M's synthesisers stop at 30 MHz).
+- Transmit has **no filtering of its own**: low-pass filter, a LimeRFE
+  channel, or a dummy load.
+- **LimeRFE:** prefer its own USB cable if you change band often — the
+  through-the-LimeSDR link costs the better part of a second per transaction.
+  On HF, **J5 is the only path to the amplifier and is one jack for both
+  directions**; leave the connector setting on `Automatic`. Turn the fan on
+  for sustained transmitting. Nothing sdroxide does keys an external
+  amplifier.
+- **Rescan is not free** — LimeSuite opens each candidate board, which can
+  disturb one another program is using.
+
+### 15.19 RX-888 / RX-888 Mk2
+
+- Firmware is bundled and uploaded automatically. On a Mk2 the built-in
+  R828D tuner is driven too, so it covers VHF/UHF as well as HF and switches
+  between its two antenna ports on its own. The [ISM decoder](#5-ism-band-decoder)
+  reaches 868 MHz through that tuner, where the 2.025 Msps downconverter
+  width is exactly why the 868.880 MHz centre matters.
+
+---
+
+## 16. Appendix
 
 ### Keyboard shortcuts
 

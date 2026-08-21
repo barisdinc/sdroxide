@@ -723,10 +723,13 @@ pub enum CwKeying {
     /// the only route that puts CW on the air from a rig that is *in* CW.
     #[default]
     Cat,
-    /// Send the keyer's sidetone through the rig's sound card as audio. Only
-    /// reaches the air if the rig is left in a voice/data mode, where it goes
-    /// out as a tone on the sideband (MCW) at dial + pitch rather than as CW on
-    /// the dial frequency.
+    /// Send the keyer's sidetone through the rig's sound card as audio, a tone
+    /// on the sideband (MCW) at dial + pitch rather than CW on the dial
+    /// frequency. Because it only reaches the air from a voice/data mode,
+    /// selecting CW then keeps the rig on the digital modes' sideband
+    /// (`digi_mode`; plain USB on the LAN backend) instead of switching it to
+    /// CW — the route for rigs whose keyer sdroxide cannot drive, like a Xiegu
+    /// G90 (issue #119).
     Audio,
 }
 

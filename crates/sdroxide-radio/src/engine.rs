@@ -3106,17 +3106,20 @@ impl Engine {
             ControlUpdate::Mode(m) => {
                 let cur = self.state.rx[0].mode;
                 // Against the mode we *command*, not the one on screen: SSTV is
-                // commanded as plain LSB on 160/80/40 m, and a rig echoing that
-                // LSB back has done exactly as it was told.
-                let same_class = rig_mode_class(self.control_mode()) == rig_mode_class(m);
-                if cur.is_digital() {
-                    // Digital modes (FT8/FT4/PSK/RTTY/SSTV) are app-driven and
-                    // ride the sideband the app chose. Never leave the digital
-                    // mode because of a rig report; if the rig drifted onto
-                    // another sideband (e.g. per-band mode memory switching to
-                    // LSB on 40/80 m), command it straight back. Re-commanding
-                    // just echoes the same sideband, which is same-class and
-                    // ignored, so this settles (no feedback).
+                // commanded as plain LSB on 160/80/40 m, CW keyed as audio
+                // (MCW) is commanded as the digi sideband, and a rig echoing
+                // that back has done exactly as it was told.
+                let cw_mcw = cur == Mode::Cw && self.source.cw_audio_keyed();
+                let same_class =
+                    expected_rig_class(self.control_mode(), cw_mcw) == rig_mode_class(m);
+                if cur.is_digital() || cw_mcw {
+                    // Digital modes (FT8/FT4/PSK/RTTY/SSTV) — and CW-as-MCW —
+                    // are app-driven and ride the sideband the app chose. Never
+                    // leave the mode because of a rig report; if the rig
+                    // drifted onto another sideband (e.g. per-band mode memory
+                    // switching to LSB on 40/80 m), command it straight back.
+                    // Re-commanding just echoes the same sideband, which is
+                    // same-class and ignored, so this settles (no feedback).
                     if !same_class {
                         let _ = self.source.set_control_mode(self.control_mode());
                     }
@@ -9169,6 +9172,13 @@ fn rig_mode_class(m: Mode) -> u8 {
     }
 }
 
+/// The rig-mode class an echo should be compared against: CW keyed as audio
+/// (MCW) is commanded to the rig as the digital modes' sideband, so the class
+/// expected back is the sideband's, not CW's.
+fn expected_rig_class(commanded: Mode, cw_mcw: bool) -> u8 {
+    rig_mode_class(if cw_mcw { Mode::Digu } else { commanded })
+}
+
 /// Encode an interleaved-RGB image (`w*h*3` bytes) to PNG.
 fn encode_png(rgb: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
     let img = image::RgbImage::from_raw(w as u32, h as u32, rgb.to_vec())?;
@@ -9308,6 +9318,32 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
 fn keep_engine_owned(mut incoming: DigiConfig, current: &DigiConfig) -> DigiConfig {
     incoming.tx_audio_hz = current.tx_audio_hz.clone();
     incoming
+}
+
+#[cfg(test)]
+mod rig_mode_class_tests {
+    use super::*;
+
+    /// Issue #119: CW keyed as audio (MCW) is commanded to the rig as the digi
+    /// sideband, so the rig echoing USB (or DATA-U) back is it doing exactly
+    /// as told — not the operator leaving CW — and must be same-class.
+    #[test]
+    fn a_rig_on_the_sideband_is_where_cw_as_mcw_left_it() {
+        let expected = expected_rig_class(Mode::Cw, true);
+        assert_eq!(expected, rig_mode_class(Mode::Usb));
+        assert_eq!(expected, rig_mode_class(Mode::Digu));
+        assert_ne!(expected, rig_mode_class(Mode::Cw));
+        // And drifting onto the other sideband is still a class change, so the
+        // handler commands the rig straight back.
+        assert_ne!(expected, rig_mode_class(Mode::Lsb));
+    }
+
+    /// With the rig's own keyer sending, the rig really is put in CW and its
+    /// echo is compared against CW, exactly as before.
+    #[test]
+    fn cw_from_the_rig_keyer_still_expects_cw_back() {
+        assert_eq!(expected_rig_class(Mode::Cw, false), rig_mode_class(Mode::Cw));
+    }
 }
 
 #[cfg(test)]

@@ -644,6 +644,16 @@ impl IqSource for IcomNetSource {
     }
 
     fn set_control_mode(&mut self, mode: Mode) -> Result<()> {
+        // CW keyed as audio (MCW) rides a sideband: a rig put in CW keys its
+        // own transmitter and ignores the modulator input, so the keyed
+        // sidetone only reaches the air from USB — the same plain USB this
+        // backend already commands for every digital mode (`mode_to_civ`
+        // folds them all to 0x01). Mapped before the echo-suppression store
+        // so the rig's USB report matches what was commanded.
+        let mode = match mode {
+            Mode::Cw if matches!(self.cw_keying, CwKeying::Audio) => Mode::Usb,
+            m => m,
+        };
         self.mode_cmd = Some((civ::mode_to_civ(mode), Instant::now()));
         self.send(civ::set_mode_frame(self.civ_addr, mode));
         Ok(())
@@ -654,6 +664,11 @@ impl IqSource for IcomNetSource {
     // transmitter — so the keyer hands it text rather than a sidetone.
     fn cw_text_keying(&self) -> Option<usize> {
         matches!(self.cw_keying, CwKeying::Cat).then_some(civ::CW_MAX)
+    }
+    // …and with the keyer on the sound path instead, the engine must expect
+    // the mode poll to answer USB while the panel shows CW.
+    fn cw_audio_keyed(&self) -> bool {
+        matches!(self.cw_keying, CwKeying::Audio)
     }
     fn send_cw(&mut self, text: &str) {
         if let Some(f) = civ::send_cw_frame(self.civ_addr, text) {
@@ -976,6 +991,32 @@ mod tests {
         wait_for("a set-mode frame selecting LSB", || {
             sim.civ_frames().iter().any(|f| f.get(4) == Some(&0x06) && f.get(5) == Some(&0x00))
         });
+    }
+
+    /// Issue #119: a rig put in CW keys its own transmitter and ignores its
+    /// modulator input, so with the keyer on the sound path (MCW) selecting CW
+    /// must keep the radio in plain USB — the same mode every digital mode
+    /// rides here. With the rig's own keyer, CW is still commanded as CW.
+    #[test]
+    fn cw_keyed_as_audio_keeps_the_radio_in_usb() {
+        for (keying, sent, never) in
+            [(CwKeying::Audio, 0x01u8, 0x03u8), (CwKeying::Cat, 0x03u8, 0x01u8)]
+        {
+            let sim = Sim::start(SimOptions { scope: false, ..Default::default() }).unwrap();
+            let mut c = cfg(&sim);
+            c.cw_keying = keying;
+            let mut src = IcomNetSource::open(&c).expect("open");
+            src.set_control_mode(Mode::Cw).unwrap();
+            wait_for("the set-mode frame", || {
+                sim.civ_frames().iter().any(|f| f.get(4) == Some(&0x06) && f.get(5) == Some(&sent))
+            });
+            assert!(
+                !sim.civ_frames()
+                    .iter()
+                    .any(|f| f.get(4) == Some(&0x06) && f.get(5) == Some(&never)),
+                "{keying:?}: the wrong mode went to the radio"
+            );
+        }
     }
 
     #[test]
