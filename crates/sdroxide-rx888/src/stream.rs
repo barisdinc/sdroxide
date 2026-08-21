@@ -34,9 +34,27 @@ use crate::protocol::{BULK_EP, BULK_PACKET_HS, BULK_PACKET_SS};
 /// Input block size for the downconverter. 8192 gives a 7.9 kHz tuning grid at
 /// 64.8 Msps, which is fine enough that the residual mixer never has far to go.
 pub const DDC_BLOCK: usize = 8192;
-/// Bins selected, and so the inverse FFT size. 256 of 8192 at 64.8 Msps is a
-/// 2.025 Msps output, comfortably inside what the engine's own DDC expects.
-pub const DDC_BINS: usize = 256;
+/// Default bins selected, and so the inverse FFT size. 256 of 8192 at
+/// 64.8 Msps is a 2.025 Msps output, comfortably inside what the engine's own
+/// DDC expects. `Settings::ddc_bins` chooses others — the output, and so the
+/// panadapter, is always `adc_rate · bins / 8192`, up to half of `DDC_BLOCK`
+/// for a full-Nyquist span.
+pub const DEFAULT_DDC_BINS: usize = 256;
+
+/// The bin counts that make sense to offer: a power of two (the inverse FFT
+/// runs on every block) from the classic 1/32 up to the full half-spectrum.
+pub const DDC_BIN_CHOICES: [usize; 5] = [256, 512, 1024, 2048, 4096];
+
+/// Clamp a configured bin count to something `WbDdc::new` accepts: a power of
+/// two, at least a usable channel, at most half the block. A config written by
+/// hand (or by an older sdroxide, where the field deserialises as zero) lands
+/// on the default rather than a panic.
+pub fn sanitize_ddc_bins(bins: usize) -> usize {
+    if bins == 0 {
+        return DEFAULT_DDC_BINS;
+    }
+    bins.next_power_of_two().clamp(64, DDC_BLOCK / 2)
+}
 
 /// FFT size for the full-band display. A real FFT of 8192 gives 4097 bins over
 /// 0–32.4 MHz — 7.9 kHz each, or about two bins per pixel once the engine pools
@@ -96,7 +114,8 @@ pub fn spawn(settings: &Settings, center_hz: f64) -> Result<Rx888Handle> {
         wide: Mutex::new(None),
     });
 
-    let out_rate = settings.adc_rate_hz * DDC_BINS as f64 / DDC_BLOCK as f64;
+    let out_rate =
+        settings.adc_rate_hz * sanitize_ddc_bins(settings.ddc_bins) as f64 / DDC_BLOCK as f64;
     let (rx_prod, rx_cons) = ring_for(out_rate);
 
     let settings = settings.clone();
@@ -166,7 +185,7 @@ fn run(
     };
 
     let adc_rate = dev.adc_rate_hz();
-    let mut ddc = WbDdc::new(adc_rate, DDC_BLOCK, DDC_BINS);
+    let mut ddc = WbDdc::new(adc_rate, DDC_BLOCK, dev.ddc_bins());
     ddc.set_center_hz(center_hz);
     let out_rate = ddc.out_rate();
     shared.out_rate_milli_hz.store((out_rate * 1000.0) as u64, Ordering::Relaxed);
@@ -556,7 +575,21 @@ mod tests {
     #[test]
     fn the_ddc_geometry_gives_the_expected_output_rate() {
         // 64.8 Msps real in, 256 of 8192 bins out.
-        let out = 64.8e6 * DDC_BINS as f64 / DDC_BLOCK as f64;
+        let out = 64.8e6 * DEFAULT_DDC_BINS as f64 / DDC_BLOCK as f64;
         assert!((out - 2_025_000.0).abs() < 1.0, "{out}");
+        // And the widest choice is the whole half-spectrum.
+        let full = 64.8e6 * DDC_BIN_CHOICES[4] as f64 / DDC_BLOCK as f64;
+        assert!((full - 32_400_000.0).abs() < 1.0, "{full}");
+    }
+
+    #[test]
+    fn bin_counts_are_sanitised_to_what_the_converter_accepts() {
+        assert_eq!(sanitize_ddc_bins(0), DEFAULT_DDC_BINS, "an old config deserialises as zero");
+        assert_eq!(sanitize_ddc_bins(256), 256);
+        assert_eq!(sanitize_ddc_bins(300), 512, "rounded up to a power of two");
+        assert_eq!(sanitize_ddc_bins(1 << 20), DDC_BLOCK / 2, "never a whole block or more");
+        for b in DDC_BIN_CHOICES {
+            assert_eq!(sanitize_ddc_bins(b), b, "every offered choice passes through untouched");
+        }
     }
 }

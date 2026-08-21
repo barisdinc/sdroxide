@@ -22,9 +22,11 @@ use crate::usb::{self, UsbDev};
 /// RTL-SDR's 3.2 Msps as the rate that drops samples.
 pub const DEFAULT_ADC_HZ: f64 = 64_800_000.0;
 
-/// Sample rates offered in the UI. The Si5351 will synthesise others, but these
-/// are the ones in common use on this board.
-pub const ADC_RATES: &[f64] = &[16_200_000.0, 32_400_000.0, 64_800_000.0, 129_600_000.0];
+/// Sample rates offered in the UI, one list shared with the wasm-safe settings
+/// panel. The Si5351 synthesises nearly anything in range — the firmware takes
+/// the clock as a plain integer of hertz, and the UI has a free-entry field
+/// for exactly that — so this is the set worth a click, not a limit.
+pub const ADC_RATES: &[f64] = &sdroxide_types::Rx888Config::ADC_RATES;
 
 /// The LTC2208's specified ceiling.
 const MAX_ADC_HZ: f64 = 130_000_000.0;
@@ -78,6 +80,10 @@ pub struct Settings {
     /// Let the tuner run its own LNA and mixer loops instead of the fixed
     /// ladder.
     pub tuner_agc: bool,
+    /// Bins the downconverter keeps of its 8192-bin analysis, which sets the
+    /// complex output rate — and so the panadapter width — to
+    /// `adc_rate · bins / 8192`. Snapped by [`crate::stream::sanitize_ddc_bins`].
+    pub ddc_bins: usize,
 }
 
 impl Default for Settings {
@@ -95,6 +101,7 @@ impl Default for Settings {
             bias_tee_vhf: false,
             tuner_gain_db: 30.0,
             tuner_agc: false,
+            ddc_bins: crate::stream::DEFAULT_DDC_BINS,
         }
     }
 }
@@ -107,6 +114,11 @@ pub struct Device {
     /// write — which means exactly one place may own this value.
     gpio_word: u32,
     adc_rate_hz: f64,
+    /// Bins the downconverter keeps, already sanitised. The device itself never
+    /// touches them — they live here because the band plan does: how far the
+    /// downconverter may slide, and whether VHF is possible at all, both depend
+    /// on the output width.
+    ddc_bins: usize,
     randomize: bool,
     identity: Option<Identity>,
     /// Set when the link is too slow for the requested rate, or when the
@@ -178,12 +190,16 @@ impl Device {
 
         let (adc_rate_hz, link_warning) = clamp_rate_to_link(settings.adc_rate_hz, &usb);
         let warning = join_warnings(link_warning, front_end_warning(identity));
+        let ddc_bins = crate::stream::sanitize_ddc_bins(settings.ddc_bins);
+        let out_rate_hz = adc_rate_hz * ddc_bins as f64 / crate::stream::DDC_BLOCK as f64;
 
         // The firmware sets hardware id 0x04 only when its boot-time I2C probe
         // found an R828D, so it already answers "is there a tuner" — but a
-        // clock too slow for the tuner's IF rules VHF out just as firmly.
+        // clock too slow for the tuner's IF, or an output too wide to park on
+        // it, rule VHF out just as firmly.
         let vhf_capable = band::vhf_available(
             adc_rate_hz,
+            out_rate_hz,
             identity.is_some_and(|i| i.front_end_ready()) && tuner_present(&usb),
         );
 
@@ -191,6 +207,7 @@ impl Device {
             usb,
             gpio_word: 0,
             adc_rate_hz,
+            ddc_bins,
             randomize: settings.randomize,
             identity,
             warning,
@@ -234,6 +251,16 @@ impl Device {
     /// The ADC clock, which is also the real-sample rate.
     pub fn adc_rate_hz(&self) -> f64 {
         self.adc_rate_hz
+    }
+
+    /// Bins the downconverter keeps, already sanitised.
+    pub fn ddc_bins(&self) -> usize {
+        self.ddc_bins
+    }
+
+    /// The downconverter's complex output rate for this clock and bin count.
+    pub fn out_rate_hz(&self) -> f64 {
+        self.adc_rate_hz * self.ddc_bins as f64 / crate::stream::DDC_BLOCK as f64
     }
 
     /// Whether the ADC is scrambling its output, so the converter knows whether
@@ -510,7 +537,7 @@ impl Device {
     /// is told rather than asked.
     pub fn set_center_hz(&mut self, dial_hz: f64) -> Result<Tune> {
         let cur = BandState { band: self.band, lo_dial_hz: self.lo_dial_hz };
-        let p = band::plan(dial_hz, self.adc_rate_hz, self.vhf_capable(), cur);
+        let p = band::plan(dial_hz, self.adc_rate_hz, self.out_rate_hz(), self.vhf_capable(), cur);
 
         match (self.band, p.band) {
             (Band::Hf, Band::Vhf) => {
@@ -554,7 +581,7 @@ impl Device {
     /// that services the bulk endpoint.
     pub fn hardware_retune_needed(&self, dial_hz: f64) -> bool {
         let cur = BandState { band: self.band, lo_dial_hz: self.lo_dial_hz };
-        let p = band::plan(dial_hz, self.adc_rate_hz, self.vhf_capable(), cur);
+        let p = band::plan(dial_hz, self.adc_rate_hz, self.out_rate_hz(), self.vhf_capable(), cur);
         p.move_lo || p.band != self.band
     }
 

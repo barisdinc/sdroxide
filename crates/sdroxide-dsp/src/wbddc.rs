@@ -91,9 +91,9 @@ pub struct WbDdc {
 impl WbDdc {
     /// Build a downconverter.
     ///
-    /// `n` and `m` must both be even and `m` must be smaller than `n`; `m` is
-    /// rounded to a power of two if it is not already one, since the inverse FFT
-    /// runs on every block.
+    /// `n` and `m` must both be powers of two, with `m` smaller than `n` — at
+    /// `m = n/2` the output is the entire half-spectrum. The inverse FFT runs
+    /// on every block, which is why an arbitrary `m` is not worth supporting.
     pub fn new(in_rate: f64, n: usize, m: usize) -> WbDdc {
         assert!(n >= 64 && n.is_power_of_two(), "block size must be a power of two");
         assert!(m >= 8 && m < n && m.is_power_of_two(), "band size must be a power of two below n");
@@ -403,6 +403,27 @@ mod tests {
 
         let (f, _) = dominant(&out[M..], d.out_rate());
         assert!((f - offset).abs() < 5000.0, "tone at {f:.0} Hz, expected {offset:.0}");
+    }
+
+    /// The widest geometry the converter accepts: half the block, so the
+    /// output *is* the half-spectrum. The centre pins at fs/4 whatever the
+    /// tune asks for, and a tone anywhere in the digitised band appears at its
+    /// true offset from fs/4.
+    #[test]
+    fn the_full_nyquist_geometry_covers_the_whole_band() {
+        let mut d = WbDdc::new(FS, N, N / 2);
+        assert!((d.out_rate() - FS / 2.0).abs() < 1.0);
+        d.set_center_hz(1_000_000.0);
+        assert!((d.center_hz() - FS / 4.0).abs() < 1.0, "centre must pin at fs/4");
+
+        let tone = 27_000_000.0;
+        let x = real_tone(tone, 0.5, N * 8, FS);
+        let mut out = Vec::new();
+        d.process(&x, &mut out);
+
+        let (f, a) = dominant(&out[N / 2..], d.out_rate());
+        assert!((f - (tone - FS / 4.0)).abs() < 20_000.0, "tone at {f:.0} Hz");
+        assert!((a - 0.5).abs() < 0.06, "amplitude {a:.3}, expected ~0.5");
     }
 
     /// The negative-frequency image must not come back. A real input has energy

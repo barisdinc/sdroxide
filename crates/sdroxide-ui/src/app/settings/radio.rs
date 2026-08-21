@@ -2959,7 +2959,12 @@ pub(in crate::app) fn settings_rx888_tab(
     // in a way it is not for other backends — the device is already programmed,
     // so reopening it costs about a millisecond plus the firmware's own start
     // latency, measured at ~150 ms end to end.
-    let before = (cfg.rx888.serial.clone(), cfg.rx888.adc_rate_hz, cfg.rx888.randomize);
+    //
+    // The ADC clock is *not* in this tuple: its free-entry field changes the
+    // value on every frame of a drag, and a reopen per pixel would restart the
+    // receiver hundreds of times. Its combo and entry field push `apply`
+    // themselves, on the click and on release.
+    let before = (cfg.rx888.serial.clone(), cfg.rx888.randomize, cfg.rx888.ddc_bins);
 
     egui::Grid::new("rx888-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Receiver");
@@ -3011,11 +3016,16 @@ pub(in crate::app) fn settings_rx888_tab(
                 .selected_text(format!("{:.1} Msps", rate / 1e6))
                 .show_styled(ui, |ui| {
                     for r in Rx888Config::ADC_RATES {
-                        ui.selectable_value(
-                            &mut cfg.rx888.adc_rate_hz,
-                            r,
-                            format!("{:.1} Msps", r / 1e6),
-                        );
+                        if ui
+                            .selectable_value(
+                                &mut cfg.rx888.adc_rate_hz,
+                                r,
+                                format!("{:.1} Msps", r / 1e6),
+                            )
+                            .changed()
+                        {
+                            *apply = true;
+                        }
                     }
                 });
             // Inside a grid (and a horizontal row) labels default to Extend,
@@ -3033,6 +3043,26 @@ pub(in crate::app) fn settings_rx888_tab(
             );
         });
         ui.end_row();
+
+        // The Si5351 synthesises nearly any clock in range, so the list above
+        // is the common set, not a limit. Applied on release rather than per
+        // keystroke — every digit typed would otherwise reopen the radio.
+        ui.label("or, in Msps");
+        ui.horizontal(|ui| {
+            let mut msps = cfg.rx888.adc_rate_hz / 1e6;
+            let r = ui.add(
+                egui::DragValue::new(&mut msps)
+                    .speed(0.1)
+                    .range(Rx888Config::MIN_ADC_HZ / 1e6..=Rx888Config::MAX_ADC_HZ / 1e6),
+            );
+            if r.changed() {
+                cfg.rx888.adc_rate_hz = (msps * 1e6).round();
+            }
+            if r.drag_stopped() || r.lost_focus() {
+                *apply = true;
+            }
+        });
+        ui.end_row();
         ui.label("");
         ui.add(
             egui::Label::new(
@@ -3040,6 +3070,51 @@ pub(in crate::app) fn settings_rx888_tab(
                     "129.6 Msps needs a SuperSpeed link and a fast host; 64.8 is the \
                      safe default. Changing it reopens the receiver automatically, \
                      which takes a moment but needs no restart.",
+                )
+                .weak(),
+            )
+            .wrap(),
+        );
+        ui.end_row();
+
+        ui.label("Panadapter width");
+        ui.horizontal(|ui| {
+            let rate = cfg.rx888.adc_rate_hz;
+            let width_label = |bins: u32| {
+                format!(
+                    "{} — 1/{}",
+                    bw_label(Rx888Config::ddc_out_rate_hz(rate, bins)),
+                    Rx888Config::DDC_BLOCK / bins.max(1),
+                )
+            };
+            let bins = cfg.rx888.ddc_bins;
+            ComboBox::from_id_salt("rx888_width")
+                .width(180.0)
+                .selected_text(width_label(if bins == 0 { 256 } else { bins }))
+                .show_styled(ui, |ui| {
+                    for b in Rx888Config::DDC_BIN_CHOICES {
+                        ui.selectable_value(&mut cfg.rx888.ddc_bins, b, width_label(b));
+                    }
+                });
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("of the {:.1} MHz digitised", rate / 2e6)).weak(),
+                )
+                .wrap(),
+            );
+        });
+        ui.end_row();
+        ui.label("");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "How much of the digitised spectrum the panadapter shows at once. \
+                     The whole DSP chain runs at this width, so wider costs \
+                     proportionally more CPU — 1/2 is the entire band in the \
+                     waterfall, and a serious amount of arithmetic. Above the \
+                     VHF crossover the tuner's IF filter is 8 MHz wide: wider \
+                     settings show its skirts, and ones too wide to sit on the \
+                     IF at all switch the VHF range off.",
                 )
                 .weak(),
             )
@@ -3207,7 +3282,7 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.end_row();
     });
 
-    if before != (cfg.rx888.serial.clone(), cfg.rx888.adc_rate_hz, cfg.rx888.randomize) {
+    if before != (cfg.rx888.serial.clone(), cfg.rx888.randomize, cfg.rx888.ddc_bins) {
         *apply = true;
     }
 

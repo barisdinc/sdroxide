@@ -27,13 +27,28 @@ pub const IF_CENTER_HZ: f64 = 4_570_000.0;
 /// display.
 pub const IF_BW_HZ: f64 = 8_000_000.0;
 
-/// How far the downconverter may slide either side of the IF carrier before the
-/// tuner has to follow.
+/// The most the downconverter may slide either side of the IF carrier before
+/// the tuner has to follow.
 ///
-/// ±1 MHz keeps the whole 2.025 MHz output inside the flat part of the filter
-/// and well clear of the ADC's own DC region. It exists so that small dial
-/// movements stay free — see the note on this module.
+/// ±1 MHz keeps the whole default 2.025 MHz output inside the flat part of the
+/// filter and well clear of the ADC's own DC region. It exists so that small
+/// dial movements stay free — see the note on this module. A wider output has
+/// less room to slide in; [`fine_span_hz`] is the width that actually applies.
 pub const FINE_SPAN_HZ: f64 = 1_000_000.0;
+
+/// How far the downconverter may actually slide, for this clock and output
+/// width.
+///
+/// The downconverter's centre can only reach `out/2 .. Nyquist − out/2` — the
+/// selected band has to fit inside the real half-spectrum — so a wide output
+/// parked on the IF has little or no slide left before one edge would fall
+/// off. The window is whatever slide keeps the whole output reachable, capped
+/// at [`FINE_SPAN_HZ`]; at zero the tuner simply follows every dial move.
+pub fn fine_span_hz(adc_rate_hz: f64, out_rate_hz: f64) -> f64 {
+    let lo_room = IF_CENTER_HZ - out_rate_hz / 2.0;
+    let hi_room = adc_rate_hz / 2.0 - out_rate_hz / 2.0 - IF_CENTER_HZ;
+    FINE_SPAN_HZ.min(lo_room).min(hi_room).max(0.0)
+}
 
 /// The tuner cannot reach below this, so the automatic crossover never hands it
 /// a frequency it will not lock on. `librtlsdr` publishes the same floor.
@@ -94,8 +109,17 @@ pub fn adc_rate_allows_vhf(adc_rate_hz: f64) -> bool {
 }
 
 /// Whether the VHF front end can be used at all.
-pub fn vhf_available(adc_rate_hz: f64, has_tuner: bool) -> bool {
-    has_tuner && adc_rate_allows_vhf(adc_rate_hz)
+///
+/// Three conditions, all hard: a tuner soldered in, an ADC clock with room for
+/// its IF under Nyquist, and a downconverter output narrow enough to park on
+/// the IF carrier at all — a full-Nyquist output's centre is pinned at a
+/// quarter of the clock and cannot reach it, so the honest answer is HF only.
+pub fn vhf_available(adc_rate_hz: f64, out_rate_hz: f64, has_tuner: bool) -> bool {
+    let half_out = out_rate_hz / 2.0;
+    has_tuner
+        && adc_rate_allows_vhf(adc_rate_hz)
+        && IF_CENTER_HZ >= half_out
+        && IF_CENTER_HZ <= adc_rate_hz / 2.0 - half_out
 }
 
 /// Where the automatic switch happens.
@@ -122,7 +146,17 @@ pub fn freq_ranges(adc_rate_hz: f64, vhf: bool) -> Vec<(f64, f64)> {
 }
 
 /// Work out what `dial_hz` requires, given where the front end is now.
-pub fn plan(dial_hz: f64, adc_rate_hz: f64, vhf: bool, cur: BandState) -> BandPlan {
+///
+/// `out_rate_hz` — the downconverter's output width — sets how far the
+/// downconverter may slide before the tuner has to follow; see
+/// [`fine_span_hz`].
+pub fn plan(
+    dial_hz: f64,
+    adc_rate_hz: f64,
+    out_rate_hz: f64,
+    vhf: bool,
+    cur: BandState,
+) -> BandPlan {
     let hf_plan = |move_lo: bool| BandPlan {
         band: Band::Hf,
         lo_dial_hz: 0.0,
@@ -147,7 +181,7 @@ pub fn plan(dial_hz: f64, adc_rate_hz: f64, vhf: bool, cur: BandState) -> BandPl
     }
 
     let entering = cur.band == Band::Hf;
-    let left_window = (dial_hz - cur.lo_dial_hz).abs() > FINE_SPAN_HZ;
+    let left_window = (dial_hz - cur.lo_dial_hz).abs() > fine_span_hz(adc_rate_hz, out_rate_hz);
     let move_lo = entering || left_window;
     let lo = if move_lo { dial_hz.clamp(TUNER_MIN_HZ, TUNER_MAX_HZ) } else { cur.lo_dial_hz };
 
@@ -163,6 +197,23 @@ pub fn plan(dial_hz: f64, adc_rate_hz: f64, vhf: bool, cur: BandState) -> BandPl
         ddc_center_hz: IF_CENTER_HZ - (dial_hz - lo),
         conjugate: true,
     }
+}
+
+/// The centre the downconverter can actually reach for an HF dial.
+///
+/// The selected band has to fit inside the real half-spectrum, so the centre
+/// clamps to `out/2 .. Nyquist − out/2` — the same arithmetic as
+/// `WbDdc::set_center_hz`, kept here so the source can know *synchronously*
+/// where the stream really ended up. A dial inside the clamped strip is still
+/// received — it just sits off-centre in the output — and the whole point of
+/// this function is to say where the centre truly is rather than let the
+/// engine demodulate against a centre the converter never took. At a
+/// full-Nyquist output the two bounds meet and every tune lands on a quarter
+/// of the clock.
+pub fn hf_achievable_center_hz(dial_hz: f64, adc_rate_hz: f64, out_rate_hz: f64) -> f64 {
+    let lo = out_rate_hz / 2.0;
+    let hi = (adc_rate_hz / 2.0 - out_rate_hz / 2.0).max(lo);
+    dial_hz.clamp(lo, hi)
 }
 
 /// Which analyser bins to publish for the full-band display, and the RF axis
@@ -221,6 +272,8 @@ mod tests {
     use super::*;
 
     const ADC: f64 = 64_800_000.0;
+    /// The default downconverter output: 256 of 8192 bins.
+    const OUT: f64 = 2_025_000.0;
 
     fn vhf_state(lo: f64) -> BandState {
         BandState { band: Band::Vhf, lo_dial_hz: lo }
@@ -240,7 +293,7 @@ mod tests {
         let steps: Vec<f64> =
             (-200..=200).chain((-200..=200).rev()).map(|k| x + f64::from(k) * 10_000.0).collect();
         for hz in steps {
-            let p = plan(hz, ADC, true, st);
+            let p = plan(hz, ADC, OUT, true, st);
             if p.band != st.band {
                 changes += 1;
             }
@@ -270,7 +323,7 @@ mod tests {
         let st = vhf_state(145_000_000.0);
 
         for delta in [0.0, 500_000.0, -900_000.0, FINE_SPAN_HZ] {
-            let p = plan(145_000_000.0 + delta, ADC, true, st);
+            let p = plan(145_000_000.0 + delta, ADC, OUT, true, st);
             assert!(!p.move_lo, "a {delta} Hz nudge reprogrammed the PLL");
             assert_eq!(p.lo_dial_hz, 145_000_000.0);
             // The downconverter took up the slack instead.
@@ -279,7 +332,7 @@ mod tests {
 
         // Past the window the tuner has to follow, and the downconverter goes
         // back to the middle of the IF.
-        let p = plan(146_100_000.0, ADC, true, st);
+        let p = plan(146_100_000.0, ADC, OUT, true, st);
         assert!(p.move_lo);
         assert_eq!(p.lo_dial_hz, 146_100_000.0);
         assert!((p.ddc_center_hz - IF_CENTER_HZ).abs() < 1.0);
@@ -295,7 +348,7 @@ mod tests {
 
         for k in -100..=100 {
             let dial = 145_000_000.0 + f64::from(k) * 10_000.0;
-            let p = plan(dial, ADC, true, st);
+            let p = plan(dial, ADC, OUT, true, st);
             assert!((p.ddc_center_hz - IF_CENTER_HZ).abs() <= FINE_SPAN_HZ + 1.0);
             assert!(
                 p.ddc_center_hz - half_out > IF_CENTER_HZ - IF_BW_HZ / 2.0,
@@ -313,20 +366,20 @@ mod tests {
     #[test]
     fn tuning_up_moves_the_downconverter_down() {
         let st = vhf_state(145_000_000.0);
-        let lower = plan(144_800_000.0, ADC, true, st).ddc_center_hz;
-        let higher = plan(145_200_000.0, ADC, true, st).ddc_center_hz;
+        let lower = plan(144_800_000.0, ADC, OUT, true, st).ddc_center_hz;
+        let higher = plan(145_200_000.0, ADC, OUT, true, st).ddc_center_hz;
         assert!(
             higher < lower,
             "high-side injection inverts the IF: {higher} should be below {lower}"
         );
         // And the same fact is reported to the converter.
-        assert!(plan(145_200_000.0, ADC, true, st).conjugate);
-        assert!(!plan(10_000_000.0, ADC, true, st).conjugate, "HF is not inverted");
+        assert!(plan(145_200_000.0, ADC, OUT, true, st).conjugate);
+        assert!(!plan(10_000_000.0, ADC, OUT, true, st).conjugate, "HF is not inverted");
     }
 
     #[test]
     fn a_receiver_without_a_tuner_never_leaves_hf() {
-        let p = plan(145_000_000.0, ADC, false, BandState::default());
+        let p = plan(145_000_000.0, ADC, OUT, false, BandState::default());
         assert_eq!(p.band, Band::Hf);
         assert!(!p.conjugate);
         assert_eq!(freq_ranges(ADC, false), vec![(0.0, 32_400_000.0)]);
@@ -339,7 +392,7 @@ mod tests {
         assert!(!adc_rate_allows_vhf(16_200_000.0), "8.1 MHz Nyquist cannot hold an 8.57 MHz IF");
         assert!(adc_rate_allows_vhf(32_400_000.0));
         assert!(adc_rate_allows_vhf(64_800_000.0));
-        assert!(!vhf_available(64_800_000.0, false), "no tuner, no VHF");
+        assert!(!vhf_available(64_800_000.0, OUT, false), "no tuner, no VHF");
     }
 
     /// At the default clock the two ranges meet; at a slower one they do not,
@@ -359,6 +412,48 @@ mod tests {
         assert_eq!((m.lo_bin, m.hi_bin, m.reverse), (0, 4096, false));
         assert_eq!(m.center_hz, ADC / 4.0);
         assert_eq!(m.span_hz, ADC / 2.0);
+    }
+
+    /// A wider output leaves less slide before the tuner must follow, and a
+    /// full-Nyquist output leaves none anywhere — the downconverter cannot even
+    /// park on the IF, so VHF is honestly unavailable rather than mistuned.
+    #[test]
+    fn a_wide_output_shrinks_the_fine_window_and_then_rules_vhf_out() {
+        // Default width: the classic ±1 MHz survives untouched.
+        assert_eq!(fine_span_hz(ADC, OUT), FINE_SPAN_HZ);
+
+        // 1024 of 8192 bins at 64.8 Msps: 8.1 MHz out. The IF carrier sits at
+        // 4.57 MHz, so only 0.52 MHz of slide keeps the low edge reachable.
+        let out_8m1 = 8_100_000.0;
+        assert!((fine_span_hz(ADC, out_8m1) - 520_000.0).abs() < 1.0);
+        assert!(vhf_available(ADC, out_8m1, true));
+        // And the plan respects the shrunken window: a nudge past it moves the
+        // tuner where the default width would have slid the downconverter.
+        let st = vhf_state(145_000_000.0);
+        assert!(!plan(145_400_000.0, ADC, out_8m1, true, st).move_lo);
+        assert!(plan(145_700_000.0, ADC, out_8m1, true, st).move_lo);
+
+        // 2048 bins: 16.2 MHz out. out/2 is past the IF carrier entirely.
+        assert!(!vhf_available(ADC, 16_200_000.0, true));
+        assert_eq!(fine_span_hz(ADC, 16_200_000.0), 0.0);
+    }
+
+    /// The downconverter's centre clamps to what fits in the half-spectrum,
+    /// and at a full-Nyquist output it is pinned at a quarter of the clock.
+    #[test]
+    fn the_achievable_hf_center_clamps_to_the_half_spectrum() {
+        // Comfortably inside: untouched.
+        assert_eq!(hf_achievable_center_hz(7_100_000.0, ADC, OUT), 7_100_000.0);
+        // Below out/2: the centre stops where the band still fits, and the
+        // dial rides off-centre in the output. This is the medium-wave case
+        // the engine has to be told about.
+        assert_eq!(hf_achievable_center_hz(630_000.0, ADC, OUT), OUT / 2.0);
+        // Near Nyquist: same at the top.
+        assert_eq!(hf_achievable_center_hz(32_000_000.0, ADC, OUT), ADC / 2.0 - OUT / 2.0);
+        // Full-Nyquist output: pinned at fs/4, wherever the dial is.
+        let full = ADC / 2.0;
+        assert_eq!(hf_achievable_center_hz(1_000_000.0, ADC, full), ADC / 4.0);
+        assert_eq!(hf_achievable_center_hz(30_000_000.0, ADC, full), ADC / 4.0);
     }
 
     /// In VHF the strip is a slice of the analyser centred on the tuner, and

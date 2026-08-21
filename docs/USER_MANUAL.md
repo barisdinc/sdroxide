@@ -2592,8 +2592,10 @@ offers a **TUNE 868.880 MHz** button that does it for you.
 > source and is unavailable when a CAT radio is feeding demodulated audio.
 
 On an **RX-888**, 868 MHz is reached through its VHF tuner, and its wideband
-downconverter delivers 2.025 Msps — enough for the whole channel plan, but only
-just, which is why the centre frequency matters there.
+downconverter delivers 2.025 Msps at the default panadapter width — enough for
+the whole channel plan, but only just, which is why the centre frequency
+matters there. A wider panadapter width ([15.19](#1519-rx-888--rx-888-mk2))
+covers it with room to spare.
 
 ### 5.2 Reading the device list
 
@@ -3156,7 +3158,9 @@ radio. Everything below the selector changes to match the choice:
 - **RX-888 (USB)** — an RX-888 / RX-888 Mk2 direct-sampling receiver, likewise
   driven directly over USB, with its firmware bundled and uploaded for it. On a
   Mk2 the built-in R828D tuner is driven too, so the receiver covers VHF and UHF
-  as well as HF and switches between its two antenna ports on its own.
+  as well as HF and switches between its two antenna ports on its own. Both the
+  ADC clock and how much of the digitised band the panadapter shows at once are
+  selectable — up to all of it. See [15.19](#1519-rx-888--rx-888-mk2).
 - **Airspy HF+ (USB)** — an Airspy HF+ Dual, Discovery or Ranger, driven by
   sdroxide's own USB driver with no SoapySDR and no libairspyhf involved. See
   [6.2.9](#629-airspy-hf-usb).
@@ -8815,8 +8819,29 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
 - Firmware is bundled and uploaded automatically. On a Mk2 the built-in
   R828D tuner is driven too, so it covers VHF/UHF as well as HF and switches
   between its two antenna ports on its own. The [ISM decoder](#5-ism-band-decoder)
-  reaches 868 MHz through that tuner, where the 2.025 Msps downconverter
-  width is exactly why the 868.880 MHz centre matters.
+  reaches 868 MHz through that tuner, where the downconverter width — 2.025 Msps
+  at the default settings — is exactly why the 868.880 MHz centre matters.
+- The **ADC clock** decides how much spectrum is digitised (half the clock)
+  and how much USB bandwidth it takes (two bytes per sample). The list offers
+  the common clocks from 8.1 to 129.6 Msps, and the **or, in Msps** field
+  takes any value from 4 to 130 — the receiver's clock synthesiser is freely
+  programmable, so 80 MHz is as valid a choice as 64.8. 129.6 Msps needs a
+  SuperSpeed (USB 3) link and a fast host; on a slower link the rate is
+  reduced automatically and a notice says so.
+- The **panadapter width** chooses how much of the digitised band the main
+  waterfall carries at once, as a fraction of the ADC clock: from 1/32 — the
+  classic 2.025 MHz at the default clock — up to 1/2, which is the *entire*
+  digitised spectrum in the panadapter, 64.8 MHz of it at the top clock. The
+  whole receive DSP chain runs at the width you pick, so every step doubles
+  the CPU cost; the full-band strip (**WIDE**) shows everything at any
+  setting, so the widths beyond 1/8 are for machines with cycles to spare.
+  Near the edges of the band a wide window can no longer centre itself on the
+  dial — the window stops where the spectrum ends and the tuned frequency
+  sits off-centre in it, exactly as it looks on screen.
+- On VHF the tuner's IF filter is 8 MHz wide. Panadapter widths beyond that
+  show the filter's own skirts at the edges, and any width past about 9 MHz
+  cannot sit on the IF at all, so it switches the VHF range off — the
+  receiver honestly claims HF only rather than offering a VHF that mistunes.
 
 ---
 

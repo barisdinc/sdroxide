@@ -2228,10 +2228,20 @@ pub struct Rx888Config {
     /// Let the tuner run its own gain loops instead of the fixed ladder.
     #[serde(default)]
     pub tuner_agc: bool,
+    /// Bins the downconverter keeps of its 8192-bin analysis: the panadapter
+    /// width is `adc_rate · bins / 8192`, so 256 is the classic 1/32 and 4096
+    /// puts the whole half-spectrum in the panadapter. Zero (an older config)
+    /// means the default.
+    #[serde(default = "default_ddc_bins")]
+    pub ddc_bins: u32,
 }
 
 fn default_tuner_gain_db() -> f64 {
     30.0
+}
+
+fn default_ddc_bins() -> u32 {
+    256
 }
 
 impl Default for Rx888Config {
@@ -2250,6 +2260,7 @@ impl Default for Rx888Config {
             bias_tee_vhf: false,
             tuner_gain_db: 30.0,
             tuner_agc: false,
+            ddc_bins: 256,
         }
     }
 }
@@ -2273,9 +2284,41 @@ impl Rx888Config {
     /// publishes, because it is the same table in the same chip family.
     pub const TUNER_GAIN_MAX_DB: f64 = 49.6;
 
-    /// ADC clocks offered in the UI. The Si5351 will synthesise others, but
-    /// these are the ones in common use on this board.
-    pub const ADC_RATES: [f64; 4] = [16_200_000.0, 32_400_000.0, 64_800_000.0, 129_600_000.0];
+    /// ADC clocks offered in the UI. The Si5351 will synthesise nearly
+    /// anything between 4 and 130 MHz — the panel has a free-entry field for
+    /// that — so this is the set worth a click, not a limit. The native driver
+    /// re-exports this same list as `sdroxide_rx888::ADC_RATES`.
+    pub const ADC_RATES: [f64; 7] = [
+        8_100_000.0,
+        16_200_000.0,
+        32_400_000.0,
+        48_600_000.0,
+        64_800_000.0,
+        96_000_000.0,
+        129_600_000.0,
+    ];
+
+    /// What the ADC clock may be trimmed to by hand: the LTC2208's specified
+    /// ceiling, and the floor below which the Si5351 and the ADC both
+    /// misbehave. The native driver clamps to the same figures.
+    pub const MIN_ADC_HZ: f64 = 4_000_000.0;
+    pub const MAX_ADC_HZ: f64 = 130_000_000.0;
+
+    /// Panadapter widths on offer, as downconverter bin counts out of
+    /// [`Self::DDC_BLOCK`]: 1/32 of the ADC clock up to the full half-spectrum.
+    pub const DDC_BIN_CHOICES: [u32; 5] = [256, 512, 1024, 2048, 4096];
+
+    /// The downconverter's analysis size, fixed in the native driver
+    /// (`sdroxide_rx888::stream::DDC_BLOCK`); repeated here so the wasm-safe
+    /// settings UI can label a bin count with the width it produces.
+    pub const DDC_BLOCK: u32 = 8192;
+
+    /// The complex output rate — and so the panadapter width — this clock and
+    /// bin count produce.
+    pub fn ddc_out_rate_hz(adc_rate_hz: f64, ddc_bins: u32) -> f64 {
+        let bins = if ddc_bins == 0 { 256 } else { ddc_bins };
+        adc_rate_hz * f64::from(bins) / f64::from(Self::DDC_BLOCK)
+    }
 }
 
 /// Which Airspy HF+ is on the other end.

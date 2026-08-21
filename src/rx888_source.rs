@@ -7,19 +7,26 @@
 //! # What this source is doing that the others are not
 //!
 //! The hardware has no downconverter. It sends 16-bit *real* samples at the full
-//! ADC rate — 64.8 Msps covering 0–32.4 MHz — and an FFT downconverter in the
-//! backend turns that into ~2 Msps of complex baseband. Two consequences leak
-//! out here:
+//! ADC rate — 64.8 Msps covering 0–32.4 MHz at the default clock — and an FFT
+//! downconverter in the backend turns a selectable slice of that into complex
+//! baseband: 1/32 of the clock by default, up to the whole half-spectrum in the
+//! panadapter at once. Three consequences leak out here:
 //!
 //! * [`IqSource::sample_rate`] is the *downconverter's* output rate, not the
 //!   ADC clock. The engine's own DDC chain then works from that as usual.
 //! * Retuning is free. There is no LO to move and no I2C to wait for — a retune
 //!   is a change of FFT bin — so dragging the panadapter across the whole of HF
 //!   costs nothing.
+//! * The downconverter's centre cannot go everywhere the dial can: it clamps to
+//!   what keeps the output inside the half-spectrum, and the wider the output
+//!   the larger the strip of dial it cannot centre on. Where that happens the
+//!   achieved centre is reported through [`IqSource::poll_control`] — see
+//!   [`achieved_center_hz`].
 
 use std::time::Duration;
 
-use sdroxide_radio::{Complex32, IqSource, Result};
+use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
+use sdroxide_rx888::band::{self, Band, BandState};
 use sdroxide_rx888::{Rx888Handle, Settings};
 use sdroxide_types::Rx888Config;
 
@@ -43,6 +50,50 @@ fn settings_from(cfg: &Rx888Config) -> Settings {
         bias_tee_vhf: cfg.bias_tee_vhf,
         tuner_gain_db: cfg.tuner_gain_db,
         tuner_agc: cfg.tuner_agc,
+        ddc_bins: cfg.ddc_bins as usize,
+    }
+}
+
+/// Where the stream's centre actually lands for this dial, tracked with the
+/// same pure band plan the device runs.
+///
+/// On HF the downconverter's centre clamps to what fits in the half-spectrum
+/// (see [`band::hf_achievable_center_hz`]); the widest output pins it at a
+/// quarter of the ADC clock however the dial moves. The engine has to be told,
+/// or it demodulates against a centre the converter never took — so
+/// [`Rx888Source::set_center_hz`] computes the truth here and reports it
+/// through [`IqSource::poll_control`], the same adoption path a shared-LO
+/// device uses when its centre moves.
+///
+/// The band state is mirrored rather than asked of the device because the
+/// device's copy lives on the USB thread; the plan is pure, both start from
+/// the same state, and they see the same dials in the same order. The one
+/// divergence is a VHF entry that fails on real hardware and falls back to HF
+/// aliasing — reception is already wrong there in a way no centre report
+/// could mend.
+fn achieved_center_hz(
+    dial_hz: f64,
+    adc_rate_hz: f64,
+    out_rate_hz: f64,
+    vhf: bool,
+    st: &mut BandState,
+) -> f64 {
+    let p = band::plan(dial_hz, adc_rate_hz, out_rate_hz, vhf, *st);
+    *st = BandState { band: p.band, lo_dial_hz: p.lo_dial_hz };
+    match p.band {
+        // The alias sliver between Nyquist and the crossover-plus-hysteresis
+        // stays uncorrected on purpose: it is how a scrolled dial climbs into
+        // the VHF range. A correction there would be adopted, the adoption
+        // clamps the VFO back under Nyquist, and the crossover could never be
+        // reached by scrolling again. Reception in the sliver is aliased
+        // regardless, so there is no truth to protect.
+        Band::Hf if dial_hz <= adc_rate_hz / 2.0 => {
+            band::hf_achievable_center_hz(dial_hz, adc_rate_hz, out_rate_hz)
+        }
+        Band::Hf => dial_hz,
+        // The plan keeps the downconverter's slide inside what it can reach
+        // (`band::fine_span_hz`), so on VHF the dial is achieved exactly.
+        Band::Vhf => dial_hz,
     }
 }
 
@@ -56,6 +107,13 @@ pub struct Rx888Source {
     bias_tee: bool,
     bias_tee_vhf: bool,
     tuner_gain_db: f64,
+    /// Mirror of the device's band machine — see [`achieved_center_hz`].
+    band_state: BandState,
+    /// A centre the converter could not take verbatim, waiting to be reported
+    /// through [`IqSource::poll_control`]. Overwritten by every tune, so only
+    /// the latest correction is ever delivered — a stale one would have the
+    /// engine adopt a centre the stream has already left.
+    pending_center: Option<f64>,
 }
 
 impl Rx888Source {
@@ -72,7 +130,19 @@ impl Rx888Source {
             handle.out_rate_hz() / 1e6,
         );
         tracing::info!("RX-888 source ready: {label}, center {center_hz:.0} Hz");
+        let mut band_state = BandState::default();
+        let achieved = achieved_center_hz(
+            center_hz,
+            handle.adc_rate_hz(),
+            handle.out_rate_hz(),
+            handle.vhf_capable(),
+            &mut band_state,
+        );
         Ok(Rx888Source {
+            // The requested dial, not the achieved centre: the engine seeds its
+            // VFOs from `center_hz()` when it opens, and the operator's saved
+            // dial must survive that. The correction below moves only the
+            // centre, through the adoption path that leaves the VFOs alone.
             center: center_hz,
             rx_scratch: Vec::new(),
             label,
@@ -81,6 +151,8 @@ impl Rx888Source {
             bias_tee: cfg.bias_tee_hf,
             bias_tee_vhf: cfg.bias_tee_vhf,
             tuner_gain_db: cfg.tuner_gain_db,
+            band_state,
+            pending_center: ((achieved - center_hz).abs() >= 0.5).then_some(achieved),
             handle,
         })
     }
@@ -117,8 +189,28 @@ impl IqSource for Rx888Source {
 
     fn set_center_hz(&mut self, hz: f64) -> Result<()> {
         self.center = hz;
+        let achieved = achieved_center_hz(
+            hz,
+            self.handle.adc_rate_hz(),
+            self.handle.out_rate_hz(),
+            self.handle.vhf_capable(),
+            &mut self.band_state,
+        );
+        self.pending_center = ((achieved - hz).abs() >= 0.5).then_some(achieved);
         self.handle.set_center_hz(hz);
         Ok(())
+    }
+
+    /// The one update this receiver volunteers: where the stream's centre
+    /// really is, after a tune the downconverter could not take verbatim — a
+    /// dial closer to DC or Nyquist than half the output width, or any dial at
+    /// all on the full-Nyquist width, whose centre never leaves a quarter of
+    /// the ADC clock. The engine adopts it exactly as it adopts a shared-LO
+    /// sibling's retune: the demodulator offset is corrected, the VFO stays
+    /// where the operator put it (clamped into the span it can still reach),
+    /// and nothing is commanded back at the hardware.
+    fn poll_control(&mut self) -> Vec<ControlUpdate> {
+        self.pending_center.take().map(ControlUpdate::Center).into_iter().collect()
     }
 
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
