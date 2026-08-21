@@ -17,7 +17,7 @@ or connects to a remote sdroxide server.
 2. [Basic operation](#2-basic-operation)
 3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
-5. [ISM band decoder (868 MHz devices)](#5-ism-band-decoder)
+5. [ISM band decoder (433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
 7. [Solar system 3D view](#7-solar-system-3d-view)
 8. [Remote operation](#8-remote-operation)
@@ -2559,12 +2559,18 @@ care about is always better copied on the panel.
 
 ## 5. ISM band decoder
 
-Around 868 MHz, Europe's licence-exempt ISM band is full of small unattended
-transmitters: weather and soil sensors, water and heat meters, doorbells,
-thermostats, alarm contacts. Each one wakes up, sends a few milliseconds of
-2-FSK, and goes back to sleep for a minute. The **ISM** button in the System
-module opens a window that reads them and lists each device it has heard, with
-its readings in real units.
+The licence-exempt ISM bands are full of small unattended transmitters: weather
+and soil sensors, water and heat meters, doorbells, thermostats, alarm contacts,
+tyre-pressure sensors, gate remotes. Each one wakes up, sends a few
+milliseconds, and goes back to sleep for a minute. The **ISM** button in the
+System module opens a window that reads them and lists each device it has heard,
+with its readings in real units.
+
+There are two sets of decoders behind that window. SDRoxide's own read a handful
+of protocols on the European 868 MHz channels, in detail and with every checksum
+verified — those are what the rest of this section describes first. The
+**rtl_433** decoders ([§5.4](#54-the-rtl_433-decoders)) add several hundred more
+across 315, 433, 868 and 915 MHz. Most people will want both switched on.
 
 - **DECODING / OFF** switches the decoder on. It costs four downconverters and a
   burst detector while it runs, so the ISM button stays lit — like SCAN and SAT —
@@ -2597,9 +2603,10 @@ lamp: green for one being listened to, and a reason beside any that is not —
 `outside the receiver's window` if you are tuned elsewhere, `not decoded yet` if
 nothing in this build reads it.
 
-**Tune to 868.880 MHz** and the whole plan fits, even on a receiver that hands
-over only ~2 MHz. If you are tuned away from the band the window says so and
-offers a **TUNE 868.880 MHz** button that does it for you.
+Press **868 MHz EU** in the band row to get there — it tunes the radio for you,
+and on a receiver handing over ~2 MHz the window then reaches the channels that
+matter. Those buttons are the only tuning control in this window; there is one
+per band, and they serve both sets of decoders at once.
 
 > **Note:** like the skimmers, this is a wideband feature. It needs a true IQ
 > source and is unavailable when a CAT radio is feeding demodulated audio.
@@ -2788,14 +2795,163 @@ Wireless M-Bus and LoRa recognition are not implemented yet.
 > and device type — their readings are AES-encrypted and SDRoxide holds no keys.
 > That is a useful meter inventory, but it is not a meter reading.
 
-### 5.4 Nothing is being decoded
+### 5.4 The rtl_433 decoders
+
+Under **RTL_433 DECODERS** is a second set of decoders, from the rtl_433
+project, built into SDRoxide. It adds several hundred device protocols and,
+unlike the decoders above, reads **OOK** as well as FSK — which is most of what
+is on the air below 868 MHz.
+
+There is no switch: if your build has them, they decode whenever the ISM decoder
+is running. All you choose is which band to listen on.
+
+#### Bands
+
+The band buttons pick where to listen. Pressing one selects that band **and
+tunes the radio to it**, because the decoder listens inside whatever IQ the
+receiver is delivering. Only one band runs at a time: they are hundreds of
+megahertz apart and no receiver covers two at once.
+
+| Band | Where it is used | What is on it |
+|---|---|---|
+| **433.92 MHz** | Europe, and worldwide for remotes | Weather stations, thermometers, soil and pool sensors, doorbells, garage and gate remotes, alarm contacts, PIR sensors, tyre-pressure sensors, energy monitors, remote switches |
+| **868 MHz EU** | Europe | The same weather families as the decoders above, plus Fine Offset and Bresser variants they do not cover, and assorted home-automation devices |
+| **915 MHz US** | North America, Australia | Acurite, LaCrosse and Oregon Scientific weather stations, tyre-pressure sensors, utility meters (ERT/SCM), Honeywell alarm sensors |
+| **315 MHz US** | North America | Tyre-pressure sensors, garage and gate remotes, alarm contacts |
+
+433.92 MHz is the one worth trying first if you have never looked: it is busy
+almost everywhere, and none of SDRoxide's own decoders reach it.
+
+#### What it adds
+
+Broadly: **weather** (Acurite, Ambient Weather, Bresser, Ecowitt, Fine Offset,
+LaCrosse, Oregon Scientific, Nexus, Rubicson, TFA and many rebadges),
+**tyre-pressure sensors** from most car makers, **utility and sub-metering**
+(ERT/SCM gas, water and electricity meters, Efergy and Owl energy monitors),
+**security and access** (door and window contacts, PIR sensors, smoke alarms,
+gate and garage remotes, key fobs), **environment** (soil moisture, pool and
+fridge thermometers, air quality, lightning detectors) and a long tail of
+remotes, doorbells and thermostats.
+
+Devices appear in the same list as everything else, with `rtl_433` in the
+protocol column and the device's model name beside it.
+
+#### Where it takes over
+
+Where both sets of decoders can read a device, rtl_433 reads it, because it
+knows far more variants — fifteen LaCrosse decoders to SDRoxide's one, nineteen
+Fine Offset to seven, eight Bresser to four. The channel list says
+`handled by rtl_433` for those, and the panel lists them under **handled by
+rtl_433**. This is why a sensor you know as `Bresser` may appear as `rtl_433`
+with a model of `Bresser-6in1` — same device, better decoder. Select a band
+somewhere else and SDRoxide's own decoders take 868 MHz back.
+
+**Z-Wave and Homematic are never handed over** — rtl_433 has no decoder for
+either, so those two stay with SDRoxide's own regardless of what band is
+selected.
+
+### 5.5 Adding your own decoders (flex specs)
+
+If you have a device nothing decodes, you can describe it yourself — no code, no
+rebuild. A **flex spec** is a few lines of text saying how a device modulates
+and frames its data, and SDRoxide turns it into a working decoder.
+
+They live in one file:
+
+| Platform | Location |
+| --- | --- |
+| Linux | `~/.config/sdroxide/rtl433_flex.conf` |
+| macOS | `~/Library/Application Support/org.sdroxide.sdroxide/rtl433_flex.conf` |
+| Windows | `%APPDATA%\sdroxide\sdroxide\config\rtl433_flex.conf` |
+
+The file is created for you, with a worked example commented out, the first time
+the ISM decoder runs. **SDRoxide never rewrites it**, so what you put there stays
+exactly as you wrote it — including your comments and spacing.
+
+#### The syntax
+
+It is rtl_433's own flex syntax, unchanged. That is the point: a spec published
+on a forum, in a blog post, or in rtl_433's own
+[`conf/` directory](https://github.com/merbanan/rtl_433/tree/master/conf) can be
+pasted in as-is. Both shapes work — a `decoder { ... }` block:
+
+```
+decoder {
+    name=doorbell,
+    modulation=OOK_PWM,
+    short=400,
+    long=800,
+    gap=1000,
+    reset=7000,
+    match={24}0xa9878c,
+    get=@0:{24}:id,
+    unique
+}
+```
+
+or the single-line form, which is what rtl_433's `-X` option takes:
+
+```
+decoder n=doorbell,m=OOK_PWM,s=400,l=800,g=1000,r=7000,match={24}0xa9878c
+```
+
+Put as many as you like in the file, one block each. `#` starts a comment.
+
+The keys you will use most:
+
+| Key | Means |
+|---|---|
+| `name` / `n` | What the device is called in the list. Required. |
+| `modulation` / `m` | How it keys the carrier. Required — `OOK_PWM`, `OOK_PPM`, `OOK_PCM`, `OOK_MC_ZEROBIT`, `FSK_PCM`, `FSK_PWM` and a few more. |
+| `short` / `s`, `long` / `l` | The two pulse widths, in microseconds. Required (except for the Manchester modulations, which have one). |
+| `gap` / `g` | Longest gap still inside one message, in microseconds. |
+| `reset` / `r` | Quiet time that ends a message, in microseconds. Required. |
+| `bits`, `rows`, `repeats` | How much data to insist on before believing it. Also `bits>`, `bits<` and so on for a range. |
+| `match`, `preamble` | A fixed bit pattern the message must contain or start with, as `{count}hex` — the main defence against decoding noise. |
+| `get` | Pull a named field out of the bits: `get=@0:{8}:temperature_C`. Repeat for each field. |
+| `unique` | Report one line per message rather than one per repeat. Worth adding. |
+
+`short`, `long`, `gap` and `reset` are timings you measure from the device
+itself — the `ism_replay --survey` tool in
+[§5.7](#57-checking-it-without-waiting-for-a-sensor) prints them from a recording.
+
+**Name your `get=` fields well.** Call one `temperature_C`, `humidity`,
+`pressure_hPa`, `power_W`, `battery_ok`, `wind_avg_km_h` and so on, and it shows
+up as a proper reading with units, converted to the same units as every other row
+in the list. Any other name still appears, just as plain text.
+
+#### Loading changes
+
+Press **RELOAD DECODERS** in the ISM window after editing the file. The devices
+already in the list stay there, and the notice bar says how many decoders loaded
+and how many were refused.
+
+Deleting the file and reloading gets you a fresh one with the commented example
+back.
+
+#### When a spec is wrong
+
+Every spec is checked before it is used. One that does not pass is listed in the
+ISM window with its line number and the reason, and skipped — **the others still
+load**, so one typo costs you one decoder rather than all of them.
+
+The check is deliberately stricter than rtl_433's own command line. rtl_433
+reports a bad spec by printing a message and stopping the program, which is fine
+for a command-line tool and not fine for a receiver you are operating; so
+anything SDRoxide cannot confirm is safe gets refused with an explanation
+instead. If a spec is rejected that you believe is valid, the message says which
+part was not understood.
+
+### 5.6 Nothing is being decoded
 
 Work down this list; each step distinguishes two causes that look identical from
 the outside.
 
-1. **Is a channel live?** The channel list needs at least one green lamp. All grey
-   with "outside the receiver's window" means the dial is wrong — press the
-   **TUNE 868.880 MHz** button.
+1. **Is anything live?** The channel list needs at least one green lamp — the
+   rtl_433 row counts. All grey with "outside the receiver's window" means the
+   dial is wrong: press the band button for the band you want, which tunes there.
+   A native channel reading `handled by rtl_433` is not a fault; it means the
+   other set of decoders has that one ([§5.4](#54-the-rtl_433-decoders)).
 2. **Is the gate opening?** The **bursts / decoded** line says. `0 bursts` means
    nothing is reaching the threshold: lower **sql** towards 6 dB. A healthy count
    with `0 decoded` means the band is busy with devices this build cannot read —
@@ -2820,7 +2976,7 @@ the outside.
    LoRa's chirps look like. Those columns are what a new protocol module gets
    written from.
 
-### 5.5 Checking it without waiting for a sensor
+### 5.7 Checking it without waiting for a sensor
 
 Two tools ship with the decoder. The first writes a synthetic 868 MHz band with
 four sensors whose readings are known, as an IQ file the radio can tune:
@@ -2835,7 +2991,7 @@ generator printed.
 
 The second replays a real capture and reports **every** burst it finds, decoded
 or not — which is how you find out what your own neighbourhood is transmitting.
-Capture one with `--record-iq` (see [5.4](#54-nothing-is-being-decoded)), then:
+Capture one with `--record-iq` (see [5.6](#56-nothing-is-being-decoded)), then:
 
 ```bash
 cargo run --release -p sdroxide-ism --example ism_replay -- band.iq 868880000 2025000
@@ -8143,7 +8299,7 @@ sends them.
 | `--width <CHARS>` | Console spectrum width in characters (default 100). |
 | `--freedv-reporter-probe <SECS>` | Connect to FreeDV Reporter read-only for SECS seconds and print what arrives. Uses the server's view role, so nothing is reported and you do not appear on the site. Needs no radio. |
 | `--freedv-reporter-host <HOST[:PORT]>` | FreeDV Reporter host for the probe (default `qso.freedv.org`). |
-| `--record-iq <PATH>` | Write every raw IQ sample the receiver delivers to PATH, in the same interleaved CF32 format `--file` reads back. For capturing a band to work on offline — see [5.4](#54-nothing-is-being-decoded). Large: 8 bytes a sample, so about 16 MB a second at 2 Msps, and it runs until you quit. Radio 0 only. |
+| `--record-iq <PATH>` | Write every raw IQ sample the receiver delivers to PATH, in the same interleaved CF32 format `--file` reads back. For capturing a band to work on offline — see [5.6](#56-nothing-is-being-decoded). Large: 8 bytes a sample, so about 16 MB a second at 2 Msps, and it runs until you quit. Radio 0 only. |
 | `--oob-tx` | Allow transmit on **any** frequency the hardware supports, not just the amateur bands. See below. |
 
 **Testing without a radio:** `--siggen` (built-in signal generator), `--file`
@@ -8215,7 +8371,8 @@ sdroxide stores its settings under the per-user config directory:
 | `wsjtx.json` | JSON | WSJT-X UDP broadcast: enabled, destination host and port, and the name clients see. |
 | `scanner.json` | JSON | The scanner: memories or a range, the range and channel step, the level that counts as busy, the dwell, how it resumes, and which memories to skip. |
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
-| `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, and the burst threshold in dB. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
+| `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on and which band they watch. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
+| `rtl433_flex.conf` | text | Your own ISM decoders, in rtl_433's "flex" syntax ([§5.5](#55-adding-your-own-decoders-flex-specs)). Written with a commented example the first time the ISM decoder runs, and never rewritten afterwards — like `bandplan.json`, it is yours to edit. A specification that does not pass its check is listed in the ISM window and skipped; the rest still load. **RELOAD DECODERS** in the ISM window applies an edit without a restart. |
 | `input.json` | JSON | Control inputs: keyboard bindings, panadapter mouse behaviour, mouse-button bindings, and the MIDI controller mapping. Belongs to the machine running the user interface, not the engine. |
 | `remote_login.json` | JSON | A sign-in to *somebody else's* server that you asked this client to remember ([§8.3](#83-sign-in-who-may-operate-the-station)). Written only when the **Remember on this device** box is ticked, holds the password in plaintext, and deleted when you untick it or the server refuses it. Belongs to the user interface, like `input.json`; the browser client keeps the same thing in local storage instead. |
 | `satellites.json` | JSON | Satellite additions for the 3D tracker: subscribed element-set listings, element sets pasted in by hand, and frequency entries that override the built-in table. Belongs to the engine, like `net.json`: the listings are fetched and cached where the radio is, so remote and browser clients track the same satellites. |

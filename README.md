@@ -781,13 +781,20 @@ standard library as a separate package, but the usual symptom is that the native
 build works fine and the web client build fails on the missing target. Migrating
 to rustup is the shortest way out.
 
-The RADE digital-voice codec is vendored as a git submodule, so clone with:
+The RADE digital-voice codec and the rtl_433 ISM decoders are vendored as git
+submodules, so clone with:
 
 ```sh
 git clone --recurse-submodules https://github.com/dividebysandwich/sdroxide
 # or, in an existing checkout:
 git submodule update --init --recursive
 ```
+
+Both are built from source by `build.rs`, so a default build needs a C compiler
+and CMake — already in the package lists below. If you would rather not build
+rtl_433, `--no-default-features` leaves it out and SDRoxide falls back to its own
+ISM decoders; see [`crates/sdroxide-ism/PROVENANCE.md`](crates/sdroxide-ism/PROVENANCE.md)
+for what it is and what licence it carries.
 
 ### What depends on what
 

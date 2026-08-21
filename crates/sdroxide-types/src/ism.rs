@@ -119,16 +119,24 @@ pub enum IsmProtocol {
     /// matched no decoder. Reported by its symbol rate and the sync word derived
     /// from its own preamble.
     Unidentified,
+    /// Decoded by the embedded rtl_433 rather than by one of the decoders above.
+    ///
+    /// One variant for all several hundred of its device protocols, because the
+    /// interesting name is the *model* — "Bresser-6in1", "Nexus-TH" — which the
+    /// report already carries as text. An enum with a variant per rtl_433
+    /// decoder would have to be rewritten every time the submodule moves.
+    Rtl433,
 }
 
 impl IsmProtocol {
     /// Every protocol, in UI order.
-    pub const ALL: [IsmProtocol; 6] = [
+    pub const ALL: [IsmProtocol; 7] = [
         IsmProtocol::LaCrosseIt,
         IsmProtocol::FineOffset,
         IsmProtocol::Bresser,
         IsmProtocol::ZWave,
         IsmProtocol::Homematic,
+        IsmProtocol::Rtl433,
         IsmProtocol::Unidentified,
     ];
 
@@ -139,17 +147,25 @@ impl IsmProtocol {
             IsmProtocol::Bresser => "Bresser",
             IsmProtocol::ZWave => "Z-Wave",
             IsmProtocol::Homematic => "Homematic",
+            IsmProtocol::Rtl433 => "rtl_433",
             IsmProtocol::Unidentified => "unidentified",
         }
     }
 
     /// Which family switch turns this protocol on.
+    ///
+    /// Note that the family switches gate the **native** decoders. The rtl_433
+    /// lane has its own enable and band selection and is not filtered by family
+    /// — it would mean deciding a family for several hundred device protocols
+    /// that upstream does not categorise.
     pub fn family(self) -> IsmFamily {
         match self {
             IsmProtocol::LaCrosseIt | IsmProtocol::FineOffset | IsmProtocol::Bresser => {
                 IsmFamily::Weather
             }
-            IsmProtocol::ZWave | IsmProtocol::Homematic => IsmFamily::HomeAuto,
+            IsmProtocol::ZWave | IsmProtocol::Homematic | IsmProtocol::Rtl433 => {
+                IsmFamily::HomeAuto
+            }
             IsmProtocol::Unidentified => IsmFamily::Unidentified,
         }
     }
@@ -216,6 +232,16 @@ pub enum IsmQuantity {
     /// Strikes counted since the sensor was last reset. A running total, so what
     /// matters is that it went up.
     StrikeCount,
+    /// Instantaneous power, from an energy monitor.
+    PowerW,
+    /// Cumulative energy, from a utility or sub-meter. A running total like
+    /// [`IsmQuantity::StrikeCount`].
+    EnergyKwh,
+    /// Line voltage, from an energy monitor. Distinct from
+    /// [`IsmQuantity::BatteryVolts`], which is a sensor reporting on itself.
+    VoltageV,
+    /// Line current, from an energy monitor.
+    CurrentA,
 }
 
 impl IsmQuantity {
@@ -236,6 +262,10 @@ impl IsmQuantity {
             IsmQuantity::BatteryVolts => "batt",
             IsmQuantity::LightningKm => "strike",
             IsmQuantity::StrikeCount => "strikes",
+            IsmQuantity::PowerW => "pwr",
+            IsmQuantity::EnergyKwh => "energy",
+            IsmQuantity::VoltageV => "volt",
+            IsmQuantity::CurrentA => "cur",
         }
     }
 
@@ -252,8 +282,11 @@ impl IsmQuantity {
             IsmQuantity::PressureHpa => "hPa",
             IsmQuantity::UvIndex | IsmQuantity::StrikeCount => "",
             IsmQuantity::LuxLx => "lx",
-            IsmQuantity::BatteryVolts => "V",
+            IsmQuantity::BatteryVolts | IsmQuantity::VoltageV => "V",
             IsmQuantity::LightningKm => "km",
+            IsmQuantity::PowerW => "W",
+            IsmQuantity::EnergyKwh => "kWh",
+            IsmQuantity::CurrentA => "A",
         }
     }
 
@@ -265,7 +298,11 @@ impl IsmQuantity {
             | IsmQuantity::WindAvgMs
             | IsmQuantity::WindGustMs
             | IsmQuantity::UvIndex => 1,
-            IsmQuantity::RainMm | IsmQuantity::BatteryVolts => 2,
+            IsmQuantity::RainMm | IsmQuantity::BatteryVolts | IsmQuantity::CurrentA => 2,
+            // Energy is a slowly-moving total; a whole kWh is too coarse to see
+            // a household's consumption change between reports.
+            IsmQuantity::EnergyKwh => 3,
+            IsmQuantity::VoltageV => 1,
             IsmQuantity::HumidityPct
             | IsmQuantity::WindDirDeg
             | IsmQuantity::PressureHpa
@@ -273,7 +310,8 @@ impl IsmQuantity {
             | IsmQuantity::SoilMoisturePct
             | IsmQuantity::BatteryPct
             | IsmQuantity::LightningKm
-            | IsmQuantity::StrikeCount => 0,
+            | IsmQuantity::StrikeCount
+            | IsmQuantity::PowerW => 0,
         }
     }
 }
@@ -395,7 +433,77 @@ pub struct IsmSettings {
     pub families: u32,
     /// Most devices remembered; the least recently heard are dropped past this.
     pub max_devices: u16,
+    /// The embedded rtl_433 lane, which runs beside the native decoders.
+    pub rtl433: Rtl433Settings,
 }
+
+/// The embedded rtl_433 decoders.
+///
+/// There is no switch here. When rtl_433 is compiled in it decodes whenever the
+/// ISM decoder is running — it costs one more downconverter, it reads bands and
+/// modulations nothing else here reaches, and an operator who has to know it
+/// exists before switching it on is an operator who never sees most of what is
+/// on the air. All that is left to choose is *where* to listen.
+///
+/// Note this is not gated by the family switches above, which are about the
+/// native decoders: rtl_433's several hundred device protocols are not sorted
+/// into families upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rtl433Settings {
+    /// Which bands to listen on, as a bitmask. One is live at a time — the one
+    /// the receiver's window can actually reach.
+    pub bands: u32,
+}
+
+/// The European 868 MHz band — where the native decoders already listen, so a
+/// receiver sitting on the ISM channel plan hears rtl_433's devices too without
+/// being retuned.
+///
+/// A bitmask rather than an index because a hand-edited `ism.json` may name
+/// several, in which case whichever one the receiver can currently reach is the
+/// one that runs. The panel selects exactly one.
+pub const RTL433_BANDS_DEFAULT: u32 = 1 << 1;
+
+impl Default for Rtl433Settings {
+    fn default() -> Self {
+        Rtl433Settings { bands: RTL433_BANDS_DEFAULT }
+    }
+}
+
+impl Rtl433Settings {
+    /// Nothing running.
+    ///
+    /// No band selected, which is the only way to have the lane not run now that
+    /// it has no switch of its own — the counterpart of `families: 0` in
+    /// [`IsmSettings::OFF`].
+    pub const OFF: Rtl433Settings = Rtl433Settings { bands: 0 };
+
+    pub fn band_enabled(&self, bit: u32) -> bool {
+        self.bands & bit != 0
+    }
+
+    pub fn set_band(&mut self, bit: u32, on: bool) {
+        if on {
+            self.bands |= bit;
+        } else {
+            self.bands &= !bit;
+        }
+    }
+}
+
+/// The bands the rtl_433 lane offers, as (bit, label, centre in Hz).
+///
+/// Mirrors `sdroxide_ism::rtl433::bands::BANDS`, which additionally holds the
+/// sample rate each one is decoded at. Repeated here because the UI draws these
+/// chips — and tunes to them — without linking any DSP, and the remote client
+/// cannot link it at all. Keep the two in step.
+pub const RTL433_BAND_LABELS: [(u32, &str, f64); 4] = [
+    (1 << 0, "433.92 MHz", 433_920_000.0),
+    (1 << 1, "868 MHz EU", 868_650_000.0),
+    (1 << 2, "915 MHz US", 915_000_000.0),
+    (1 << 3, "315 MHz US", 315_000_000.0),
+];
 
 impl Default for IsmSettings {
     fn default() -> Self {
@@ -404,6 +512,7 @@ impl Default for IsmSettings {
             threshold_db: ISM_THRESHOLD_DB_DEFAULT,
             families: IsmFamily::Weather.bit(),
             max_devices: ISM_MAX_DEVICES_DEFAULT,
+            rtl433: Rtl433Settings::default(),
         }
     }
 }
@@ -417,6 +526,7 @@ impl IsmSettings {
         threshold_db: ISM_THRESHOLD_DB_DEFAULT,
         families: 0,
         max_devices: ISM_MAX_DEVICES_DEFAULT,
+        rtl433: Rtl433Settings::OFF,
     };
 
     pub fn family_enabled(&self, f: IsmFamily) -> bool {
@@ -431,14 +541,33 @@ impl IsmSettings {
         }
     }
 
+    /// Whether a **native** decoder should run.
+    ///
+    /// The rtl_433 lane is not filtered by family; see
+    /// [`IsmProtocol::family`].
     pub fn protocol_enabled(&self, p: IsmProtocol) -> bool {
         self.family_enabled(p.family())
     }
 
-    /// True while the decoder should be running: switched on, and with at least
-    /// one family to listen for.
-    pub fn any_enabled(&self) -> bool {
+    /// True while the native decoders should be running: switched on, and with
+    /// at least one family to listen for.
+    pub fn native_enabled(&self) -> bool {
         self.enabled && self.families != 0
+    }
+
+    /// True while the embedded rtl_433 should be running.
+    ///
+    /// No switch of its own: it runs whenever the ISM decoder does and a band is
+    /// selected. Whether it is compiled in at all is a build-time question the
+    /// decoder crate answers.
+    pub fn rtl433_enabled(&self) -> bool {
+        self.enabled && self.rtl433.bands != 0
+    }
+
+    /// True while either lane should be running — what the engine builds a
+    /// window for, and what lights the panel's chip.
+    pub fn any_enabled(&self) -> bool {
+        self.native_enabled() || self.rtl433_enabled()
     }
 }
 
@@ -490,4 +619,42 @@ pub struct IsmStatus {
     /// Zero when no decoder is running.
     pub window_center_hz: f64,
     pub window_rate_hz: f64,
+    /// The embedded rtl_433 lane, when it is switched on.
+    ///
+    /// `None` means the lane is off, not that it is broken — the panel draws
+    /// nothing for it rather than an empty section.
+    ///
+    /// Boxed because it is several times the size of everything else here and
+    /// usually absent, and this whole struct travels inside an enum that is
+    /// otherwise small. Serde sees straight through the box, so the encoding is
+    /// the same as if it were inline.
+    pub rtl433: Option<Box<Rtl433Status>>,
+}
+
+/// What the embedded rtl_433 is doing, for the panel.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rtl433Status {
+    /// Whether it is actually decoding right now.
+    pub running: bool,
+    /// The band it settled on, e.g. "868 MHz EU". Empty when none fits.
+    pub band: String,
+    /// How many device decoders are registered, including flex ones.
+    pub decoders: u32,
+    /// How many of those came from the operator's own flex specs.
+    pub flex: u32,
+    /// Decodes since the lane started.
+    pub decodes: u64,
+    /// Every band offered, and whether it is reachable — same shape as the
+    /// native channel rows so the panel can offer the same one-click retune.
+    pub bands: Vec<IsmChannelStatus>,
+    /// Native protocols standing down because rtl_433 covers them better, so
+    /// the panel can say so rather than leave them looking switched off.
+    pub superseded: Vec<IsmProtocol>,
+    /// Flex specs that were refused, with the line and the reason. Shown so a
+    /// mistyped spec is visible instead of silently absent.
+    pub errors: Vec<String>,
+    /// Why the lane is not running, when it is not.
+    pub unavailable: Option<String>,
+    /// The vendored rtl_433's version, for the status line.
+    pub version: String,
 }

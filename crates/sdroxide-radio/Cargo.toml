@@ -5,8 +5,11 @@ edition.workspace = true
 
 [features]
 # SoapySDR is optional so a CAT-only build needs no libSoapySDR installed.
-default = ["soapy"]
+default = ["soapy", "rtl433"]
 soapy = ["dep:soapysdr"]
+# The embedded rtl_433 ISM decoders. Needs a C compiler, CMake and the
+# vendor/rtl_433 submodule; turn off for a build without them.
+rtl433 = ["sdroxide-ism/rtl433"]
 
 [dependencies]
 sdroxide-types.workspace = true

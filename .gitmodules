@@ -1,3 +1,6 @@
 [submodule "vendor/rade_c"]
 	path = vendor/rade_c
 	url = https://github.com/freedv/rade_c
+[submodule "vendor/rtl_433"]
+	path = vendor/rtl_433
+	url = https://github.com/merbanan/rtl_433

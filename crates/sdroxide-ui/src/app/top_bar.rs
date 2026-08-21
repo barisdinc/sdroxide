@@ -3011,7 +3011,7 @@ impl SdroxideApp {
         };
         if ism_chip
             .on_hover_text(
-                "868 MHz ISM devices — weather sensors, meters and home \
+                "ISM-band devices — weather sensors, meters and home \
                  automation heard around you",
             )
             .clicked()

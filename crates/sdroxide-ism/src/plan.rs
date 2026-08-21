@@ -138,13 +138,104 @@ pub fn fits(ch: &Channel, window_center_hz: f64, window_rate_hz: f64) -> bool {
 /// channel at all, which is the honest outcome — [`fits`] then rejects
 /// everything and the panel says so.
 pub fn window_center_hz(hw_center_hz: f64, hw_rate_hz: f64, window_rate_hz: f64) -> f64 {
+    window_center_for(ideal_center_hz(), hw_center_hz, hw_rate_hz, window_rate_hz)
+}
+
+/// As [`window_center_hz`], but aiming somewhere other than the native plan.
+pub fn window_center_for(
+    want_hz: f64,
+    hw_center_hz: f64,
+    hw_rate_hz: f64,
+    window_rate_hz: f64,
+) -> f64 {
     // The window is centred by an NCO offset inside the hardware span, so its
     // own edges must stay inside the usable part of that span.
     let slack = (hw_rate_hz * USABLE_FRACTION - window_rate_hz) / 2.0;
     if slack <= 0.0 {
         return hw_center_hz;
     }
-    ideal_center_hz().clamp(hw_center_hz - slack, hw_center_hz + slack)
+    want_hz.clamp(hw_center_hz - slack, hw_center_hz + slack)
+}
+
+/// Where the decoder's one window should sit and how wide it should be.
+pub struct WindowPlan {
+    /// What to aim the window at, before the hardware span clamps it.
+    pub want_center_hz: f64,
+    /// The bandwidth to ask the downconverter for.
+    pub target_rate_hz: f64,
+}
+
+/// Choose the window from what is switched on.
+///
+/// There is one window and two lanes that may want different parts of the
+/// spectrum — the native decoders are fixed on the European 868 MHz channels,
+/// while rtl_433 can be pointed at any of four bands hundreds of megahertz
+/// apart. A window aimed at 868 would never reach a 433 MHz band, so the aim
+/// point cannot be a constant any more.
+///
+/// Candidates are scored by how many enabled lanes they would actually serve,
+/// so a receiver wide enough for both the native plan and rtl_433's 868 band
+/// gets the window that covers both. Ties go to the native plan, then to band
+/// order. Whatever is left uncovered is reported as such, with somewhere to
+/// tune — which is the honest outcome when no front end spans both bands.
+pub fn window_plan(
+    cfg: &sdroxide_types::IsmSettings,
+    hw_center_hz: f64,
+    hw_rate_hz: f64,
+) -> Option<WindowPlan> {
+    let mut candidates: Vec<(f64, f64)> = Vec::new(); // (want_center, target_rate)
+
+    if cfg.native_enabled() {
+        candidates.push((ideal_center_hz(), span_hz() / USABLE_FRACTION));
+    }
+
+    #[cfg(feature = "rtl433")]
+    if cfg.rtl433_enabled() {
+        for b in crate::rtl433::bands::all() {
+            if cfg.rtl433.band_enabled(b.bit) {
+                candidates.push((b.center_hz, b.rate_hz / USABLE_FRACTION));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Never ask for more than the front end delivers: the window is a
+    // decimation of that stream, not a second tuner.
+    for c in &mut candidates {
+        c.1 = c.1.min(hw_rate_hz);
+    }
+
+    let score = |want: f64, rate: f64| -> u32 {
+        let center = window_center_for(want, hw_center_hz, hw_rate_hz, rate);
+        let mut n = 0;
+        if cfg.native_enabled() && CHANNELS.iter().any(|ch| fits(ch, center, rate)) {
+            n += 1;
+        }
+        #[cfg(feature = "rtl433")]
+        if cfg.rtl433_enabled() {
+            for b in crate::rtl433::bands::all() {
+                if cfg.rtl433.band_enabled(b.bit) && crate::rtl433::bands::fits(b, center, rate) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+
+    let best = candidates
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, (want, rate))| {
+            // Higher score first; earlier candidate wins a tie, and the native
+            // plan is first in the list when it is enabled at all.
+            (score(*want, *rate), std::cmp::Reverse(*i))
+        })
+        .map(|(_, c)| *c)?;
+
+    Some(WindowPlan { want_center_hz: best.0, target_rate_hz: best.1 })
 }
 
 #[cfg(test)]

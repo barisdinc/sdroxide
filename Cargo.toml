@@ -168,10 +168,14 @@ num-complex.workspace = true
 rtrb.workspace = true
 
 [features]
-default = ["soapy"]
+default = ["soapy", "rtl433"]
 # SoapySDR device support. Turn off (`--no-default-features`) for a CAT-only
 # binary that builds and runs without libSoapySDR installed.
 soapy = ["sdroxide-radio/soapy"]
+# The several hundred ISM device decoders of the embedded rtl_433. Needs a C
+# compiler, CMake, and `git submodule update --init --recursive`. Turn off for a
+# build with only sdroxide's own ISM decoders.
+rtl433 = ["sdroxide-radio/rtl433"]
 # Bundle the trunk-built web client into the binary (run `trunk build
 # --release` in crates/sdroxide-web first).
 embed-web = ["sdroxide-server/embed-web"]

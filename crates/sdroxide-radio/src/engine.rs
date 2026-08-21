@@ -4808,6 +4808,7 @@ impl Engine {
 
             // ISM decoder.
             SetIsmConfig(cfg) => {
+                let prev_rtl433 = self.state.ism.rtl433;
                 self.state.ism = cfg;
                 // Remembered before `sync_ism` may force the live state off on an
                 // audio-mode source, so a swap back restores what was chosen.
@@ -4815,10 +4816,35 @@ impl Engine {
                 if let Err(e) = sdroxide_config::save_ism_config(&cfg) {
                     warn!("saving ISM config: {e}");
                 }
+                let _ = prev_rtl433;
                 self.sync_ism();
                 if let Some(d) = self.ism.as_ref() {
                     d.set_config(cfg);
                 }
+            }
+
+            ReloadIsmDecoders => {
+                // Seeded here as well as at startup, so deleting the file to get
+                // the commented example back works without a restart.
+                let text = sdroxide_config::load_rtl433_flex();
+                let (specs, problems) = ism_flex_parse(&text);
+                let n = specs.len();
+                if let Some(d) = self.ism.as_ref() {
+                    d.set_flex_conf(text);
+                }
+                // Whatever the file had to say reaches the operator who asked
+                // for the reload, not just the log.
+                let msg = if problems.is_empty() {
+                    format!("rtl433_flex.conf: {n} decoder(s) loaded")
+                } else {
+                    format!(
+                        "rtl433_flex.conf: {n} decoder(s) loaded, {} refused — {}",
+                        problems.len(),
+                        problems.join("; ")
+                    )
+                };
+                let _ = self.event_tx.send(RadioEvent::Notice(Some(msg)));
+                return;
             }
 
             // Network cockpit (no RadioState change → return before the State
@@ -5318,7 +5344,27 @@ impl Engine {
     /// — which is the RX-888's VHF case, where the wideband downconverter hands
     /// over 2.025 Msps and the plan fits inside its flat portion.
     fn ism_window_target_hz(&self) -> f64 {
-        (sdroxide_ism::span_hz() / sdroxide_ism::USABLE_FRACTION).min(self.state.sample_rate)
+        self.ism_window_plan().map(|p| p.target_rate_hz).unwrap_or_else(|| {
+            (sdroxide_ism::span_hz() / sdroxide_ism::USABLE_FRACTION).min(self.state.sample_rate)
+        })
+    }
+
+    /// Where the ISM window wants to sit, given which lanes are switched on.
+    ///
+    /// Not a constant any more: the native decoders are fixed on the European
+    /// 868 MHz channels, but the embedded rtl_433 can be pointed at 433, 915 or
+    /// 315 MHz, and a window aimed at 868 would never reach those.
+    fn ism_window_plan(&self) -> Option<sdroxide_ism::WindowPlan> {
+        sdroxide_ism::window_plan(&self.state.ism, self.state.center_hz, self.state.sample_rate)
+    }
+
+    /// Where to place the ISM window's centre for a given width.
+    fn ism_window_center_hz(&self, rate: f64) -> f64 {
+        let want = self
+            .ism_window_plan()
+            .map(|p| p.want_center_hz)
+            .unwrap_or_else(sdroxide_ism::ideal_center_hz);
+        sdroxide_ism::window_center_for(want, self.state.center_hz, self.state.sample_rate, rate)
     }
 
     /// Construct or tear down the ISM decoder, and keep its window on the channel
@@ -5341,15 +5387,14 @@ impl Engine {
             (true, false) => {
                 let target = self.ism_window_target_hz();
                 let rate = Ddc::rate_for(self.state.sample_rate, target);
-                let center = sdroxide_ism::window_center_hz(
-                    self.state.center_hz,
-                    self.state.sample_rate,
-                    rate,
-                );
+                let center = self.ism_window_center_hz(rate);
                 let mut ddc = Ddc::new(self.state.sample_rate, target);
                 ddc.set_offset_hz(center - self.state.center_hz);
                 let out_rate = ddc.out_rate();
-                self.ism = Some(IsmController::new(center, out_rate, self.state.ism));
+                // Read from disk here rather than on the worker: the operator's
+                // decoder file is config, and config loading lives on this side.
+                let flex = sdroxide_config::load_rtl433_flex();
+                self.ism = Some(IsmController::new(center, out_rate, self.state.ism, flex));
                 self.ism_ddc = Some(ddc);
                 self.ism_center_hz = center;
                 info!(rate = out_rate, center, "ISM decoder started");
@@ -5371,10 +5416,12 @@ impl Engine {
     /// the one thing an operator watching a band accumulates over minutes. So the
     /// mixer moves and the worker is told; it rebuilds only its channels.
     fn sync_ism_window(&mut self) {
+        let rate = match self.ism_ddc.as_ref() {
+            Some(ddc) => ddc.out_rate(),
+            None => return,
+        };
+        let center = self.ism_window_center_hz(rate);
         let Some(ddc) = self.ism_ddc.as_mut() else { return };
-        let rate = ddc.out_rate();
-        let center =
-            sdroxide_ism::window_center_hz(self.state.center_hz, self.state.sample_rate, rate);
         if (center - self.ism_center_hz).abs() < 1.0 {
             return;
         }
@@ -9206,6 +9253,28 @@ fn save_sstv_rx(png: &[u8]) -> Option<String> {
 /// Returns `None` rather than failing the engine: a mailbox that cannot be
 /// opened is a reason for the mail window to complain, not for the radio to
 /// refuse to start.
+/// Pull the decoder specs out of the operator's `rtl433_flex.conf`.
+///
+/// Problems are logged here rather than raised: a spec that does not parse costs
+/// its own decoder and nothing else, and the ISM window shows the same list
+/// again with the line numbers, which is where somebody editing the file will be
+/// looking.
+#[cfg(feature = "rtl433")]
+fn ism_flex_parse(text: &str) -> (Vec<String>, Vec<String>) {
+    let (specs, problems) = sdroxide_ism::rtl433::flex::parse_conf(text);
+    let mut said = Vec::new();
+    for p in &problems {
+        warn!("rtl433_flex.conf line {}: {}", p.line, p.message);
+        said.push(format!("line {}: {}", p.line, p.message));
+    }
+    (specs.into_iter().map(|s| s.spec).collect(), said)
+}
+
+#[cfg(not(feature = "rtl433"))]
+fn ism_flex_parse(_text: &str) -> (Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new())
+}
+
 fn open_mailbox(cfg: &sdroxide_types::WinlinkConfig) -> Option<sdroxide_winlink::WinlinkManager> {
     let dir = match sdroxide_config::config_dir() {
         Ok(d) => d.join("winlink"),

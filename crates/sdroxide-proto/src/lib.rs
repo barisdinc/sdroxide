@@ -427,7 +427,17 @@ use sdroxide_types::{
 /// self-describing and `CatConfig` rides `Command::SetRadioConfig` whole, so a
 /// v70 peer stops reading where the struct used to end and treats the two new
 /// fields as the next message. Same reasoning as v69's `DeviceCaps` append.
-pub const PROTO_VERSION: u16 = 71;
+///
+/// **72** — the embedded rtl_433 ISM decoders. Four changes, any one of which
+/// would force the bump: `IsmSettings` gained an `rtl433` block and it rides
+/// inside every `RadioState`, so a v71 peer misreads everything after it;
+/// `IsmStatus` gained a trailing `rtl433` field, and postcard is not
+/// self-describing, so the old reader stops where the struct used to end;
+/// `IsmProtocol` gained `Rtl433` and `IsmQuantity` four energy quantities,
+/// appended so existing discriminants keep their numbers, but a v71 client
+/// handed one has nowhere to put it. No new `ServerMsg` or `Command`: the lane
+/// reuses `IsmReports`, `IsmStatus` and `SetIsmConfig`.
+pub const PROTO_VERSION: u16 = 72;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

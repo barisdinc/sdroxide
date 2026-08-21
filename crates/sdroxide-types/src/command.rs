@@ -596,4 +596,14 @@ pub enum Command {
     /// Which ISM decoders run and how hard they squelch. The engine persists this
     /// and echoes it back in [`crate::RadioState`], so there is no apply step.
     SetIsmConfig(crate::IsmSettings),
+
+    /// Re-read `rtl433_flex.conf` and restart the rtl_433 decoders on it.
+    /// Appended for the usual reason: postcard numbers variants by position.
+    ///
+    /// The operator's decoder file is edited outside sdroxide, so nothing else
+    /// notices it changed — the same reason [`Command::ReloadBandPlan`] exists.
+    /// The device table survives: adding a decoder should not cost somebody the
+    /// sensors already on screen. Whatever the file had to say comes back as a
+    /// [`crate::RadioEvent::Notice`] and in the ISM status.
+    ReloadIsmDecoders,
 }

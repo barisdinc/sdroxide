@@ -30,6 +30,19 @@ use crate::gate::{Burst, Gate};
 use crate::plan;
 use crate::proto::{self, Scratch};
 
+/// The embedded rtl_433, its downconverter, and the scratch it is fed through.
+#[cfg(feature = "rtl433")]
+struct Rtl433Lane {
+    inst: crate::rtl433::sys::Instance,
+    band: &'static crate::rtl433::bands::Band,
+    ddc: Ddc,
+    /// Window IQ decimated to the band rate.
+    buf: Vec<C32>,
+    /// The same samples as interleaved cs16, which is what rtl_433 reads.
+    cs16: Vec<i16>,
+    decodes: u64,
+}
+
 /// How often a snapshot goes out. Fast enough that a sensor's reading appears
 /// while the operator is still looking at the burst on the waterfall, slow enough
 /// that the table is not rebuilt for nothing on a quiet band.
@@ -52,6 +65,9 @@ enum Ctl {
         rate_hz: f64,
     },
     Config(IsmSettings),
+    /// A freshly read `rtl433_flex.conf`, sent when the operator asks for a
+    /// reload after editing it.
+    Flex(String),
     Stop,
 }
 
@@ -65,7 +81,17 @@ pub struct IsmController {
 impl IsmController {
     /// `window_rate_hz` is the rate of the IQ the engine will feed, and
     /// `window_center_hz` the absolute RF frequency that IQ is centred on.
-    pub fn new(window_center_hz: f64, window_rate_hz: f64, cfg: IsmSettings) -> IsmController {
+    ///
+    /// `flex_conf` is the operator's `rtl433_flex.conf`, verbatim. It is parsed
+    /// and validated on the worker so that a spec which does not pass becomes a
+    /// line in the panel rather than an error the caller has to route somewhere
+    /// — and so there is exactly one place that decides what a valid spec is.
+    pub fn new(
+        window_center_hz: f64,
+        window_rate_hz: f64,
+        cfg: IsmSettings,
+        flex_conf: String,
+    ) -> IsmController {
         let (iq_tx, iq_rx) = bounded::<Iq>(64);
         let (ctl_tx, ctl_rx) = unbounded::<Ctl>();
         let (res_tx, res_rx) = unbounded::<IsmAction>();
@@ -73,7 +99,7 @@ impl IsmController {
         let worker = std::thread::Builder::new()
             .name("sdroxide-ism".into())
             .spawn(move || {
-                let mut w = Worker::new(window_center_hz, window_rate_hz, cfg);
+                let mut w = Worker::new(window_center_hz, window_rate_hz, cfg, flex_conf);
                 let mut last_emit = Instant::now();
                 loop {
                     select! {
@@ -82,6 +108,7 @@ impl IsmController {
                                 w.set_window(center_hz, rate_hz);
                             }
                             Ok(Ctl::Config(next)) => w.set_config(next),
+                            Ok(Ctl::Flex(conf)) => w.set_flex_conf(conf),
                             Ok(Ctl::Stop) | Err(_) => break,
                         },
                         recv(iq_rx) -> msg => match msg {
@@ -123,6 +150,14 @@ impl IsmController {
         let _ = self.ctl_tx.send(Ctl::Config(cfg));
     }
 
+    /// Hand over a freshly read `rtl433_flex.conf`.
+    ///
+    /// The device table survives: the operator adding a decoder should not cost
+    /// them the sensors already on screen.
+    pub fn set_flex_conf(&self, conf: String) {
+        let _ = self.ctl_tx.send(Ctl::Flex(conf));
+    }
+
     /// Drain whatever the worker has produced since the last poll. Non-blocking.
     pub fn poll(&self) -> Vec<IsmAction> {
         let mut out = Vec::new();
@@ -161,10 +196,26 @@ struct Worker {
     scratch: Scratch,
     bursts_out: Vec<Burst>,
     decodes: u64,
+    /// The operator's `rtl433_flex.conf`, verbatim. Kept so the lane can be
+    /// rebuilt without going back to disk.
+    flex_conf: String,
+    #[cfg(feature = "rtl433")]
+    rtl433: Option<Rtl433Lane>,
+    /// Why the rtl_433 lane is not running, when it should be but is not.
+    #[cfg(feature = "rtl433")]
+    rtl433_unavailable: Option<String>,
+    /// Flex specs the validator refused, kept for the panel.
+    #[cfg(feature = "rtl433")]
+    rtl433_errors: Vec<String>,
 }
 
 impl Worker {
-    fn new(window_center_hz: f64, window_rate_hz: f64, cfg: IsmSettings) -> Worker {
+    fn new(
+        window_center_hz: f64,
+        window_rate_hz: f64,
+        cfg: IsmSettings,
+        flex_conf: String,
+    ) -> Worker {
         let mut w = Worker {
             window_center_hz,
             window_rate_hz,
@@ -175,6 +226,13 @@ impl Worker {
             scratch: Scratch::default(),
             bursts_out: Vec::new(),
             decodes: 0,
+            flex_conf,
+            #[cfg(feature = "rtl433")]
+            rtl433: None,
+            #[cfg(feature = "rtl433")]
+            rtl433_unavailable: None,
+            #[cfg(feature = "rtl433")]
+            rtl433_errors: Vec::new(),
         };
         w.rebuild();
         w
@@ -194,8 +252,11 @@ impl Worker {
     fn set_config(&mut self, next: IsmSettings) {
         let families_changed = next.families != self.cfg.families;
         let threshold_changed = next.threshold_db != self.cfg.threshold_db;
+        let rtl433_changed = next.rtl433 != self.cfg.rtl433;
         self.cfg = next;
-        if families_changed {
+        if families_changed || rtl433_changed {
+            // The rtl_433 lane decides which native decoders stand down, so a
+            // change to either has to go through the same rebuild.
             self.rebuild();
         } else if threshold_changed {
             // Not a rebuild: the noise did not move because a slider did, and
@@ -208,11 +269,64 @@ impl Worker {
         self.trim();
     }
 
-    /// Whether any registry protocol on `center_hz` belongs to an enabled family.
+    /// Replace the decoder file and restart the lane on it.
+    fn set_flex_conf(&mut self, conf: String) {
+        self.flex_conf = conf;
+        #[cfg(feature = "rtl433")]
+        self.rebuild_rtl433();
+    }
+
+    /// Whether the embedded rtl_433 is listening to `freq_hz` right now.
+    ///
+    /// The question the suppression rule turns on: a native decoder only stands
+    /// down for a protocol rtl_433 reads *better*, and only while rtl_433 is
+    /// actually in a position to hear it.
+    #[cfg(feature = "rtl433")]
+    fn rtl433_covers(&self, freq_hz: f64) -> bool {
+        self.rtl433
+            .as_ref()
+            .is_some_and(|l| (freq_hz - l.band.center_hz).abs() <= l.band.rate_hz / 2.0)
+    }
+
+    #[cfg(not(feature = "rtl433"))]
+    fn rtl433_covers(&self, _freq_hz: f64) -> bool {
+        false
+    }
+
+    /// Whether the native decoder for `p` should run on a burst from `freq_hz`.
+    fn native_runs(&self, p: IsmProtocol, freq_hz: f64) -> bool {
+        if !self.cfg.protocol_enabled(p) {
+            return false;
+        }
+        #[cfg(feature = "rtl433")]
+        if crate::rtl433::suppresses(p, self.rtl433_covers(freq_hz)) {
+            return false;
+        }
+        let _ = freq_hz;
+        true
+    }
+
+    /// Whether any registry protocol on `center_hz` is enabled and not left to
+    /// rtl_433.
     fn any_protocol_on(&self, center_hz: f64) -> bool {
-        proto::PROTOCOLS
+        proto::PROTOCOLS.iter().any(|p| {
+            (p.channel_hz - center_hz).abs() < 10_000.0 && self.native_runs(p.id, center_hz)
+        })
+    }
+
+    /// Native protocols standing down on this window because rtl_433 has them.
+    #[cfg(feature = "rtl433")]
+    fn superseded(&self) -> Vec<IsmProtocol> {
+        let mut v: Vec<IsmProtocol> = proto::PROTOCOLS
             .iter()
-            .any(|p| (p.channel_hz - center_hz).abs() < 10_000.0 && self.cfg.protocol_enabled(p.id))
+            .filter(|p| {
+                self.cfg.protocol_enabled(p.id)
+                    && crate::rtl433::suppresses(p.id, self.rtl433_covers(p.channel_hz))
+            })
+            .map(|p| p.id)
+            .collect();
+        v.dedup();
+        v
     }
 
     /// Whether any registry protocol exists on `center_hz` at all, enabled or not.
@@ -224,16 +338,32 @@ impl Worker {
         self.chans.clear();
         self.status_chans.clear();
 
+        // Before the native channels, because which of those run depends on what
+        // rtl_433 ended up covering.
+        #[cfg(feature = "rtl433")]
+        self.rebuild_rtl433();
+
         for ch in plan::CHANNELS {
             let in_window = plan::fits(ch, self.window_center_hz, self.window_rate_hz);
+            // The family switches alone, before rtl_433 is allowed an opinion.
+            // The two have to be told apart: a channel the operator switched off
+            // and a channel handed to the other lane look identical from here and
+            // want completely different things done about them.
+            let family_on = proto::PROTOCOLS.iter().any(|p| {
+                (p.channel_hz - ch.center_hz).abs() < 10_000.0 && self.cfg.protocol_enabled(p.id)
+            });
             let enabled = self.any_protocol_on(ch.center_hz);
 
             let reason = if !in_window {
                 Some("outside the receiver's window".to_string())
             } else if !Self::any_protocol_implemented_on(ch.center_hz) {
                 Some("not decoded yet".to_string())
-            } else if !enabled {
+            } else if !family_on {
                 Some("switched off".to_string())
+            } else if !enabled {
+                // Switched on, and still not running: everything on this channel
+                // is a protocol rtl_433 reads better, and it is listening here.
+                Some("handled by rtl_433".to_string())
             } else {
                 None
             };
@@ -260,11 +390,173 @@ impl Worker {
         }
     }
 
+    /// Build, move or tear down the embedded rtl_433 to match the settings and
+    /// the window.
+    ///
+    /// The instance is rebuilt rather than retuned when the band changes: its
+    /// filters and pulse detector are sized for one sample rate, and a band
+    /// change is usually a rate change too. The device table lives outside it and
+    /// survives.
+    #[cfg(feature = "rtl433")]
+    fn rebuild_rtl433(&mut self) {
+        use crate::rtl433::{bands, flex, sys};
+
+        self.rtl433 = None;
+        self.rtl433_unavailable = None;
+        self.rtl433_errors.clear();
+
+        if !self.cfg.rtl433_enabled() {
+            return;
+        }
+
+        let Some(band) =
+            bands::pick(self.cfg.rtl433.bands, self.window_center_hz, self.window_rate_hz)
+        else {
+            self.rtl433_unavailable =
+                Some("no enabled band is inside the receiver's window".to_string());
+            return;
+        };
+
+        let mut ddc = Ddc::new(self.window_rate_hz, band.rate_hz);
+        ddc.set_offset_hz(band.center_hz - self.window_center_hz);
+        let rate = ddc.out_rate();
+
+        sys::install_log_handler();
+        let Some(mut inst) = sys::Instance::new(rate as u32, band.center_hz as u32) else {
+            self.rtl433_unavailable = Some("rtl_433 could not start".to_string());
+            return;
+        };
+
+        // The operator's own decoders. `parse_conf` validates as it goes —
+        // rtl_433 exits the process on a spec it cannot parse — and hands back
+        // the ones that did not pass, which become lines in the panel rather
+        // than a silently shorter list of decoders.
+        let (specs, problems) = flex::parse_conf(&self.flex_conf);
+        for p in problems {
+            self.rtl433_errors.push(format!("line {}: {}", p.line, p.message));
+        }
+        for spec in &specs {
+            if let Err(e) = inst.register_flex(&spec.spec) {
+                self.rtl433_errors.push(format!("line {}: {e}", spec.line));
+            }
+        }
+
+        info!(
+            band = band.label,
+            rate,
+            decoders = inst.decoder_count(),
+            flex = inst.flex_count(),
+            "rtl_433 decoders started"
+        );
+
+        self.rtl433 =
+            Some(Rtl433Lane { inst, band, ddc, buf: Vec::new(), cs16: Vec::new(), decodes: 0 });
+    }
+
+    /// Decimate the window to the band, convert, and let rtl_433 decode it.
+    #[cfg(feature = "rtl433")]
+    fn process_rtl433(&mut self, iq: &[C32], now: i64) {
+        let Some(lane) = self.rtl433.as_mut() else { return };
+
+        lane.buf.clear();
+        lane.ddc.process(iq, &mut lane.buf);
+        if lane.buf.is_empty() {
+            return;
+        }
+
+        // rtl_433 reads interleaved signed 16-bit, which is its native path —
+        // no conversion happens on its side and the full dynamic range of the
+        // window survives.
+        lane.cs16.clear();
+        lane.cs16.reserve(lane.buf.len() * 2);
+        for s in &lane.buf {
+            lane.cs16.push(to_i16(s.re));
+            lane.cs16.push(to_i16(s.im));
+        }
+
+        let events = lane.inst.feed(&lane.cs16);
+        if events.is_empty() {
+            return;
+        }
+        let center = lane.band.center_hz;
+        lane.decodes += events.len() as u64;
+
+        for kvs in events {
+            let Some(mapped) = crate::rtl433::map::map_event(&kvs, center) else { continue };
+            self.record_rtl433(mapped, now);
+        }
+        self.trim();
+    }
+
+    /// Fold one mapped rtl_433 decode into the shared device table.
+    #[cfg(feature = "rtl433")]
+    fn record_rtl433(&mut self, m: crate::rtl433::map::Mapped, now: i64) {
+        let d = m.decoded;
+        self.decodes += 1;
+
+        // Two rtl_433 devices can report the same id under different models, so
+        // the model is part of the identity as well as the display.
+        let model = d.model.clone().unwrap_or_default();
+        let id = device_id(d.protocol, &format!("{model}\u{0}{}", d.device));
+        let snr = m.snr_db.unwrap_or(0.0).round().clamp(-99.0, 99.0) as i16;
+
+        match self.devices.get_mut(&id) {
+            Some(r) => {
+                r.freq_hz = m.freq_hz;
+                r.snr_db = snr;
+                r.last_at = now;
+                r.count = r.count.saturating_add(1);
+                r.readings = d.readings;
+                r.extra = d.extra;
+                r.model = d.model;
+                r.raw_hex = d.raw_hex;
+            }
+            None => {
+                info!(
+                    protocol = "rtl_433",
+                    model = %model,
+                    device = %d.device,
+                    freq_hz = m.freq_hz,
+                    snr_db = snr,
+                    readings = %d
+                        .readings
+                        .iter()
+                        .map(|r| r.fmt_labelled())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    "ISM device heard"
+                );
+                self.devices.insert(
+                    id,
+                    IsmReport {
+                        id,
+                        protocol: d.protocol,
+                        model: d.model,
+                        device: d.device,
+                        freq_hz: m.freq_hz,
+                        snr_db: snr,
+                        first_at: now,
+                        last_at: now,
+                        count: 1,
+                        readings: d.readings,
+                        extra: d.extra,
+                        encrypted: d.encrypted,
+                        raw_hex: d.raw_hex,
+                    },
+                );
+            }
+        }
+    }
+
     fn process(&mut self, iq: &[C32]) {
+        let now = unix_now();
+
+        #[cfg(feature = "rtl433")]
+        self.process_rtl433(iq, now);
+
         if self.chans.is_empty() {
             return;
         }
-        let now = unix_now();
         // Lifted out of `self` so the per-channel borrow can end before
         // `on_burst`, which needs the worker's scratch and device table.
         let mut bursts = std::mem::take(&mut self.bursts_out);
@@ -286,9 +578,19 @@ impl Worker {
     }
 
     fn on_burst(&mut self, b: &Burst, now: i64) {
-        let cfg = self.cfg;
-        let out =
-            proto::decode(b, &mut self.scratch, &|p: IsmProtocol| cfg.protocol_enabled(p), true);
+        // Which native decoders may run on this burst. Not simply the family
+        // switches: a protocol rtl_433 covers stands down while rtl_433 is
+        // listening here, and the saving is real because this runs before the
+        // slicer rather than after it.
+        let allowed: Vec<bool> =
+            proto::PROTOCOLS.iter().map(|p| self.native_runs(p.id, b.center_hz)).collect();
+        let enabled = |p: IsmProtocol| {
+            proto::PROTOCOLS
+                .iter()
+                .position(|q| q.id == p)
+                .is_some_and(|i| allowed.get(i).copied().unwrap_or(false))
+        };
+        let out = proto::decode(b, &mut self.scratch, &enabled, true);
         for d in out.decoded {
             self.decodes += 1;
             let id = device_id(d.protocol, &d.device);
@@ -374,9 +676,19 @@ impl Worker {
             .status_chans
             .iter()
             .any(|c| c.reason.as_deref() == Some("outside the receiver's window"));
+        // "Nothing is listening" is a claim about the whole decoder, not about
+        // one of its two lanes. With rtl_433 running there is no problem to
+        // report even when every native channel has stood down — which is the
+        // usual case on a band rtl_433 covers, and saying otherwise would send
+        // an operator looking for a fault while the panel fills with devices.
+        #[cfg(feature = "rtl433")]
+        let other_lane_running = self.rtl433.is_some();
+        #[cfg(not(feature = "rtl433"))]
+        let other_lane_running = false;
+
         IsmStatus {
             channels: self.status_chans.clone(),
-            unavailable: self.chans.is_empty().then(|| {
+            unavailable: (self.chans.is_empty() && !other_lane_running).then(|| {
                 if window_is_the_problem {
                     "no ISM channel is inside the receiver's window".to_string()
                 } else {
@@ -392,8 +704,66 @@ impl Worker {
             decodes: self.decodes,
             window_center_hz: self.window_center_hz,
             window_rate_hz: self.window_rate_hz,
+            rtl433: self.rtl433_status(),
         }
     }
+
+    #[cfg(feature = "rtl433")]
+    fn rtl433_status(&self) -> Option<Box<sdroxide_types::Rtl433Status>> {
+        use crate::rtl433::{bands, sys};
+
+        if !self.cfg.rtl433_enabled() {
+            return None;
+        }
+
+        // Every offered band, so a band that does not fit can still say where to
+        // tune — the same one-click fix the native channel rows offer.
+        let rows: Vec<IsmChannelStatus> = bands::all()
+            .iter()
+            .map(|b| {
+                let on = self.cfg.rtl433.band_enabled(b.bit);
+                let live = self.rtl433.as_ref().is_some_and(|l| l.band.bit == b.bit);
+                let reason = if !on {
+                    Some("switched off".to_string())
+                } else if live {
+                    None
+                } else if !bands::fits(b, self.window_center_hz, self.window_rate_hz) {
+                    Some("outside the receiver's window".to_string())
+                } else {
+                    // Fits, enabled, but another band won: only one at a time.
+                    Some("another band is live".to_string())
+                };
+                IsmChannelStatus { freq_hz: b.center_hz, label: b.label.to_string(), live, reason }
+            })
+            .collect();
+
+        Some(Box::new(sdroxide_types::Rtl433Status {
+            running: self.rtl433.is_some(),
+            band: self.rtl433.as_ref().map(|l| l.band.label.to_string()).unwrap_or_default(),
+            decoders: self.rtl433.as_ref().map(|l| l.inst.decoder_count()).unwrap_or(0),
+            flex: self.rtl433.as_ref().map(|l| l.inst.flex_count()).unwrap_or(0),
+            decodes: self.rtl433.as_ref().map(|l| l.decodes).unwrap_or(0),
+            bands: rows,
+            superseded: self.superseded(),
+            errors: self.rtl433_errors.clone(),
+            unavailable: self.rtl433_unavailable.clone(),
+            version: sys::version(),
+        }))
+    }
+
+    #[cfg(not(feature = "rtl433"))]
+    fn rtl433_status(&self) -> Option<Box<sdroxide_types::Rtl433Status>> {
+        None
+    }
+}
+
+/// Scale a normalised sample to signed 16-bit, saturating rather than wrapping.
+///
+/// A clipped sample is a distorted burst; a wrapped one is a phantom edge in the
+/// middle of a pulse, which is far worse for a pulse detector.
+#[cfg(feature = "rtl433")]
+fn to_i16(v: f32) -> i16 {
+    (v * 32767.0).clamp(-32768.0, 32767.0) as i16
 }
 
 fn unix_now() -> i64 {
@@ -430,6 +800,10 @@ mod tests {
             threshold_db: 12,
             families: IsmFamily::Weather.bit(),
             max_devices: 200,
+            // The native lane on its own: these tests are about the channel
+            // plan and the device table, and an rtl_433 lane would stand the
+            // weather decoders down underneath them.
+            rtl433: sdroxide_types::Rtl433Settings::OFF,
         }
     }
 
@@ -442,7 +816,7 @@ mod tests {
     /// on the first of those.
     #[test]
     fn the_worker_opens_only_the_channels_it_can_use() {
-        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on());
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on(), String::new());
         assert_eq!(w.chans.len(), 1, "only the weather channel is enabled here");
         assert_eq!(w.status_chans.len(), plan::CHANNELS.len());
         let live: Vec<f64> = w.status_chans.iter().filter(|c| c.live).map(|c| c.freq_hz).collect();
@@ -460,13 +834,85 @@ mod tests {
         assert!(w.status().suggest_center_hz.is_none());
     }
 
+    /// With rtl_433 listening on the same band, the native decoders it covers
+    /// stand down — and the channel says so, rather than looking switched off by
+    /// an operator who did no such thing.
+    ///
+    /// The reason matters more than the outcome here: "switched off" sends
+    /// somebody hunting for a switch they never touched, and this is the one
+    /// place the two lanes are visibly in each other's way.
+    #[cfg(feature = "rtl433")]
+    #[test]
+    fn rtl433_takes_over_the_weather_channel_it_covers() {
+        let mut cfg = on();
+        cfg.rtl433.bands = crate::rtl433::bands::BANDS[1].bit; // 868 EU
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
+
+        let weather = w
+            .status_chans
+            .iter()
+            .find(|c| c.freq_hz == 868_300_000.0)
+            .expect("the weather channel is in the plan");
+        assert!(!weather.live, "the native weather decoder should have stood down");
+        assert_eq!(weather.reason.as_deref(), Some("handled by rtl_433"));
+        assert!(
+            w.superseded().contains(&IsmProtocol::Bresser),
+            "the panel needs the list to explain the changed protocol name"
+        );
+
+        // Z-Wave has no rtl_433 decoder at all, so it is never handed over —
+        // whatever the lane is doing on this band.
+        let mut cfg = cfg;
+        cfg.set_family(IsmFamily::HomeAuto, true);
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
+        let zwave = w.status_chans.iter().find(|c| c.freq_hz == 868_420_000.0).unwrap();
+        assert!(zwave.live, "Z-Wave must keep its native decoder: rtl_433 has none");
+    }
+
+    /// A decoder spec that does not pass has to reach the panel.
+    ///
+    /// The whole point of validating rather than passing specs straight through
+    /// is that rtl_433 would answer a bad one by ending the process; the trade is
+    /// only worth anything if the operator is then told which line was refused
+    /// and why. The good specs in the same file still load.
+    #[cfg(feature = "rtl433")]
+    #[test]
+    fn a_refused_flex_spec_is_reported_and_the_others_still_load() {
+        let mut cfg = on();
+        cfg.rtl433.bands = crate::rtl433::bands::BANDS[1].bit;
+        let conf = "\
+decoder n=good,m=OOK_PWM,s=400,l=800,r=7000
+decoder n=bad,m=OOK_PWM,s=400,l=800,r=7000,nonsense=1
+";
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, conf.to_string());
+        let st = w.rtl433_status().expect("the lane is on");
+
+        assert_eq!(st.flex, 1, "the good spec should have registered");
+        assert_eq!(st.errors.len(), 1, "the bad one should be reported, got {:?}", st.errors);
+        assert!(st.errors[0].contains("line 2"), "{:?} should name the line", st.errors);
+        assert!(st.errors[0].contains("nonsense"), "{:?} should name the keyword", st.errors);
+    }
+
+    /// Point rtl_433 at another band and the native decoders come back. Standing
+    /// down is about who is listening *here*, not a permanent handover.
+    #[cfg(feature = "rtl433")]
+    #[test]
+    fn the_native_decoders_return_when_rtl433_looks_elsewhere() {
+        let mut cfg = on();
+        cfg.rtl433.bands = crate::rtl433::bands::BANDS[0].bit; // 433.92, far away
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
+        let weather = w.status_chans.iter().find(|c| c.freq_hz == 868_300_000.0).unwrap();
+        assert!(weather.live, "nothing is covering 868 here, so the native decoder must run");
+        assert!(w.superseded().is_empty());
+    }
+
     /// Turning the home-automation family on opens the Z-Wave channel, which is
     /// the switch an operator uses after seeing it reported as switched off.
     #[test]
     fn enabling_home_automation_opens_the_zwave_channel() {
         let mut cfg = on();
         cfg.set_family(IsmFamily::HomeAuto, true);
-        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg);
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
         let live: Vec<f64> = w.status_chans.iter().filter(|c| c.live).map(|c| c.freq_hz).collect();
         assert_eq!(live, vec![868_300_000.0, 868_420_000.0]);
     }
@@ -475,7 +921,7 @@ mod tests {
     /// otherwise an empty panel is indistinguishable from a quiet neighbourhood.
     #[test]
     fn a_receiver_off_the_band_reports_where_to_tune() {
-        let w = Worker::new(866_000_000.0, 2_025_000.0, on());
+        let w = Worker::new(866_000_000.0, 2_025_000.0, on(), String::new());
         assert!(w.chans.is_empty());
         let st = w.status();
         assert_eq!(
@@ -493,7 +939,7 @@ mod tests {
     fn everything_switched_off_is_not_reported_as_mistuned() {
         let mut cfg = on();
         cfg.families = 0;
-        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg);
+        let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
         assert!(w.chans.is_empty());
         let st = w.status();
         assert_eq!(st.unavailable.as_deref(), Some("no device family is switched on"));
@@ -505,7 +951,7 @@ mod tests {
     /// operator dragging the slider would see the band go dead.
     #[test]
     fn changing_the_threshold_keeps_the_gates() {
-        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on());
+        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on(), String::new());
         // Teach the gate a floor.
         let iq = vec![C32::new(0.001, 0.001); 8192];
         for _ in 0..20 {
@@ -526,7 +972,7 @@ mod tests {
     fn the_device_table_evicts_the_least_recently_heard() {
         let mut cfg = on();
         cfg.max_devices = 3;
-        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg);
+        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
 
         for i in 0..5u8 {
             let id = device_id(IsmProtocol::LaCrosseIt, &i.to_string());
@@ -629,7 +1075,7 @@ mod tests {
     fn a_modulated_frame_becomes_a_device_with_readings() {
         const WINDOW: f64 = 2_025_000.0;
         let center = plan::ideal_center_hz();
-        let mut w = Worker::new(center, WINDOW, on());
+        let mut w = Worker::new(center, WINDOW, on(), String::new());
         let mut seed = 0x1234_5678_9ABC_DEF0u64;
 
         // Let the gate learn a floor first. Around 100 ms is ample: the tracker's
@@ -698,7 +1144,7 @@ mod tests {
     /// gate to CRC has to hold together, not just its pieces.
     #[test]
     fn noise_through_the_whole_worker_produces_no_devices() {
-        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on());
+        let mut w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, on(), String::new());
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
         let mut buf = vec![C32::default(); 8192];
         for _ in 0..120 {

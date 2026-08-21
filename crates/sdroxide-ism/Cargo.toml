@@ -4,12 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Native-only: the 868 MHz ISM burst decoder. Not linked by the wasm client —
-# it runs server-side in the engine, like the skimmers and FT8.
+# Native-only: the ISM burst decoder. Not linked by the wasm client — it runs
+# server-side in the engine, like the skimmers and FT8.
 #
-# Deliberately free of GPL dependencies. Every protocol here is written from its
-# published specification rather than ported from an existing decoder, so this
-# crate adds no licence obligation of its own beyond the workspace's.
+# Every protocol under `src/proto` is written from its published specification
+# rather than ported from an existing decoder, and each cites its source.
+#
+# The `rtl433` feature additionally links the vendored rtl_433 (GPL-2.0-or-later,
+# `vendor/rtl_433`, used unmodified) for the several hundred device protocols it
+# already covers. With that feature on — it is on by default — this crate carries
+# rtl_433's licence obligations as well as the workspace's. See PROVENANCE.md.
+
+[features]
+default = []
+# Compile in rtl_433. Needs a C compiler, CMake, and the submodule checked out.
+rtl433 = []
 
 [dependencies]
 sdroxide-types.workspace = true
@@ -17,3 +26,8 @@ sdroxide-dsp.workspace = true
 num-complex.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+cmake = "0.1"
+cc = "1"
+bindgen = "0.72"

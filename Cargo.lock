@@ -5152,6 +5152,9 @@ dependencies = [
 name = "sdroxide-ism"
 version = "1.4.1"
 dependencies = [
+ "bindgen",
+ "cc",
+ "cmake",
  "crossbeam-channel",
  "num-complex",
  "sdroxide-dsp",

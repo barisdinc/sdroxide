@@ -268,6 +268,84 @@ pub fn load_band_plan() -> sdroxide_types::BandPlan {
     }
 }
 
+pub const RTL433_FLEX_FILE: &str = "rtl433_flex.conf";
+
+/// Where `rtl433_flex.conf` lives, for the ISM window to show the operator.
+pub fn rtl433_flex_path() -> Option<PathBuf> {
+    config_dir().ok().map(|d| d.join(RTL433_FLEX_FILE))
+}
+
+/// The operator's own rtl_433 decoder specs, as raw text.
+///
+/// Same three outcomes and the same reasoning as [`load_band_plan`]: seeded with
+/// a commented example the first time, never rewritten afterwards, and never
+/// quarantined — this is a document somebody authors by hand, and moving a
+/// half-finished edit aside would be taking their work away.
+///
+/// The text is returned unparsed. What a valid spec is belongs to the decoder
+/// that has to survive an invalid one, not to the code that reads the file; see
+/// `sdroxide_ism::rtl433::flex`.
+pub fn load_rtl433_flex() -> String {
+    let Ok(dir) = config_dir() else { return String::new() };
+    let path = dir.join(RTL433_FLEX_FILE);
+    match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match write_atomic(&dir, RTL433_FLEX_FILE, RTL433_FLEX_SEED) {
+                Ok(()) => info!("wrote a starting flex decoder file to {}", path.display()),
+                Err(e) => warn!("could not write {}: {e}", path.display()),
+            }
+            RTL433_FLEX_SEED.to_string()
+        }
+        Err(e) => {
+            warn!("could not read {}: {e}; no user flex decoders loaded", path.display());
+            push_load_alert(format!(
+                "{RTL433_FLEX_FILE} could not be read ({e}) — the built-in rtl_433 decoders still \
+                 run, but none of your own."
+            ));
+            String::new()
+        }
+    }
+}
+
+/// What a fresh `rtl433_flex.conf` says.
+///
+/// Entirely commented out: a new file must add no decoders until the operator
+/// asks for one. The example is a real, working spec so that uncommenting it is
+/// a complete experiment rather than a template to fill in.
+const RTL433_FLEX_SEED: &str = "\
+# Your own rtl_433 decoders (\"flex\" specs) — one decoder per block.
+#
+# This is the same syntax as rtl_433's -X option and the \"decoder\" blocks in
+# its own conf files, so a spec published by somebody else pastes in unchanged:
+#   https://github.com/merbanan/rtl_433/tree/master/conf
+#
+# sdroxide reads this file when the ISM decoder starts. After editing it, press
+# RELOAD DECODERS in the ISM window — the devices already heard stay in the list.
+# This file is never rewritten, so anything you put here stays as you wrote it.
+#
+# Every spec is checked before it is handed to rtl_433, and one that does not
+# pass is listed in the ISM window and skipped — the others still load. The
+# check is deliberately stricter than rtl_433's own command line, because
+# rtl_433 reports a bad spec by stopping the program, which is not something a
+# receiver should do halfway through a contact.
+#
+# Example: a generic OOK doorbell. Remove the leading # from the block below to
+# switch it on, then edit the timings to match your own device.
+#
+#decoder {
+#    name=doorbell,
+#    modulation=OOK_PWM,
+#    short=400,
+#    long=800,
+#    gap=1000,
+#    reset=7000,
+#    match={24}0xa9878c,
+#    get=@0:{24}:id,
+#    unique
+#}
+";
+
 /// Write the band plan, atomically like every other config file.
 ///
 /// The only file here that does not go through [`save_json`]: the band plan

@@ -1,4 +1,4 @@
-//! The ISM window: what the 868 MHz band around you is saying.
+//! The ISM window: what the licence-exempt bands around you are saying.
 //!
 //! One row per device rather than per transmission — see
 //! [`sdroxide_types::IsmReport`] for why — with the channels the decoder is
@@ -70,7 +70,7 @@ impl SdroxideApp {
         // scanner's are; the engine persists it and echoes it back, so there is
         // no apply step to get wrong.
         let mut cfg = self.state.ism;
-        let resp = egui::Window::new("ISM 868 MHz")
+        let resp = egui::Window::new("ISM DEVICES")
             .id(crate::layout::salted_id(ctx, "Ism"))
             .open(&mut open)
             .frame(crate::chrome::window_frame())
@@ -146,7 +146,11 @@ impl SdroxideApp {
         });
 
         ui.add_space(6.0);
-        self.ism_channels(ui, cmds);
+        self.ism_bands(ui, cfg, cmds, wideband);
+
+        ui.add_space(6.0);
+        self.ism_channels(ui);
+        self.ism_rtl433(ui, cmds);
 
         ui.add_space(6.0);
         ui.separator();
@@ -155,8 +159,155 @@ impl SdroxideApp {
         self.ism_list(ui, cmds);
     }
 
+    /// Which band the decoder is on. One button each, and pressing one goes
+    /// there.
+    ///
+    /// This is the *only* set of tuning buttons in the window. There used to be
+    /// two — a "TUNE 868.881 MHz" for the native channel plan and a separate
+    /// TUNE beside each rtl_433 band — which is two answers to one question. The
+    /// bands are hundreds of megahertz apart, so choosing one is choosing where
+    /// the radio points; both sets of decoders then work on whatever that window
+    /// contains.
+    fn ism_bands(
+        &self,
+        ui: &mut egui::Ui,
+        cfg: &mut IsmSettings,
+        cmds: &mut Vec<Command>,
+        wideband: bool,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("band").size(10.0).color(crate::theme::CYAN_DIM()));
+            for (bit, label, center_hz) in sdroxide_types::RTL433_BAND_LABELS {
+                let selected = cfg.rtl433.band_enabled(bit);
+                let chip = crate::chrome::chip_enabled(ui, wideband, selected, label);
+                if chip.clicked() {
+                    cfg.rtl433.bands = bit;
+                    // Selecting a band the receiver cannot hear would only swap
+                    // one "outside the window" row for another, so go there.
+                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: center_hz });
+                }
+                chip.on_hover_text(format!(
+                    "Listen on {label} — tunes the radio there. One band at a time: they are \
+                     too far apart for any receiver to cover two at once."
+                ));
+            }
+        });
+    }
+
+    /// What the embedded rtl_433 is doing, as one row under the channel list.
+    ///
+    /// No section and no switch of its own: it is compiled in or it is not, and
+    /// when it is it decodes whatever band the buttons above chose. Anything it
+    /// needs to say about *where* it is listening is already said by those
+    /// buttons and by the channel rows, so all that is left here is how it is
+    /// getting on.
+    fn ism_rtl433(&self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let Some(rt) = self.ism_status.as_ref().and_then(|s| s.rtl433.as_ref()) else { return };
+
+        // Its own lamp row, in the same shape as the channels above it, so the
+        // two lanes read as one list of "who is listening where".
+        ui.horizontal(|ui| {
+            Self::ism_lamp(ui, rt.running);
+            let live = rt.bands.iter().find(|b| b.live);
+            let freq =
+                live.map(|b| format!("{:.3}", b.freq_hz / 1e6)).unwrap_or_else(|| "—".into());
+            ui.label(RichText::new(freq).size(11.0).monospace().color(if rt.running {
+                crate::theme::TEXT()
+            } else {
+                crate::theme::CYAN_DIM()
+            }));
+            let tail = match (&rt.unavailable, live) {
+                (Some(why), _) => format!("rtl_433  —  {why}"),
+                (None, Some(b)) => format!("rtl_433 {}", b.label),
+                (None, None) => "rtl_433".to_string(),
+            };
+            ui.label(RichText::new(tail).size(10.5).color(crate::theme::CYAN_DIM())).on_hover_text(
+                "Several hundred more device decoders, from the rtl_433 project, built in. \
+                     Reads the 433 MHz OOK devices sdroxide's own decoders do not reach at all. \
+                     Where both can read a device, rtl_433 knows far more variants and takes \
+                     over.",
+            );
+        });
+
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            if rt.running {
+                let flex = if rt.flex == 1 {
+                    "1 of your own".to_string()
+                } else {
+                    format!("{} of your own", rt.flex)
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{} decoders ({flex}), {} decoded",
+                        rt.decoders, rt.decodes
+                    ))
+                    .size(10.0)
+                    .color(crate::theme::CYAN_DIM()),
+                )
+                .on_hover_text(
+                    "Device decoders registered, how many came from your rtl433_flex.conf, \
+                     and how many transmissions have been decoded since it started.",
+                );
+                ui.add_space(6.0);
+            }
+            // The operator's decoder file is edited outside sdroxide, so nothing
+            // notices it changed until asked — the same reason the band plan has
+            // a reload button.
+            if crate::chrome::chip(ui, false, "RELOAD DECODERS")
+                .on_hover_text(
+                    "Re-read rtl433_flex.conf after editing it. The devices already \
+                     heard stay in the list.",
+                )
+                .clicked()
+            {
+                cmds.push(Command::ReloadIsmDecoders);
+            }
+        });
+
+        // Which of sdroxide's own decoders have stood down, so a Bresser row
+        // changing its protocol name is explained rather than mysterious.
+        if !rt.superseded.is_empty() {
+            let names: Vec<&str> = rt.superseded.iter().map(|p| p.label()).collect();
+            ui.label(
+                RichText::new(format!("handled by rtl_433: {}", names.join(", ")))
+                    .size(10.0)
+                    .color(crate::theme::CYAN_DIM()),
+            )
+            .on_hover_text(
+                "rtl_433 knows more variants of these than sdroxide's own decoders do, so it \
+                 reads them while it is listening here. Select another band and sdroxide's \
+                 own take over again.",
+            );
+        }
+
+        for e in &rt.errors {
+            ui.label(RichText::new(format!("flex: {e}")).size(10.0).color(crate::theme::YELLOW()))
+                .on_hover_text(
+                    "A decoder in your rtl433_flex.conf was refused. The others still loaded. \
+                     Fix the line, then press RELOAD DECODERS.",
+                );
+        }
+    }
+
+    /// The filled or hollow lamp that starts a status row.
+    ///
+    /// Painted rather than written: a filled-circle glyph is not in the bundled
+    /// font's fallback chain, so `●` comes out as an empty box — and next to the
+    /// hollow `○` of an idle row that reads as the wrong state rather than as a
+    /// missing glyph.
+    fn ism_lamp(ui: &mut egui::Ui, live: bool) {
+        let colour = if live { crate::theme::GREEN() } else { crate::theme::CYAN_DIM() };
+        let (lamp, _) = ui.allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
+        if live {
+            ui.painter().circle_filled(lamp.center(), 3.5, colour);
+        } else {
+            ui.painter().circle_stroke(lamp.center(), 3.5, egui::Stroke::new(1.0, colour));
+        }
+    }
+
     /// Where the decoder is listening, and why it is not where it is not.
-    fn ism_channels(&self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+    fn ism_channels(&self, ui: &mut egui::Ui) {
         let Some(st) = &self.ism_status else {
             ui.label(
                 RichText::new("waiting for the decoder…")
@@ -189,36 +340,16 @@ impl SdroxideApp {
                      way apart, and it is the window that decides which channels are reachable.",
                 );
             }
-            // The one problem the operator can fix with a click.
-            if let Some(hz) = st.suggest_center_hz {
-                ui.horizontal(|ui| {
-                    if crate::chrome::chip(ui, false, &format!("TUNE {:.3} MHz", hz / 1e6))
-                        .on_hover_text(
-                            "Put the whole 868 MHz channel plan inside the receiver's span",
-                        )
-                        .clicked()
-                    {
-                        cmds.push(Command::SetVfo { vfo: Vfo::A, hz });
-                    }
-                });
-            }
+            // No TUNE button here. The band buttons above are the one place
+            // this window offers to move the radio, and a second control for
+            // the same job — differing only in which decoder lane it suited —
+            // is two answers to one question.
             ui.add_space(4.0);
         }
 
         for c in &st.channels {
             ui.horizontal(|ui| {
-                // Painted rather than written. A filled-circle glyph is not in
-                // the bundled font's fallback chain, so `●` comes out as an
-                // empty box — and next to the hollow `○` of an idle channel
-                // that reads as the wrong state rather than as a missing glyph.
-                let colour = if c.live { crate::theme::GREEN() } else { crate::theme::CYAN_DIM() };
-                let (lamp, _) =
-                    ui.allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
-                if c.live {
-                    ui.painter().circle_filled(lamp.center(), 3.5, colour);
-                } else {
-                    ui.painter().circle_stroke(lamp.center(), 3.5, egui::Stroke::new(1.0, colour));
-                }
+                Self::ism_lamp(ui, c.live);
                 ui.label(
                     RichText::new(format!("{:.3}", c.freq_hz / 1e6)).size(11.0).monospace().color(
                         if c.live { crate::theme::TEXT() } else { crate::theme::CYAN_DIM() },
