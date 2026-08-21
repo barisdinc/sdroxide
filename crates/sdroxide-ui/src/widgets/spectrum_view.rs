@@ -649,9 +649,10 @@ fn draw_net_box(p: &egui::Painter, b: &NetBox, spot: &Spot, hovered: bool, alpha
 /// sidetone-pitch below so the signal lands in the CW passband (as click-tune
 /// on a skimmer spot does).
 ///
-/// [`Command::TuneInSpan`], like every click on the picture: the spot is drawn
-/// where it is because it is inside the span we are already receiving, so the
-/// receiver moves onto it and a radio that tunes with its dial stays put.
+/// [`Command::TuneInSpan`], like every click on the picture: the receiver
+/// moves onto the spot, and a radio that tunes with its dial comes along
+/// exactly as it does for the readout (see the command's docs for why it no
+/// longer stays put).
 fn tune_to_net_spot(spot: &Spot, state: &RadioState, cmds: &mut Vec<Command>) {
     match spot.radio_mode() {
         Some(Mode::Cw) => {

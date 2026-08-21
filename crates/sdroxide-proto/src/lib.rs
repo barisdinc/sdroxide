@@ -356,7 +356,9 @@ use sdroxide_types::{
 /// the span already on screen (click, drag, wheel on the panadapter) from
 /// setting the dial (`Command::SetVfo` — the readout, a memory, an external
 /// controller), which are the same thing on an SDR and are not on a rig whose
-/// own synthesiser is the centre of what we capture.
+/// own synthesiser is the centre of what we capture. (The semantic split has
+/// since been retired — the engine answers both commands identically, see
+/// `Command::TuneInSpan` — but the discriminant is on the wire and stays.)
 ///
 /// **63** — the ISM decoder. `RadioState` gained an `ism` block, which puts it in
 /// *every* state broadcast, so this is not an append a v62 client can survive:

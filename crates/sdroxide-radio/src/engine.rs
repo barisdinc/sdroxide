@@ -4114,7 +4114,20 @@ impl Engine {
     fn apply(&mut self, cmd: Command) {
         use Command::*;
         match cmd {
-            SetVfo { vfo, hz } => {
+            // One arm for the dial and for the panadapter's gestures. They
+            // used to part company on a rig that tunes with its dial — a click
+            // moved only our receiver and left the rig where it was, on the
+            // theory that a signal already inside the captured span needs no
+            // retune. A field report (a Kenwood on its I/Q output) showed what
+            // that leaves behind: the rig's readout disagreeing with ours, its
+            // next frequency report snapping ours back, and two transmit paths
+            // that never borrow the dial — CW keyed as text through the rig's
+            // own keyer, and a microphone keyed at the radio — going on air at
+            // the stale frequency the panel no longer showed. So a click
+            // follows the dial exactly as the readout does; on an SDR
+            // `follow_dial` still keeps the window, so only the
+            // rig-as-front-end case moves.
+            SetVfo { vfo, hz } | TuneInSpan { vfo, hz } => {
                 self.stop_scan_for_operator();
                 let hz = hz.max(0.0);
                 match vfo {
@@ -4124,24 +4137,6 @@ impl Engine {
                 if vfo == self.state.active_vfo {
                     self.state.band = Band::containing(hz);
                     self.follow_dial();
-                }
-                self.update_tuning();
-            }
-            // The panadapter's own gestures: what they point at is already in
-            // the baseband, so the receiver moves onto it and the front end
-            // stays where it is for as long as the span holds the VFO. That is
-            // what `SetVfo` does too on a radio whose window is its own; the
-            // two only part company on one that tunes with the dial.
-            TuneInSpan { vfo, hz } => {
-                self.stop_scan_for_operator();
-                let hz = hz.max(0.0);
-                match vfo {
-                    Vfo::A => self.state.vfo_a_hz = hz,
-                    Vfo::B => self.state.vfo_b_hz = hz,
-                }
-                if vfo == self.state.active_vfo {
-                    self.state.band = Band::containing(hz);
-                    self.keep_vfo_in_span();
                 }
                 self.update_tuning();
             }
@@ -8940,9 +8935,12 @@ impl Engine {
     /// the operator asked for is commanded at the radio, and the window follows
     /// it.
     ///
-    /// The panadapter keeps the old behaviour through
-    /// [`sdroxide_types::Command::TuneInSpan`]: clicking a signal that is
-    /// already inside the captured baseband is not a request to move the radio.
+    /// The panadapter's gestures ([`sdroxide_types::Command::TuneInSpan`])
+    /// arrive here too. A click used to be exempt — the signal is already in
+    /// the baseband, so only our receiver moved — until a field report showed
+    /// the price of the exemption: the two readouts disagree, and an over the
+    /// engine does not key itself (CW through the rig's own keyer, a mic keyed
+    /// at the radio) transmits on the dial that was left behind.
     fn follow_dial(&mut self) {
         if self.audio_mode || !self.source.center_is_dial() {
             self.keep_vfo_in_span();

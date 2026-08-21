@@ -14,8 +14,9 @@ pub enum Command {
     // VFO / tuning
     /// Put the dial here: the frequency readout, a keypad entry, a band or
     /// memory recall, a spot from the list, an external controller. On a rig
-    /// that is its own front end this moves the radio — see
-    /// [`Command::TuneInSpan`] for the panadapter's gestures, which do not.
+    /// that is its own front end this moves the radio. [`Command::TuneInSpan`]
+    /// (the panadapter's gestures) now does exactly the same — see there for
+    /// why its exemption was retired.
     SetVfo {
         vfo: Vfo,
         hz: f64,
@@ -571,20 +572,23 @@ pub enum Command {
         to: crate::MailFolder,
         mid: String,
     },
-    /// Tune inside the span already on screen — the panadapter's own gestures
-    /// (click, drag, wheel, a spot box) as against [`Command::SetVfo`], which
-    /// is the dial.
+    /// Tune from the panadapter's own gestures (a click, a spot box) as
+    /// against [`Command::SetVfo`], which is the dial. The engine answers both
+    /// identically; the discriminant survives because protocol v62 put it on
+    /// the wire.
     ///
-    /// The two are the same thing on an SDR, whose window is a resource worth
-    /// keeping: the engine only retunes the hardware when the VFO would leave
-    /// the span, whichever command asked. They part company on a rig that *is*
-    /// the front end — a transceiver whose I/Q output feeds a sound card, an
-    /// Icom sending its 12 kHz IF — where the dial and the centre of what we
-    /// capture are one synthesiser. Setting the dial there has to move the
-    /// radio, or its readout and ours disagree and the next touch of its knob
-    /// snaps ours back. Clicking a signal that is *already inside* the captured
-    /// span must not: the content is in hand, so the receiver moves to it
-    /// smoothly and the radio stays where it is.
+    /// On an SDR the window is a resource worth keeping, so the hardware only
+    /// retunes when the VFO would leave the span, whichever command asked. On
+    /// a rig that *is* the front end — a transceiver whose I/Q output feeds a
+    /// sound card, an Icom sending its 12 kHz IF — the dial and the centre of
+    /// what we capture are one synthesiser, and both commands move it. A click
+    /// used to be exempt there, on the theory that a signal already inside the
+    /// captured span needs no retune, until a field report (a Kenwood on its
+    /// I/Q output) showed what the exemption costs: the rig's readout
+    /// disagreeing with ours, its next frequency report snapping ours back —
+    /// and any over the engine does not key itself, CW sent as text to the
+    /// rig's own keyer or a microphone keyed at the radio, transmitting on the
+    /// dial the click left behind.
     TuneInSpan {
         vfo: Vfo,
         hz: f64,

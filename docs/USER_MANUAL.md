@@ -3426,18 +3426,21 @@ separately from your computer's own speakers and microphone.
   on the right). This gives a full panadapter but requires a **stereo** capture
   device (see the note in [6.1](#61-general-station-audio-and-remote-access)).
 
-  The radio's dial is the centre of that panadapter, so the two ways of tuning
-  do different things. **Clicking** a signal already on screen — bare spectrum,
-  a spot box, shift-click for the sub receiver — tunes sdroxide's own receiver
-  inside the span the radio is sending and leaves the radio's dial alone: the
-  waterfall stays put and the passband marker moves to the signal. **Setting
-  the dial** moves the radio, and the display recentres on it. That is the
-  frequency readout, the keypad, a memory or band recall, wheel- and
-  drag-tuning on the panadapter, and anything arriving from WSJT-X or another
-  program over the rigctld or TCI server — down to a single-hertz step, so the
-  radio's readout and sdroxide's never drift apart. Turning the radio's own VFO
-  knob does the same thing from the other end: its synthesiser moves, and with
-  it everything the radio is sending us, so the whole display follows.
+  The radio's dial is the centre of that panadapter, and every way of tuning
+  the active VFO moves the radio, with the display recentring on it: a click on
+  the spectrum or a spot box, the frequency readout, the keypad, a memory or
+  band recall, wheel- and drag-tuning on the panadapter, and anything arriving
+  from WSJT-X or another program over the rigctld or TCI server — down to a
+  single-hertz step, so the radio's readout and sdroxide's never disagree.
+  That agreement is not cosmetic: CW keyed from the panel goes out through the
+  radio's own keyer, and a microphone keyed at the radio transmits wherever
+  its dial is, so a dial left behind by a click would put those overs on the
+  air at a frequency the panel no longer shows. Turning the radio's own VFO
+  knob is the same contract from the other end: its synthesiser moves, and
+  with it everything the radio is sending us, so the whole display follows.
+  Only tuning that has no dial of its own stays inside the span the radio is
+  sending: **shift-click** placing the sub receiver, or parking the inactive
+  VFO.
 
   On any other kind of receiver — an SDR, or a transceiver paired with one
   under **Panadapter** — none of this applies: the window is the receiver's

@@ -9,12 +9,15 @@
 //! between a stale centre and the new VFO, demodulates somewhere else again.
 //!
 //! It runs the other way too. Setting the dial here — the readout, a memory, an
-//! external controller — has to move the radio, or its readout and ours show
-//! different frequencies with nothing to reconcile them until the next thing it
-//! reports snaps ours back to its. Only a click on the picture is exempt: the
-//! signal is already in the baseband, so the receiver tunes onto it and the rig
-//! stays where it is. That is [`Command::TuneInSpan`], and it is what `SetVfo`
-//! does anyway on a radio whose window is its own.
+//! external controller, a click on the picture — has to move the radio, or its
+//! readout and ours show different frequencies with nothing to reconcile them
+//! until the next thing it reports snaps ours back to its. The click used to be
+//! exempt (the signal is already in the baseband, so only our receiver moved)
+//! until a field report showed where the exemption transmits: CW keyed as text
+//! through the rig's own keyer, and a mic keyed at the radio, both go out on
+//! the dial the click left behind. So [`Command::TuneInSpan`] follows the dial
+//! exactly as `SetVfo` does — and on a radio whose window is its own, both
+//! still leave the hardware alone while the VFO stays inside the span.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -170,22 +173,30 @@ fn the_window_follows_a_dial_the_rig_moved_itself() {
     shutdown(h);
 }
 
-/// The other half of the contract: a click inside the captured baseband is a
-/// DDC move, not a retune. The signal is already in the span, and the rig has
-/// no business being dragged to it.
+/// The other half of the contract: a click on the picture moves the rig too,
+/// however far inside the captured span the clicked signal already is.
+///
+/// Field report (a Kenwood on its I/Q output): the click used to tune only the
+/// DDC, and the rig's readout parted company with ours. That is more than a
+/// display quarrel — an over the engine does not key itself (CW sent as text
+/// to the rig's own keyer, a mic keyed at the radio) never borrows the dial
+/// through `tx_begin`, so it went on air at the frequency the click had left
+/// behind.
 #[test]
-fn clicking_inside_the_span_does_not_move_the_rig() {
+fn clicking_inside_the_span_moves_the_rig() {
     let (h, rig) = engine();
     settle(&h, |s| s.vfo_a_hz == DIAL);
     rig.lock().unwrap().commanded.clear();
 
     let clicked = DIAL + 5_000.0;
     h.cmd_tx.send(Command::TuneInSpan { vfo: Vfo::A, hz: clicked }).unwrap();
-    let state = settle(&h, |s| s.vfo_a_hz == clicked);
-    assert_eq!(state.center_hz, DIAL, "the window stays on the baseband we are capturing");
-    assert!(
-        rig.lock().unwrap().commanded.is_empty(),
-        "a signal already inside the span is tuned by the DDC, not by the rig"
+    let state = settle(&h, |s| s.center_hz == clicked);
+    assert_eq!(state.vfo_a_hz, clicked);
+    assert_eq!(state.center_hz, clicked, "the window follows the radio the click just moved");
+    assert_eq!(
+        rig.lock().unwrap().commanded.last().copied(),
+        Some(clicked),
+        "the clicked frequency has to reach the radio — its keyer and its mic transmit there"
     );
     shutdown(h);
 }
@@ -218,9 +229,11 @@ fn setting_the_dial_moves_the_rig_however_small_the_step() {
     shutdown(h);
 }
 
-/// The same command on an ordinary SDR must not touch the front end while the
+/// The same commands on an ordinary SDR must not touch the front end while the
 /// VFO is inside the span: its window is a resource worth keeping, and retuning
-/// on every dial nudge would throw the picture away.
+/// on every dial nudge or click would throw the picture away. Both commands,
+/// because they now share one engine arm and this is the case that arm must
+/// not have changed.
 #[test]
 fn an_sdr_still_keeps_its_window_when_the_dial_moves() {
     let rig = Arc::new(Mutex::new(Rig { dial: DIAL, ..Rig::default() }));
@@ -259,5 +272,11 @@ fn an_sdr_still_keeps_its_window_when_the_dial_moves() {
     let state = settle(&h, |s| s.vfo_a_hz == want);
     assert_eq!(state.center_hz, DIAL, "the SDR's window stays where it was");
     assert!(rig.lock().unwrap().commanded.is_empty(), "and its hardware is not retuned");
+
+    let clicked = DIAL - 8_000.0;
+    h.cmd_tx.send(Command::TuneInSpan { vfo: Vfo::A, hz: clicked }).unwrap();
+    let state = settle(&h, |s| s.vfo_a_hz == clicked);
+    assert_eq!(state.center_hz, DIAL, "a click inside the span keeps the window too");
+    assert!(rig.lock().unwrap().commanded.is_empty(), "with no retune for the click either");
     shutdown(h);
 }
