@@ -1467,6 +1467,7 @@ fn open_soapy_source(
 fn open_soapy_source(
     _cli: &Cli,
     _settings: &Settings,
+    _radio: &RadioConfig,
 ) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
     bail!("SoapySDR support is not compiled into this build")
 }

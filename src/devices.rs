@@ -14,7 +14,6 @@
 //! settings window closure, the server on its own probe thread.
 
 use sdroxide_types::{DeviceProbe, ProbeAnswer, ProbeTest, ReportKind};
-use tracing::warn;
 
 /// Answer one device question about this machine.
 pub fn probe(req: DeviceProbe) -> ProbeAnswer {
@@ -50,7 +49,7 @@ pub fn probe(req: DeviceProbe) -> ProbeAnswer {
 fn soapy_devices() -> Vec<sdroxide_types::SoapyDeviceInfo> {
     sdroxide_radio::enumerate_devices("")
         .unwrap_or_else(|e| {
-            warn!("SoapySDR enumeration failed: {e}");
+            tracing::warn!("SoapySDR enumeration failed: {e}");
             Vec::new()
         })
         .into_iter()
