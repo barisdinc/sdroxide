@@ -421,6 +421,9 @@ pub struct SdroxideApp {
     /// Decode-list filter: only stations that would put something new in the
     /// log (new entity, new band-slot, new grid, or a callsign never worked).
     digi_new_only: bool,
+    /// Show every decode as one list — sorted across all turns — instead of
+    /// grouped into odd/even turn blocks.
+    digi_single_list: bool,
     /// The FT8 free-text entry, sent verbatim in the next transmit slot.
     digi_free_text: String,
     /// Country-flag textures, uploaded on first use and kept for the session.
@@ -945,6 +948,7 @@ impl SdroxideApp {
             digi_sort_desc: true,
             digi_cq_only: false,
             digi_new_only: false,
+            digi_single_list: false,
             digi_free_text: String::new(),
             flags: Default::default(),
             show_logbook: false,

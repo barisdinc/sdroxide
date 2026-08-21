@@ -1456,6 +1456,13 @@ The panel has two halves:
   again reverses it — the arrow on the chip says which way it is running — and
   **None** returns to the order the decoder found them in. Turns stay in their
   own blocks whichever sort is chosen; only the rows inside a turn move.
+  **Single list** dissolves the turn blocks: every decode goes into one list,
+  newest turn first, and the Sort chips then order the whole list at once — the
+  band's strongest signals or farthest DX in one sweep, whichever turn carried
+  them. The odd/even headers go with the blocks, so each row carries its slot
+  time instead, coloured by the slot's parity (cyan for even, gold for odd) —
+  worth a glance before replying, since a sorted list puts decodes from several
+  turns ago next to fresh ones.
   A **CQ DX** call only counts as a CQ for you when you actually are DX for the
   caller — a different DXCC entity, or (when the prefix can't be resolved)
   3000 km or more away. Otherwise the row stays plain and the **CQ only** filter
@@ -1582,8 +1589,9 @@ free text is cut to 13 characters.
   offset you last set on the *new* band, because holding through a band change
   is what carries a licence-edge figure onto a band that does not want it.
 - **Set the transmit offset by hand.** FT8 and FT4 have a transmit-offset
-  readout above the decode list: a box to type a figure into and a **-10** /
-  **+10** Hz pair. The offset is remembered **per band**, not per station and
+  readout above the decode list: a box to type an exact figure into, between a
+  **−** / **+** pair that steps to the next round 10 Hz either side of it. The
+  offset is remembered **per band**, not per station and
   not per mode, because the constraint that makes one worth remembering belongs
   to the band — and it is saved to `digi.json` as you set it. Only your own
   moves are recorded; an automatic hop is the engine's choice for one over, not

@@ -15,7 +15,8 @@ use crate::time::now_unix;
 use crate::app::panels::widgets::{row_cell, row_cell_ui, snr_color, station_card};
 use crate::app::{SdroxideApp, rx_only_hint, tx_gated};
 
-/// How the FT8/FT4 decode list orders the stations within each turn.
+/// How the FT8/FT4 decode list orders the stations — within each turn, or
+/// across the whole list when the single-list view is on.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(in crate::app) enum DecodeSort {
     /// As received (no reordering).
@@ -85,7 +86,16 @@ impl SdroxideApp {
                 });
             });
         }
-        // Per-turn ordering + a CQ-only filter for the decode list.
+        // Two control rows, each one chip tall, so everything on a row shares
+        // a baseline. This used to be a single wrapped row with the TX nudges
+        // stacked two-high in the middle of it: every chip then centred against
+        // a double-height neighbour, and on most pane widths the Hz box broke
+        // onto a ragged second line by itself. Split by subject instead — what
+        // the list shows on one row, what transmit does on the other — each
+        // row keeps a uniform height, and wrapping happens between rows' items
+        // rather than through the middle of a stacked group.
+        //
+        // Ordering, grouping and filters for the decode list.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.label(RichText::new("Sort").size(9.5).color(crate::theme::CYAN_DIM()));
@@ -115,6 +125,21 @@ impl SdroxideApp {
                 }
             }
             ui.add_space(8.0);
+            // Grouping: odd/even turn blocks, or everything in one list.
+            // Beside the Sort chips because it decides what they sort — each
+            // turn on its own, or the whole list at once.
+            if crate::chrome::chip(ui, self.digi_single_list, "Single list")
+                .on_hover_text(
+                    "Every decode in one list, newest turn first, instead of odd/even turn \
+                     blocks. The Sort chips then order the whole list rather than each turn, \
+                     and each row carries its slot time — cyan for an even slot, gold for an \
+                     odd one.",
+                )
+                .clicked()
+            {
+                self.digi_single_list = !self.digi_single_list;
+            }
+            ui.add_space(8.0);
             if crate::chrome::chip(ui, self.digi_cq_only, "CQ only")
                 .on_hover_text(
                     "Only stations calling CQ — and only the calls you may answer: a directed \
@@ -131,6 +156,11 @@ impl SdroxideApp {
             {
                 self.digi_new_only = !self.digi_new_only;
             }
+        });
+        // The transmit row: who picks our frequency, the frequency itself, and
+        // the list-clearing button at the end.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             // Whether the engine chooses our transmit frequency. Here rather
             // than in the setup window because it decides what clicking a
             // decode in this list does.
@@ -204,31 +234,26 @@ impl SdroxideApp {
                 // from the box beneath.
                 let step_down = ((our_hz / 10.0).ceil() - 1.0) * 10.0;
                 let step_up = ((our_hz / 10.0).floor() + 1.0) * 10.0;
-                // The three of them are one column, nudges above and typed
-                // figure below, rather than four items loose in the wrapping
-                // row. Loose, they sat side by side on a wide panel and broke
-                // apart on a narrow one, so where the box appeared depended on
-                // the panel width and it could be separated from the chips that
-                // move the same number. As a column it is placed as a single
-                // item: the whole group wraps or none of it does.
+                // Label, nudges, figure and unit are one horizontal group —
+                // the typed box between its own − and +, stepper-fashion —
+                // rather than five items loose in the wrapping row. Loose,
+                // they sat side by side on a wide panel and broke apart on a
+                // narrow one, so where the box appeared depended on the panel
+                // width and it could be separated from the chips that move the
+                // same number. A child `Ui` inside a `horizontal_wrapped` row
+                // does not wrap, which is exactly what the group wants: it is
+                // placed — and wraps — as one item, a single chip tall, so the
+                // row it lands on keeps a uniform height.
                 //
-                // Each control is still gated on its own rather than the column
-                // being wrapped in an `add_enabled_ui`. The rule about a child
-                // `Ui` not wrapping inside a `horizontal_wrapped` is what this
-                // column relies on, not an exception to it: the inner rows are
-                // meant to keep their shape. An enabling wrapper would be a
-                // second child for a different purpose, and greying out is what
-                // `chip_enabled` is for.
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
-                        if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
-                            cmds.push(Command::SetDigiAudioFreq(step_down.clamp(200.0, 3500.0)));
-                        }
-                        if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
-                            cmds.push(Command::SetDigiAudioFreq(step_up.clamp(200.0, 3500.0)));
-                        }
-                    });
+                // Each control inside is still gated on its own rather than
+                // the group being wrapped in an `add_enabled_ui`: greying out
+                // is what `chip_enabled` and `field_enabled` are for.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new("TX").size(11.0).color(crate::theme::gray(140)));
+                    if crate::chrome::chip_enabled(ui, !held, false, "−").clicked() {
+                        cmds.push(Command::SetDigiAudioFreq(step_down.clamp(200.0, 3500.0)));
+                    }
                     // The readout and the entry are the same widget: two of them
                     // would be two things to disagree with each other.
                     //
@@ -265,29 +290,27 @@ impl SdroxideApp {
                             self.digi_tx_hz_edit = shown;
                         }
                     }
-                    let resp = ui
-                        .horizontal(|ui| {
-                            let r = crate::chrome::field_enabled(
-                                ui,
-                                !held,
-                                egui::TextEdit::singleline(&mut self.digi_tx_hz_edit)
-                                    .id(tx_hz_id)
-                                    .desired_width(40.0),
-                            )
-                            .on_hover_text(
-                                "Type the transmit offset in Hz, then press Enter. Where \
-                                     your licence is narrower than the band plan the whole \
-                                     range below the edge is yours to pick from, so nothing \
-                                     is suggested here.",
-                            );
-                            // The unit rides beside the box rather than inside
-                            // it. As a suffix it would be text sitting in the
-                            // buffer the operator is typing into, to be worked
-                            // around on every edit and parsed back off again.
-                            ui.label(RichText::new("Hz").size(11.0).color(crate::theme::gray(140)));
-                            r
-                        })
-                        .inner;
+                    let resp = crate::chrome::field_enabled(
+                        ui,
+                        !held,
+                        egui::TextEdit::singleline(&mut self.digi_tx_hz_edit)
+                            .id(tx_hz_id)
+                            .desired_width(40.0),
+                    )
+                    .on_hover_text(
+                        "Type the transmit offset in Hz, then press Enter. Where \
+                         your licence is narrower than the band plan the whole \
+                         range below the edge is yours to pick from, so nothing \
+                         is suggested here.",
+                    );
+                    if crate::chrome::chip_enabled(ui, !held, false, "+").clicked() {
+                        cmds.push(Command::SetDigiAudioFreq(step_up.clamp(200.0, 3500.0)));
+                    }
+                    // The unit rides beside the box rather than inside it. As a
+                    // suffix it would be text sitting in the buffer the
+                    // operator is typing into, to be worked around on every
+                    // edit and parsed back off again.
+                    ui.label(RichText::new("Hz").size(11.0).color(crate::theme::gray(140)));
                     if resp.lost_focus() {
                         if let Ok(v) = self.digi_tx_hz_edit.trim().parse::<f32>() {
                             let v = v.clamp(200.0, 3500.0);
@@ -341,6 +364,7 @@ impl SdroxideApp {
             self.digi_status.as_ref().map(|s| s.config.hold_tx_freq).unwrap_or(false);
         let sort = self.digi_sort;
         let desc = self.digi_sort_desc;
+        let single = self.digi_single_list;
         // Turn parity needs the mode's slot length (FT8 15 s, FT4 7.5 s). JS8's
         // is an operator setting rather than implied by the mode, so it comes
         // from the status — otherwise Turbo draws one turn header per 2.5 turns.
@@ -407,11 +431,18 @@ impl SdroxideApp {
             let mut gi = 0;
             while gi < items.len() {
                 // A turn is one slot: group the contiguous same-slot decodes.
-                let slot = items[gi].d.slot_utc;
-                let mut end = gi;
-                while end < items.len() && items[end].d.slot_utc == slot {
-                    end += 1;
-                }
+                // The single-list view instead takes the whole list as one
+                // group, so the same sort below runs across every turn at once.
+                let end = if single {
+                    items.len()
+                } else {
+                    let slot = items[gi].d.slot_utc;
+                    let mut end = gi;
+                    while end < items.len() && items[end].d.slot_utc == slot {
+                        end += 1;
+                    }
+                    end
+                };
                 match sort {
                     DecodeSort::None => {}
                     DecodeSort::Signal => items[gi..end].sort_by(|a, b| {
@@ -444,27 +475,32 @@ impl SdroxideApp {
                         }
                     }),
                 }
-                // Turn separator: even/odd parity + UTC timestamp.
-                let even = ((slot as f64 / period).round() as i64).rem_euclid(2) == 0;
-                let s = slot.rem_euclid(86_400);
-                let tstr = format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60);
-                ui.add_space(3.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    let (ptxt, pcol) = if even {
-                        ("EVEN", crate::theme::CYAN())
-                    } else {
-                        ("ODD", crate::theme::YELLOW())
-                    };
-                    ui.label(RichText::new(ptxt).size(9.0).strong().color(pcol));
-                    ui.label(
-                        RichText::new(format!("{tstr} UTC"))
-                            .size(9.5)
-                            .monospace()
-                            .color(crate::theme::gray(130)),
-                    );
-                });
-                ui.separator();
+                if single {
+                    ui.add_space(3.0);
+                } else {
+                    // Turn separator: even/odd parity + UTC timestamp.
+                    let slot = items[gi].d.slot_utc;
+                    let even = ((slot as f64 / period).round() as i64).rem_euclid(2) == 0;
+                    let s = slot.rem_euclid(86_400);
+                    let tstr = format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60);
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let (ptxt, pcol) = if even {
+                            ("EVEN", crate::theme::CYAN())
+                        } else {
+                            ("ODD", crate::theme::YELLOW())
+                        };
+                        ui.label(RichText::new(ptxt).size(9.0).strong().color(pcol));
+                        ui.label(
+                            RichText::new(format!("{tstr} UTC"))
+                                .size(9.5)
+                                .monospace()
+                                .color(crate::theme::gray(130)),
+                        );
+                    });
+                    ui.separator();
+                }
                 for k in gi..end {
                     let DecodeRow { idx: i, d, entity, dist_km, cq, novelty, to_me } = items[k];
                     // Free text names no sender, and a hashed callsign nobody
@@ -510,6 +546,29 @@ impl SdroxideApp {
 
                     // Everything the row shows, built once and placed by
                     // whichever of the two layouts below runs.
+                    //
+                    // In the single-list view the turn headers are gone, so the
+                    // row itself says when it arrived: its slot time, coloured
+                    // by the slot's parity — the two facts the headers carried.
+                    let time_lbl = single.then(|| {
+                        let even = ((d.slot_utc as f64 / period).round() as i64).rem_euclid(2) == 0;
+                        let s = d.slot_utc.rem_euclid(86_400);
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "{:02}:{:02}:{:02}",
+                                s / 3600,
+                                (s % 3600) / 60,
+                                s % 60
+                            ))
+                            .monospace()
+                            .size(10.5)
+                            .color(if even {
+                                crate::theme::CYAN()
+                            } else {
+                                crate::theme::YELLOW()
+                            }),
+                        )
+                    });
                     let dist_txt = dist_km.map(|km| format!("{km:.0} km")).unwrap_or_default();
                     let snr_lbl = egui::Label::new(
                         RichText::new(format!("{:+}", d.snr_db))
@@ -674,6 +733,14 @@ impl SdroxideApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
+                                            // Slot time at the row's right edge
+                                            // (single-list view only) — the
+                                            // narrow layout has no column for
+                                            // it, and here it scans down the
+                                            // list like one.
+                                            if let Some(t) = time_lbl {
+                                                ui.add(t);
+                                            }
                                             let tail = [country, grid.as_str(), dist_txt.as_str()]
                                                 .iter()
                                                 .filter(|s| !s.is_empty())
@@ -701,6 +768,9 @@ impl SdroxideApp {
                                 ui.horizontal(|ui| {
                                     ui.set_min_height(ch);
                                     ui.spacing_mut().item_spacing.x = 7.0;
+                                    if let Some(t) = time_lbl {
+                                        cell(ui, 54.0, false, t);
+                                    }
                                     cell(ui, 28.0, true, snr_lbl);
                                     cell(ui, 40.0, true, freq_lbl);
                                     cell(ui, 98.0, false, call_lbl);
