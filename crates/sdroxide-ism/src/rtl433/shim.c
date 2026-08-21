@@ -187,10 +187,38 @@ sdrx_rtl433 *sdrx_rtl433_create(uint32_t samp_rate, uint32_t center_hz,
      * optional here the way it is on the command line. */
     h->cfg->report_meta = 1;
 
+    /* rtl_433's own log level, for diagnosing a band that is not decoding.
+     * Off unless asked for; 4 makes the auto-level tracker report what it
+     * thinks the noise floor is, which is the first thing worth knowing. The
+     * messages reach `tracing` through the handler installed from Rust. */
+    {
+        const char *v = getenv("SDROXIDE_RTL433_VERBOSITY");
+        if (v) {
+            h->cfg->verbosity = atoi(v);
+        }
+    }
+
     /* CS16: four bytes per complex sample. rtl_433 has a native magnitude and
      * FM path for it, so nothing converts on the way in. */
     h->cfg->demod->sample_size     = 4;
     h->cfg->demod->enable_FM_demod = 1;
+
+    /* Track the noise floor and move the detection threshold down to meet it.
+     *
+     * NOT optional here, and the reason is the difference between rtl_433's
+     * usual input and ours. An RTL-SDR sets its own gain, so its samples arrive
+     * near full scale and rtl_433's default minimum detection level of about
+     * -12 dBFS is below everything worth hearing. What arrives here is a
+     * decimated window from a receiver with no such gain control — on an RX-888
+     * at 868 MHz a sensor burst lands somewhere around -35 to -65 dBFS, i.e.
+     * entirely beneath that default. Without this the pulse detector never
+     * opens and *nothing at all* decodes, which is not a subtle failure but it
+     * is a silent one.
+     *
+     * It is `-Y autolevel` on the command line, and like `raw_handler` above it
+     * is set by rtl_433's own main() rather than by r_create_cfg(), so an
+     * embedder has to know to ask for it. */
+    h->cfg->demod->auto_level = 1.0f;
 
     h->out = calloc(1, sizeof(*h->out));
     if (!h->out) {

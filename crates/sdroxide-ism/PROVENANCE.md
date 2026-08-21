@@ -97,3 +97,15 @@ rather than a documented interface:
    parameters that `sdr_handler()` sets in `src/rtl_433.c`. `raw_handler` in
    particular is dereferenced unconditionally by `push_sdr_flow()` and is NULL on
    a config that has never been through upstream's own SDR path.
+4. **`demod->auto_level`** — set in `sdrx_rtl433_create()`, and load-bearing.
+   It is `-Y autolevel` on the command line and `r_create_cfg()` leaves it at 0,
+   which pins the minimum detection level at `min_level` (≈ −12 dBFS). That
+   suits an RTL-SDR, which sets its own gain and delivers samples near full
+   scale; it does not suit a decimated window from a receiver with no gain
+   control, where a sensor burst is 35–65 dB down. With it unset **nothing
+   decodes at all** and there is no error to see. `tests/rtl433_weak_signal.rs`
+   is the guard: it fails if this line goes away.
+
+If a whole band stops decoding after a bump, set `SDROXIDE_RTL433_VERBOSITY=4`
+and look for rtl_433's own "Auto Level: estimated noise level is …" lines; they
+say whether the detector has found the floor. They arrive through `tracing`.
