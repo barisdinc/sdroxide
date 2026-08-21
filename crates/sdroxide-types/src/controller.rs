@@ -349,11 +349,12 @@ pub trait RadioController {
         let _ = (username, password);
     }
 
-    /// Silence (or restore) this radio's speaker path — the tab-strip mute.
-    /// Distinct from [`Command::SetMute`], which is a per-receiver setting the
-    /// operator owns: this one belongs to the tab, and everything (DSP,
-    /// decoders, the recorder) keeps running underneath it. No-op by default —
-    /// a remote session has no tab strip of its own yet.
+    /// Stop this radio's audio from being played *here* — the browser
+    /// client's one-output rule, under which only the focused tab may feed
+    /// the page's single audio worklet. Not the operator's mute: that is
+    /// [`Command::SetMute`], a per-receiver setting the engine keeps (and
+    /// remembers across restarts). No-op by default — a native radio plays
+    /// through a stream of its own and needs no gate.
     fn set_muted(&mut self, muted: bool) {
         let _ = muted;
     }

@@ -170,11 +170,6 @@ pub enum EngineSwap {
     /// Rebuild the radio source at runtime (backend / CAT audio / HPSDR-TCI
     /// address changed). The engine calls its [`ReopenFn`] factory.
     ReopenSource,
-    /// Silence (or restore) this engine's speaker path — the tab-strip mute.
-    /// The DSP, meters, decoders and the recording tap all keep running; only
-    /// what goes to the audio device is zeroed. Deliberately not
-    /// [`Command::SetMute`], which is a per-receiver setting the operator owns.
-    MuteOutput(bool),
     /// Re-read the station-shared stores (memories, folders, band stacks, digi
     /// operator config) from disk. Sent to every *other* engine after one of
     /// them saves: each engine holds a whole in-memory copy and writes it back
@@ -849,11 +844,6 @@ struct StereoMixer {
     /// channels arrive as separate arguments — so ducking here cannot leak into
     /// an MP3 however the caller assembled the two sides.
     duck: f32,
-    /// The tab-strip mute ([`EngineSwap::MuteOutput`]): the speaker path is
-    /// zeroed, everything else — including the recording tap — runs on. Same
-    /// placement rationale as `duck`. Zeroed rather than skipped so the ring
-    /// keeps flowing and unmuting is instant, with nothing stale queued.
-    muted: bool,
     /// Silence the speaker path for the length of an over, where the receiver
     /// keeps running through it: a radio with another radio attached as its
     /// panadapter, set to blank nothing but still to mute
@@ -886,7 +876,6 @@ impl StereoMixer {
             rx_rec_enabled: true,
             rec_mono: false,
             duck: 1.0,
-            muted: false,
             tx_muted: false,
         }
     }
@@ -972,7 +961,7 @@ impl StereoMixer {
 
         if n > 0 {
             if self.out.slots() >= n * 2 {
-                let duck = if self.muted || self.tx_muted { 0.0 } else { self.duck };
+                let duck = if self.tx_muted { 0.0 } else { self.duck };
                 for i in 0..n {
                     let l = self.main_q[i] * duck;
                     let r = if dual { self.sub_q[i] * duck } else { l };
@@ -1857,6 +1846,7 @@ fn engine_thread(
         }
         state.band = Band::containing(state.active_freq_hz());
         state.rx[0].volume = s.volume;
+        state.rx[0].muted = s.muted;
         state.rx[0].manual_gain_db = s.rx_gain_db;
         state.rx[0].agc = s.agc;
         state.rx[0].squelch_db = s.squelch_db;
@@ -2172,11 +2162,6 @@ fn engine_thread(
                 EngineSwap::Output(a) => engine.set_audio_output(a),
                 EngineSwap::Input(m) => engine.set_audio_input(m),
                 EngineSwap::ReopenSource => engine.reopen_source(),
-                EngineSwap::MuteOutput(muted) => {
-                    if let Some(m) = engine.mixer.as_mut() {
-                        m.muted = muted;
-                    }
-                }
                 EngineSwap::ReloadSharedStores => engine.reload_shared_stores(),
             }
         }
@@ -7305,6 +7290,7 @@ impl Engine {
             antenna_rx: keep(&self.state.antenna_rx).or_else(|| saved.antenna_rx.clone()),
             antenna_tx: keep(&self.state.antenna_tx).or_else(|| saved.antenna_tx.clone()),
             volume: self.state.rx[0].volume,
+            muted: self.state.rx[0].muted,
             rx_gain_db: self.state.rx[0].manual_gain_db,
             agc: self.state.rx[0].agc,
             drive: self.state.tx.drive,

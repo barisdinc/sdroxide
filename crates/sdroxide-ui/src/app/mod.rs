@@ -1096,8 +1096,23 @@ impl SdroxideApp {
         self.error.is_some()
     }
 
-    /// The tab strip's mute toggle — silences this radio's speaker path in the
-    /// engine; everything else keeps running.
+    /// Whether the main receiver is muted — the one state both the MUTE
+    /// button and the tab strip's mute chip show.
+    pub(crate) fn tab_muted(&self) -> bool {
+        self.state.rx[0].muted
+    }
+
+    /// The tab strip's mute toggle: the same per-receiver mute the MUTE
+    /// button sends, so muting from either place lights both — and the
+    /// engine, which owns the state, remembers it across restarts.
+    pub(crate) fn set_tab_muted(&mut self, muted: bool) {
+        self.ctrl.send(sdroxide_types::Command::SetMute { rx: sdroxide_types::RxId::Main, muted });
+    }
+
+    /// The browser's one-output rule: keep this radio's audio out of the
+    /// page's single worklet while another tab is focused. Not the operator's
+    /// mute — that is [`Self::set_tab_muted`].
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn mute_tab(&mut self, muted: bool) {
         self.ctrl.set_muted(muted);
     }

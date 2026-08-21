@@ -19,8 +19,9 @@
 //!
 //! What keeps the radios from stepping on each other lives mostly *below*
 //! the UI: each engine has its own config scope (`sdroxide_config::Store`),
-//! the [`sdroxide_types::RadioController::set_muted`] path silences one
-//! radio's speaker without stopping it, a shared `TxGate` keys one
+//! the strip's mute chip is the engine's own per-receiver mute (the same
+//! [`sdroxide_types::Command::SetMute`] state the MUTE button shows, so the
+//! two always agree and the engine remembers it), a shared `TxGate` keys one
 //! transmitter at a time, and a shared `StoreSync` keeps the station-wide
 //! stores (memories, band stacks, digi config) converged across engines. Up
 //! here the shell only has to salt the persisted view state per tab (and,
@@ -71,7 +72,6 @@ struct Tab {
     id: u32,
     name: String,
     app: SdroxideApp,
-    muted: bool,
     /// The radio that has borrowed this one's receiver as its panadapter, if
     /// one has. Such a radio has no front end of its own — the borrower opened
     /// it — so it is kept out of the strip: a tab that can only ever say "my
@@ -170,15 +170,7 @@ impl MultiApp {
                 app.set_focused_flag(i == 0);
                 app.set_shared_log(shared_log);
                 app.set_can_add_radio(can_add);
-                Tab {
-                    id: r.id,
-                    name: r.name,
-                    app,
-                    muted: false,
-                    remote,
-                    attached_to: None,
-                    enabled: r.enabled,
-                }
+                Tab { id: r.id, name: r.name, app, remote, attached_to: None, enabled: r.enabled }
             })
             .collect();
         assert!(!tabs.is_empty(), "MultiApp needs at least one radio");
@@ -254,7 +246,7 @@ impl MultiApp {
                 default_name: Self::default_name(t),
                 tx_on: t.app.tab_tx_on(),
                 error: t.app.tab_error(),
-                muted: t.muted,
+                muted: t.app.tab_muted(),
                 focused: i == self.focused,
                 attached_to: t.attached_to,
                 enabled: t.enabled,
@@ -366,10 +358,8 @@ impl MultiApp {
                 }
                 RadioTabRequest::Mute { id, muted } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
-                        t.muted = muted;
-                        t.app.mute_tab(muted);
+                        t.app.set_tab_muted(muted);
                     }
-                    self.sync_audio();
                 }
                 RadioTabRequest::Power { id, on } => self.set_power(id, on),
                 RadioTabRequest::Reopen(id) => {
@@ -405,13 +395,12 @@ impl MultiApp {
                 StripAction::Show { pane, id } => self.show_in_pane(pane, id, ctx),
                 StripAction::ToggleSplit(id) => self.toggle_split(id, ctx),
                 StripAction::Mute { id, muted } => {
+                    // To the engine, not latched here: the chip and the MUTE
+                    // button both read the engine's answer back, so they
+                    // cannot drift apart — and the engine remembers it.
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
-                        t.muted = muted;
-                        t.app.mute_tab(muted);
+                        t.app.set_tab_muted(muted);
                     }
-                    // In the browser, unmuting a radio that is not on screen
-                    // must not put two of them through the one output.
-                    self.sync_audio();
                 }
                 StripAction::Power { id, on } => self.set_power(id, on),
                 StripAction::Add => self.add_tab(ctx),
@@ -527,13 +516,14 @@ impl MultiApp {
                     // split toggle stays either way — a pane showing a radio
                     // that has just been switched off still has to be closable.
                     if tab.enabled {
+                        let muted = tab.app.tab_muted();
                         let mute = crate::chrome::chip(
                             ui,
-                            tab.muted,
-                            RichText::new(if tab.muted { "🔇" } else { "🔊" }).size(11.0),
+                            muted,
+                            RichText::new(if muted { "🔇" } else { "🔊" }).size(11.0),
                         );
                         if mute.on_hover_text("Mute this radio's audio").clicked() {
-                            actions.push(StripAction::Mute { id, muted: !tab.muted });
+                            actions.push(StripAction::Mute { id, muted: !muted });
                         }
                     }
                     let split = crate::chrome::chip(ui, split_on, RichText::new("⊞").size(11.0));
@@ -585,13 +575,14 @@ impl MultiApp {
     /// fed by whichever tab pushes into it — so exactly one radio may be
     /// audible there, and it is the one the operator is on. A native client
     /// gives every radio a stream of its own and lets the sound system mix
-    /// them, which is why this rule is the browser's alone.
+    /// them, which is why this rule is the browser's alone. The operator's
+    /// mute is not part of it: that lives in the engine, which zeroes the
+    /// stream at the source.
     #[cfg(target_arch = "wasm32")]
     fn sync_audio(&mut self) {
         let focused = self.focused;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
-            let silent = tab.muted || i != focused;
-            tab.app.mute_tab(silent);
+            tab.app.mute_tab(i != focused);
         }
     }
 
@@ -755,7 +746,6 @@ impl MultiApp {
             id: r.id,
             name: r.name,
             app,
-            muted: false,
             remote,
             attached_to: None,
             enabled: r.enabled,

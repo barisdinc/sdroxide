@@ -132,10 +132,11 @@ pub struct RemoteController {
     /// Answers to the settings dialog's device questions, in the order the
     /// server ran them. Drained by [`RadioController::poll_probe`].
     probe_answers: VecDeque<sdroxide_types::ProbeAnswer>,
-    /// The tab strip's mute: this radio's audio is not played *here*. The
+    /// The browser's one-output gate ([`RadioController::set_muted`]): this
+    /// radio is not the focused tab, so its audio is not played *here*. The
     /// stream keeps arriving and the engine keeps decoding, recording and
-    /// metering — only the speaker path stops, which is what the chip means
-    /// for a local radio too.
+    /// metering — only local playback stops. The operator's mute is not this;
+    /// it goes to the engine as [`Command::SetMute`] like any other command.
     muted: bool,
     /// The far end's roster and which of it this session is on, as announced
     /// in the handshake. `None` until it lands, and re-announced on every
@@ -243,8 +244,9 @@ impl RemoteController {
             ServerMsg::Memories(m) => self.pending.push_back(RadioEvent::Memories(m)),
             ServerMsg::MemoryFolders(f) => self.pending.push_back(RadioEvent::MemoryFolders(f)),
             ServerMsg::Scanner(c) => self.pending.push_back(RadioEvent::Scanner(c)),
-            // Dropped rather than decoded when this radio is muted: the work
-            // saved is the point on a browser tab holding several radios.
+            // Dropped rather than decoded while another tab holds the page's
+            // single output: the work saved is the point on a browser tab
+            // holding several radios.
             ServerMsg::RxAudio { .. } if self.muted => {}
             ServerMsg::RxAudio { payload, .. } => {
                 if let Some(bridge) = self.audio.as_mut() {

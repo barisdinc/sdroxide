@@ -195,10 +195,6 @@ impl RadioController for LocalController {
         let _ = self.swap_tx.send(EngineSwap::ReopenSource);
     }
 
-    fn set_muted(&mut self, muted: bool) {
-        let _ = self.swap_tx.send(EngineSwap::MuteOutput(muted));
-    }
-
     fn nudge_shared_stores(&mut self) {
         let _ = self.swap_tx.send(EngineSwap::ReloadSharedStores);
     }

@@ -847,6 +847,10 @@ pub struct Session {
     pub antenna_tx: Option<String>,
     /// Main receiver's AF volume, 0.0..=1.0.
     pub volume: f32,
+    /// Whether the main receiver was left muted — the MUTE button and the
+    /// radio strip's mute chip, which are one state. Remembered so a radio
+    /// muted on purpose comes back quiet instead of opening at full volume.
+    pub muted: bool,
     /// Main receiver's manual (AGC-off) gain, in dB.
     pub rx_gain_db: f32,
     /// Main receiver's AGC mode.
@@ -915,6 +919,7 @@ impl Default for Session {
             antenna_rx: None,
             antenna_tx: None,
             volume: radio.rx[0].volume,
+            muted: radio.rx[0].muted,
             rx_gain_db: radio.rx[0].manual_gain_db,
             agc: radio.rx[0].agc,
             drive: radio.tx.drive,
@@ -1523,6 +1528,7 @@ mod tests {
             antenna_rx: Some("LNAW".into()),
             antenna_tx: Some("BAND2".into()),
             volume: 0.8,
+            muted: true,
             rx_gain_db: 35.0,
             agc: sdroxide_types::AgcMode::Fast,
             drive: 0.4,
@@ -1554,6 +1560,7 @@ mod tests {
             serde_json::from_str(r#"{"freq_hz":7074000.0,"mode":"Ft8"}"#).expect("parses");
         let radio = sdroxide_types::RadioState::default();
         assert_eq!(old.volume, radio.rx[0].volume);
+        assert_eq!(old.muted, radio.rx[0].muted);
         assert_eq!(old.rx_gain_db, radio.rx[0].manual_gain_db);
         assert_eq!(old.agc, radio.rx[0].agc);
         assert_eq!(old.drive, radio.tx.drive);
