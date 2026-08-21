@@ -191,15 +191,14 @@ impl Device {
         let (adc_rate_hz, link_warning) = clamp_rate_to_link(settings.adc_rate_hz, &usb);
         let warning = join_warnings(link_warning, front_end_warning(identity));
         let ddc_bins = crate::stream::sanitize_ddc_bins(settings.ddc_bins);
-        let out_rate_hz = adc_rate_hz * ddc_bins as f64 / crate::stream::DDC_BLOCK as f64;
 
         // The firmware sets hardware id 0x04 only when its boot-time I2C probe
         // found an R828D, so it already answers "is there a tuner" — but a
-        // clock too slow for the tuner's IF, or an output too wide to park on
-        // it, rule VHF out just as firmly.
+        // clock too slow for the tuner's IF rules VHF out just as firmly. The
+        // output width does not: an output too wide to centre on the IF still
+        // contains it, and the source reports the off-centre truth.
         let vhf_capable = band::vhf_available(
             adc_rate_hz,
-            out_rate_hz,
             identity.is_some_and(|i| i.front_end_ready()) && tuner_present(&usb),
         );
 

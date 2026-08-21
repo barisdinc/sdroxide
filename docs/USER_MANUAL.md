@@ -325,7 +325,10 @@ can't quietly add itself to the one you set here.
 
 ### 2.7 Receiver controls
 
-- **AGC** — a drop-down: `Off`, `Slow`, `Med`, `Fast`.
+- **AGC** — a drop-down: `Off`, `Slow`, `Med`, `Fast`. Not shown in NFM or
+  WFM, where there is no AGC at all: an FM detector's output level is set by
+  the transmitter's deviation, not by signal strength, so there is nothing to
+  level and an AGC would only pump on the noise between overs.
 - **Man** — the fixed audio gain the receiver runs on while the AGC is `Off`,
   shown only then. Unlevelled audio is whatever the band delivered, and a weak
   SSB signal can sit tens of dB below anything the volume control can reach, so
@@ -8839,9 +8842,10 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   dial — the window stops where the spectrum ends and the tuned frequency
   sits off-centre in it, exactly as it looks on screen.
 - On VHF the tuner's IF filter is 8 MHz wide. Panadapter widths beyond that
-  show the filter's own skirts at the edges, and any width past about 9 MHz
-  cannot sit on the IF at all, so it switches the VHF range off — the
-  receiver honestly claims HF only rather than offering a VHF that mistunes.
+  show the filter's own skirts at the edges, and one past about 9 MHz can no
+  longer centre itself on the IF — the window parks as close as it can and
+  the tuned frequency simply rides off-centre in it, the same way it does at
+  the edges of HF. Every width keeps the full VHF/UHF range.
 
 ---
 

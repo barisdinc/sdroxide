@@ -521,12 +521,18 @@ impl RxChain {
         demod.process(&self.channel_buf, &mut self.audio_buf);
         demod.set_stereo_enabled(stereo_allowed(rx));
         let stereo = demod.take_side(&mut self.side_buf);
-        if stereo {
-            // One gain trajectory and one lookahead delay across both channels:
-            // levelling them separately would pump the stereo image.
-            self.agc.process_pair(&mut self.audio_buf, &mut self.side_buf);
-        } else {
-            self.agc.process(&mut self.audio_buf);
+        // FM skips the AGC entirely — a true unity bypass, not AgcMode::Off's
+        // manual gain: the discriminator output is already deviation-scaled to
+        // ±full scale, so there is no level to restore (Mode::audio_agc).
+        if self.mode.audio_agc() {
+            if stereo {
+                // One gain trajectory and one lookahead delay across both
+                // channels: levelling them separately would pump the stereo
+                // image.
+                self.agc.process_pair(&mut self.audio_buf, &mut self.side_buf);
+            } else {
+                self.agc.process(&mut self.audio_buf);
+            }
         }
 
         // Tap the clean, post-AGC audio before volume/mute/squelch AND before

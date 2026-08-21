@@ -3113,8 +3113,9 @@ pub(in crate::app) fn settings_rx888_tab(
                      proportionally more CPU — 1/2 is the entire band in the \
                      waterfall, and a serious amount of arithmetic. Above the \
                      VHF crossover the tuner's IF filter is 8 MHz wide: wider \
-                     settings show its skirts, and ones too wide to sit on the \
-                     IF at all switch the VHF range off.",
+                     settings show its skirts, and on ones too wide to centre \
+                     on the IF the tuned signal simply rides off-centre in \
+                     the panadapter.",
                 )
                 .weak(),
             )

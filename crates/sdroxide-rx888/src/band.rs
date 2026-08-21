@@ -110,16 +110,14 @@ pub fn adc_rate_allows_vhf(adc_rate_hz: f64) -> bool {
 
 /// Whether the VHF front end can be used at all.
 ///
-/// Three conditions, all hard: a tuner soldered in, an ADC clock with room for
-/// its IF under Nyquist, and a downconverter output narrow enough to park on
-/// the IF carrier at all — a full-Nyquist output's centre is pinned at a
-/// quarter of the clock and cannot reach it, so the honest answer is HF only.
-pub fn vhf_available(adc_rate_hz: f64, out_rate_hz: f64, has_tuner: bool) -> bool {
-    let half_out = out_rate_hz / 2.0;
-    has_tuner
-        && adc_rate_allows_vhf(adc_rate_hz)
-        && IF_CENTER_HZ >= half_out
-        && IF_CENTER_HZ <= adc_rate_hz / 2.0 - half_out
+/// Two conditions, both hard: a tuner soldered in, and an ADC clock with room
+/// for its IF under Nyquist. The output width is *not* one of them: an output
+/// too wide to centre on the IF carrier still contains it — the converter
+/// clamps the centre into the half-spectrum and the IF rides off-centre in the
+/// output, which [`achieved_dial_center_hz`] reports so the engine demodulates
+/// in the right place.
+pub fn vhf_available(adc_rate_hz: f64, has_tuner: bool) -> bool {
+    has_tuner && adc_rate_allows_vhf(adc_rate_hz)
 }
 
 /// Where the automatic switch happens.
@@ -199,21 +197,30 @@ pub fn plan(
     }
 }
 
-/// The centre the downconverter can actually reach for an HF dial.
+/// Where a plan's stream centre actually lands, on the dial axis.
 ///
-/// The selected band has to fit inside the real half-spectrum, so the centre
-/// clamps to `out/2 .. Nyquist − out/2` — the same arithmetic as
-/// `WbDdc::set_center_hz`, kept here so the source can know *synchronously*
-/// where the stream really ended up. A dial inside the clamped strip is still
-/// received — it just sits off-centre in the output — and the whole point of
-/// this function is to say where the centre truly is rather than let the
-/// engine demodulate against a centre the converter never took. At a
-/// full-Nyquist output the two bounds meet and every tune lands on a quarter
-/// of the clock.
-pub fn hf_achievable_center_hz(dial_hz: f64, adc_rate_hz: f64, out_rate_hz: f64) -> f64 {
+/// The selected band has to fit inside the real half-spectrum, so the
+/// converter clamps the plan's DDC centre to `out/2 .. Nyquist − out/2` — the
+/// same arithmetic as `WbDdc::set_center_hz`, kept here so the source can know
+/// *synchronously* where the stream really ended up. A dial inside the clamped
+/// strip is still received — it just sits off-centre in the output — and the
+/// whole point of this function is to say where the centre truly is rather
+/// than let the engine demodulate against a centre the converter never took.
+///
+/// On HF the DDC centre *is* the dial axis. On VHF it is an IF, reflected
+/// through the tuner's park frequency exactly as [`wide_map`] reflects the
+/// display: an output too wide to park on the IF carrier gets its centre
+/// pinned at `out/2`, and the dial rides `out/2 − IF_CENTER` above the
+/// reported centre. At a full-Nyquist output the clamp's two bounds meet and
+/// every tune lands on a quarter of the clock.
+pub fn achieved_dial_center_hz(p: &BandPlan, adc_rate_hz: f64, out_rate_hz: f64) -> f64 {
     let lo = out_rate_hz / 2.0;
     let hi = (adc_rate_hz / 2.0 - out_rate_hz / 2.0).max(lo);
-    dial_hz.clamp(lo, hi)
+    let c = p.ddc_center_hz.clamp(lo, hi);
+    match p.band {
+        Band::Hf => c,
+        Band::Vhf => p.lo_dial_hz + (IF_CENTER_HZ - c),
+    }
 }
 
 /// Which analyser bins to publish for the full-band display, and the RF axis
@@ -392,7 +399,7 @@ mod tests {
         assert!(!adc_rate_allows_vhf(16_200_000.0), "8.1 MHz Nyquist cannot hold an 8.57 MHz IF");
         assert!(adc_rate_allows_vhf(32_400_000.0));
         assert!(adc_rate_allows_vhf(64_800_000.0));
-        assert!(!vhf_available(64_800_000.0, OUT, false), "no tuner, no VHF");
+        assert!(!vhf_available(64_800_000.0, false), "no tuner, no VHF");
     }
 
     /// At the default clock the two ranges meet; at a slower one they do not,
@@ -414,11 +421,12 @@ mod tests {
         assert_eq!(m.span_hz, ADC / 2.0);
     }
 
-    /// A wider output leaves less slide before the tuner must follow, and a
-    /// full-Nyquist output leaves none anywhere — the downconverter cannot even
-    /// park on the IF, so VHF is honestly unavailable rather than mistuned.
+    /// A wider output leaves less slide before the tuner must follow; past the
+    /// point where the output cannot park on the IF carrier at all, the slide
+    /// is zero and the tuner simply follows every dial move — VHF stays
+    /// available, with the IF riding off-centre in the output.
     #[test]
-    fn a_wide_output_shrinks_the_fine_window_and_then_rules_vhf_out() {
+    fn a_wide_output_shrinks_the_fine_window_but_keeps_vhf() {
         // Default width: the classic ±1 MHz survives untouched.
         assert_eq!(fine_span_hz(ADC, OUT), FINE_SPAN_HZ);
 
@@ -426,34 +434,73 @@ mod tests {
         // 4.57 MHz, so only 0.52 MHz of slide keeps the low edge reachable.
         let out_8m1 = 8_100_000.0;
         assert!((fine_span_hz(ADC, out_8m1) - 520_000.0).abs() < 1.0);
-        assert!(vhf_available(ADC, out_8m1, true));
         // And the plan respects the shrunken window: a nudge past it moves the
         // tuner where the default width would have slid the downconverter.
         let st = vhf_state(145_000_000.0);
         assert!(!plan(145_400_000.0, ADC, out_8m1, true, st).move_lo);
         assert!(plan(145_700_000.0, ADC, out_8m1, true, st).move_lo);
 
-        // 2048 bins: 16.2 MHz out. out/2 is past the IF carrier entirely.
-        assert!(!vhf_available(ADC, 16_200_000.0, true));
+        // 2048 bins: 16.2 MHz out. out/2 is past the IF carrier entirely, so
+        // there is no slide at all — every VHF tune reprograms the PLL.
         assert_eq!(fine_span_hz(ADC, 16_200_000.0), 0.0);
+        assert!(plan(145_100_000.0, ADC, 16_200_000.0, true, st).move_lo);
+        // Width never rules VHF out; only the tuner and the clock do.
+        assert!(vhf_available(ADC, true));
+        assert!(!vhf_available(16_200_000.0, true), "the IF does not fit under Nyquist");
     }
 
-    /// The downconverter's centre clamps to what fits in the half-spectrum,
-    /// and at a full-Nyquist output it is pinned at a quarter of the clock.
+    /// The stream centre clamps to what fits in the half-spectrum, reported on
+    /// the dial axis for either band.
     #[test]
-    fn the_achievable_hf_center_clamps_to_the_half_spectrum() {
+    fn the_achieved_center_clamps_to_the_half_spectrum() {
+        let hf = |dial: f64| BandPlan {
+            band: Band::Hf,
+            lo_dial_hz: 0.0,
+            move_lo: false,
+            ddc_center_hz: dial,
+            conjugate: false,
+        };
         // Comfortably inside: untouched.
-        assert_eq!(hf_achievable_center_hz(7_100_000.0, ADC, OUT), 7_100_000.0);
+        assert_eq!(achieved_dial_center_hz(&hf(7_100_000.0), ADC, OUT), 7_100_000.0);
         // Below out/2: the centre stops where the band still fits, and the
         // dial rides off-centre in the output. This is the medium-wave case
         // the engine has to be told about.
-        assert_eq!(hf_achievable_center_hz(630_000.0, ADC, OUT), OUT / 2.0);
+        assert_eq!(achieved_dial_center_hz(&hf(630_000.0), ADC, OUT), OUT / 2.0);
         // Near Nyquist: same at the top.
-        assert_eq!(hf_achievable_center_hz(32_000_000.0, ADC, OUT), ADC / 2.0 - OUT / 2.0);
+        assert_eq!(achieved_dial_center_hz(&hf(32_000_000.0), ADC, OUT), ADC / 2.0 - OUT / 2.0);
         // Full-Nyquist output: pinned at fs/4, wherever the dial is.
         let full = ADC / 2.0;
-        assert_eq!(hf_achievable_center_hz(1_000_000.0, ADC, full), ADC / 4.0);
-        assert_eq!(hf_achievable_center_hz(30_000_000.0, ADC, full), ADC / 4.0);
+        assert_eq!(achieved_dial_center_hz(&hf(1_000_000.0), ADC, full), ADC / 4.0);
+        assert_eq!(achieved_dial_center_hz(&hf(30_000_000.0), ADC, full), ADC / 4.0);
+    }
+
+    /// On VHF a narrow output parks on the IF carrier and the dial is achieved
+    /// exactly; a wide one gets its centre pinned at `out/2`, and the dial
+    /// rides above the reported centre by the difference — reflected through
+    /// the tuner's park frequency because high-side injection runs the IF
+    /// backwards.
+    #[test]
+    fn the_achieved_vhf_center_rides_off_centre_on_a_wide_output() {
+        let st = vhf_state(145_000_000.0);
+        let p = plan(145_000_000.0, ADC, OUT, true, st);
+        assert_eq!(achieved_dial_center_hz(&p, ADC, OUT), 145_000_000.0);
+
+        // 16.2 MHz out at 64.8 Msps: the centre pins at 8.1 MHz, 3.53 MHz
+        // above the IF carrier, so the reported centre sits 3.53 MHz below
+        // the dial and the wanted signal is 3.53 MHz inside the span.
+        let wide = 16_200_000.0;
+        let p = plan(145_000_000.0, ADC, wide, true, st);
+        let c = achieved_dial_center_hz(&p, ADC, wide);
+        assert_eq!(c, 145_000_000.0 + IF_CENTER_HZ - wide / 2.0);
+        assert!((145_000_000.0 - c).abs() < wide / 2.0, "the dial must stay inside the span");
+
+        // Full-Nyquist at 48.6 Msps — the configuration that used to switch
+        // VHF off outright: centre pinned at 12.15 MHz, dial 7.58 MHz inside.
+        let (adc, full) = (48_600_000.0, 24_300_000.0);
+        let p = plan(145_000_000.0, adc, full, true, st);
+        let c = achieved_dial_center_hz(&p, adc, full);
+        assert_eq!(c, 145_000_000.0 + IF_CENTER_HZ - full / 2.0);
+        assert!((145_000_000.0 - c).abs() < full / 2.0, "the dial must stay inside the span");
     }
 
     /// In VHF the strip is a slice of the analyser centred on the tuner, and

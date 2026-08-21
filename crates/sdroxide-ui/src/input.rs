@@ -298,9 +298,13 @@ pub(crate) fn apply_action(
         }
         AutoNotch => cmds.push(Command::SetAutoNotch { rx, on: !state.rx[0].auto_notch }),
         AgcCycle => {
-            let all = sdroxide_types::AgcMode::ALL;
-            let i = all.iter().position(|a| *a == state.rx[0].agc).unwrap_or(0);
-            cmds.push(Command::SetAgc { rx, agc: all[(i + 1) % all.len()] });
+            // In FM the chain bypasses the AGC and the chip is hidden; cycling
+            // here would invisibly change what the next mode comes back to.
+            if state.rx[0].mode.audio_agc() {
+                let all = sdroxide_types::AgcMode::ALL;
+                let i = all.iter().position(|a| *a == state.rx[0].agc).unwrap_or(0);
+                cmds.push(Command::SetAgc { rx, agc: all[(i + 1) % all.len()] });
+            }
         }
         SubRx => cmds.push(Command::SetSubRx(!state.sub_rx_enabled)),
         Split => cmds.push(Command::SetSplit(!state.split)),

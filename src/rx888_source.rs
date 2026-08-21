@@ -57,13 +57,14 @@ fn settings_from(cfg: &Rx888Config) -> Settings {
 /// Where the stream's centre actually lands for this dial, tracked with the
 /// same pure band plan the device runs.
 ///
-/// On HF the downconverter's centre clamps to what fits in the half-spectrum
-/// (see [`band::hf_achievable_center_hz`]); the widest output pins it at a
-/// quarter of the ADC clock however the dial moves. The engine has to be told,
-/// or it demodulates against a centre the converter never took — so
-/// [`Rx888Source::set_center_hz`] computes the truth here and reports it
-/// through [`IqSource::poll_control`], the same adoption path a shared-LO
-/// device uses when its centre moves.
+/// The downconverter's centre clamps to what fits in the half-spectrum (see
+/// [`band::achieved_dial_center_hz`]); the widest output pins it at a quarter
+/// of the ADC clock however the dial moves, and on VHF an output too wide to
+/// park on the tuner's IF carrier leaves the dial a fixed offset inside the
+/// span. The engine has to be told, or it demodulates against a centre the
+/// converter never took — so [`Rx888Source::set_center_hz`] computes the truth
+/// here and reports it through [`IqSource::poll_control`], the same adoption
+/// path a shared-LO device uses when its centre moves.
 ///
 /// The band state is mirrored rather than asked of the device because the
 /// device's copy lives on the USB thread; the plan is pure, both start from
@@ -80,21 +81,16 @@ fn achieved_center_hz(
 ) -> f64 {
     let p = band::plan(dial_hz, adc_rate_hz, out_rate_hz, vhf, *st);
     *st = BandState { band: p.band, lo_dial_hz: p.lo_dial_hz };
-    match p.band {
-        // The alias sliver between Nyquist and the crossover-plus-hysteresis
-        // stays uncorrected on purpose: it is how a scrolled dial climbs into
-        // the VHF range. A correction there would be adopted, the adoption
-        // clamps the VFO back under Nyquist, and the crossover could never be
-        // reached by scrolling again. Reception in the sliver is aliased
-        // regardless, so there is no truth to protect.
-        Band::Hf if dial_hz <= adc_rate_hz / 2.0 => {
-            band::hf_achievable_center_hz(dial_hz, adc_rate_hz, out_rate_hz)
-        }
-        Band::Hf => dial_hz,
-        // The plan keeps the downconverter's slide inside what it can reach
-        // (`band::fine_span_hz`), so on VHF the dial is achieved exactly.
-        Band::Vhf => dial_hz,
+    // The alias sliver between Nyquist and the crossover-plus-hysteresis
+    // stays uncorrected on purpose: it is how a scrolled dial climbs into
+    // the VHF range. A correction there would be adopted, the adoption
+    // clamps the VFO back under Nyquist, and the crossover could never be
+    // reached by scrolling again. Reception in the sliver is aliased
+    // regardless, so there is no truth to protect.
+    if p.band == Band::Hf && dial_hz > adc_rate_hz / 2.0 {
+        return dial_hz;
     }
+    band::achieved_dial_center_hz(&p, adc_rate_hz, out_rate_hz)
 }
 
 pub struct Rx888Source {

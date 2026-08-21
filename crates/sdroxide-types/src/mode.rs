@@ -538,6 +538,15 @@ impl Mode {
         }
     }
 
+    /// Whether the audio-chain AGC runs in this mode. An FM discriminator's
+    /// output level is set by deviation, not signal strength, so there is
+    /// nothing for an AGC to level — it can only pump on the noise between
+    /// overs and breathe with the modulation. FM chains pass audio at unity
+    /// gain instead, and the UI draws no AGC control for them.
+    pub fn audio_agc(self) -> bool {
+        !matches!(self, Mode::Nfm | Mode::Wfm)
+    }
+
     /// Furthest a filter edge may be dragged from the carrier — bounded by
     /// the mode's DSP channel bandwidth.
     pub fn max_filter_hz(self) -> f32 {

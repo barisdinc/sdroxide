@@ -1767,42 +1767,47 @@ impl SdroxideApp {
             // opens a second popup layer, and clicking it counts as
             // "outside" and closes the menu it was opened from. Four
             // settings is few enough to walk through anyway.
-            let agc = self.state.rx[0].agc;
-            if crate::chrome::chip(ui, agc != AgcMode::Off, format!("AGC {}", agc.label()))
-                .on_hover_text("AGC hang time — click to cycle: Off / Slow / Med / Fast")
-                .clicked()
-            {
-                cmds.push(Command::SetAgc { rx: RxId::Main, agc: agc.next() });
-            }
-            // With the AGC off the audio rides on this fixed gain instead. It
-            // has to be here: unlevelled, the demodulator's output is whatever
-            // the band handed it, and a weak SSB signal is tens of dB below
-            // anything the volume control can reach. Switching the AGC off
-            // seeds it from where the AGC had settled, so this starts in the
-            // right place and only needs trimming.
-            if agc == AgcMode::Off {
-                let mut db = self.state.rx[0].manual_gain_db;
-                ui.label("Man");
-                let resp = ui
-                    .scope(|ui| {
-                        if !narrow {
-                            ui.spacing_mut().slider_width = RX_DB_RAIL_W;
-                        }
-                        crate::chrome::slider(
-                            ui,
-                            Slider::new(&mut db, 0.0..=sdroxide_types::MAX_MANUAL_GAIN_DB)
-                                .step_by(1.0)
-                                .suffix(" dB"),
-                        )
-                    })
-                    .inner
-                    .on_hover_text(
-                        "Manual audio gain, used while the AGC is off. Seeded from \
-                         the level the AGC was holding when it was switched off.",
-                    );
-                if resp.changed() {
-                    self.state.rx[0].manual_gain_db = db; // optimistic echo
-                    cmds.push(Command::SetManualGain { rx: RxId::Main, db });
+            //
+            // Not drawn at all in FM, where the chain bypasses the AGC
+            // (Mode::audio_agc) and the chip would do nothing.
+            if self.state.rx[0].mode.audio_agc() {
+                let agc = self.state.rx[0].agc;
+                if crate::chrome::chip(ui, agc != AgcMode::Off, format!("AGC {}", agc.label()))
+                    .on_hover_text("AGC hang time — click to cycle: Off / Slow / Med / Fast")
+                    .clicked()
+                {
+                    cmds.push(Command::SetAgc { rx: RxId::Main, agc: agc.next() });
+                }
+                // With the AGC off the audio rides on this fixed gain instead.
+                // It has to be here: unlevelled, the demodulator's output is
+                // whatever the band handed it, and a weak SSB signal is tens of
+                // dB below anything the volume control can reach. Switching the
+                // AGC off seeds it from where the AGC had settled, so this
+                // starts in the right place and only needs trimming.
+                if agc == AgcMode::Off {
+                    let mut db = self.state.rx[0].manual_gain_db;
+                    ui.label("Man");
+                    let resp = ui
+                        .scope(|ui| {
+                            if !narrow {
+                                ui.spacing_mut().slider_width = RX_DB_RAIL_W;
+                            }
+                            crate::chrome::slider(
+                                ui,
+                                Slider::new(&mut db, 0.0..=sdroxide_types::MAX_MANUAL_GAIN_DB)
+                                    .step_by(1.0)
+                                    .suffix(" dB"),
+                            )
+                        })
+                        .inner
+                        .on_hover_text(
+                            "Manual audio gain, used while the AGC is off. Seeded from \
+                             the level the AGC was holding when it was switched off.",
+                        );
+                    if resp.changed() {
+                        self.state.rx[0].manual_gain_db = db; // optimistic echo
+                        cmds.push(Command::SetManualGain { rx: RxId::Main, db });
+                    }
                 }
             }
         });
@@ -3268,11 +3273,17 @@ fn rx_rows_w(ui: &egui::Ui, gain: bool, decim: bool, agc_off: bool, mode: Mode) 
         rx_row += g + chip("DEC off").max(chip("DEC /64"));
     }
     // At the widest of the four settings, so the box does not change width —
-    // and the strip does not re-break its rows — as the AGC is cycled.
-    rx_row +=
-        g + AgcMode::ALL.iter().map(|a| chip(&format!("AGC {}", a.label()))).fold(0.0, f32::max);
-    if agc_off {
-        rx_row += g + label("Man") + g + db_rail_w(ui);
+    // and the strip does not re-break its rows — as the AGC is cycled. In FM
+    // the chain bypasses the AGC and neither the chip nor the manual rail is
+    // drawn at all (Mode::audio_agc).
+    if mode.audio_agc() {
+        rx_row += g + AgcMode::ALL
+            .iter()
+            .map(|a| chip(&format!("AGC {}", a.label())))
+            .fold(0.0, f32::max);
+        if agc_off {
+            rx_row += g + label("Man") + g + db_rail_w(ui);
+        }
     }
 
     // Filter / noise: the squelch rail and its readout — the deepest threshold
@@ -4669,23 +4680,27 @@ mod tests {
                                     if decim {
                                         crate::chrome::chip(ui, false, "DEC /64");
                                     }
-                                    // The widest of the four AGC settings.
-                                    crate::chrome::chip(ui, true, "AGC Slow");
-                                    if agc_off {
-                                        let mut man = sdroxide_types::MAX_MANUAL_GAIN_DB;
-                                        ui.label("Man");
-                                        ui.scope(|ui| {
-                                            ui.spacing_mut().slider_width = RX_DB_RAIL_W;
-                                            crate::chrome::slider(
-                                                ui,
-                                                Slider::new(
-                                                    &mut man,
-                                                    0.0..=sdroxide_types::MAX_MANUAL_GAIN_DB,
-                                                )
-                                                .step_by(1.0)
-                                                .suffix(" dB"),
-                                            );
-                                        });
+                                    // The widest of the four AGC settings —
+                                    // absent in FM, where the box draws no
+                                    // AGC control (Mode::audio_agc).
+                                    if mode.audio_agc() {
+                                        crate::chrome::chip(ui, true, "AGC Slow");
+                                        if agc_off {
+                                            let mut man = sdroxide_types::MAX_MANUAL_GAIN_DB;
+                                            ui.label("Man");
+                                            ui.scope(|ui| {
+                                                ui.spacing_mut().slider_width = RX_DB_RAIL_W;
+                                                crate::chrome::slider(
+                                                    ui,
+                                                    Slider::new(
+                                                        &mut man,
+                                                        0.0..=sdroxide_types::MAX_MANUAL_GAIN_DB,
+                                                    )
+                                                    .step_by(1.0)
+                                                    .suffix(" dB"),
+                                                );
+                                            });
+                                        }
                                     }
                                     ui.min_rect().width()
                                 })
