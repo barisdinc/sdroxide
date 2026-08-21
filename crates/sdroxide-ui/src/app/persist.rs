@@ -201,10 +201,11 @@ pub(in crate::app) fn spawn_band_conditions_fetch()
 /// Ask sdroxide.com for the released version on a worker thread.
 ///
 /// Off the UI thread because it is a network round trip; the app picks the
-/// result up from the receiver on a later frame. A version only arrives on the
-/// channel when it differs from the running build *and* from the one whose
-/// banner the operator already dismissed — an unreachable site, a current
-/// build and a dismissed release all just let the channel close quietly.
+/// result up from the receiver on a later frame. A version only arrives on
+/// the channel when it is strictly newer than the running build *and* differs
+/// from the one whose banner the operator already dismissed — an unreachable
+/// site, a current or ahead-of-release build and a dismissed release all just
+/// let the channel close quietly.
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::app) fn spawn_update_check() -> Option<std::sync::mpsc::Receiver<String>> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -212,7 +213,7 @@ pub(in crate::app) fn spawn_update_check() -> Option<std::sync::mpsc::Receiver<S
         .name("update-check".into())
         .spawn(move || {
             let Some(published) = sdroxide_config::fetch_published_version() else { return };
-            if published != env!("CARGO_PKG_VERSION")
+            if sdroxide_config::version_is_newer(&published, env!("CARGO_PKG_VERSION"))
                 && published != sdroxide_config::load_dismissed_update()
             {
                 let _ = tx.send(published);

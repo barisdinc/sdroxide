@@ -102,8 +102,8 @@ pub struct Settings {
     /// Preferred audio input (microphone) device name; `None` = system default.
     pub audio_input: Option<String>,
     /// The published version the operator dismissed the update banner for.
-    /// The banner stays away until sdroxide.com names a version that differs
-    /// from both this and the running build. Empty = nothing dismissed.
+    /// The banner stays away until sdroxide.com names a newer version than
+    /// the running build that is also not this one. Empty = nothing dismissed.
     pub dismissed_update: String,
     /// The ITU / IARU region this station is in, which decides every band edge
     /// and sub-segment sdroxide draws and enforces.
@@ -1490,6 +1490,25 @@ fn parse_published_version(js: &str) -> Option<String> {
     None
 }
 
+/// Whether `candidate` is a strictly newer version than `current`, comparing
+/// dotted components numerically — so `1.10.0` beats `1.9.9`, and a build
+/// ahead of the published release (this machine running `1.4.0` while the
+/// site still says `1.3.2`) is *not* offered its own past as an update.
+/// Missing components count as zero, so `1.4` and `1.4.0` are the same.
+pub fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0)).collect()
+    };
+    let (a, b) = (parts(candidate), parts(current));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 /// The published version the operator last dismissed the update banner for.
 pub fn load_dismissed_update() -> String {
     Settings::load().dismissed_update
@@ -1544,6 +1563,18 @@ mod tests {
         assert_eq!(parse_published_version("<html>404</html>"), None);
         assert_eq!(parse_published_version(r#"version: "v1.3.2""#), None);
         assert_eq!(parse_published_version("version: 1.3.2"), None);
+    }
+
+    #[test]
+    fn version_is_newer_compares_numerically() {
+        assert!(version_is_newer("1.4.0", "1.3.2"));
+        assert!(version_is_newer("1.10.0", "1.9.9"));
+        assert!(version_is_newer("2.0", "1.9.9"));
+        // Equal — including a missing trailing component — is not newer.
+        assert!(!version_is_newer("1.4.0", "1.4.0"));
+        assert!(!version_is_newer("1.4", "1.4.0"));
+        // A build ahead of the published release is not offered its own past.
+        assert!(!version_is_newer("1.3.2", "1.4.0"));
     }
 
     #[test]

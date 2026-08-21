@@ -219,7 +219,7 @@ pub struct UiSettings {
     /// factor, so the spacing around the text follows it and the waterfall and
     /// skimmer sizes below are relative to it. `Medium` is the historic size.
     pub menu_font_size: FontSize,
-    /// Ask sdroxide.com once per start whether a different release has been
+    /// Ask sdroxide.com once per start whether a newer release has been
     /// published, and say so in the notice banner above the panadapter. In
     /// `[ui]` because it is this screen's preference, like the theme — the
     /// native client checks for its own build, wherever its radio is.

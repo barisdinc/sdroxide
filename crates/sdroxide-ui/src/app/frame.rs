@@ -258,8 +258,8 @@ impl eframe::App for SdroxideApp {
                 });
         }
         // The startup version check landing. At most one message ever comes:
-        // the worker only sends a release that differs from this build and
-        // was not already dismissed, then hangs up — as it also does, without
+        // the worker only sends a release newer than this build that was not
+        // already dismissed, then hangs up — as it also does, without
         // sending, when the site is unreachable or nothing is new.
         if let Some(rx) = &self.update_fetch {
             match rx.try_recv() {
@@ -271,7 +271,7 @@ impl eframe::App for SdroxideApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        // A different release on sdroxide.com — the radio warnings' banner in
+        // A newer release on sdroxide.com — the radio warnings' banner in
         // the same place, but its Dismiss also remembers the version, so the
         // banner stays away until the *next* release ships.
         if let Some(version) = self.update_notice.clone() {

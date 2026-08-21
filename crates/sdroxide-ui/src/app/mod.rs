@@ -124,7 +124,7 @@ pub struct SdroxideApp {
     /// Persistent, non-fatal operator notice (e.g. radio audio input
     /// unavailable / mono card selected for IQ). Shown as a warning banner.
     radio_notice: Option<String>,
-    /// A different release published on sdroxide.com — the version string
+    /// A newer release published on sdroxide.com — the version string
     /// itself. Set at most once, when the startup check lands; drawn in the
     /// notice banner's clothes above the panadapter, with a Dismiss that also
     /// remembers the version so the banner returns only for the next release.
