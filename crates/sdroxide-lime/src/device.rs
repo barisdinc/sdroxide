@@ -292,6 +292,35 @@ pub fn auto_lpf_bw(rate_hz: f64, range: ffi::Range) -> f64 {
     if range.max > range.min && range.min > 0.0 { want.clamp(range.min, range.max) } else { want }
 }
 
+/// Below this, LimeSuite parks the synthesiser *at* it and the TSP NCO makes
+/// up the difference — the LMS7002M's SX simply stops at 30 MHz
+/// (`LMS7_Device::SetFrequency`).
+pub const NCO_LO_FLOOR_HZ: f64 = 30e6;
+
+/// The analog filter width to actually program, given the width the operator
+/// wants and the centre the synthesiser is about to be handed.
+///
+/// Above 30 MHz this is the wanted width unchanged. Below it, the NCO trick
+/// above puts the wanted signal up to 30 MHz away from DC *inside the analog
+/// chain* — LimeSuite retunes the data converters to span that offset but
+/// leaves the analog low-pass wherever it was told (`LMS7_Device::SetLPF`
+/// tunes around DC, NCO-blind). A filter chosen from the sample rate alone
+/// then sits with its corner at a few MHz while the signal rides at 8–28 MHz,
+/// which on transmit is the difference between full power and milliwatts —
+/// issue #118's "TX very low compared to SDR-Console" was exactly this.
+///
+/// The floor is the worst case for the whole of HF rather than the current
+/// offset, deliberately: retuning these filters costs LimeSuite's MCU a few
+/// hundred milliseconds, so the only boundary an ordinary tune may cross is
+/// 30 MHz itself, once — never band-to-band within HF.
+pub fn effective_lpf_bw(want_hz: f64, center_hz: f64, rate_hz: f64, range: ffi::Range) -> f64 {
+    let mut bw = want_hz;
+    if center_hz < NCO_LO_FLOOR_HZ {
+        bw = bw.max((2.0 * NCO_LO_FLOOR_HZ + rate_hz) * 1.25);
+    }
+    if range.max > range.min && range.min > 0.0 { bw.clamp(range.min, range.max) } else { bw }
+}
+
 /// The receive port to use when the operator has not named one.
 ///
 /// LimeSuite has an "auto" value for this, but what it does is undocumented, so
@@ -341,6 +370,41 @@ mod tests {
         let range = ffi::Range { min: 1.4e6, max: 130.0e6, step: 0.0 };
         assert_eq!(auto_lpf_bw(0.2e6, range), 1.4e6, "clamped up to the minimum");
         assert_eq!(auto_lpf_bw(200.0e6, range), 130.0e6, "clamped down to the maximum");
+    }
+
+    /// Below 30 MHz the synthesiser parks there and the NCO carries the rest,
+    /// so the signal rides at the offset inside the analog chain — the filter
+    /// must span it, or transmit comes out at milliwatts (issue #118).
+    #[test]
+    fn below_30_mhz_the_filter_opens_for_the_nco_offset() {
+        let range = ffi::Range { min: 5.0e6, max: 130.0e6, step: 0.0 };
+        let rate = 5.0e6;
+        let want = auto_lpf_bw(rate, range);
+        let hf = effective_lpf_bw(want, 14.1e6, rate, range);
+        assert!(
+            hf >= 2.0 * NCO_LO_FLOOR_HZ + rate,
+            "{hf} does not span the worst NCO offset plus the span"
+        );
+        // One figure for the whole of HF: tuning band to band below 30 MHz
+        // must never land the slow filter retune.
+        assert_eq!(hf, effective_lpf_bw(want, 1.8e6, rate, range));
+        assert_eq!(hf, effective_lpf_bw(want, 29.9e6, rate, range));
+        // Above the boundary the wanted width passes through untouched.
+        assert_eq!(effective_lpf_bw(want, 145.5e6, rate, range), want);
+        // And the chip's ceiling holds where the floor would pass it.
+        let fast = effective_lpf_bw(auto_lpf_bw(61.44e6, range), 14.1e6, 61.44e6, range);
+        assert!(fast <= range.max);
+    }
+
+    /// A hand-set narrow filter gets the same floor: the operator's number is
+    /// a width for the *signal*, not permission to park the passband 20 MHz
+    /// away from where the NCO put it.
+    #[test]
+    fn the_nco_floor_applies_to_a_hand_set_width_too() {
+        let range = ffi::Range { min: 5.0e6, max: 130.0e6, step: 0.0 };
+        let hf = effective_lpf_bw(2.5e6, 14.1e6, 2.0e6, range);
+        assert!(hf >= 2.0 * NCO_LO_FLOOR_HZ + 2.0e6);
+        assert_eq!(effective_lpf_bw(8.0e6, 145.5e6, 2.0e6, range), 8.0e6);
     }
 
     #[test]

@@ -68,7 +68,20 @@ pub struct LimeHandle {
     rate: f64,
     center: f64,
     tx_center: f64,
+    /// The receive filter actually in force — on HF this is wider than asked;
+    /// see [`device::effective_lpf_bw`].
     analog_bw: f64,
+    /// The receive filter width the operator (or the automatic choice) asked
+    /// for, kept so a retune across 30 MHz can recompute what to program.
+    lpf_rx_want: f64,
+    lpf_tx_want: f64,
+    /// The transmit filter actually in force, compared against on every
+    /// key-down so the slow retune only happens when the answer changes.
+    tx_lpf_applied: f64,
+    /// The filter ranges, read once — `set_center_hz` is the panadapter's drag
+    /// path and should not make even a cheap FFI call it does not need.
+    lpf_range_rx: ffi::Range,
+    lpf_range_tx: ffi::Range,
 
     antennas_rx: Vec<String>,
     antennas_tx: Vec<String>,
@@ -137,8 +150,17 @@ impl LimeHandle {
 
         let lpf_range =
             ctl.lpf_range(false).unwrap_or(ffi::Range { min: 0.0, max: 0.0, step: 0.0 });
-        let analog_bw =
+        let lpf_rx_want =
             if cfg.lpf_rx_hz > 0.0 { cfg.lpf_rx_hz } else { device::auto_lpf_bw(rate, lpf_range) };
+        let analog_bw = device::effective_lpf_bw(lpf_rx_want, center_hz, rate, lpf_range);
+        if analog_bw > lpf_rx_want {
+            tracing::info!(
+                "below 30 MHz the signal rides at the NCO offset inside the analog chain, so \
+                 the receive filter opens to {:.1} MHz (instead of {:.1} MHz)",
+                analog_bw / 1e6,
+                lpf_rx_want / 1e6
+            );
+        }
         ctl.set_lpf_bw(false, analog_bw)?;
 
         ctl.set_lo(false, center_hz)?;
@@ -156,13 +178,20 @@ impl LimeHandle {
         ctl.set_gain_db(false, cfg.rx_gain_db)?;
 
         let mut antenna_tx = String::new();
+        let lpf_range_tx = ctl.lpf_range(true).unwrap_or(lpf_range);
+        let lpf_tx_want = if cfg.lpf_tx_hz > 0.0 {
+            cfg.lpf_tx_hz
+        } else {
+            device::auto_lpf_bw(rate, lpf_range_tx)
+        };
+        let mut tx_lpf_applied = 0.0;
         if want_tx {
-            let tx_bw = if cfg.lpf_tx_hz > 0.0 {
-                cfg.lpf_tx_hz
-            } else {
-                device::auto_lpf_bw(rate, ctl.lpf_range(true).unwrap_or(lpf_range))
-            };
-            let _ = ctl.set_lpf_bw(true, tx_bw);
+            // Same 30 MHz rule as the receive filter above — this one is the
+            // whole difference between full power and milliwatts on HF.
+            let tx_bw = device::effective_lpf_bw(lpf_tx_want, center_hz, rate, lpf_range_tx);
+            if ctl.set_lpf_bw(true, tx_bw).is_ok() {
+                tx_lpf_applied = tx_bw;
+            }
             antenna_tx = if cfg.antenna_tx.trim().is_empty() {
                 device::auto_antenna_tx(&antennas_tx).unwrap_or_default()
             } else {
@@ -179,10 +208,14 @@ impl LimeHandle {
             // Best-effort: an uncalibrated radio still receives, and refusing
             // to open because the calibration would not converge would be a
             // poor trade. The image is visible and the log says why.
-            if let Err(e) = ctl.calibrate(false, analog_bw) {
+            //
+            // Calibrated for the *wanted* width, not the NCO-widened filter:
+            // the span the operator uses is what the DC and image corrections
+            // should be best over.
+            if let Err(e) = ctl.calibrate(false, lpf_rx_want) {
                 tracing::warn!("LimeSDR receive calibration failed, continuing: {e}");
             }
-            if want_tx && let Err(e) = ctl.calibrate(true, analog_bw) {
+            if want_tx && let Err(e) = ctl.calibrate(true, lpf_tx_want) {
                 tracing::warn!("LimeSDR transmit calibration failed, continuing: {e}");
             }
         }
@@ -255,6 +288,11 @@ impl LimeHandle {
             center: center_hz,
             tx_center: center_hz,
             analog_bw,
+            lpf_rx_want,
+            lpf_tx_want,
+            tx_lpf_applied,
+            lpf_range_rx: lpf_range,
+            lpf_range_tx,
             antennas_rx,
             antennas_tx,
             antenna_rx,
@@ -350,6 +388,29 @@ impl LimeHandle {
             self.ctl().set_antenna_named(false, &want)?;
             self.antenna_rx = want;
         }
+        // Crossing 30 MHz changes which side of the NCO trick the filter has
+        // to serve (see `device::effective_lpf_bw`). The answer is constant on
+        // each side, so this slow call fires only on the crossing itself —
+        // never while dragging around within a band. Best-effort: a tune that
+        // succeeded is not refused because the filter would not follow.
+        let bw = device::effective_lpf_bw(self.lpf_rx_want, hz, self.rate, self.lpf_range_rx);
+        if (bw - self.analog_bw).abs() > 1.0 {
+            let retuned = self.ctl().set_lpf_bw(false, bw);
+            match retuned {
+                Ok(()) => {
+                    tracing::info!(
+                        "receive filter retuned to {:.1} MHz for the 30 MHz crossing",
+                        bw / 1e6
+                    );
+                    self.analog_bw = bw;
+                    // LimeSuite's filter tuning moves the receive gain stages
+                    // and does not put them back (its `SetLPF` preserves only
+                    // the transmit IAMP).
+                    let _ = self.ctl().set_gain_db(false, self.rx_gain_db);
+                }
+                Err(e) => tracing::warn!("receive filter did not follow the tune: {e}"),
+            }
+        }
         Ok(())
     }
 
@@ -381,14 +442,31 @@ impl LimeHandle {
 
     pub fn set_lpf_bw(&mut self, tx: bool, hz: f64) -> Result<()> {
         self.ensure_open()?;
-        let hz = if hz > 0.0 {
-            hz
+        let range = if tx { self.lpf_range_tx } else { self.lpf_range_rx };
+        let want = if hz > 0.0 { hz } else { device::auto_lpf_bw(self.rate, range) };
+        // The 30 MHz floor applies to the operator's number too: a hand-set
+        // 2.5 MHz filter under a 14 MHz dial is a transmitter at milliwatts
+        // and a half-deaf receiver, which nobody has ever meant.
+        let center = if tx { self.tx_center } else { self.center };
+        let bw = device::effective_lpf_bw(want, center, self.rate, range);
+        if bw > want {
+            tracing::info!(
+                "the {} filter opens to {:.1} MHz (asked {:.1} MHz): below 30 MHz the signal \
+                 rides at the NCO offset inside the analog chain",
+                if tx { "transmit" } else { "receive" },
+                bw / 1e6,
+                want / 1e6
+            );
+        }
+        self.ctl().set_lpf_bw(tx, bw)?;
+        if tx {
+            self.lpf_tx_want = want;
+            self.tx_lpf_applied = bw;
         } else {
-            device::auto_lpf_bw(self.rate, self.ctl().lpf_range(tx).unwrap_or_default())
-        };
-        self.ctl().set_lpf_bw(tx, hz)?;
-        if !tx {
-            self.analog_bw = hz;
+            self.lpf_rx_want = want;
+            self.analog_bw = bw;
+            // See `set_center_hz`: the filter tuning moves the gain stages.
+            let _ = self.ctl().set_gain_db(false, self.rx_gain_db);
         }
         Ok(())
     }
@@ -397,10 +475,13 @@ impl LimeHandle {
     /// it stalls whatever thread calls it for the better part of a second.
     pub fn calibrate(&mut self) -> Result<()> {
         self.ensure_open()?;
-        let bw = self.analog_bw;
+        // The wanted widths, not the NCO-widened filters: the span the
+        // operator uses is what the corrections should be best over.
+        let bw = self.lpf_rx_want;
         self.ctl().calibrate(false, bw)?;
         if self.tx.is_some() {
-            self.ctl().calibrate(true, bw)?;
+            let tx_bw = self.lpf_tx_want;
+            self.ctl().calibrate(true, tx_bw)?;
         }
         Ok(())
     }
@@ -544,6 +625,37 @@ impl LimeHandle {
         self.ensure_open()?;
         if self.tx.is_none() {
             return Err(Error::api("LMS_StartStream", "the transmitter is not armed".into()));
+        }
+        // The transmit filter has to serve the right side of the 30 MHz NCO
+        // boundary for the frequency this over is on (see
+        // `device::effective_lpf_bw` — below it, a rate-derived filter
+        // transmits milliwatts). The answer is constant on each side, so the
+        // slow retune fires only when a band change actually crossed over;
+        // an ordinary key-down compares two numbers and moves on.
+        let bw =
+            device::effective_lpf_bw(self.lpf_tx_want, center_hz, self.rate, self.lpf_range_tx);
+        if (bw - self.tx_lpf_applied).abs() > 1.0 {
+            let retuned = self.ctl().set_lpf_bw(true, bw);
+            match retuned {
+                Ok(()) => {
+                    self.tx_lpf_applied = bw;
+                    tracing::info!(
+                        "transmit filter retuned to {:.1} MHz for the 30 MHz crossing",
+                        bw / 1e6
+                    );
+                }
+                // A filter already wider than needed still passes the signal,
+                // so an over is not refused because the *narrowing* failed.
+                // One too narrow would go out at milliwatts — that over is
+                // refused with the reason in hand.
+                Err(e) if self.tx_lpf_applied >= bw => {
+                    tracing::warn!(
+                        "transmit filter stayed at {:.1} MHz: {e}",
+                        self.tx_lpf_applied / 1e6
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         }
         // Retune before taking hold of the stream: the device lock and the
         // stream borrow must not overlap, and the LO is the device's.

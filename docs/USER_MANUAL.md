@@ -5616,6 +5616,12 @@ where the library is absent.
   Worth leaving there: a filter narrower than a quarter of the span silently
   withdraws the zero-IF LO offset, which puts the LO leakage back on top of what
   you are listening to rather than merely softening the band edges.
+  **Below 30 MHz the filter opens far wider than either figure**, on purpose:
+  the LMS7002M's synthesisers stop at 30 MHz, so on HF the chip parks its LO
+  there and an internal NCO makes up the difference — the signal then rides at
+  up to 30 MHz *inside* the analog chain, and a filter that ignored this would
+  receive half-deaf and transmit at milliwatts. The digital filters keep the
+  selectivity either way.
 - **Corrections** — host-side IQ/DC correction on top of the chip's own
   calibration, whether to calibrate when the radio opens (about a second), and
   **Calibrate now**. Turning the host correction off is the one-click way to
