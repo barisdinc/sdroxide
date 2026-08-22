@@ -1,0 +1,102 @@
+//! Asking for the next frame at a rate that is the rate asked for.
+//!
+//! [`egui::Context::request_repaint_after`] does not schedule a wake-up in the
+//! duration handed to it. It first subtracts
+//! [`egui::InputState::predicted_dt`] — "make it less likely we over-shoot the
+//! target", `egui/src/context.rs` — on the theory that a repaint asked for in
+//! `d` should be *on screen* by `d`, so the pass has to start a frame early.
+//!
+//! That reasoning only holds while `predicted_dt` is a measurement. It is not:
+//! neither `eframe` nor `egui-winit` ever writes the field, so it keeps its
+//! `RawInput` default of 1/60 s on every native and web build, and the
+//! subtraction is a flat 16.67 ms taken off every request. Measured against
+//! egui 0.35 (an eleven-line eframe app asking for one fixed delay, X11 and
+//! Wayland alike, at both 60 Hz and 144 Hz output):
+//!
+//! | asked | got |
+//! |---|---|
+//! | 200 ms | 184 ms |
+//! | 66 ms | 50 ms |
+//! | 33 ms | 16.5 ms |
+//! | ≤ 17 ms | *no delay at all* |
+//!
+//! The last row is the one that mattered. sdroxide's frame scheduler asks for
+//! `1000 / frame_rate_fps` ms, so the default 60 fps asked for 16 ms, the
+//! subtraction floored it at zero, and the UI thread stopped being paced at
+//! all: it redrew as fast as the machine would let it, which is the definition
+//! of one saturated core. On a fast desktop that looked like a harmless 85 fps;
+//! on a thin laptop it looked like the whole application living on one core
+//! (issue: 8-core Lunar Lake, `sdroxide` pegged at 99 %).
+//!
+//! So every place that wants a *cadence* — a meter that creeps, a waterfall
+//! that scrolls, the frame scheduler itself — goes through here, which adds
+//! back exactly what egui is about to take off. Reading `predicted_dt` rather
+//! than hard-coding 16.67 ms keeps the compensation exact if egui ever starts
+//! filling the field in for real.
+
+use std::time::Duration;
+
+use eframe::egui;
+
+/// Ask for the next pass in `delay`, and mean it.
+///
+/// Drop-in for [`egui::Context::request_repaint_after`]; see the module docs
+/// for why calling that directly does not do what it says.
+pub fn after(ctx: &egui::Context, delay: Duration) {
+    // What `Context::request_repaint_after` is about to subtract. `predicted_dt`
+    // is seconds as `f32` and always positive, so the conversion cannot fail —
+    // but a zero on the error path only leaves egui's own behaviour in place.
+    let bias = Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or(Duration::ZERO);
+    ctx.request_repaint_after(delay + bias);
+}
+
+/// [`after`] in whole milliseconds, which is how most callers say it.
+pub fn after_ms(ctx: &egui::Context, ms: u64) {
+    after(ctx, Duration::from_millis(ms));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive one headless pass that asks for a repaint, and report the delay
+    /// egui actually scheduled for the root viewport.
+    fn scheduled(ask: impl Fn(&egui::Context)) -> Duration {
+        let ctx = egui::Context::default();
+        // A fresh context repaints immediately for its first few passes while
+        // fonts and layout settle, so run several and read the last — by then
+        // the only thing asking for a repaint is `ask`.
+        let mut delay = None;
+        for _ in 0..4 {
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| ask(ui.ctx()));
+            delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        }
+        delay.expect("no root viewport output")
+    }
+
+    /// The bug this module exists for: egui takes `predicted_dt` — a hard-coded
+    /// 1/60 s, since no backend ever fills the field in — off every request.
+    /// Pinned here so an egui upgrade that changes it is visible rather than
+    /// silent, in either direction: the compensation is written against this.
+    #[test]
+    fn egui_shortens_a_bare_request_by_one_sixtieth_of_a_second() {
+        let got = scheduled(|ctx| ctx.request_repaint_after(Duration::from_millis(33)));
+        assert!(
+            (16..=18).contains(&got.as_millis()),
+            "expected 33 ms minus the 16.7 ms bias, got {got:?}"
+        );
+        // Anything at or under the bias loses its delay entirely, which is what
+        // turned the 60 fps default into an unthrottled render loop.
+        let got = scheduled(|ctx| ctx.request_repaint_after(Duration::from_millis(16)));
+        assert_eq!(got, Duration::ZERO, "a 16 ms request should be floored to no delay at all");
+    }
+
+    #[test]
+    fn the_helper_schedules_the_delay_it_was_asked_for() {
+        for ms in [16_u64, 33, 66, 200] {
+            let got = scheduled(|ctx| after_ms(ctx, ms));
+            let got_ms = got.as_millis() as i64;
+            assert!((got_ms - ms as i64).abs() <= 1, "asked {ms} ms, egui scheduled {got_ms} ms");
+        }
+    }
+}

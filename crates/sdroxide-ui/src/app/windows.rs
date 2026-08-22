@@ -5,8 +5,6 @@
 //! backend, the keyer slots from the audio engine — so all either does is
 //! draw the list and push the [`Command`] a click means.
 
-use std::time::Duration;
-
 use eframe::egui::{self, Color32, RichText};
 use sdroxide_types::{Command, MemoryChannel, MemoryFolder};
 
@@ -548,7 +546,7 @@ impl SdroxideApp {
         // Keep the position readout moving while something is running; the app
         // otherwise idles between spectrum frames.
         if self.voice.busy() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            crate::repaint::after_ms(ctx, 100);
         }
         self.show_voice = open;
     }

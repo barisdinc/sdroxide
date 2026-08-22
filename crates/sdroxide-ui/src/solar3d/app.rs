@@ -67,9 +67,7 @@ impl SolarApp {
             cc.storage.and_then(|s| eframe::get_value(s, STORAGE_KEY)).unwrap_or_default();
 
         let ctx = cc.egui_ctx.clone();
-        let net = SolarClient::connect(url, move || {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33))
-        })?;
+        let net = SolarClient::connect(url, move || crate::repaint::after_ms(&ctx, 33))?;
 
         let mut state = SolarUi::new(view);
         state.data = Some(net.shared());
@@ -135,7 +133,7 @@ impl eframe::App for SolarApp {
             if let Some(login) = crate::login::screen(ui, &mut self.login, &phase, rs) {
                 self.net.send_auth(login.username, login.password);
             }
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            crate::repaint::after_ms(ui.ctx(), 250);
             return;
         }
 

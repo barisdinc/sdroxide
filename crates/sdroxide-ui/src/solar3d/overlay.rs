@@ -122,7 +122,7 @@ impl Place {
 const IDLE_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 pub fn ui(ui: &mut egui::Ui, st: &mut SolarUi) {
-    ui.ctx().request_repaint_after(IDLE_FRAME);
+    crate::repaint::after(ui.ctx(), IDLE_FRAME);
     // Take a snapshot of the feed's data for this frame. Cloning the `Arc`
     // first means the guard's lifetime is not tied to `st`, which is borrowed
     // mutably by every module below.
@@ -1185,7 +1185,7 @@ fn qso_card(
     if typing || elapsed < lines.len() as f64 * CARD_LINE_S + 1.0 {
         ui.ctx().request_repaint();
     } else {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+        crate::repaint::after_ms(ui.ctx(), 120);
     }
 }
 

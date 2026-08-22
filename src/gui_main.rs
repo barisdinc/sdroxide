@@ -323,7 +323,7 @@ fn connect_remote(
     let ctrl = sdroxide_ui::RemoteController::connect(
         url,
         Some(Box::new(CpalBridge::open())),
-        move || ctx.request_repaint_after(std::time::Duration::from_millis(33)),
+        move || sdroxide_ui::repaint::after_ms(&ctx, 33),
     )?;
     // Named after the address, minus the parts every server shares — the shell
     // overrides this with whatever the operator typed when the connection came

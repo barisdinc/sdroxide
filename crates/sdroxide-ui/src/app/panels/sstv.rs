@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 use sdroxide_types::{
@@ -620,7 +619,7 @@ impl SdroxideApp {
             self.sstv.preview_dirty = true;
         }
         self.sstv.ensure_preview(dims, &ctx);
-        ctx.request_repaint_after(Duration::from_millis(120));
+        crate::repaint::after_ms(&ctx, 120);
 
         let st = self.sstv.status;
         let (signal, tx_active, progress) = if rifp {

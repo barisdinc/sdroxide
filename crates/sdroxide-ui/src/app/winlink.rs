@@ -668,7 +668,7 @@ impl crate::app::SdroxideApp {
                     });
                     // Keep the transcript moving while a session is live; there
                     // is no other repaint source when the radio is idle.
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                    crate::repaint::after_ms(ui.ctx(), 250);
                     ui.separator();
                 }
 

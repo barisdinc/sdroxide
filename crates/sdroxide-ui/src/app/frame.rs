@@ -5,8 +5,6 @@
 //! so the frame draws the newest state, and the repaint request at the end is
 //! what keeps the app idling instead of spinning when no stream is flowing.
 
-use std::time::Duration;
-
 use eframe::egui::{self, Color32, RichText};
 use sdroxide_types::{Band, Command, Mode, RadioEvent, SpectrumConfig, Spot};
 
@@ -166,7 +164,7 @@ impl eframe::App for SdroxideApp {
             }
             // The socket wakes the UI when the server answers; this is only so
             // a spinner-less "CHECKING…" cannot look like a hung window.
-            ctx.request_repaint_after(Duration::from_millis(IDLE_POLL_MS));
+            crate::repaint::after_ms(&ctx, IDLE_POLL_MS);
             return;
         }
 
@@ -865,7 +863,7 @@ impl eframe::App for SdroxideApp {
                 let ms = ((at - now).max(0.0) * 1000.0).ceil() as u64;
                 wait_ms = wait_ms.min(ms.max(1));
             }
-            ctx.request_repaint_after(Duration::from_millis(wait_ms));
+            crate::repaint::after_ms(&ctx, wait_ms);
         }
     }
 

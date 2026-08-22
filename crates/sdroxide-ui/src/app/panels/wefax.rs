@@ -5,8 +5,6 @@
 //! the panel shows is a texture being written to rather than a finished image.
 //! The station chip tunes the well-known schedules without leaving the panel.
 
-use std::time::Duration;
-
 use eframe::egui::{self, RichText};
 use sdroxide_types::Command;
 
@@ -50,7 +48,7 @@ impl SdroxideApp {
         }
         // A chart arrives at two lines a second; there is no need to chase it
         // any faster than the eye can follow.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        crate::repaint::after_ms(&ctx, 200);
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("WEFAX").size(12.0).strong().color(theme::CYAN()));

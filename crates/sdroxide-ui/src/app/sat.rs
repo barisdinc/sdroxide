@@ -487,7 +487,7 @@ fn pass_diagram(ui: &mut egui::Ui, curve: &PassCurve, now: i64, height: f32) {
         p.circle_filled(dot, 2.2, pink);
         // The marker is the only thing on here that moves; keep it moving even
         // when nothing else asks for a frame.
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        crate::repaint::after(ui.ctx(), std::time::Duration::from_secs(1));
     }
 
     // --- caption and frame -------------------------------------------------

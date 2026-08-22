@@ -217,7 +217,7 @@ pub(in crate::app) fn slot_bar(
     // frame is enough to read as moving without asking a phone to redraw the
     // panel sixty times a second for a strip five pixels tall.
     let step_ms = (t.slot_s * 1000.0 / 400.0).clamp(80.0, 250.0);
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(step_ms as u64));
+    crate::repaint::after_ms(ui.ctx(), step_ms as u64);
 
     let (bar, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 5.0), egui::Sense::hover());

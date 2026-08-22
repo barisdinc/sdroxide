@@ -820,7 +820,7 @@ fn needle_motion(ui: &Ui, id: Id, target: f32) -> f32 {
 /// and an unpaced request would pin the whole window — panadapter included — at
 /// the display's refresh rate for the sake of one small widget.
 fn animate(ui: &Ui) {
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    crate::repaint::after_ms(ui.ctx(), 33);
 }
 
 /// The decaying peak marker for `frac` — held briefly at the maximum, then

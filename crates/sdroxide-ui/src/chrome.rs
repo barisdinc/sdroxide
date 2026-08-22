@@ -221,7 +221,7 @@ pub fn popup_fade_alpha(
         (1.0 - (elapsed - HOLD) / FADE) as f32
     } else {
         // Wake up exactly when the fade should begin.
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64((HOLD - elapsed).max(0.001)));
+        crate::repaint::after(ctx, std::time::Duration::from_secs_f64((HOLD - elapsed).max(0.001)));
         1.0
     }
 }

@@ -298,7 +298,7 @@ pub fn show(
             && wrap180(t_clon - view.clon).abs() < 0.05
             && (view.lon_span - t_span).abs() < 0.05;
         if !settled {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            crate::repaint::after_ms(ui.ctx(), 16);
         }
     }
     // Mouse/touch pan and zoom, applied on top of (and suspending) the auto-fit.
@@ -393,7 +393,7 @@ pub fn show(
     }
     // Keep the slow fade progressing even after the zoom has settled.
     if !stations.is_empty() {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        crate::repaint::after_ms(ui.ctx(), 300);
     }
 
     // Network spots (DX cluster / POTA / SOTA / PSK) as small kind-coloured
@@ -460,7 +460,7 @@ pub fn show(
                 p.circle_filled(c, 3.2, map.station);
                 // ~30 fps is plenty for the comet; an unconditional repaint
                 // would drive the whole app at vsync rate during TX.
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                crate::repaint::after_ms(ui.ctx(), 33);
             }
         }
     }

@@ -112,7 +112,7 @@ mod web {
         // client for rationale.
         let ctrl =
             RemoteController::connect(url, Some(Box::new(WebAudioBridge::default())), move || {
-                ctx.request_repaint_after(std::time::Duration::from_millis(33))
+                sdroxide_ui::repaint::after_ms(&ctx, 33)
             })?;
         // Deliberately unnamed: nobody typed an address here — the page came
         // from this station — so the shell fills the name in from what the
