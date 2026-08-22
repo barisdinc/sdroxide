@@ -272,6 +272,15 @@ impl IcomNetSource {
             transmitting: false,
         };
         notes.extend(src.configure(cfg));
+        // Adopt the radio's current dial before returning, the way the CAT
+        // backend does with `query_once`. Without this the source hands the
+        // engine a centre of 0 Hz — the `Dial::default()` above, before the
+        // first frequency reply has folded in — and the engine clamps that up
+        // to the receiver's lowest frequency and *commands the radio there*.
+        // That is the "it jumps to ~30 kHz on reconnect / power-toggle" bug:
+        // `configure` has already asked for the dial, so this only waits for
+        // the answer.
+        src.adopt_initial_dial();
         src.status = (!notes.is_empty()).then(|| notes.join("\n"));
         Ok(src)
     }
@@ -334,6 +343,39 @@ impl IcomNetSource {
             self.enable_scope();
         }
         notes
+    }
+
+    /// Wait, briefly, for the radio to say where its dial is, and fold it in.
+    ///
+    /// The engine reads [`IqSource::center_hz`] the instant it adopts a source
+    /// and builds the whole display window — and, on this backend where the
+    /// dial *is* the VFO, the tune it commands back at the rig — from it. A
+    /// centre of 0 Hz (the opening [`Dial::default`]) is clamped up to the
+    /// receiver's lowest frequency and sent to the radio, which is why a
+    /// reconnect used to yank an IC-R8600 down to ~30 kHz. `configure` has
+    /// already asked for the frequency; this just gives the answer a moment to
+    /// arrive, re-asking through [`Self::pump`] if the first read was lost.
+    ///
+    /// Bounded and best-effort: a radio that never answers times out and the
+    /// old behaviour stands, which is no worse than before. A real dial is
+    /// never 0 Hz, so that is a safe "not yet known" sentinel.
+    fn adopt_initial_dial(&mut self) {
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while self.dial.vfo == 0.0 && Instant::now() < deadline {
+            self.pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Whatever arrived came in as a pending `Freq` update; the engine has
+        // not been built yet, so drop it — the dial itself now carries the
+        // frequency, and `center_hz` reports it. Leaving it would make the
+        // first `poll_control` announce a "retune" to where the radio already
+        // is.
+        self.pending.retain(|u| !matches!(u, ControlUpdate::Freq(_)));
+        if self.dial.vfo == 0.0 {
+            tracing::warn!(
+                "Icom LAN: the radio did not report its frequency at connect; the display                  will adopt it on the first poll instead"
+            );
+        }
     }
 
     /// Whether the radio offered a transmit stream. An IC-R8600 does not, and
@@ -828,6 +870,20 @@ mod tests {
     }
 
     #[test]
+    fn the_dial_is_adopted_at_open_so_the_engine_never_retunes_the_radio() {
+        // The engine reads `center_hz()` the instant it adopts the source and
+        // commands the rig there. If that read is 0 (the dial before the first
+        // frequency reply), the rig is dragged to the bottom of its range — the
+        // "jumps to ~30 kHz on reconnect" bug. `open` must not return until the
+        // radio's real dial is in hand.
+        let sim =
+            Sim::start(SimOptions { freq_hz: 7_074_000.0, scope: false, ..Default::default() })
+                .unwrap();
+        let src = IcomNetSource::open(&cfg(&sim)).expect("open");
+        assert_eq!(src.center_hz(), 7_074_000.0, "the radio's own dial, not 0");
+    }
+
+    #[test]
     fn af_mode_delivers_packed_real_audio_at_the_negotiated_rate() {
         let sim =
             Sim::start(SimOptions { tone_hz: Some(1_000.0), scope: false, ..Default::default() })
@@ -974,19 +1030,6 @@ mod tests {
         // And the clock was held, so the first quiet moment after the over is
         // not instantly a stall either.
         assert!(src.last_sweep.elapsed() < SCOPE_STALL);
-    }
-
-    #[test]
-    fn the_dial_is_adopted_from_the_radio_rather_than_assumed() {
-        let sim =
-            Sim::start(SimOptions { freq_hz: 7_074_000.0, scope: false, ..Default::default() })
-                .unwrap();
-        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
-        wait_for("the radio's dial", || {
-            src.poll_control().iter().any(|u| matches!(u, ControlUpdate::Freq(_)))
-                || src.center_hz() == 7_074_000.0
-        });
-        assert_eq!(src.center_hz(), 7_074_000.0);
     }
 
     #[test]
