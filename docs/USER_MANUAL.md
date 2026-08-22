@@ -746,6 +746,17 @@ control there is, the sound card having no part in CW at all. After a TUNE the
 operating level is put back, so the radio is not left at the tune level for the
 next call.
 
+The level is asserted **behind the mode**, not only when you move the slider,
+because a rig keeps its output power *per mode*: a radio set to 100 W in USB and
+25 W in USB-DATA transmits at whichever of the two the mode command last left it
+in, and one put into AM is held to a quarter of its rated power on top of that.
+So a mode command and a power command go out in that order at every key-down,
+and the level lands in the register the over will actually transmit on. This
+matters most on a **quadrature rig**, where sdroxide demodulates the I/Q itself
+and the radio only learns which mode to transmit in when the transmitter comes
+up: there *every* over changes the rig's mode, and so the register its power
+comes out of.
+
 > On a CAT rig the power is a fraction of what the radio can do. Icom carries it
 > that way natively; Yaesu and Kenwood take a number of watts and have no way to
 > say how many they have, so their sliders are read against 100 W — right for
@@ -8584,6 +8595,17 @@ audio sdroxide transmits.
 **The Kenwood transmits on the wrong band.**
 On a TS-2000, set **Send command** back to `TS-2000 style (TX;)`. `TX1;` is
 DATA SEND on a TS-590 but *transmit on the sub-band* on a TS-2000.
+
+**The radio transmits at a power the Drive slider does not show — often much
+less — and moving the slider changes nothing.**
+Every one of these radios stores its output power per mode, and sdroxide
+commands the mode at key-down. So the level you set while the rig sat in one
+mode was stored in *that* mode's register, and the over went out on another
+one's. sdroxide now writes the Drive level behind every mode command, which puts
+it in the register the over transmits on; if you are on a build older than that,
+set the power at the radio in the mode it actually transmits in. The tell is a
+tune: the operating level is restored at unkey, so the rig's own power display
+jumps to what the slider says the moment a TUNE ends.
 
 **The Elecraft goes into plain SSB for FT8 instead of DATA.**
 **CAT family** is set to `Kenwood`. DATA is a flag beside the mode there (`DA`)

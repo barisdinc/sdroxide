@@ -1305,11 +1305,11 @@ fn write_power(
     port: &mut dyn Link,
     protocol: &mut dyn Protocol,
     frac: f32,
-    last_sent: &mut Option<f32>,
+    last_sent: &mut PowerMemory,
     last_write: &mut Instant,
     io: &mut Exchange,
 ) -> bool {
-    if *last_sent == Some(frac) {
+    if last_sent.holds(frac) {
         return false;
     }
     let mut failed = false;
@@ -1317,9 +1317,50 @@ fn write_power(
         failed |= write_frame(port, protocol, &f, last_write, io);
     }
     if !failed {
-        *last_sent = Some(frac);
+        last_sent.set(frac);
     }
     failed
+}
+
+/// The output power the rig was last *given* — or last said it was on — so a
+/// level it already holds costs no frame in front of the next PTT.
+///
+/// The catch is that this is a cache of a register the *radio* also writes to.
+/// These families keep their output power **per mode**: switch a rig from USB
+/// to DATA-U and its transmitter comes up on whatever was last set in DATA-U,
+/// and one switched into AM is held to a quarter of its rated power on top of
+/// that on most of them. So the moment the mode changes, this no longer
+/// describes anything the rig is on, and the level the operator chose has to be
+/// written again rather than deduped away.
+///
+/// It is the I/Q sound format where that bites: there sdroxide demodulates the
+/// rig's quadrature stream itself, so the app's mode is nobody's business but
+/// ours until the transmitter comes up, and the mode is asserted *at key-down*
+/// (see the engine's `sync_tx_state`). Every over therefore moved the rig to
+/// another mode — and so to another power register — and the assertion that
+/// should have put the Drive level back was skipped as already sent, leaving
+/// the over on whatever that mode happened to be left at and the Drive slider
+/// apparently doing nothing at all.
+#[derive(Default)]
+struct PowerMemory(Option<f32>);
+
+impl PowerMemory {
+    /// Whether the rig is known to be on this level already.
+    fn holds(&self, frac: f32) -> bool {
+        self.0 == Some(frac)
+    }
+
+    /// Record a level the rig has been given, or has reported it is on.
+    fn set(&mut self, frac: f32) {
+        self.0 = Some(frac);
+    }
+
+    /// The rig changed mode, whoever moved it. Whatever this held describes a
+    /// register the transmitter is no longer using, and the next level asked
+    /// for has to reach the radio.
+    fn forget(&mut self) {
+        self.0 = None;
+    }
 }
 
 /// What mode the rig is in, held as the frame that would put it there — either
@@ -1703,9 +1744,11 @@ fn serial_thread(
         // whose control port is served one frame at a time must not be handed
         // hundreds of them — the PTT behind that queue is the thing that would
         // suffer. Only a level that differs from the last one written goes out,
-        // so the assertion before every key-down is free once it has settled.
+        // so the assertion before every key-down is free once it has settled —
+        // until the rig changes mode, which changes the register the level
+        // lives in and makes the memory stale (see [`PowerMemory`]).
         let mut pending_power: Option<f32> = None;
-        let mut last_sent_power: Option<f32> = None;
+        let mut last_sent_power = PowerMemory::default();
         let mut power_deadline = Instant::now();
         // The rig's own receive filter, on the same rate limit and the same
         // only-on-change rule. Unlike the power it is never asserted before a
@@ -1752,6 +1795,15 @@ fn serial_thread(
                                 ) {
                                     break 'io true;
                                 }
+                                // The transmitter is now on another mode's
+                                // output-power register, so what this end
+                                // believes about the level is about a register
+                                // the rig has left. The engine asserts the
+                                // level that applies immediately behind this
+                                // command at every key-down; forgetting is what
+                                // lets that assertion through instead of
+                                // deduping it away against a stale memory.
+                                last_sent_power.forget();
                                 // On a rig that shifts its VFO with the mode,
                                 // that command has just moved the dial out from
                                 // under the operator. Put it back — before the
@@ -2215,7 +2267,7 @@ fn serial_thread(
                 // engine asserts the level it adopted before the first key-down, and that is now a
                 // level the rig is already on.
                 if let CatUpdate::Power(frac) = u {
-                    last_sent_power = Some(frac);
+                    last_sent_power.set(frac);
                     let _ = event_tx.send(u);
                     continue;
                 }
@@ -2248,6 +2300,12 @@ fn serial_thread(
                         let c = emit_mode != Some(m);
                         if c {
                             emit_mode = Some(m);
+                            // The operator turned the mode knob, and the output power went with
+                            // it: these families hold a level per mode. What this end last wrote
+                            // went into the register the rig has just left, so it is no longer an
+                            // answer about the one the next over will transmit on — see
+                            // [`PowerMemory`].
+                            last_sent_power.forget();
                         }
                         c
                     }
@@ -2498,6 +2556,29 @@ mod tests {
         assert_eq!(sent(0.0), "PC005;");
         // A slider cannot ask for more than the assumed full scale.
         assert_eq!(sent(2.0), "PC100;");
+    }
+
+    /// The power memory exists to save a frame in front of a PTT, and it is
+    /// only allowed to do that while it is still true. A mode change makes it
+    /// false: the level lives in a per-mode register on these families, so
+    /// after one the operator's Drive level has to reach the radio again.
+    ///
+    /// This is the whole of the I/Q transmit bug — there the app demodulates
+    /// the rig's quadrature itself, so the mode is asserted at key-down, and
+    /// every over moved the rig to a register the deduped `PC` never wrote.
+    #[test]
+    fn a_mode_change_costs_the_power_memory() {
+        let mut p = PowerMemory::default();
+        assert!(!p.holds(1.0), "nothing has been written yet");
+        p.set(1.0);
+        assert!(p.holds(1.0), "a level just written need not be written again");
+        p.forget();
+        assert!(!p.holds(1.0), "the rig changed mode: that register is not the one it is on");
+        // And a level adopted from the rig counts as written, which is what
+        // makes the opening read free.
+        p.set(0.25);
+        assert!(p.holds(0.25));
+        assert!(!p.holds(1.0));
     }
 
     /// The control traffic is what the setting is for, so all of it has to be
