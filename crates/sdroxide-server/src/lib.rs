@@ -22,7 +22,7 @@ mod solar;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,6 +61,31 @@ pub enum ServerError {
 pub type AccessFn = Box<dyn Fn() -> sdroxide_types::RemoteAccess + Send + Sync>;
 
 pub use probe::ProbeFn;
+
+/// How this station puts another radio in its roster: create the radio's
+/// configuration scope, start an engine on it, and hand back the endpoints the
+/// server serves it through.
+///
+/// A callback for the same reason as [`ProbeFn`] and `ReopenFn`: only the
+/// binary knows how to build a backend, and the engine a new radio needs is
+/// exactly the one the binary already builds for every radio in the roster at
+/// startup. `None` leaves the station's roster fixed for the life of the
+/// process, and clients are told so ([`ServerMsg::Radios`]'s `editable`) rather
+/// than left pressing a button that does nothing.
+///
+/// The `name` is the operator's name for the radio, empty for one that will be
+/// named after whatever interface it ends up configured as.
+pub type AddRadioFn = Box<dyn Fn(&str) -> Result<RadioParams, String> + Send + Sync>;
+
+/// How this station takes a radio out of its roster — the roster file only:
+/// the engine stops by itself once the server has let go of its command
+/// channel, and the radio's configuration stays on disk, because closing a
+/// radio is not a request to destroy what it was set up as.
+pub type RemoveRadioFn = Box<dyn Fn(u32) -> Result<(), String> + Send + Sync>;
+
+/// How this station records the operator's name for one of its radios. Empty
+/// puts it back on the interface-derived default.
+pub type RenameRadioFn = Box<dyn Fn(u32, &str) -> Result<(), String> + Send + Sync>;
 
 /// One radio's engine endpoints. A station hands the server one of these per
 /// radio in its roster, and each gets an address of its own on the socket —
@@ -107,6 +132,17 @@ pub struct ServerParams {
     /// Supplied by the caller because only the binary knows how to reach each
     /// backend; see [`ProbeFn`].
     pub probe: Option<ProbeFn>,
+    /// How a client adds a radio to this station, and how one is taken out
+    /// again or renamed. All three `None` — the default for anything that just
+    /// wants to serve the radios it was given — leaves the roster fixed, and
+    /// the client shows no controls for it.
+    ///
+    /// Wired together rather than one at a time: a client that could add a
+    /// radio but never remove one would be a trap, and the operator would have
+    /// to go to the station to undo a mistake made from away.
+    pub add_radio: Option<AddRadioFn>,
+    pub remove_radio: Option<RemoveRadioFn>,
+    pub rename_radio: Option<RenameRadioFn>,
 }
 
 pub(crate) struct SessionTx {
@@ -186,29 +222,250 @@ pub(crate) struct Latest {
     pub ism_status: Option<sdroxide_types::IsmStatus>,
 }
 
-/// Everything the routes are served out of: the station's radios and the two
+/// Everything the routes are served out of: the station's radios and the
 /// things that belong to the station rather than to any one of them — the
-/// solar feed on `/solar-ws`, and the sign-in gate.
+/// solar feed on `/solar-ws`, the sign-in gate, the probe worker, and how the
+/// roster itself is edited.
 pub(crate) struct Station {
-    /// In roster order; `radios[0]` is what `/ws` reaches.
-    pub radios: Vec<Arc<Shared>>,
+    /// In roster order; the first is what `/ws` reaches.
+    ///
+    /// Behind a lock because the roster is no longer fixed for the life of the
+    /// process: a client may add a radio to the station and take one away
+    /// again ([`Station::add_radio`]). Held only long enough to clone what is
+    /// wanted out of it — never across an await, and never while an engine is
+    /// being started.
+    radios: std::sync::RwLock<Vec<Arc<Shared>>>,
     pub solar: Arc<solar::SolarHub>,
     pub auth: Arc<auth::AuthGate>,
+    /// The one probe worker, kept here so a radio added later shares it rather
+    /// than starting a second thread that would scan the same bus.
+    probes: Arc<probe::ProbeHub>,
+    add: Option<AddRadioFn>,
+    remove: Option<RemoveRadioFn>,
+    rename: Option<RenameRadioFn>,
+    /// One roster edit at a time, across every client on the station. The
+    /// callbacks below read `radios.json`, change it and write it back, so two
+    /// sessions adding a radio at the same moment would each hand out the id
+    /// the other was about to use — and the second write would drop the first
+    /// radio out of the file it had just been put in. A session takes its edits
+    /// one at a time by itself (it awaits each one); this is what makes two
+    /// sessions do the same.
+    edit: Mutex<()>,
 }
 
 impl Station {
     /// The radio a client asked for by id, or `None` — which the route turns
     /// into a 404 rather than quietly handing over a different radio.
     pub(crate) fn radio(&self, id: u32) -> Option<Arc<Shared>> {
-        self.radios.iter().find(|r| r.id == id).cloned()
+        self.radios.read().unwrap().iter().find(|r| r.id == id).cloned()
+    }
+
+    /// The station's first radio: what `/ws` means, and the one radio a client
+    /// that knows nothing of a roster ever asks for. Always there — a station
+    /// with none is refused at startup ([`ServerError::NoRadios`]) and the
+    /// first radio is the one removal will not take.
+    pub(crate) fn first(&self) -> Arc<Shared> {
+        self.radios.read().unwrap()[0].clone()
+    }
+
+    /// Every radio, cloned out of the lock so callers can hold them across an
+    /// await without holding the roster.
+    pub(crate) fn list(&self) -> Vec<Arc<Shared>> {
+        self.radios.read().unwrap().clone()
+    }
+
+    /// Whether this station takes roster edits from a client. False leaves the
+    /// controls off at the far end rather than offering buttons that would be
+    /// quietly ignored — see [`AddRadioFn`].
+    pub(crate) fn editable(&self) -> bool {
+        self.add.is_some() && self.remove.is_some()
+    }
+
+    /// The roster as a client sees it.
+    pub(crate) fn roster(&self) -> Vec<sdroxide_proto::RadioInfo> {
+        self.radios
+            .read()
+            .unwrap()
+            .iter()
+            .map(|r| sdroxide_proto::RadioInfo {
+                id: r.id,
+                name: r.display_name(),
+                named: !r.name.lock().unwrap().trim().is_empty(),
+            })
+            .collect()
+    }
+
+    /// Tell one radio's client what the station now has. Also how a client is
+    /// told that *its own* radio has gone: the roster it gets simply does not
+    /// list `me` any more.
+    pub(crate) fn tell_roster(&self, r: &Shared, list: &[sdroxide_proto::RadioInfo]) {
+        if let Some(s) = r.session.lock().unwrap().as_ref() {
+            let _ = s.reliable.try_send(ServerMsg::Radios {
+                me: r.id,
+                radios: list.to_vec(),
+                editable: self.editable(),
+            });
+        }
+    }
+
+    /// Tell every client what the station now has. Sent to all of them, not
+    /// just to whoever asked: two operators on one station both have a tab
+    /// strip, and only one of them pressed the button.
+    pub(crate) fn announce_roster(&self) {
+        let list = self.roster();
+        for r in self.list() {
+            self.tell_roster(&r, &list);
+        }
+    }
+
+    /// Put another radio in the roster and serve it: the host creates its
+    /// configuration scope and starts its engine ([`AddRadioFn`]), and it is
+    /// on the air at `/ws/<id>` by the time this returns.
+    ///
+    /// Blocking — it starts an engine — so callers run it off the socket task.
+    pub(crate) fn add_radio(self: &Arc<Self>, name: &str) -> Result<u32, String> {
+        let Some(add) = self.add.as_ref() else {
+            return Err("this station's radios cannot be changed from here".into());
+        };
+        let _edit = self.edit.lock().unwrap_or_else(|e| e.into_inner());
+        let params = add(name)?;
+        let id = params.id;
+        if self.radio(id).is_some() {
+            // A roster that hands out an id twice — hand-edited, or two
+            // stations sharing a config directory. Refusing here drops the
+            // engine the host just started with `params`, which stops by
+            // itself once its command channel goes; serving it would put two
+            // radios on one address instead.
+            return Err(format!("this station already has a radio {id}"));
+        }
+        // Never primary: the station's network services belong to the radio
+        // that was here first, and a radio added at runtime must not take them
+        // over from a radio that is already running them.
+        let shared = self.attach(params, false);
+        self.radios.write().unwrap().push(shared);
+        self.announce_roster();
+        info!(radio = id, "radio added to the roster on /ws/{id}");
+        Ok(id)
+    }
+
+    /// Take a radio out of the roster. Its configuration stays on disk: this
+    /// is closing a radio, not destroying what it was set up as.
+    ///
+    /// The station's first radio is refused — it holds the shared network
+    /// services and the legacy configuration, and `/ws` has to keep meaning
+    /// something.
+    pub(crate) fn remove_radio(&self, id: u32) -> Result<(), String> {
+        let Some(remove) = self.remove.as_ref() else {
+            return Err("this station's radios cannot be changed from here".into());
+        };
+        let _edit = self.edit.lock().unwrap_or_else(|e| e.into_inner());
+        let gone = {
+            let mut radios = self.radios.write().unwrap();
+            if radios.first().is_some_and(|r| r.id == id) {
+                return Err("the station's first radio cannot be closed".into());
+            }
+            let Some(i) = radios.iter().position(|r| r.id == id) else {
+                return Err(format!("this station has no radio {id}"));
+            };
+            radios.remove(i)
+        };
+        // The one whose radio has gone hears first, and hears it while its
+        // socket is still open: the roster it gets no longer lists `me`, which
+        // is how its tab knows to close itself instead of trying to dial an
+        // address that is now a 404. Dropping the session then closes that
+        // socket — the queued message goes out ahead of the close, because a
+        // dropped sender leaves what it has already queued to be drained.
+        let list = self.roster();
+        self.tell_roster(&gone, &list);
+        *gone.session.lock().unwrap() = None;
+        for r in self.list() {
+            self.tell_roster(&r, &list);
+        }
+        // Stop the pump, which is what lets the engine stop: the engine runs
+        // until its last command sender drops, that sender lives in `gone`, and
+        // the pump holds a reference to `gone` of its own. So the pump goes
+        // first, dropping its reference on the way out; the session's reference
+        // has just been dropped with the session above, and ours goes at the
+        // end of this function. The engine then finds its command channel
+        // disconnected, stands down and releases the device.
+        gone.stop.store(true, Ordering::Relaxed);
+        // The roster file, on the host.
+        remove(id)?;
+        info!(radio = id, "radio removed from the roster");
+        Ok(())
+    }
+
+    /// Record the operator's name for one of the station's radios.
+    pub(crate) fn rename_radio(&self, id: u32, name: &str) -> Result<(), String> {
+        let Some(rename) = self.rename.as_ref() else {
+            return Err("this station's radios cannot be changed from here".into());
+        };
+        let _edit = self.edit.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(radio) = self.radio(id) else {
+            return Err(format!("this station has no radio {id}"));
+        };
+        rename(id, name)?;
+        *radio.name.lock().unwrap() = name.to_string();
+        self.announce_roster();
+        Ok(())
+    }
+
+    /// Build one radio's shared state and start its pump thread. The whole of
+    /// what serving a radio takes, so that a radio added at runtime is set up
+    /// by exactly the same code as one the station started with.
+    fn attach(self: &Arc<Self>, r: RadioParams, primary: bool) -> Arc<Shared> {
+        let (spectrum_watch, spectrum_rx) = watch::channel(None);
+        let (wide_watch, wide_spectrum_rx) = watch::channel(None);
+        let shared = Arc::new(Shared {
+            id: r.id,
+            name: Mutex::new(r.name),
+            primary,
+            cmd_tx: r.cmd_tx,
+            latest: Mutex::new(Latest::default()),
+            session: Mutex::new(None),
+            busy: AtomicBool::new(false),
+            mic_tx: Mutex::new(r.mic_tx),
+            spectrum_rx,
+            wide_spectrum_rx,
+            solar: self.solar.clone(),
+            auth: self.auth.clone(),
+            probes: self.probes.clone(),
+            station: Arc::downgrade(self),
+            stop: AtomicBool::new(false),
+        });
+        let pumped = shared.clone();
+        // Radio 0 keeps the historical thread name, as the engine's own does:
+        // it is what profiling notes and thread filters key on.
+        let name = match r.id {
+            0 => "sdroxide-pump".to_string(),
+            id => format!("sdroxide-pump{id}"),
+        };
+        std::thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                pump(
+                    pumped,
+                    r.event_rx,
+                    r.spectrum_out,
+                    r.wide_spectrum_out,
+                    r.audio_rx,
+                    spectrum_watch,
+                    wide_watch,
+                )
+            })
+            .expect("spawn pump thread");
+        shared
     }
 }
 
 pub(crate) struct Shared {
     /// This radio's roster id, as it is addressed on the wire.
     pub id: u32,
-    /// The operator's name for it, empty when they never gave one.
-    pub name: String,
+    /// The operator's name for it, empty when they never gave one. Behind a
+    /// lock because it can be changed from a client now
+    /// ([`Station::rename_radio`]) — the roster file on the host is where it
+    /// really lives, and this is the copy the listing is drawn from.
+    pub name: Mutex<String>,
     /// The station's first radio, which is the one that relays the
     /// station-wide facts — the operating status on the solar arc, the
     /// satellite subscriptions — to the viewers on `/solar-ws`. Every radio
@@ -241,6 +498,20 @@ pub(crate) struct Shared {
     /// scan is about this machine, and running one per radio at once is
     /// exactly what [`probe`] exists to prevent.
     pub probes: Arc<probe::ProbeHub>,
+    /// The station this radio belongs to, so the pump can have the roster
+    /// announced again when what this radio is *called* changes — see
+    /// [`Shared::display_name`]. Weak because the station owns the radio: an
+    /// `Arc` here would be a cycle, and neither would ever be dropped.
+    pub station: std::sync::Weak<Station>,
+    /// Set when this radio has been taken out of the roster, to stop its pump
+    /// thread ([`Station::remove_radio`]).
+    ///
+    /// Needed because the pump holds an `Arc<Shared>` of its own, and this
+    /// struct holds the engine's command sender: the engine stops when the last
+    /// sender drops, and the pump stops when the engine does, so a pump that
+    /// waited for the engine would be waiting for itself — and the device would
+    /// stay claimed for the life of the process.
+    pub stop: AtomicBool,
 }
 
 impl Shared {
@@ -249,8 +520,9 @@ impl Shared {
     /// — which is what the tab strip here falls back to as well — and failing
     /// both, its number, because a client still has to be able to point at it.
     pub(crate) fn display_name(&self) -> String {
-        if !self.name.trim().is_empty() {
-            return self.name.clone();
+        let name = self.name.lock().unwrap().clone();
+        if !name.trim().is_empty() {
+            return name;
         }
         let label = self.latest.lock().unwrap().caps.label.clone();
         if !label.trim().is_empty() {
@@ -269,60 +541,29 @@ pub async fn serve(params: ServerParams) -> Result<(), ServerError> {
     if params.radios.is_empty() {
         return Err(ServerError::NoRadios);
     }
-    let solar = Arc::new(solar::SolarHub::default());
-    let auth = Arc::new(auth::AuthGate::new(params.access));
-    let probes = Arc::new(probe::ProbeHub::start(params.probe));
+    let station = Arc::new(Station {
+        radios: std::sync::RwLock::new(Vec::new()),
+        solar: Arc::new(solar::SolarHub::default()),
+        auth: Arc::new(auth::AuthGate::new(params.access)),
+        probes: Arc::new(probe::ProbeHub::start(params.probe)),
+        add: params.add_radio,
+        remove: params.remove_radio,
+        rename: params.rename_radio,
+        edit: Mutex::new(()),
+    });
 
-    let mut radios = Vec::with_capacity(params.radios.len());
+    // The roster the station started with, through the same path a radio added
+    // later takes.
     for (i, r) in params.radios.into_iter().enumerate() {
-        let (spectrum_watch, spectrum_rx) = watch::channel(None);
-        let (wide_watch, wide_spectrum_rx) = watch::channel(None);
-        let shared = Arc::new(Shared {
-            id: r.id,
-            name: r.name,
-            primary: i == 0,
-            cmd_tx: r.cmd_tx,
-            latest: Mutex::new(Latest::default()),
-            session: Mutex::new(None),
-            busy: AtomicBool::new(false),
-            mic_tx: Mutex::new(r.mic_tx),
-            spectrum_rx,
-            wide_spectrum_rx,
-            solar: solar.clone(),
-            auth: auth.clone(),
-            probes: probes.clone(),
-        });
-        {
-            let shared = shared.clone();
-            // Radio 0 keeps the historical thread name, as the engine's own
-            // does: it is what profiling notes and thread filters key on.
-            let name = match r.id {
-                0 => "sdroxide-pump".to_string(),
-                id => format!("sdroxide-pump{id}"),
-            };
-            std::thread::Builder::new()
-                .name(name)
-                .spawn(move || {
-                    pump(
-                        shared,
-                        r.event_rx,
-                        r.spectrum_out,
-                        r.wide_spectrum_out,
-                        r.audio_rx,
-                        spectrum_watch,
-                        wide_watch,
-                    )
-                })
-                .expect("spawn pump thread");
-        }
-        radios.push(shared);
+        let shared = station.attach(r, i == 0);
+        station.radios.write().unwrap().push(shared);
     }
 
     // Worth saying out loud either way. This port hands out a transmitter, and
     // an operator who forwarded it through a router without noticing that it
     // asks for nothing should find that out from the log rather than from a
     // complaint about what went out on their callsign.
-    match auth.required() {
+    match station.auth.required() {
         Some(a) if a.username.is_empty() => info!("remote clients must give the password"),
         Some(a) => info!("remote clients must sign in as {:?}", a.username),
         None => warn!(
@@ -332,18 +573,18 @@ pub async fn serve(params: ServerParams) -> Result<(), ServerError> {
     }
     // Which radio is where, because the addresses are the only way a client
     // reaches the second one and nothing else on this machine will say.
+    let radios = station.list();
     if radios.len() > 1 {
         for (i, r) in radios.iter().enumerate() {
             let path =
                 if i == 0 { format!("/ws (also /ws/{})", r.id) } else { format!("/ws/{}", r.id) };
-            match r.name.as_str() {
+            match r.name.lock().unwrap().as_str() {
                 "" => info!("radio {} on {path}", r.id),
                 name => info!("radio {} ({name}) on {path}", r.id),
             }
         }
     }
 
-    let station = Arc::new(Station { radios, solar, auth });
     let mut app = Router::new()
         .route("/ws", get(session::ws_route))
         .route("/ws/{id}", get(session::ws_route_for))
@@ -383,7 +624,7 @@ async fn radios_route(
     }
 
     let list: Vec<Listing> = station
-        .radios
+        .list()
         .iter()
         .map(|r| Listing { id: r.id, name: r.display_name(), path: format!("/ws/{}", r.id) })
         .collect();
@@ -410,6 +651,15 @@ fn pump(
     let mut audio_seq = 0u32;
 
     loop {
+        // Taken out of the roster: let go of the radio, so that the engine
+        // behind it can stop and hand its device back. Checked at the top of
+        // the loop, which runs at ~200 Hz, so "closed" and "the dongle is free
+        // again" are the same moment to anybody watching.
+        if shared.stop.load(Ordering::Relaxed) {
+            info!(radio = shared.id, "radio closed; pump stopping");
+            return;
+        }
+
         // Events: block briefly so the loop runs ~200 Hz even when idle.
         match event_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(ev) => {
@@ -574,6 +824,10 @@ fn handle_event(shared: &Shared, ev: RadioEvent) {
 
     // Set by the station-config arm below, and acted on after the lock.
     let mut sat: Option<sdroxide_types::SatConfig> = None;
+    // Whether this event changed what the radio is called (see the
+    // `Capabilities` arm), which is a fact about the station's roster and not
+    // about this radio's session.
+    let mut renamed = false;
     let msg = {
         let mut latest = shared.latest.lock().unwrap();
         match ev {
@@ -583,6 +837,14 @@ fn handle_event(shared: &Shared, ev: RadioEvent) {
                 // it means the radio under this session has just changed —
                 // either because a client switched the interface or because one
                 // that was missing at startup has attached.
+                //
+                // A radio with no name of its own is called after its
+                // interface, so this is also the moment its name in the roster
+                // changes. Noted here and announced below, outside the lock: a
+                // radio that has just been added is announced before its engine
+                // has said what it is, and without this it would stay "Radio 2"
+                // on every client's tab strip until something else changed.
+                renamed = label_of(&latest.caps) != label_of(&c);
                 latest.caps = c.clone();
                 Some(ServerMsg::Capabilities(c))
             }
@@ -766,6 +1028,20 @@ fn handle_event(shared: &Shared, ev: RadioEvent) {
             }
         }
     }
+    // ...and to everybody on the station, not just to this radio's client: the
+    // roster is what every tab strip is drawn from, and a radio that has just
+    // said what it is has just changed the name it appears under.
+    if renamed && let Some(station) = shared.station.upgrade() {
+        station.announce_roster();
+    }
+}
+
+/// What a radio's *interface* contributes to its name — empty when it has not
+/// said yet. An operator's own name wins over it, so a change here only shows
+/// on a radio that has none; announcing the roster anyway is a message a
+/// second, at worst, on a radio whose front end is flapping.
+fn label_of(caps: &DeviceCaps) -> String {
+    caps.label.trim().to_string()
 }
 
 fn add_static_routes(app: Router, web_root: Option<PathBuf>) -> Router {

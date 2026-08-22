@@ -2866,6 +2866,42 @@ impl SdroxideApp {
     }
 }
 
+/// One place a new radio can go. A screen can hold two rosters at once — this
+/// machine's own and that of a station it is connected to — and "add a radio"
+/// means nothing until it says which, so the "+" chip offers these.
+struct AddTarget {
+    /// The station key ([`SdroxideApp::station_key`]) whose roster this is;
+    /// empty for this computer's own.
+    key: String,
+}
+
+impl AddTarget {
+    fn label(&self) -> String {
+        if self.key.is_empty() {
+            "On this computer".to_string()
+        } else {
+            format!("On {}", station_label(&self.key))
+        }
+    }
+
+    fn hint(&self) -> String {
+        if self.key.is_empty() {
+            "Add a radio on this computer".to_string()
+        } else {
+            format!(
+                "Add a radio on {} — the station serves it straight away",
+                station_label(&self.key)
+            )
+        }
+    }
+}
+
+/// A station key as it reads on a button: the address, without the scheme
+/// nobody needs to see. Falls back to the key itself for anything unexpected.
+fn station_label(key: &str) -> &str {
+    key.split_once("://").map_or(key, |(_, rest)| rest)
+}
+
 /// The radio-management strip at the top of Settings → Radio: the same chips
 /// the main window's tab area shows, drawn where radios are configured. The
 /// main window only shows its copy once there is more than one radio, so this
@@ -2873,18 +2909,39 @@ impl SdroxideApp {
 /// set lives in the multi-radio shell, not in this tab — so they are queued as
 /// [`crate::app::RadioTabRequest`]s and the shell acts on them after the frame.
 impl SdroxideApp {
+    /// Where a new radio could go, in the order the chip offers them: this
+    /// computer first where it has hardware of its own to open, then every
+    /// station on screen that keeps a roster it will let a client touch, once
+    /// each however many of its radios are in tabs.
+    fn add_radio_targets(&self) -> Vec<AddTarget> {
+        let mut out = Vec::new();
+        if self.can_add_radio {
+            out.push(AddTarget { key: String::new() });
+        }
+        for chip in &self.radio_roster {
+            if chip.station.is_empty() || !chip.roster_editable {
+                continue;
+            }
+            if out.iter().any(|t: &AddTarget| t.key == chip.station) {
+                continue;
+            }
+            out.push(AddTarget { key: chip.station.clone() });
+        }
+        out
+    }
+
     fn settings_radio_roster(
         &self,
         ui: &mut egui::Ui,
         requests: &mut Vec<crate::app::RadioTabRequest>,
         name_edit: &mut Option<(u32, String)>,
     ) {
-        // Nothing to manage: no roster at all (the browser client), or a
-        // session that holds one radio it cannot add to — a client dialled
-        // straight at somebody else's station, which has exactly one thing on
-        // screen and no hardware of its own to open beside it.
+        // Nothing to manage: one radio, with nowhere to add a second — no
+        // hardware of this machine's own to open, and no station at the far end
+        // that keeps a roster it would let us touch.
         let Some(station) = self.radio_roster.first() else { return };
-        if self.radio_roster.len() < 2 && !self.can_add_radio {
+        let targets = self.add_radio_targets();
+        if self.radio_roster.len() < 2 && targets.is_empty() {
             return;
         }
         let station_id = station.id;
@@ -2969,9 +3026,18 @@ impl SdroxideApp {
                 }
                 // The first radio is the station: it runs the shared network
                 // services and the legacy configuration, and it stays.
+                //
+                // On a connection this hangs up and nothing more — the radio at
+                // the other end is closed with **Close on station** below, and
+                // the two say which they are.
+                let closing = if chip.station.is_empty() {
+                    "Close this radio (its configuration is kept)"
+                } else {
+                    "Close this tab — the connection is dropped and the radio stays on its station"
+                };
                 if chip.id != station_id
                     && crate::chrome::chip(ui, false, RichText::new("×").size(11.0))
-                        .on_hover_text("Close this radio (its configuration is kept)")
+                        .on_hover_text(closing)
                         .clicked()
                 {
                     requests.push(crate::app::RadioTabRequest::Close(chip.id));
@@ -2979,14 +3045,44 @@ impl SdroxideApp {
                 ui.add_space(6.0);
             }
             // Absent where there is nothing to add: a client that only drives
-            // somebody else's station has no local radios to open. Connecting
-            // to a further server is still offered, on the Remote tab.
-            if self.can_add_radio
-                && crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
-                    .on_hover_text("Add a radio")
-                    .clicked()
-            {
-                requests.push(crate::app::RadioTabRequest::Add);
+            // somebody else's station, and that station does not take roster
+            // edits. Connecting to a further server is still offered, on the
+            // Remote tab.
+            //
+            // Where a radio can go in more than one place — this computer and a
+            // station at the far end of a connection — the chip asks which
+            // first. "Add a radio" is ambiguous the moment a screen holds two
+            // rosters, and the two answers are as different as plugging a
+            // dongle in here and plugging one in at the remote site.
+            match targets.as_slice() {
+                [] => {}
+                [only] => {
+                    if crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
+                        .on_hover_text(only.hint())
+                        .clicked()
+                    {
+                        requests
+                            .push(crate::app::RadioTabRequest::Add { station: only.key.clone() });
+                    }
+                }
+                many => {
+                    // Plain "+", like the single-destination case: the arrow
+                    // that would mark it as a menu is not in the text font and
+                    // comes out as an empty box. What it opens is a menu, and
+                    // the hover text says which rosters are in it.
+                    let btn = crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
+                        .on_hover_text("Add a radio — here, or on a station you are connected to");
+                    crate::chrome::menu_popup(ui, &btn, |ui| {
+                        for t in many {
+                            if ui.button(t.label()).on_hover_text(t.hint()).clicked() {
+                                requests.push(crate::app::RadioTabRequest::Add {
+                                    station: t.key.clone(),
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                }
             }
         });
         // The focused radio's name. By default a radio is named after its
@@ -3014,6 +3110,40 @@ impl SdroxideApp {
                     if name != chip.name {
                         requests.push(crate::app::RadioTabRequest::Rename { id: chip.id, name });
                     }
+                }
+                // Closing a radio that lives on another machine. Deliberately
+                // not the "×" on the chip: there, on a connection, "×" means
+                // hang up — and hanging up must never be one stray click away
+                // from taking somebody's radio out of their station. So it sits
+                // here, on the radio actually being looked at, says which
+                // station it will reach, and asks first.
+                //
+                // The station's own first radio is not offered: it holds the
+                // shared network services and the address every client that
+                // knows nothing of a roster arrives at, and the station refuses
+                // to close it.
+                if !chip.station.is_empty() && chip.roster_editable && !chip.first_of_station {
+                    let btn = crate::chrome::chip(
+                        ui,
+                        false,
+                        RichText::new("Close on station").size(11.5),
+                    )
+                    .on_hover_text(format!(
+                        "Take this radio out of {}'s roster — its settings are kept there",
+                        station_label(&chip.station)
+                    ));
+                    crate::chrome::menu_popup(ui, &btn, |ui| {
+                        ui.label(format!(
+                            "Close {} on {}? Its configuration stays on that machine; the tab \
+                             here closes with it.",
+                            chip.display_name(),
+                            station_label(&chip.station)
+                        ));
+                        if ui.button(RichText::new("Close it").strong()).clicked() {
+                            requests.push(crate::app::RadioTabRequest::RemoveFromStation(chip.id));
+                            ui.close();
+                        }
+                    });
                 }
             });
         }

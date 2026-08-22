@@ -457,12 +457,81 @@ pub trait RadioController {
         None
     }
 
-    /// What the far end calls the radio this connection is on. Used to name a
-    /// tab that arrived without a name of its own — the browser client, where
-    /// nobody typed an address to name it after. `None` until the far end has
-    /// said, and always for an in-process engine.
+    /// The *operator's* name for the radio this connection is on, at the
+    /// station that holds it. Used to name a tab that arrived without a name of
+    /// its own — the browser client, where nobody typed an address to name it
+    /// after.
+    ///
+    /// `None` until the far end has said, for an in-process engine, and for a
+    /// radio nobody has named — one of those is called after its interface, and
+    /// the tab derives that for itself.
     fn peer_name(&self) -> Option<String> {
         None
+    }
+
+    /// The id of the far station's *first* radio — the one at its `/ws`, which
+    /// holds its shared network services and which it will not let a client
+    /// close. `None` for an in-process engine and until the roster has landed.
+    ///
+    /// Named so the client can leave the control off that radio rather than
+    /// offering one the station is going to refuse.
+    fn peer_first_radio(&self) -> Option<u32> {
+        None
+    }
+
+    /// Whether the station at the far end takes roster edits from here — the
+    /// three calls below. False for an in-process engine (this machine's own
+    /// roster is a file, not something a controller speaks for), for a station
+    /// whose host wired none of it up, and until the far end has said.
+    ///
+    /// The client leaves the controls off rather than offering buttons that
+    /// would be quietly ignored.
+    fn station_roster_editable(&self) -> bool {
+        false
+    }
+
+    /// Ask the station at the far end to put another radio in its roster.
+    /// `name` is the operator's name for it, empty for one named after
+    /// whatever interface it ends up configured as.
+    ///
+    /// Nothing comes back here: what answers is the station's roster, which it
+    /// announces again to everyone on it — see [`RadioController::peer_radios`].
+    /// The new radio then arrives as one more of the station's radios, and the
+    /// shell opens it beside this one exactly as it does at connect time.
+    fn add_station_radio(&mut self, name: &str) {
+        let _ = name;
+    }
+
+    /// Ask the station at the far end to take one of its radios out of its
+    /// roster. Its configuration is kept there, as it is when a radio is closed
+    /// at the station itself.
+    ///
+    /// `id` is the station's own id for the radio
+    /// ([`PeerRadio::id`]) — not a tab id here, which means nothing at the
+    /// other end.
+    fn remove_station_radio(&mut self, id: u32) {
+        let _ = id;
+    }
+
+    /// Record the operator's name for one of the far station's radios, in that
+    /// station's roster. Empty puts it back on the interface-derived default.
+    ///
+    /// On the wire rather than kept here because that roster is a file on the
+    /// station: a name remembered only on this screen would be gone at the next
+    /// reconnect and invisible to everybody else on it.
+    fn rename_station_radio(&mut self, id: u32, name: &str) {
+        let (_, _) = (id, name);
+    }
+
+    /// Whether the station has just said that the radio this connection is on
+    /// is no longer one of its own — the roster it announced does not list it.
+    ///
+    /// How a tab finds out that its radio was closed from somewhere else: at
+    /// the station, or by another client. The socket is about to shut, so
+    /// without this the tab would show a lost connection and offer to redial an
+    /// address that is now a 404.
+    fn peer_removed(&self) -> bool {
+        false
     }
 }
 
@@ -474,6 +543,11 @@ pub struct PeerRadio {
     /// What the station calls it — the operator's name for it where they gave
     /// one, otherwise its interface's.
     pub name: String,
+    /// Whether that name is the operator's own rather than one derived from the
+    /// radio's interface. A derived one is not adopted as a tab's name: the tab
+    /// derives its own, from the radio it is connected to, and so follows the
+    /// interface instead of going stale on what it was when the tab opened.
+    pub named: bool,
     /// The full URL to dial, built from the one this connection is on.
     pub url: String,
 }

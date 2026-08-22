@@ -49,10 +49,10 @@ async fn send(
 /// connect-time replay is sending.
 async fn next_radios(
     ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
-) -> (u32, Vec<sdroxide_proto::RadioInfo>) {
+) -> (u32, Vec<sdroxide_proto::RadioInfo>, bool) {
     for _ in 0..50 {
-        if let ServerMsg::Radios { me, radios } = recv_msg(ws).await {
-            return (me, radios);
+        if let ServerMsg::Radios { me, radios, editable } = recv_msg(ws).await {
+            return (me, radios, editable);
         }
     }
     panic!("the station never announced its radios");
@@ -127,6 +127,9 @@ async fn every_radio_in_the_roster_is_served_and_separately_addressable() {
         web_root: None,
         access: None,
         probe: None,
+        add_radio: None,
+        remove_radio: None,
+        rename_radio: None,
     }));
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -163,7 +166,7 @@ async fn every_radio_in_the_roster_is_served_and_separately_addressable() {
     // Each session is told which radio it is on and what else the station has
     // — the whole of how a client that holds several radios finds the others
     // without anybody typing an address in.
-    let (me, radios) = next_radios(&mut second).await;
+    let (me, radios, editable) = next_radios(&mut second).await;
     assert_eq!(me, 1, "the second session did not know which radio it was on");
     assert_eq!(radios.len(), 2, "the roster was not announced in full");
     assert_eq!(radios[0].id, 0);
@@ -172,6 +175,9 @@ async fn every_radio_in_the_roster_is_served_and_separately_addressable() {
     // the interface's where there is not.
     assert_eq!(radios[0].name, "First radio");
     assert_eq!(radios[1].name, "The Pluto");
+    // This station was handed no way to edit its roster, so it says so rather
+    // than leaving the client to press a button nothing answers.
+    assert!(!editable, "a station with no roster callbacks called itself editable");
 
     // The first client is still on its own radio, not displaced by the second.
     send(&mut first, &ClientMsg::Ping(7)).await;

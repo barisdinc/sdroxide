@@ -714,6 +714,17 @@ pub(crate) struct RadioChip {
     /// the far end of a connection: it is switched on and off where it is, and
     /// this machine's roster has no entry for it to record.
     pub switchable: bool,
+    /// Whether the roster this radio is in can be edited from here — radios
+    /// added beside it, and this one closed. True for one of this machine's own
+    /// (the roster is a file here) and for one on a station that takes roster
+    /// edits from a client; false for a browser tab's own machine, which has no
+    /// roster, and for a station whose host did not wire that up.
+    pub roster_editable: bool,
+    /// Whether this is the first radio of the station that holds it — the one
+    /// that runs the station-wide network services and answers at its plain
+    /// `/ws`. It is not offered for closing anywhere, because no station will
+    /// let go of it.
+    pub first_of_station: bool,
 }
 
 impl RadioChip {
@@ -738,7 +749,18 @@ pub(crate) enum RadioTabRequest {
     /// Switch to this radio, carrying the settings dialog along: the origin's
     /// closes, the target's opens on its Radio page.
     Focus(u32),
-    Add,
+    /// Put another radio in a roster. `station` is empty for this machine's own
+    /// — the "+" the shell has always had — and otherwise the station key of a
+    /// connection ([`SdroxideApp::station_key`]), which asks the station at the
+    /// far end to add one to *its* roster.
+    ///
+    /// The distinction is the whole point on a native client: a screen holding
+    /// its own dongle and a remote station has two rosters in one tab strip,
+    /// and "add a radio" means nothing until it says which. A browser has only
+    /// the station's.
+    Add {
+        station: String,
+    },
     /// Open somebody else's station as a tab of its own: dial this WebSocket
     /// URL and, if it answers, show it under `name`. Queued by the **Remote**
     /// tab's CONNECT button — the connection is made by the shell, because
@@ -775,6 +797,15 @@ pub(crate) enum RadioTabRequest {
     /// the *borrower's* engine, so Apply on the lender's own page has to reach
     /// the borrower or nothing it changed takes effect.
     Reopen(u32),
+    /// Take this tab's radio out of the roster of the station it belongs to —
+    /// a station somewhere else, reached over the network. Its configuration
+    /// stays there, exactly as a local radio's does when it is closed here.
+    ///
+    /// Deliberately not what [`RadioTabRequest::Close`] does to such a tab:
+    /// closing a connection is hanging up, and hanging up must not be able to
+    /// delete somebody's radio. The tab named here is a *tab* id; the shell
+    /// translates it into the id its station knows it by.
+    RemoveFromStation(u32),
 }
 
 impl SdroxideApp {
@@ -1208,6 +1239,43 @@ impl SdroxideApp {
 
     pub(crate) fn peer_name(&self) -> Option<String> {
         self.ctrl.peer_name()
+    }
+
+    /// The far station's first radio, as it numbers it — the one it will not
+    /// let a client close.
+    pub(crate) fn peer_first_radio(&self) -> Option<u32> {
+        self.ctrl.peer_first_radio()
+    }
+
+    /// Whether the station this tab is connected to lets a client add radios to
+    /// its roster and take them out again.
+    pub(crate) fn station_roster_editable(&self) -> bool {
+        self.ctrl.station_roster_editable()
+    }
+
+    /// Ask that station for another radio. What answers is its roster, which
+    /// it announces to everyone on it — the new radio then arrives as one more
+    /// of the station's, and the shell opens it beside this one.
+    pub(crate) fn add_station_radio(&mut self, name: &str) {
+        self.ctrl.add_station_radio(name);
+    }
+
+    /// Ask that station to take one of its radios — named as *it* numbers them
+    /// — out of its roster.
+    pub(crate) fn remove_station_radio(&mut self, id: u32) {
+        self.ctrl.remove_station_radio(id);
+    }
+
+    /// Record the operator's name for one of that station's radios, in the
+    /// roster where it lives.
+    pub(crate) fn rename_station_radio(&mut self, id: u32, name: &str) {
+        self.ctrl.rename_station_radio(id, name);
+    }
+
+    /// Whether the station has said this tab's radio is no longer one of its
+    /// own — see [`sdroxide_types::RadioController::peer_removed`].
+    pub(crate) fn peer_removed(&self) -> bool {
+        self.ctrl.peer_removed()
     }
 
     /// This connection's station, as the sign-in keys it: every radio of one

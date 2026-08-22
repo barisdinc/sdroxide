@@ -293,12 +293,16 @@ fn main() -> anyhow::Result<()> {
         // it. Each is served under its own address — see `sdroxide-server`.
         let radios = boot_radios(&mut cli, &settings)?;
         let port = cli.port.unwrap_or(settings.server_port);
+        // Sanitized for the radios a client adds later, exactly as the GUI
+        // does for its "+" chip: radio 0's overrides are radio 0's.
+        let factory_cli = secondary_cli(&cli);
         return server_main::run(
             radios,
             &settings,
             cli.tx_ham_only(&settings),
             port,
             cli.web_root.clone(),
+            factory_cli,
         );
     }
     // A remote client drives somebody else's engine; that engine is the one

@@ -141,7 +141,13 @@ pub struct RemoteController {
     /// The far end's roster and which of it this session is on, as announced
     /// in the handshake. `None` until it lands, and re-announced on every
     /// reconnect — the station may have gained or lost a radio in between.
+    ///
+    /// Re-announced *within* a session as well, whenever the station's roster
+    /// changes: by this client, by another one, or at the station itself.
     peers: Option<(u32, Vec<sdroxide_proto::RadioInfo>)>,
+    /// Whether that station takes roster edits from here, as it said with the
+    /// roster ([`RadioController::station_roster_editable`]).
+    peers_editable: bool,
 }
 
 /// How long an edited interface configuration is held before it goes out.
@@ -198,6 +204,7 @@ impl RemoteController {
             probe_answers: VecDeque::new(),
             muted: false,
             peers: None,
+            peers_editable: false,
         })
     }
 
@@ -362,7 +369,10 @@ impl RemoteController {
             // it has. Kept rather than turned into an event: it is a fact about
             // the *connection*, which the shell reads to put the station's
             // other radios in tabs of their own.
-            ServerMsg::Radios { me, radios } => self.peers = Some((me, radios)),
+            ServerMsg::Radios { me, radios, editable } => {
+                self.peers = Some((me, radios));
+                self.peers_editable = editable;
+            }
         }
     }
 
@@ -477,9 +487,37 @@ impl RadioController for RemoteController {
             .map(|r| sdroxide_types::PeerRadio {
                 id: r.id,
                 name: r.name.clone(),
+                named: r.named,
                 url: radio_url(&self.url, r.id),
             })
             .collect()
+    }
+
+    fn peer_first_radio(&self) -> Option<u32> {
+        self.peers.as_ref()?.1.first().map(|r| r.id)
+    }
+
+    fn station_roster_editable(&self) -> bool {
+        self.peers_editable
+    }
+
+    fn add_station_radio(&mut self, name: &str) {
+        self.send_msg(ClientMsg::AddRadio { name: name.to_string() });
+    }
+
+    fn remove_station_radio(&mut self, id: u32) {
+        self.send_msg(ClientMsg::RemoveRadio { id });
+    }
+
+    fn rename_station_radio(&mut self, id: u32, name: &str) {
+        self.send_msg(ClientMsg::RenameRadio { id, name: name.to_string() });
+    }
+
+    fn peer_removed(&self) -> bool {
+        // Only once a roster has actually arrived: before that there is
+        // nothing to be missing from, and a tab that read silence as "you have
+        // been closed" would shut itself on every slow connection.
+        self.peers.as_ref().is_some_and(|(me, radios)| !radios.iter().any(|r| r.id == *me))
     }
 
     fn set_muted(&mut self, muted: bool) {
@@ -488,7 +526,9 @@ impl RadioController for RemoteController {
 
     fn peer_name(&self) -> Option<String> {
         let (me, radios) = self.peers.as_ref()?;
-        radios.iter().find(|r| r.id == *me).map(|r| r.name.clone())
+        // Only a name somebody typed: a derived one is this radio's interface,
+        // which the tab reads off its own connection and keeps up to date.
+        radios.iter().find(|r| r.id == *me && r.named).map(|r| r.name.clone())
     }
 
     fn peer_url(&self) -> Option<String> {
@@ -539,6 +579,7 @@ impl RadioController for RemoteController {
         // ...and the roster, which the new session announces afresh: the
         // station may have gained or lost a radio while the link was down.
         self.peers = None;
+        self.peers_editable = false;
         // The interface configuration is per-session too: the new socket may
         // reach a different station, and an edit queued against the dead one
         // must not be applied to it. The fresh session announces its own.

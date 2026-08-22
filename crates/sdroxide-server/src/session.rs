@@ -22,7 +22,7 @@ use crate::{SessionTx, Shared, Station};
 /// with one radio has. Every client that predates the roster arrives here, so
 /// this address must never mean anything else.
 pub async fn ws_route(State(station): State<Arc<Station>>, upgrade: WebSocketUpgrade) -> Response {
-    let shared = station.radios[0].clone();
+    let shared = station.first();
     upgrade.on_upgrade(|socket| session(socket, shared, station))
 }
 
@@ -37,7 +37,7 @@ pub async fn ws_route_for(
     match station.radio(id) {
         Some(shared) => upgrade.on_upgrade(|socket| session(socket, shared, station)),
         None => {
-            let known: Vec<String> = station.radios.iter().map(|r| r.id.to_string()).collect();
+            let known: Vec<String> = station.list().iter().map(|r| r.id.to_string()).collect();
             (
                 axum::http::StatusCode::NOT_FOUND,
                 format!("this station has no radio {id}; it serves {}", known.join(", ")),
@@ -123,6 +123,31 @@ async fn handshake(socket: &mut WebSocket, shared: &Arc<Shared>) -> Option<Audio
     signed_in.then_some(audio_caps)
 }
 
+/// Tell the client that asked why a roster edit did not happen.
+///
+/// A notice rather than a [`ServerMsg::Error`]: the client reads `Error` as the
+/// session being over, and a refused edit — the first radio, a name for a radio
+/// that has just gone — leaves a perfectly good connection standing. Nothing is
+/// sent when it worked: what happened is the new roster, which every session
+/// has already been given.
+fn report<T>(
+    shared: &Shared,
+    outcome: Result<Result<T, String>, tokio::task::JoinError>,
+    what: &str,
+) {
+    let why = match outcome {
+        Ok(Ok(_)) => return,
+        Ok(Err(e)) => e,
+        // The blocking task panicked or was cancelled. The client is still
+        // owed an answer, or its button would simply have done nothing.
+        Err(e) => format!("the station could not answer ({e})"),
+    };
+    warn!(radio = shared.id, "{what}: {why}");
+    if let Some(s) = shared.session.lock().unwrap().as_ref() {
+        let _ = s.reliable.try_send(ServerMsg::Notice(Some(format!("{what}: {why}"))));
+    }
+}
+
 async fn run_session(
     socket: &mut WebSocket,
     shared: &Arc<Shared>,
@@ -185,11 +210,8 @@ async fn run_session(
     let _ = socket
         .send(msg(&ServerMsg::Radios {
             me: shared.id,
-            radios: roster
-                .radios
-                .iter()
-                .map(|r| sdroxide_proto::RadioInfo { id: r.id, name: r.display_name() })
-                .collect(),
+            radios: roster.roster(),
+            editable: roster.editable(),
         }))
         .await;
     let _ = socket.send(msg(&ServerMsg::Memories(memories))).await;
@@ -354,6 +376,33 @@ async fn run_session(
                 // the one carrying the radio. Its own worker answers, in the
                 // order these arrive — see `crate::probe`.
                 Ok(ClientMsg::Probe(req)) => crate::probe::ask(shared, req),
+                // The station's roster, not this radio's engine. Answered here
+                // rather than forwarded: a command goes to *a* radio, and how
+                // many radios there are belongs to the station.
+                //
+                // Awaited in the receive loop, so roster edits are taken one at
+                // a time in the order they arrive — the same rule as probes,
+                // and for a stronger reason: adding a radio starts an engine,
+                // and two of them racing would both read the same `next_id`.
+                Ok(ClientMsg::AddRadio { name }) => {
+                    let station = roster.clone();
+                    // On a blocking thread: it creates the radio's
+                    // configuration scope and starts an engine, neither of
+                    // which belongs on the socket task.
+                    let done = tokio::task::spawn_blocking(move || station.add_radio(&name)).await;
+                    report(shared, done, "adding a radio");
+                }
+                Ok(ClientMsg::RemoveRadio { id }) => {
+                    let station = roster.clone();
+                    let done = tokio::task::spawn_blocking(move || station.remove_radio(id)).await;
+                    report(shared, done, "closing a radio");
+                }
+                Ok(ClientMsg::RenameRadio { id, name }) => {
+                    let station = roster.clone();
+                    let done =
+                        tokio::task::spawn_blocking(move || station.rename_radio(id, &name)).await;
+                    report(shared, done, "renaming a radio");
+                }
                 Ok(ClientMsg::Ping(t)) => {
                     if let Some(s) = shared.session.lock().unwrap().as_ref() {
                         let _ = s.reliable.try_send(ServerMsg::Pong(t));

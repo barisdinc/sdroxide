@@ -7,7 +7,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use sdroxide_config::Settings;
 use sdroxide_radio::rtrb;
-use sdroxide_radio::{AudioParams, EngineConfig, MicParams, StoreSync, TxGate, start_engine};
+use sdroxide_radio::{
+    AudioParams, EngineConfig, IqSource, MicParams, StoreSync, TxGate, start_engine,
+};
 use sdroxide_server::{RadioParams, ServerParams};
 
 use crate::RadioBoot;
@@ -23,6 +25,9 @@ pub fn run(
     tx_ham_only: bool,
     port: u16,
     web_root: Option<PathBuf>,
+    // A sanitized command line (radio-0 overrides stripped) for radios a client
+    // adds while the server is running — the same one the GUI's "+" chip uses.
+    factory_cli: crate::Cli,
 ) -> Result<()> {
     // Shared by every engine in this process, exactly as in the GUI: one
     // transmitter on the air at a time, and a store change made through one
@@ -87,6 +92,75 @@ pub fn run(
         });
     }
 
+    // A radio added by a client while this server is running. The same steps
+    // the GUI's "+" chip takes, and for the same reason it takes them: the
+    // scope on disk first, then an engine on the stand-in source, because a
+    // new radio has no interface yet (`Backend::None`) and the open is
+    // *meant* to fail. What it is comes next, from the client's Radio settings
+    // page, which already reaches this machine's `radio.json`.
+    //
+    // Without this, a station with no screen could only gain a radio by
+    // editing `radios.json` on the server and restarting it — dropping
+    // everyone on the air to add a dongle.
+    let add_gate = gate.clone();
+    let add_sync = sync.clone();
+    let add_radio: sdroxide_server::AddRadioFn = Box::new(move |name: &str| {
+        let slot = sdroxide_config::create_radio(name).map_err(|e| e.to_string())?;
+        // Read fresh: this is minutes or days after startup, and the operator
+        // may have changed the station's settings from a client since.
+        let settings = Settings::load();
+        let store = sdroxide_config::Store::radio(slot.id);
+        let mut c = factory_cli.clone();
+        let initial_mode = c.apply_session(store.load_session());
+        let (source, caps) =
+            match crate::open_converted_source(&store.load_radio_config(), &c, &settings) {
+                Ok(pair) => pair,
+                Err(e) => (
+                    Box::new(crate::null_source::NullSource::new(c.center_hz(), format!("{e}")))
+                        as Box<dyn IqSource>,
+                    crate::synthetic_caps("No radio"),
+                ),
+            };
+        let (audio_producer, audio_consumer) = rtrb::RingBuffer::<f32>::new(48_000 * 2);
+        let (mic_producer, mic_consumer) = rtrb::RingBuffer::<f32>::new(48_000);
+        let handles = start_engine(
+            source,
+            caps,
+            EngineConfig {
+                audio: Some(AudioParams { producer: audio_producer, out_rate: 48_000.0 }),
+                mic: Some(MicParams { consumer: mic_consumer, rate: 48_000.0 }),
+                cal_offset_db: settings.cal_offset_db as f32,
+                initial_mode,
+                initial_antenna: (None, None),
+                tx_ham_only,
+                swr_guard: settings.swr_guard,
+                swr_limit: settings.swr_limit,
+                reopen: Some(crate::reopen_factory_for(&c, store.clone(), slot.id)),
+                remember_session: true,
+                store,
+                instance: slot.id,
+                // A radio added at runtime is never the capture target
+                // (`--record-iq` names one file), and never the primary: the
+                // station's network services belong to the radio that was
+                // already running them.
+                record_iq: None,
+                primary: false,
+                tx_gate: Some(add_gate.clone()),
+                store_sync: Some(add_sync.clone()),
+            },
+        );
+        Ok(RadioParams {
+            id: slot.id,
+            name: slot.name,
+            cmd_tx: handles.cmd_tx,
+            event_rx: handles.event_rx,
+            spectrum_out: handles.spectrum_out,
+            wide_spectrum_out: handles.wide_spectrum_out,
+            audio_rx: audio_consumer,
+            mic_tx: mic_producer,
+        })
+    });
+
     sdroxide_server::run_blocking(ServerParams {
         radios: params,
         bind: settings.server_bind.clone(),
@@ -104,6 +178,17 @@ pub fn run(
         // headless station's radio could only be changed by editing
         // `radio.json` on this machine and restarting.
         probe: Some(Box::new(crate::devices::probe)),
+        add_radio: Some(add_radio),
+        // The roster file only. The engine stops by itself once the server
+        // lets go of its command channel, and the radio's own configuration
+        // scope stays on disk — closing a radio is not a request to destroy
+        // what it was set up as, here any more than at the station.
+        remove_radio: Some(Box::new(|id| {
+            sdroxide_config::remove_radio(id).map_err(|e| e.to_string())
+        })),
+        rename_radio: Some(Box::new(|id, name| {
+            sdroxide_config::rename_radio(id, name).map_err(|e| e.to_string())
+        })),
     })?;
     Ok(())
 }

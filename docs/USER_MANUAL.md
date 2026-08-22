@@ -1167,6 +1167,17 @@ is already using. Pick its interface, configure it, press **Apply /
 reconnect**, and it is on the air. From then on the same strip appears across
 the top of the main window as well.
 
+While a station somewhere else is also open in a tab
+([8.2](#82-connect-a-native-remote-client)), the same **+** asks *where* first:
+**On this computer**, or **On** that station. The two are as different as
+plugging a dongle in here and plugging one in at the remote site — one radio
+appears in this machine's roster, the other in that station's, where its engine
+runs and where its settings are saved. A radio added on a station comes back as
+a tab of its own within a second or so, with the Radio page already open on it,
+exactly as a local one does. The **+** on the main window's tab strip always
+means this computer; the choice lives in Settings → Radio, which is where the
+two rosters are side by side.
+
 **Adding somebody else's station.** A radio in a tab does not have to be
 attached to this machine. **Settings → Remote** takes the address of an sdroxide
 server and gives it a tab of its own, exactly like a local radio
@@ -1174,6 +1185,19 @@ server and gives it a tab of its own, exactly like a local radio
 is, and what crosses the network is the spectrum, the audio and the commands.
 Such a tab is closed from the roster like any other, which hangs up and changes
 nothing on the server.
+
+**Closing a radio that lives on a station.** Hanging up and closing a radio are
+different things, so they are different buttons. The **×** on a connection's
+button closes the tab — it hangs up, and the radio stays where it is. To take a
+radio out of the station's roster, select it and press **Close on station**,
+next to the **Name** box; it asks once before doing it. What happens then is
+what happens when a local radio is closed here: the roster entry goes, its
+configuration stays on that machine, its engine stops and its device is
+released, and every client on that station — not just this one — sees the radio
+leave. A station's *first* radio is never offered: it runs the station-wide
+services and answers at the plain `/ws` that every client arrives at. A station
+that does not allow this at all — one whose sdroxide was not started as a
+server, or an older one — simply shows neither control.
 
 **The tab strip.** Each radio gets a tab of its own, and the open one is joined
 to the page below it. Click anywhere on a tab — not just its name — to switch
@@ -7528,6 +7552,18 @@ station in tabs ([8.2](#82-connect-a-native-remote-client)). A radio id that the
 station does not have is refused with a 404 rather than quietly answered by a
 different radio.
 
+**The roster can be changed from a client.** A headless station's radios used to
+be fixed at start-up: adding one meant editing `radios.json` on that machine and
+restarting the server, which drops everyone on the air. A signed-in client can
+now add a radio to the station and close one again — the **+** and **Close on
+station** described in [2.17](#217-running-more-than-one-radio) — and the
+station acts on it at once: the new radio gets its own configuration scope, its
+own engine and its own address, and every client connected is told the roster
+changed. It arrives with no interface, so the next step is the same as it is in
+the shack: pick one on the Radio page and press **Apply / reconnect**. The
+station's first radio cannot be closed this way; nothing else is protected, so
+treat the sign-in as what it is — the key to the station, not to one radio.
+
 The interlock applies across the whole station: only one of its radios can
 transmit at a time, as in the shack. Note that each radio has its own
 `rigctld.json` and `tciserver.json` in its own scope — if you enable those
@@ -7544,7 +7580,9 @@ sdroxide already has open — the tab strip at the top of the window switches
 between them, and ⊞ puts two side by side ([2.17](#217-running-more-than-one-radio)).
 Your own radio keeps running while you work the remote one. To hang up, close
 the tab from the roster at the top of **Settings → Radio**; nothing on the
-server is changed by that. If the server asks for a username and password, its
+server is changed by that. Adding a radio *on the server*, and closing one
+there, are separate and clearly-marked actions in the same roster — see
+[2.17](#217-running-more-than-one-radio). If the server asks for a username and password, its
 sign-in screen appears in the new tab ([8.3](#83-sign-in-who-may-operate-the-station)).
 
 The address is remembered in `config.toml` on the machine you typed it on, so
@@ -7727,7 +7765,11 @@ written back to the `radio.json` on the machine the radio is attached to
 a dongle's AGC off from a phone. Which interface the server opens is reachable
 from here too: the Rescan and Discover buttons enumerate the *server's* buses
 and network, so you can pick another radio out of that list and press **Apply /
-reconnect**.
+reconnect**. So is *how many* radios it has: the roster across the top of
+Settings → Radio has the same **+** as the desktop client, which here can only
+mean the station, and **Close on station** takes one out again. A radio added
+this way opens as another browser tab of the same page within a second, exactly
+as the station's other radios do.
 The [solar system 3D view](#7-solar-system-3d-view) works too: **☀ 3D**
 opens it in a new tab, which connects to a separate read-only endpoint and so
 does not consume the single control connection — though it is challenged for the
@@ -8397,7 +8439,7 @@ sdroxide stores its settings under the per-user config directory:
 | `sstv_rx/` | dir | Received SSTV and RIFP pictures, kept for the gallery. |
 | `wefax_rx/` | dir | Weather-fax charts received by an earlier version. Charts now go to `~/Pictures/sdroxide/wefax/`, but this is still read so an existing collection stays in the gallery. |
 | `solar/` | dir | Cached solar imagery, space-weather JSON and subscribed element-set listings for the 3D view, with an index of HTTP validators so refreshes stay cheap. Safe to delete; it is re-fetched on demand. |
-| `radios.json` | JSON | The roster of configured radios ([§2.17](#217-running-more-than-one-radio)): each radio's id, the name you gave it (empty = named after its interface) and whether it is switched on (`enabled`, absent = on). Absent until you add a second radio. |
+| `radios.json` | JSON | The roster of configured radios ([§2.17](#217-running-more-than-one-radio)): each radio's id, the name you gave it (empty = named after its interface) and whether it is switched on (`enabled`, absent = on). Absent until you add a second radio. Written by the GUI, and — on a machine running `--server` — by a signed-in remote client adding or closing a radio ([§8.1](#81-start-the-server)). |
 | `radio-<N>/` | dir | An additional radio's own copies of the files that describe *a radio*: `radio.json`, `session.json`, `scanner.json`, `tciserver.json`, `rigctld.json` and `wsjtx.json`. The first radio keeps those files at the root, exactly where a single-radio installation has always had them, so adding and removing other radios never touches it. Kept on disk when the radio is closed. |
 
 Every file has sensible defaults, so a missing or partial file always loads. You

@@ -437,7 +437,17 @@ use sdroxide_types::{
 /// appended so existing discriminants keep their numbers, but a v71 client
 /// handed one has nowhere to put it. No new `ServerMsg` or `Command`: the lane
 /// reuses `IsmReports`, `IsmStatus` and `SetIsmConfig`.
-pub const PROTO_VERSION: u16 = 72;
+///
+/// **73** — the station's roster is editable from a client. Three appended
+/// `ClientMsg`s (`AddRadio`, `RemoveRadio`, `RenameRadio`), which alone would
+/// be survivable — postcard numbers variants by declaration index and nobody
+/// sends a message they don't have — but `ServerMsg::Radios` gained `editable`
+/// mid-variant, and postcard is not self-describing: a v72 client reading it
+/// would take the flag for the start of the next message. Configuring a
+/// station's radios from away already worked; what did not was *how many* it
+/// has, which meant a headless station's second radio could only be added by
+/// editing `radios.json` on that machine and restarting it.
+pub const PROTO_VERSION: u16 = 73;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -495,6 +505,42 @@ pub enum ClientMsg {
     /// server's behalf, and the client that may do that is the one that may
     /// already point the radio at any address it likes.
     Probe(sdroxide_types::DeviceProbe),
+    /// Put another radio in the station's roster. `name` is the operator's
+    /// name for it, empty for the usual case of one named after whatever
+    /// interface it ends up configured as.
+    ///
+    /// Not a [`Command`]: commands go to *a* radio's engine, and a station's
+    /// roster belongs to the station. The server acts on this itself, brings
+    /// the new radio up on its own address, and announces the whole roster
+    /// again ([`ServerMsg::Radios`]) — which is how the client that asked, and
+    /// every other client on the station, finds out.
+    ///
+    /// The radio arrives with no interface (`Backend::None`), exactly as one
+    /// added at the station itself does: what it is comes next, from the Radio
+    /// settings page, which a remote client can already drive.
+    AddRadio {
+        name: String,
+    },
+    /// Take a radio out of the station's roster. Its configuration is kept on
+    /// disk, as it is when a radio is closed at the station itself — this is
+    /// closing a radio, not destroying what it was set up as.
+    ///
+    /// The station's first radio is refused: it holds the shared network
+    /// services and the legacy configuration, and `/ws` has to keep meaning
+    /// something.
+    RemoveRadio {
+        id: u32,
+    },
+    /// Record the operator's name for one of the station's radios. Empty puts
+    /// it back on the default — named after its interface.
+    ///
+    /// On the wire rather than kept on the client because the roster is a file
+    /// on the *station*: a name typed here and remembered only here would be
+    /// gone at the next reconnect, and invisible to everybody else on it.
+    RenameRadio {
+        id: u32,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -738,20 +784,35 @@ pub enum ServerMsg {
     Capabilities(DeviceCaps),
     /// Which radio this session is on, and every radio the station serves.
     ///
-    /// Sent once, immediately after `HelloAck`. A station has as many radios as
-    /// its roster says, each reached at an address of its own, and nothing else
-    /// on the wire would tell a client that the machine it just dialled has a
-    /// second one — leaving the operator to find out by reading the server's
-    /// log. With it, a client that can hold several radios at once opens the
-    /// rest beside the one it asked for.
+    /// Sent immediately after `HelloAck`, and again to every session whenever
+    /// the roster changes. A station has as many radios as its roster says,
+    /// each reached at an address of its own, and nothing else on the wire
+    /// would tell a client that the machine it just dialled has a second one —
+    /// leaving the operator to find out by reading the server's log. With it, a
+    /// client that can hold several radios at once opens the rest beside the
+    /// one it asked for, and follows the station when a radio is added or
+    /// taken away — by this client, by another one, or at the station itself.
     ///
     /// Appended last, like everything before it: postcard encodes the variant
     /// as a positional discriminant, so inserting anywhere else would silently
     /// renumber every message after it.
     Radios {
         /// The id of the radio this session is on, out of `radios` below.
+        ///
+        /// A roster that does *not* list it is how a client is told that the
+        /// radio it is on has just been taken out of the station: the roster
+        /// goes out on the reliable lane before the session is dropped, so the
+        /// tab can close itself rather than sit on a socket that is about to
+        /// shut and offer to dial an address that is now a 404.
         me: u32,
         radios: Vec<RadioInfo>,
+        /// Whether this station accepts roster edits from here —
+        /// [`ClientMsg::AddRadio`] and the two beside it. False for a station
+        /// whose host wired none of that up (or a client's own in-process
+        /// engine, which is not addressed this way at all), and the client
+        /// then leaves the controls off rather than offering buttons that
+        /// would be quietly ignored.
+        editable: bool,
     },
     /// What the RDS/RBDS decoder has made of the WFM station on the main
     /// receiver. A snapshot, except for the group log inside it, which is a
@@ -774,6 +835,17 @@ pub struct RadioInfo {
     /// What to call it: the operator's name where they gave one, otherwise
     /// what its interface calls itself, and failing both its number.
     pub name: String,
+    /// Whether `name` is the operator's own, rather than one the station
+    /// derived from the radio's interface.
+    ///
+    /// The difference matters to a client that opens the radio: a derived name
+    /// goes stale the moment the interface changes — and every radio added from
+    /// away starts out as "No radio", because that is what a radio with no
+    /// interface yet calls itself. A client that knows the name was derived
+    /// leaves its tab unnamed and derives one of its own from the radio it is
+    /// then connected to, which follows the interface the way the station's own
+    /// tab strip does.
+    pub named: bool,
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, ProtoError> {
@@ -813,6 +885,30 @@ mod tests {
         let bytes = encode(&m).unwrap();
         let back: ServerMsg = decode(&bytes).unwrap();
         assert_eq!(back, m);
+
+        // The station-roster edits, and the announcement that answers them.
+        // Appended variants, so this is also where a discriminant slip in the
+        // three of them would show.
+        let roster = [
+            ClientMsg::AddRadio { name: String::new() },
+            ClientMsg::RemoveRadio { id: 3 },
+            ClientMsg::RenameRadio { id: 3, name: "The Pluto".into() },
+        ];
+        for m in &roster {
+            let bytes = encode(m).unwrap();
+            let back: ClientMsg = decode(&bytes).unwrap();
+            assert_eq!(&back, m);
+        }
+        let announced = ServerMsg::Radios {
+            me: 1,
+            radios: vec![
+                RadioInfo { id: 0, name: "Signal generator".into(), named: false },
+                RadioInfo { id: 1, name: "The Pluto".into(), named: true },
+            ],
+            editable: true,
+        };
+        let bytes = encode(&announced).unwrap();
+        assert_eq!(decode::<ServerMsg>(&bytes).unwrap(), announced);
 
         // SSTV image/status messages round-trip (binary pixel payloads).
         let sstv = [

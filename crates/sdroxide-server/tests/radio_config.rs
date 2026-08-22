@@ -149,6 +149,9 @@ async fn the_servers_interface_is_replayed_editable_and_switchable_from_a_client
         // Device questions have their own test binary (`probe.rs`); this one
         // is about the configuration, and answers none.
         probe: None,
+        add_radio: None,
+        remove_radio: None,
+        rename_radio: None,
     }));
     // Long enough that the engine's one startup announcement is already behind
     // us when the client arrives — which is the case the replay exists for.

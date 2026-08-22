@@ -29,7 +29,9 @@ One binary, three ways to run it:
 - **Server** — `sdroxide --server`; the DSP runs on the machine with the radio
   and the full UI (plus audio and the waterfall) is served to a browser as
   WebAssembly. Every radio the station has is served, one client each: `/ws`
-  and `/ws/<id>`, listed at `/radios`.
+  and `/ws/<id>`, listed at `/radios`. Its roster is editable from a client
+  too — a signed-in operator can add a radio to the station and close one
+  again, without touching the machine or restarting it.
 - **Native remote** — `sdroxide --connect host:4950`; the desktop UI driving a
   remote server instead of local hardware. A station with several radios comes
   up with all of them, one tab each.

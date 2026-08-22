@@ -87,6 +87,16 @@ struct Tab {
     /// the same answer, kept because the strip draws it every frame and the
     /// only thing that ever changes it is the switch below.
     enabled: bool,
+    /// What to call this tab while nobody has named it and its radio has no
+    /// interface to be named after: the address its connection was opened at,
+    /// as the frontend's dialler writes it. `None` for one of this machine's
+    /// own radios, which fall back to their number instead.
+    ///
+    /// Kept apart from `name` because it is not a name anybody gave: a radio
+    /// added at a station has no interface yet, and putting the dialler's
+    /// stand-in in `name` would make it the operator's name for the radio —
+    /// still there, and now wrong, once they had chosen an interface for it.
+    fallback: Option<String>,
     /// Somebody else's station, reached over the network. It has no entry in
     /// this machine's radio roster, so closing or renaming it must not go
     /// looking for one. In the browser there is no roster and every tab is
@@ -137,6 +147,13 @@ pub struct MultiApp {
     /// Kept for tabs created at runtime, which are built long after the
     /// [`eframe::CreationContext`] is gone.
     wgpu: Option<eframe::egui_wgpu::RenderState>,
+    /// The station a radio has just been asked for, by station key, while the
+    /// station is still creating it. What it does is put the radio in front of
+    /// the operator when it arrives instead of quietly behind the tab they are
+    /// on: they asked for it, and the next thing they want is its Radio
+    /// settings page. Cleared as soon as one arrives — see
+    /// [`MultiApp::open_peer_radios`].
+    pending_add: Option<String>,
     /// Addresses of a station's further radios that have already been opened
     /// beside the one that was dialled. Kept for the whole session and never
     /// cleared on close: a tab the operator shut is one they did not want, and
@@ -170,7 +187,15 @@ impl MultiApp {
                 app.set_focused_flag(i == 0);
                 app.set_shared_log(shared_log);
                 app.set_can_add_radio(can_add);
-                Tab { id: r.id, name: r.name, app, remote, attached_to: None, enabled: r.enabled }
+                Tab {
+                    id: r.id,
+                    name: r.name,
+                    app,
+                    remote,
+                    fallback: None,
+                    attached_to: None,
+                    enabled: r.enabled,
+                }
             })
             .collect();
         assert!(!tabs.is_empty(), "MultiApp needs at least one radio");
@@ -182,6 +207,7 @@ impl MultiApp {
             factory,
             remote,
             wgpu: cc.wgpu_render_state.clone(),
+            pending_add: None,
             peers_opened: std::collections::HashSet::new(),
         }
     }
@@ -235,6 +261,12 @@ impl MultiApp {
     /// The roster as published to the visible tabs, for the settings dialog's
     /// copy of the strip.
     fn roster(&self) -> Vec<RadioChip> {
+        // The radio each station will not part with: its first. For this
+        // machine that is the first tab that is not a connection — the station
+        // radio, which holds the shared services and the legacy configuration;
+        // for a station at the far end it is the first radio in the roster it
+        // announced, which is what its `/ws` means.
+        let first_local = self.tabs.iter().find(|t| !t.remote).map(|t| t.id);
         self.tabs
             .iter()
             .enumerate()
@@ -253,6 +285,20 @@ impl MultiApp {
                 // Only a radio of this station's own has a switch here: the
                 // roster the factories read is this machine's file.
                 switchable: !t.remote,
+                // Whether the roster this radio is in takes edits from here.
+                // For one of this machine's own that is whether the shell can
+                // build a radio at all (the browser cannot); for one at the far
+                // end of a connection it is what that station said.
+                roster_editable: if t.remote {
+                    t.app.station_roster_editable()
+                } else {
+                    self.factory.is_some()
+                },
+                first_of_station: if t.remote {
+                    t.app.peer_first_radio() == Some(t.app.station_radio_id())
+                } else {
+                    first_local == Some(t.id)
+                },
             })
             .collect()
     }
@@ -262,7 +308,21 @@ impl MultiApp {
     /// the id the engine's own messages use ("radio 2 is on the air"), so the
     /// two always agree.
     fn default_name(t: &Tab) -> String {
-        t.app.interface_name().unwrap_or_else(|| format!("Radio {}", t.id + 1))
+        if let Some(name) = t.app.interface_name() {
+            return name;
+        }
+        // A radio with no interface yet — one just added at a station, or one
+        // whose device is not there. A connection says where it is instead,
+        // which is what tells two stations' unconfigured radios apart.
+        if let Some(fallback) = &t.fallback {
+            return fallback.clone();
+        }
+        // Numbered the way the station that holds the radio numbers it. A
+        // connection's tab id is this screen's own bookkeeping — allocated from
+        // `REMOTE_TAB_ID_BASE` so it cannot collide with the roster — and would
+        // read as "Radio 2147483649".
+        let n = if t.remote { t.app.station_radio_id() } else { t.id };
+        format!("Radio {}", n + 1)
     }
 
     /// The name a tab chip shows: the operator's, else the derived default.
@@ -348,7 +408,7 @@ impl MultiApp {
                         self.tabs[i].app.open_radio_settings();
                     }
                 }
-                RadioTabRequest::Add => self.add_tab(ctx),
+                RadioTabRequest::Add { station } => self.add_radio(&station, ctx),
                 #[cfg(not(target_arch = "wasm32"))]
                 RadioTabRequest::Connect { url, name } => self.connect_tab(&url, name, ctx),
                 RadioTabRequest::Close(id) => {
@@ -370,19 +430,29 @@ impl MultiApp {
                 RadioTabRequest::Rename { id, name } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
                         t.name = name.clone();
-                        // A connection has no roster entry to record it in —
-                        // the name it was given is the address it was dialled
-                        // at, and it lasts as long as the connection does. In
-                        // the browser there is no roster at all: every tab
-                        // there is somebody else's radio.
+                        // A radio at the far end of a connection is named in
+                        // the roster where it lives, so the name goes there —
+                        // otherwise it would last exactly as long as this
+                        // connection, and nobody else on that station would
+                        // ever see it. A station that does not take roster
+                        // edits keeps the name here and nowhere else, which is
+                        // what it has always done.
+                        if t.remote {
+                            if t.app.station_roster_editable() {
+                                let station_id = t.app.station_radio_id();
+                                t.app.rename_station_radio(station_id, &name);
+                            }
+                            continue;
+                        }
+                        // In the browser there is no roster to record it in at
+                        // all: every tab there is somebody else's radio.
                         #[cfg(not(target_arch = "wasm32"))]
-                        if !t.remote
-                            && let Err(e) = sdroxide_config::rename_radio(id, &name)
-                        {
+                        if let Err(e) = sdroxide_config::rename_radio(id, &name) {
                             eprintln!("sdroxide: renaming radio {id}: {e}");
                         }
                     }
                 }
+                RadioTabRequest::RemoveFromStation(id) => self.remove_at_station(id),
             }
         }
     }
@@ -403,7 +473,12 @@ impl MultiApp {
                     }
                 }
                 StripAction::Power { id, on } => self.set_power(id, on),
-                StripAction::Add => self.add_tab(ctx),
+                // The main window's strip only ever offers this machine's own
+                // roster — it is drawn on every pane and a menu there would be
+                // in the way. Adding a radio at a station is one screen away,
+                // in Settings → Radio, where the two rosters are already side
+                // by side.
+                StripAction::Add => self.add_radio("", ctx),
             }
         }
     }
@@ -551,8 +626,20 @@ impl MultiApp {
             }
             if self.factory.is_some() {
                 bar.end_tabs(ui);
+                // Always this machine's own roster. A strip is drawn on every
+                // pane and a menu here would be in the way; where a radio could
+                // also go on a station at the far end of a connection, that
+                // choice is one screen away in Settings → Radio, where the two
+                // rosters are already side by side. The tooltip says so as soon
+                // as there is a second roster to confuse it with.
+                let tip = match self.tabs.iter().any(|t| t.remote) {
+                    true => {
+                        "Add a radio on this computer (Settings → Radio to add one at a                              station)"
+                    }
+                    false => "Add a radio",
+                };
                 if crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
-                    .on_hover_text("Add a radio")
+                    .on_hover_text(tip)
                     .clicked()
                 {
                     actions.push(StripAction::Add);
@@ -588,6 +675,52 @@ impl MultiApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn sync_audio(&mut self) {}
+
+    /// Put another radio in a roster: this machine's own (`station` empty), or
+    /// that of a station this screen is connected to.
+    ///
+    /// The two are as different as plugging a dongle in here and plugging one
+    /// in at the remote site, which is why the request says which. A radio
+    /// added at a station is not built here at all — the station creates it,
+    /// starts its engine and announces its roster again, and the new radio
+    /// arrives as one more of that station's, through the same path the rest of
+    /// them did.
+    fn add_radio(&mut self, station: &str, ctx: &egui::Context) {
+        if station.is_empty() {
+            self.add_tab(ctx);
+            return;
+        }
+        let Some(t) = self.tabs.iter_mut().find(|t| t.remote && t.app.station_key() == station)
+        else {
+            return;
+        };
+        // Unnamed, exactly as the "+" chip creates one here: a radio is named
+        // after whatever interface it ends up configured as until the operator
+        // says otherwise.
+        t.app.add_station_radio("");
+        self.pending_add = Some(station.to_string());
+        // Nothing else happens here. The station answers with its roster, and
+        // `open_peer_radios` opens what is new in it — including, for a radio
+        // this screen asked for, putting it in front of the operator.
+        self.tabs[self.focused].app.show_notice("Asked the station for another radio…".to_string());
+    }
+
+    /// Take a tab's radio out of the roster of the station it belongs to.
+    ///
+    /// Sent through that radio's own session, which the station then closes:
+    /// the roster it announces on the way out no longer lists the radio, and
+    /// the tab closes itself on that ([`MultiApp::open_peer_radios`]). Closing
+    /// it here instead would be this screen deciding an answer that is the
+    /// station's to give — and would drop the socket the request has to go out
+    /// on.
+    fn remove_at_station(&mut self, tab: u32) {
+        let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) else { return };
+        if !t.remote || !t.app.station_roster_editable() {
+            return;
+        }
+        let station_id = t.app.station_radio_id();
+        t.app.remove_station_radio(station_id);
+    }
 
     fn add_tab(&mut self, ctx: &egui::Context) {
         let Some(factory) = self.factory.as_mut() else { return };
@@ -641,6 +774,24 @@ impl MultiApp {
                 tab.name = name;
             }
         }
+        // A radio the station has closed — by this client, by another one, or
+        // at the station itself. The roster it announced on its way out no
+        // longer lists this tab's radio, so the tab goes with it: the socket is
+        // about to shut, and leaving it up would show a lost connection and
+        // offer to redial an address that is now a 404.
+        //
+        // Never the last tab standing: a window with no radio in it has nothing
+        // to draw, and a client dialled straight at one radio would be left
+        // looking at nothing. That tab keeps its lost-connection banner, which
+        // is at least the truth.
+        while self.tabs.len() > 1
+            && let Some(i) = self.tabs.iter().position(|t| t.remote && t.app.peer_removed())
+        {
+            let name = Self::display_name(&self.tabs[i]);
+            self.close_tab(i, ctx);
+            let focused = self.focused;
+            self.tabs[focused].app.show_notice(format!("{name} was closed at the station."));
+        }
         if self.remote.is_none() {
             return;
         }
@@ -659,19 +810,49 @@ impl MultiApp {
             // session.
             self.peers_opened.insert(peer.url.clone());
             let id = self.next_remote_id();
+            // A radio this screen asked the station for, arriving. That one
+            // goes in front of the operator on its Radio settings page — it has
+            // no interface yet, and choosing one is what they pressed "+" to
+            // do — while everything else keeps arriving quietly behind them.
+            let asked_for =
+                self.pending_add.as_deref() == Some(crate::login::station_key(&peer.url).as_str());
             let Some(remote) = self.remote.as_mut() else { return };
             match remote(&peer.url, id, ctx) {
                 Ok(mut r) => {
-                    // Named as the station names it, which is what the strip
-                    // shows for a local radio too. The address is already on
-                    // the tab this one came from.
-                    if !peer.name.trim().is_empty() {
-                        r.name = peer.name.clone();
-                    }
+                    // Named as the operator named it at the station — and left
+                    // unnamed where they never did, so that the tab derives its
+                    // own name from the radio it is now connected to. A radio
+                    // added from away has no interface yet, so the name the
+                    // station has for it is "No radio"; adopting that would
+                    // still be its name after the operator had picked one.
+                    //
+                    // What the dialler called it becomes the fallback rather
+                    // than the name, for the same reason: it says where the
+                    // radio is, which is worth showing while it has nothing
+                    // else, and is not something anybody typed.
+                    let fallback = match peer.named && !peer.name.trim().is_empty() {
+                        true => {
+                            let dialled = std::mem::replace(&mut r.name, peer.name.clone());
+                            (!dialled.trim().is_empty()).then_some(dialled)
+                        }
+                        false => {
+                            let dialled = std::mem::take(&mut r.name);
+                            (!dialled.trim().is_empty()).then_some(dialled)
+                        }
+                    };
                     // Into the strip, not in front of the operator: they asked
                     // for the station, and the radio they dialled is the one
-                    // they are looking at.
-                    self.append_tab(r, ctx);
+                    // they are looking at. A radio *this* screen asked the
+                    // station for is the exception — see `asked_for`.
+                    let i = if asked_for {
+                        self.pending_add = None;
+                        let i = self.install_tab(r, ctx);
+                        self.tabs[i].app.open_radio_settings();
+                        i
+                    } else {
+                        self.append_tab(r, ctx)
+                    };
+                    self.tabs[i].fallback = fallback;
                 }
                 Err(e) => self.tabs[self.focused]
                     .app
@@ -747,6 +928,7 @@ impl MultiApp {
             name: r.name,
             app,
             remote,
+            fallback: None,
             attached_to: None,
             enabled: r.enabled,
         });
@@ -777,7 +959,16 @@ impl MultiApp {
     }
 
     fn close_tab(&mut self, i: usize, ctx: &egui::Context) {
-        if i == 0 || i >= self.tabs.len() {
+        if i >= self.tabs.len() || self.tabs.len() == 1 {
+            return;
+        }
+        // The station's first radio stays: it holds the shared network
+        // services and the legacy configuration, and a window is a station.
+        // A *connection* in that position is not that radio — a client dialled
+        // straight at one of a station's other radios has one as its first tab
+        // — and a connection whose radio has been closed at the far end has to
+        // be able to go with it.
+        if i == 0 && !self.tabs[0].remote {
             return;
         }
         let mut tab = self.tabs.remove(i);

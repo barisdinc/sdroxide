@@ -73,6 +73,9 @@ async fn spawn_server(port: u16, access: Option<AccessFn>) {
         // a prober that answers from a table keeps them off whatever hardware
         // the test runner happens to have, while still exercising the lane.
         probe: None,
+        add_radio: None,
+        remove_radio: None,
+        rename_radio: None,
     }));
     tokio::time::sleep(Duration::from_millis(400)).await;
 }
