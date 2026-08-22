@@ -584,12 +584,31 @@ impl SdroxideApp {
     /// memory recall, startup) — i.e. whenever the tuning changed AND left
     /// the visible span. Deliberate pans away from the VFO are never
     /// snapped back, and drag-tuning keeps the VFO in view by itself.
-    pub(in crate::app) fn recenter_if_tuned_away(&mut self, prev_vfo: f64) {
+    pub(in crate::app) fn recenter_if_tuned_away(&mut self, prev_vfo: f64, prev_rate: f64) {
         let vfo = self.state.active_freq_hz();
         let first = !self.seen_first_state;
         self.seen_first_state = true;
         if self.view.is_unset() {
             return; // spectrum_view will fit and center on first draw
+        }
+        // The device window grew far past the view. On an audio-mode front end
+        // (a CAT rig or an Icom over LAN) that is the radio's own scope taking
+        // over the panadapter from the demodulated-audio band as it starts
+        // sweeping, or a wider scope span being chosen — either way the whole
+        // sweep is what the operator wants to see, not the sliver of it the
+        // audio band occupied, which is why the R8600 came up "zoomed in" until
+        // the wheel was rolled. Fit to the new window. Edge-triggered on the
+        // rate *changing*, so a steady window never pulls a deliberate zoom back
+        // out, and gated to audio-mode sources so an SDR that un-decimates keeps
+        // its zoom.
+        if refit_on_window_growth(
+            self.caps.as_ref().is_some_and(|c| c.audio_mode),
+            prev_rate,
+            self.state.sample_rate,
+            self.view.span(),
+        ) {
+            self.view.fit(self.state.center_hz, self.state.sample_rate);
+            return;
         }
         // A zoom window only means anything against the span the front end is
         // delivering. Come up on a different interface — or on the same one at
@@ -614,11 +633,22 @@ impl SdroxideApp {
     }
 }
 
+/// Whether a jump in the device window should re-fit the view to it.
+///
+/// True only for an audio-mode front end whose window grew by a large factor
+/// while the view is now a small fraction of it — the scope taking over an
+/// Icom/CAT panadapter, or a wider scope span being chosen. The factor gate
+/// makes it edge-triggered: a window that merely holds a wide span frame after
+/// frame never matches, so a deliberate zoom into part of the sweep survives.
+fn refit_on_window_growth(audio_mode: bool, prev_rate: f64, new_rate: f64, view_span: f64) -> bool {
+    audio_mode && prev_rate > 0.0 && new_rate > prev_rate * 4.0 && view_span * 2.0 < new_rate
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AutoFit, FIT_ARRIVED_DB, FIT_MIN_GAP_S, FIT_SETTLE_S, FIT_STEP_S, average_in, fit_due,
-        glide_step, levels_drifted, pick_levels, slack_viewport,
+        glide_step, levels_drifted, pick_levels, refit_on_window_growth, slack_viewport,
     };
 
     /// The crash this replaced: an RX-888 scrolled to the top of its band, at a
@@ -648,6 +678,35 @@ mod tests {
         // ...and it is pushed inside the device window rather than hanging off it.
         let (lo, hi) = slack_viewport(center, span, (31_500_000.0, 32_000_000.0));
         assert_eq!((lo, hi), (31_000_000.0, 32_000_000.0));
+    }
+
+    /// The scope taking over an Icom's panadapter — the audio band (a few kHz)
+    /// gives way to the sweep span (hundreds of kHz), and the view, left on the
+    /// old sliver, has to open out to the whole sweep rather than stay zoomed in.
+    #[test]
+    fn a_scope_taking_over_the_panadapter_refits_the_view() {
+        assert!(refit_on_window_growth(true, 4_000.0, 200_000.0, 4_000.0));
+        // A wider span chosen mid-session refits too.
+        assert!(refit_on_window_growth(true, 200_000.0, 1_000_000.0, 200_000.0));
+    }
+
+    #[test]
+    fn a_steady_window_leaves_a_deliberate_zoom_alone() {
+        // Same span frame after frame while zoomed into 20 kHz of a 200 kHz
+        // sweep: no growth, so the zoom is not pulled back out.
+        assert!(!refit_on_window_growth(true, 200_000.0, 200_000.0, 20_000.0));
+        // A gentle change (un-decimating 2x) is below the factor gate.
+        assert!(!refit_on_window_growth(true, 100_000.0, 200_000.0, 50_000.0));
+    }
+
+    #[test]
+    fn an_sdr_window_growth_is_left_to_the_operator() {
+        // Not audio mode: an SDR that un-decimates 8x keeps whatever zoom the
+        // operator set, exactly as before.
+        assert!(!refit_on_window_growth(false, 250_000.0, 2_000_000.0, 100_000.0));
+        // And the cold-start transition (no previous rate) never fits here —
+        // that is `spectrum_view`'s job on first draw.
+        assert!(!refit_on_window_growth(true, 0.0, 200_000.0, 4_000.0));
     }
 
     /// Map a dB value to the u8 code used by a frame spanning `[lo, hi]`.
