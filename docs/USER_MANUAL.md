@@ -87,9 +87,9 @@ or connects to a remote sdroxide server.
   [qso.freedv.org](https://qso.freedv.org/) and see who else is on FreeDV,
   including callsign exchange in the RADE End-of-Over frame.
 - **Callsign lookup and QSL upload** — QRZ/HamQTH name/QTH/grid auto-fill, and
-  one-click (or automatic) upload to eQSL, QRZ Logbook and Club Log, with LoTW
-  ADIF export and confirmation download. Each service's credentials can be
-  tested against it from the settings, without logging anything.
+  one-click (or automatic) upload to eQSL, QRZ Logbook, HamQTH and Club Log,
+  with LoTW ADIF export and confirmation download. Each service's credentials
+  can be tested against it from the settings, without logging anything.
 - **Award tracking** — live DXCC / WAS / WAZ / grid tallies, worked vs confirmed.
 - **Winlink radio email** — a native client for the amateur store-and-forward
   email network: B2F/FBB forwarding, LZHUF compression and the secure login,
@@ -6338,23 +6338,41 @@ tab itself is:
 
 ### 6.7 Uploads: callsign lookup and QSL services
 
-![The Uploads tab: callsign lookup, eQSL / QRZ / Club Log upload, and LoTW confirmations](images/16-settings-uploads.jpg)
+![The Uploads tab: callsign lookup, a tab per logging service, and LoTW confirmations](images/16-settings-uploads.jpg)
 
 The **Uploads** tab holds every online account the logbook uses. All of it is
 stored in plaintext in `net.json`. How the features behave is
-[§10.2](#102-callsign-lookup) and [§10.3](#103-uploading-qsos-eqsl-qrz-club-log-lotw);
-the fields are:
+[§10.2](#102-callsign-lookup) and
+[§10.3](#103-uploading-qsos-eqsl-qrz-hamqth-club-log-lotw); the fields are:
 
 - **Callsign lookup → Provider** — `QRZ.com` (needs a QRZ username and password
-  with an active XML-data subscription) or `HamQTH` (free). Fill in the pair
-  belonging to your provider: **QRZ user / QRZ pass** or **HamQTH user /
-  HamQTH pass**. **Auto-fill name/QTH/grid on spot click & QSO** looks a call up
-  by itself instead of only on the **LOOKUP** button.
-- **Upload — eQSL / QRZ / Club Log** — **eQSL user** and **pass**; the **QRZ log
-  key** (your QRZ *logbook* API key, which is not the XML-lookup login above);
-  **Club Log email**, **pass** and **key**. Tick **Auto-upload each new QSO** and
-  then the services to push to — the **eQSL / QRZ / Club Log** tickboxes on the
-  line below.
+  with an active XML-data subscription) or `HamQTH` (free). **Only the chosen
+  provider's login is shown**, because lookups go to exactly one service — pick
+  the provider first and its username and password appear under it.
+  **Auto-fill name/QTH/grid on spot click & QSO** looks a call up by itself
+  instead of only on the **LOOKUP** button.
+- **Upload** — **Auto-upload each new QSO** is the master switch, and under it
+  is **a tab per logging service**: **QRZ**, **eQSL**, **HamQTH** and
+  **Club Log**. Each tab holds everything about that one service — whether a new
+  QSO is pushed to it, its login, and the button that checks that login. So
+  setting up a service means opening its tab and filling in what is on it,
+  rather than picking your fields out of all four services' at once.
+  - **QRZ** — the **QRZ log key**, your QRZ *logbook* API key. Not the
+    XML-lookup login above; the two are unrelated.
+  - **eQSL** — **eQSL user** and **pass**.
+  - **HamQTH** — **HamQTH user** and **pass**, which are the *same two boxes* as
+    the ones under *Callsign lookup*. HamQTH issues one login per operator and
+    its logbook authenticates with it, so type them into whichever pair you
+    reach first and the other fills in with it. Nothing extra is needed: a
+    HamQTH callsign lookup that works is already a HamQTH logbook that works.
+    (This is also why the boxes are repeated here at all — an operator who looks
+    calls up on QRZ but uploads to HamQTH would otherwise have nowhere to type
+    them.)
+  - **Club Log** — **Club Log email**, **pass** and **key**.
+
+  A service's own tickbox only takes effect while the master **Auto-upload each
+  new QSO** is on; with it off the tab says so, and the per-QSO **UP** button in
+  the logbook still uploads by hand.
 - **Confirmations (download)** — **LoTW user** and **pass**. LoTW *upload* stays
   manual, by design; only the download is automated.
 
@@ -6363,10 +6381,11 @@ At the bottom of the tab, **APPLY** saves everything above, and
 
 #### Testing the credentials
 
-Next to each service is a **Test eQSL / Test QRZ Logbook / Test Club Log / Test
-LoTW** button. It asks that service, there and then, whether the login you have
-typed works, and prints what came back — a green tick with the account the
-service recognised, or a red cross with its own words for the refusal.
+Each upload service's tab carries its own **Test** button — **Test QRZ Logbook /
+Test eQSL / Test HamQTH / Test Club Log** — and there is a **Test LoTW** beside
+the confirmation login. It asks that service, there and then, whether the login
+you have typed works, and prints what came back — a green tick with the account
+the service recognised, or a red cross with its own words for the refusal.
 
 Without it the first sign that a password is wrong is a QSO that failed to
 upload, hours after the contact, which is both too late and the wrong place to
@@ -6384,6 +6403,12 @@ find out.
   endpoint refuses these requests. A pass there says `account accepted (API key
   not checked)` rather than pretending otherwise, and an upload can still fail
   on the key alone.
+- **Test HamQTH goes through the callbook login**, not the logbook: HamQTH's
+  real-time logbook endpoint has no read-only mode — its only commands are
+  insert, update and delete — so asking *it* would mean logging a QSO to find
+  out whether the password works. The callbook login reads nothing, writes
+  nothing, and answers about the same account the upload uses. So a pass proves
+  the account, as it does for eQSL and LoTW.
 - Results are not remembered between sessions — a green tick from an hour ago
   says nothing about the password typed since.
 - The buttons appear only when the radio is attached to *this* machine. The
@@ -6397,8 +6422,8 @@ forward. What the feature *does* — the MAIL window, composing, the packet
 panel — is [§11](#11-winlink-radio-email); this is the tab.
 
 All of it is stored in plaintext in `net.json`, **the account password
-included**, exactly as the QRZ, Club Log and LoTW credentials on the Uploads tab
-are.
+included**, exactly as the QRZ, HamQTH, Club Log and LoTW credentials on the
+Uploads tab are.
 
 ![The Winlink tab: account, route, gateway list and automatic connection](images/settings-winlink.jpg)
 
@@ -8001,17 +8026,28 @@ it on demand. Lookups only fill fields you've left blank, so they never overwrit
 what you typed; results also enrich the matching logged QSO (name, grid, DXCC,
 zones).
 
-### 10.3 Uploading QSOs (eQSL, QRZ, Club Log, LoTW)
+### 10.3 Uploading QSOs (eQSL, QRZ, HamQTH, Club Log, LoTW)
 
-Enter your eQSL, QRZ Logbook and Club Log accounts on the **Uploads** tab
-([§6.7](#67-uploads-callsign-lookup-and-qsl-services)), where a **Test** button
-beside each service checks the login against that service before a QSO depends
-on it — worth doing once, since otherwise the first sign of a wrong password is
-an upload that failed hours after the contact. Then either tick
-**Auto-upload each new QSO** and the target service(s) to push every QSO as it is
-logged, or upload individual QSOs from the logbook with the per-row **UP**
-button. Each upload sets that QSO's status flag (the **↑** in the logbook), and
-failures are reported in the SPOTS window's status line.
+Enter your QRZ Logbook, eQSL, HamQTH and Club Log accounts on the **Uploads**
+tab ([§6.7](#67-uploads-callsign-lookup-and-qsl-services)) — one tab per
+service, each with a **Test** button that checks the login against that service
+before a QSO depends on it, worth doing once, since otherwise the first sign of
+a wrong password is an upload that failed hours after the contact. Then either
+tick **Auto-upload each new QSO** and, on each service's tab, the service itself,
+to push every QSO as it is logged; or upload individual QSOs from the logbook
+with the per-row **UP** button. Each upload sets that QSO's status flag (the
+**↑** in the logbook), and failures are reported in the SPOTS window's status
+line.
+
+**HamQTH** needs no separate account from the callsign lookup — the same
+username and password do both, and if you already look calls up on HamQTH there
+is nothing more to enter. Its logbook wants a date, time, callsign, mode, band
+and **both signal reports** on every contact; a QSO missing one is refused
+before it is sent, naming the field, rather than coming back as HamQTH's
+unexplained *QSO Rejected* (which is also what it says for a duplicate). Upload
+one contact at a time, as sdroxide does — HamQTH asks specifically that this
+route not be used to push a whole log, and offers a file upload on the website
+for that.
 
 **LoTW** upload is deliberately not automated — LoTW requires a signed upload via
 ARRL's TQSL. Export your log to **ADIF** from the logbook and sign/upload it with
@@ -8434,7 +8470,7 @@ sdroxide stores its settings under the per-user config directory:
 | `bandplan.json` | JSON | The band plan itself, per IARU region: band edges, the CW/data/phone/beacon/all-modes sub-segments, and the PSK and RTTY skimmer windows — all in MHz. Written from the built-in IARU tables on first start and meant to be edited; narrow a band here and the transmit lockout narrows with it. Which region applies is `region` in `config.toml`. **RELOAD BAND PLAN** on the General tab applies an edit without a restart, and deleting the file restores the defaults. See [§6.1](#61-general-station-audio-and-remote-access). |
 | `session.json` | JSON | Where you left the radio: both VFO dials and which of the two was selected, the mode, the RX/TX antenna ports, the AF volume, RX gain, AGC mode, squelch and noise reduction, the TX drive/tune drive/mic gain, and the front end's own gain stages (the sliders on the Radio tab's device panel), restored the next time you start. Written by the engine as you tune, so `--freq`, `--mode`, `--antenna` and `--tx-antenna` override it for a run without changing it. Gain stages are remembered by name: one your current front end does not have is kept, not thrown away, so switching back to the radio it belongs to brings it back, and a figure past what this device offers is clamped to its range. |
 | `qso_log.json` | JSON | The logbook (digital and manual QSOs, with contest/QSL fields). |
-| `net.json` | JSON | Network cockpit: DX cluster / POTA / SOTA / PSK / FreeDV Reporter / WSPRnet feed settings, and callsign-lookup / eQSL / QRZ / Club Log / LoTW credentials (stored in plaintext). |
+| `net.json` | JSON | Network cockpit: DX cluster / POTA / SOTA / PSK / FreeDV Reporter / WSPRnet feed settings, and callsign-lookup / eQSL / QRZ / HamQTH / Club Log / LoTW credentials (stored in plaintext). |
 | `winlink/` | directory | The Winlink mailbox: `inbox/`, `outbox/`, `sent/` and `archive/`, one `.b2f` file per message holding it exactly as it rides the wire ([§11](#11-winlink-radio-email)). The account settings live in `net.json`, password included, in plaintext. |
 | `tciserver.json` | JSON | Built-in TCI server: enabled, bind address, port, advertised device name, whether clients may transmit, and the client limit. |
 | `rigctld.json` | JSON | Built-in Hamlib rigctld server: enabled, bind address, port, reported rig name, whether clients may transmit, and the client limit. |

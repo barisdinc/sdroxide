@@ -1,7 +1,8 @@
-//! One-click QSO upload to eQSL, QRZ Logbook and Club Log, plus QSL-confirmation
-//! download from LoTW and eQSL. LoTW *upload* is intentionally not automated
-//! (it requires TQSL signing) — the UI exports ADIF for the operator to sign;
-//! but confirmations can still be downloaded here to drive award tracking.
+//! One-click QSO upload to eQSL, QRZ Logbook, HamQTH and Club Log, plus
+//! QSL-confirmation download from LoTW and eQSL. LoTW *upload* is intentionally
+//! not automated (it requires TQSL signing) — the UI exports ADIF for the
+//! operator to sign; but confirmations can still be downloaded here to drive
+//! award tracking.
 
 use sdroxide_types::{LoginTarget, NetworkConfig, QsoRecord, UploadTarget};
 
@@ -19,6 +20,7 @@ pub fn upload(
         UploadTarget::Eqsl => upload_eqsl(cfg, adif),
         UploadTarget::QrzLogbook => upload_qrz(cfg, adif),
         UploadTarget::ClubLog => upload_clublog(cfg, my_call, adif),
+        UploadTarget::HamQth => upload_hamqth(cfg, my_call, adif),
     }
 }
 
@@ -103,6 +105,164 @@ fn upload_clublog(cfg: &NetworkConfig, my_call: &str, adif: &str) -> Result<Stri
     }
 }
 
+/// HamQTH's real-time QSO endpoint (`cmd=insert`).
+///
+/// The credentials are `cfg.hamqth` — the same pair the callsign lookup uses,
+/// not a second copy. HamQTH issues one account per operator and this endpoint
+/// authenticates with it directly, so the Uploads tab offers the one pair in
+/// both places rather than inviting them to disagree.
+///
+/// Unlike the other three targets, the answer is the HTTP status: 200 QSO OK,
+/// 400 QSO Rejected (duplicate, wrong band, missing field), 403 Forbidden
+/// (credentials), 500 for a server or ADIF problem, with a sentence in the
+/// body. Hence [`http::post_form_status`] rather than `post_form`, which would
+/// flatten all four into one error string.
+fn upload_hamqth(cfg: &NetworkConfig, my_call: &str, adif: &str) -> Result<String, String> {
+    if cfg.hamqth.user.trim().is_empty() || cfg.hamqth.password.trim().is_empty() {
+        return Err("HamQTH username/password not set".into());
+    }
+    let records = sdroxide_types::adif_records(adif);
+    if records.is_empty() {
+        return Err("HamQTH: nothing to upload (no QSO in the ADIF)".into());
+    }
+    // HamQTH asks specifically that this endpoint not be used to batch-upload a
+    // log, and every caller here sends exactly one QSO; the loop exists so a
+    // multi-record ADIF is not silently reduced to its first contact.
+    for fields in &records {
+        let body = hamqth_adif(fields)?;
+        let (status, reply) = http::post_form_status(
+            "https://www.hamqth.com/qso_realtime.php",
+            &[
+                ("u", cfg.hamqth.user.trim()),
+                ("p", cfg.hamqth.password.trim()),
+                // The station callsign goes here, not in the ADIF: HamQTH looks
+                // for it in `c` and falls back to the username when it is empty,
+                // which would file the QSO under the wrong call for anyone whose
+                // HamQTH login is not their station call.
+                ("c", my_call.trim()),
+                ("adif", &body),
+                ("prg", "sdroxide"),
+                ("cmd", "insert"),
+            ],
+        )?;
+        let reply = reply.trim();
+        let detail = || {
+            if reply.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", reply.chars().take(160).collect::<String>())
+            }
+        };
+        match status {
+            200 => {}
+            400 => return Err(format!("HamQTH: QSO rejected{}", detail())),
+            403 => return Err("HamQTH: username or password rejected".into()),
+            500 => return Err(format!("HamQTH: server or ADIF error{}", detail())),
+            other => return Err(format!("HamQTH: HTTP {other}{}", detail())),
+        }
+    }
+    Ok(match records.len() {
+        1 => "HamQTH: logged".into(),
+        n => format!("HamQTH: {n} QSOs logged"),
+    })
+}
+
+/// The ADIF fields HamQTH's real-time endpoint documents, as
+/// `(what sdroxide exports, what HamQTH calls it)`.
+///
+/// A filter as much as a rename table. HamQTH publishes the list it supports
+/// and answers 500 for "a problem with your ADIF file", so a field it never
+/// named — `SIG`, `CONTEST_ID`, `COUNTRY`, the `MY_*` zones — is dropped rather
+/// than gambled with; `STATION_CALLSIGN` is dropped for a different reason, the
+/// `c` POST parameter above. The two renames are the ones that would otherwise
+/// fail every insert in the same way: HamQTH spells the signal reports `RST_S`
+/// and `RST_R`, not ADIF's `RST_SENT`/`RST_RCVD`, and requires both.
+const HAMQTH_FIELDS: &[(&str, &str)] = &[
+    ("QSO_DATE", "QSO_DATE"),
+    ("TIME_ON", "TIME_ON"),
+    ("TIME_OFF", "TIME_OFF"),
+    ("CALL", "CALL"),
+    ("FREQ", "FREQ"),
+    ("MODE", "MODE"),
+    ("BAND", "BAND"),
+    ("RST_SENT", "RST_S"),
+    ("RST_RCVD", "RST_R"),
+    ("NAME", "NAME"),
+    ("QTH", "QTH"),
+    ("GRIDSQUARE", "GRIDSQUARE"),
+    ("MY_GRIDSQUARE", "MY_GRIDSQUARE"),
+    ("STATE", "STATE"),
+    ("CNTY", "CNTY"),
+    ("COMMENT", "COMMENT"),
+    ("IOTA", "IOTA"),
+    ("TX_PWR", "TX_PWR"),
+    ("ITUZ", "ITUZ"),
+    ("CQZ", "CQZ"),
+    ("CONT", "CONT"),
+    // "Sending DXCC … with every QSO is strongly recommended!" — without it the
+    // account's DXCC statistics come out wrong.
+    ("DXCC", "DXCC"),
+    ("QSL_SENT", "QSL_SENT"),
+    ("QSL_RCVD", "QSL_RCVD"),
+    ("QSL_VIA", "QSL_VIA"),
+    ("LOTW_QSL_SENT", "LOTW_QSL_SENT"),
+    ("LOTW_QSL_RCVD", "LOTW_QSL_RCVD"),
+    ("EQSL_QSL_SENT", "EQSL_QSL_SENT"),
+    ("EQSL_QSL_RCVD", "EQSL_QSL_RCVD"),
+];
+
+/// What HamQTH requires before it will accept an insert, in its own spelling.
+const HAMQTH_REQUIRED: &[&str] = &["QSO_DATE", "TIME_ON", "CALL", "MODE", "BAND", "RST_S", "RST_R"];
+
+/// Re-emit one parsed ADIF record in the dialect HamQTH documents: no file
+/// header, only the fields it lists, under the names it uses.
+///
+/// The missing-field check is done here rather than left to the server because
+/// the server's answer is "400 QSO Rejected", which is also what it says for a
+/// duplicate — an operator told only that would have no way to tell a QSO with
+/// no signal reports from one they had already uploaded.
+fn hamqth_adif(fields: &[(String, String)]) -> Result<String, String> {
+    let mut out = String::new();
+    let mut present: Vec<&str> = Vec::new();
+    for (name, value) in fields {
+        let Some(&(_, hamqth_name)) = HAMQTH_FIELDS.iter().find(|(ours, _)| ours == name) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        // Band and mode go up. sdroxide writes bands lower-case ("20m") where
+        // most loggers write "20M", and one of the things HamQTH names when it
+        // answers "400 QSO Rejected" is a wrong band. Both are ADIF
+        // enumerations, which are case-insensitive by specification, so this
+        // cannot make the record less valid — but it is a hedge, not a measured
+        // fix: no HamQTH account here has been shown to refuse the lower-case
+        // form.
+        let upper;
+        let value = if matches!(hamqth_name, "BAND" | "MODE") {
+            upper = value.to_ascii_uppercase();
+            upper.as_str()
+        } else {
+            value
+        };
+        // Length in bytes, as sdroxide's own writer counts it, and no escaping:
+        // HamQTH asks specifically that values not be HTML-escaped.
+        out.push_str(&format!("<{}:{}>{}", hamqth_name, value.len(), value));
+        present.push(hamqth_name);
+    }
+    let missing: Vec<&str> =
+        HAMQTH_REQUIRED.iter().copied().filter(|r| !present.contains(r)).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "HamQTH: this QSO has no {}, which it requires on every contact",
+            missing.join(", ")
+        ));
+    }
+    out.push_str("<EOR>");
+    Ok(out)
+}
+
 /// Check one service's stored credentials, without logging anything.
 ///
 /// ⛔ NOTHING HERE MAY WRITE. A credential check that inserted a dummy QSO to
@@ -125,6 +285,7 @@ pub fn test_login(
         LoginTarget::QrzLogbook => test_qrz(cfg),
         LoginTarget::ClubLog => test_clublog(cfg, my_call),
         LoginTarget::Lotw => test_lotw(cfg),
+        LoginTarget::HamQth => test_hamqth(cfg),
     }
 }
 
@@ -235,6 +396,25 @@ fn test_clublog(cfg: &NetworkConfig, my_call: &str) -> Result<String, String> {
         return Ok(format!("{call}: account accepted (API key not checked)"));
     }
     Err(body.trim().chars().take(120).collect())
+}
+
+/// HamQTH, via the XML session login the callsign lookup already uses.
+///
+/// ⛔ `qso_realtime.php` has no read-only mode — its only commands are insert,
+/// update and delete — so checking it directly would mean logging a QSO to find
+/// out whether the password works, which is exactly what this whole function is
+/// forbidden from doing. `xml.php?u=&p=` reads nothing, writes nothing, and
+/// answers about *the same account*: HamQTH has one login per operator and the
+/// upload endpoint authenticates with it.
+///
+/// What it therefore proves is the account, not that the logbook will accept a
+/// particular QSO — that is true of the eQSL and LoTW checks above too.
+fn test_hamqth(cfg: &NetworkConfig) -> Result<String, String> {
+    if cfg.hamqth.user.trim().is_empty() || cfg.hamqth.password.trim().is_empty() {
+        return Err("username/password not set".into());
+    }
+    crate::lookup::hamqth_login(&cfg.hamqth)?;
+    Ok(format!("signed in as {}", cfg.hamqth.user.trim()))
 }
 
 fn test_lotw(cfg: &NetworkConfig) -> Result<String, String> {
@@ -407,5 +587,82 @@ mod tests {
     #[test]
     fn strips_html() {
         assert_eq!(strip_html("<b>Result: 1</b> added").trim(), "Result: 1 added");
+    }
+
+    /// The whole point of the rewrite: sdroxide's own export goes in, and what
+    /// comes out is HamQTH's spelling, without the header or the fields it
+    /// never named.
+    #[test]
+    fn rewrites_export_into_hamqth_dialect() {
+        let rec = sdroxide_types::QsoRecord {
+            call: "OK2CQR".into(),
+            rst_sent: Some(59),
+            rst_rcvd: Some(57),
+            freq_hz: 14_250_000.0,
+            mode: "SSB".into(),
+            band: "20m".into(),
+            start_utc: 1_700_000_000,
+            end_utc: 1_700_000_000,
+            my_call: "OE3JJS".into(),
+            country: "Czech Republic".into(),
+            contest_id: "CQ-WW-SSB".into(),
+            dxcc: Some(503),
+            ..Default::default()
+        };
+        let adif = sdroxide_types::qso_log_to_adif(std::slice::from_ref(&rec));
+        let records = sdroxide_types::adif_records(&adif);
+        assert_eq!(records.len(), 1);
+        let out = hamqth_adif(&records[0]).expect("all required fields present");
+
+        // Renamed, because HamQTH requires these two names and no others.
+        assert!(out.contains("<RST_S:2>59"), "{out}");
+        assert!(out.contains("<RST_R:2>57"), "{out}");
+        assert!(!out.contains("RST_SENT"), "{out}");
+        // Kept.
+        assert!(out.contains("<CALL:6>OK2CQR"), "{out}");
+        assert!(out.contains("<BAND:3>20M"), "band is upper-cased: {out}");
+        assert!(out.contains("<DXCC:3>503"), "{out}");
+        // Dropped: not on HamQTH's published list, or carried in the POST.
+        assert!(!out.contains("CONTEST_ID"), "{out}");
+        assert!(!out.contains("COUNTRY"), "{out}");
+        assert!(!out.contains("STATION_CALLSIGN"), "{out}");
+        // No file header, one record.
+        assert!(!out.contains("<EOH>") && !out.contains("ADIF_VER"), "{out}");
+        assert!(out.ends_with("<EOR>"), "{out}");
+    }
+
+    /// A QSO with no signal reports is rejected here, naming the field, rather
+    /// than sent off to come back as an unexplained "400 QSO Rejected".
+    #[test]
+    fn names_the_missing_required_field() {
+        let rec = sdroxide_types::QsoRecord {
+            call: "OK2CQR".into(),
+            mode: "SSB".into(),
+            band: "20m".into(),
+            start_utc: 1_700_000_000,
+            ..Default::default()
+        };
+        let adif = sdroxide_types::qso_log_to_adif(std::slice::from_ref(&rec));
+        let err = hamqth_adif(&sdroxide_types::adif_records(&adif)[0]).unwrap_err();
+        assert!(err.contains("RST_S") && err.contains("RST_R"), "{err}");
+    }
+
+    /// Values are counted in bytes, as sdroxide's own writer counts them — an
+    /// accented name is where a character count would part company with it and
+    /// hand HamQTH a truncated field.
+    #[test]
+    fn counts_value_length_in_bytes() {
+        let fields = vec![
+            ("QSO_DATE".to_string(), "20231114".to_string()),
+            ("TIME_ON".to_string(), "2213".to_string()),
+            ("CALL".to_string(), "OK2CQR".to_string()),
+            ("MODE".to_string(), "SSB".to_string()),
+            ("BAND".to_string(), "20m".to_string()),
+            ("RST_SENT".to_string(), "59".to_string()),
+            ("RST_RCVD".to_string(), "59".to_string()),
+            ("NAME".to_string(), "Petr Hložek".to_string()),
+        ];
+        let out = hamqth_adif(&fields).unwrap();
+        assert!(out.contains("<NAME:12>Petr Hložek"), "{out}");
     }
 }

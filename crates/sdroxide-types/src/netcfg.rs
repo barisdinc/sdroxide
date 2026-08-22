@@ -264,6 +264,11 @@ pub struct NetworkConfig {
     // ── Callsign lookup ──
     pub lookup_provider: LookupProvider,
     pub qrz: Credentials,
+    /// HamQTH account. **Shared with the logbook upload** below — HamQTH issues
+    /// one account per operator and its real-time QSO endpoint authenticates
+    /// with the same username and password the XML callbook lookup does, so a
+    /// second copy could only ever be a way for the two to disagree. The
+    /// Uploads tab shows this one pair in both places.
     pub hamqth: Credentials,
     /// Auto-look-up on spot click / QSO start / manual call entry.
     pub auto_lookup: bool,
@@ -296,6 +301,14 @@ pub struct NetworkConfig {
     // ── Winlink ──
     /// Radio email. Appended last, as the wire requires.
     pub winlink: crate::WinlinkConfig,
+
+    /// Auto-upload each new QSO to the HamQTH logbook, using the `hamqth`
+    /// credentials above. Appended last, as the wire requires — it does not sit
+    /// with its three siblings for the same reason [`UploadTarget::HamQth`]
+    /// does not: postcard reads this struct positionally.
+    ///
+    /// [`UploadTarget::HamQth`]: crate::UploadTarget::HamQth
+    pub auto_upload_hamqth: bool,
 }
 
 impl Default for NetworkConfig {
@@ -324,6 +337,7 @@ impl Default for NetworkConfig {
             wspr: WsprNetConfig::default(),
             winlink: crate::WinlinkConfig::default(),
             rbn: RbnConfig::default(),
+            auto_upload_hamqth: false,
         }
     }
 }

@@ -96,8 +96,9 @@ One binary, three ways to run it:
   panel.
 - **Live spotting, awards & QSL** — DX cluster / POTA / SOTA / PSK Reporter spots
   as clickable panadapter markers (click to tune + pre-fill a log entry),
-  QRZ/HamQTH callsign lookup, one-click upload to LoTW / eQSL / Club Log / QRZ,
-  and live **DXCC / WAS / WAZ / grid** award tracking (worked vs confirmed).
+  QRZ/HamQTH callsign lookup, one-click upload to LoTW / eQSL / Club Log /
+  QRZ / HamQTH, and live **DXCC / WAS / WAZ / grid** award tracking (worked vs
+  confirmed).
 - **Control inputs** — every shortcut is rebindable, and any class-compliant
   **MIDI controller** can drive the radio: a jog wheel as the VFO knob, pads as
   PTT and band buttons, faders as gain controls, with LED/motor feedback. Mouse
@@ -349,10 +350,11 @@ the **Spots** and **Uploads** tabs of the Settings dialog, and surfaced by the
 - **Callsign lookup** — auto-fill name, QTH, grid and state from **QRZ.com** or
   **HamQTH** on a spot click, at QSO start, or when you type a call (or press
   **LOOKUP** in the entry form).
-- **One-click upload** — push QSOs to **eQSL**, **QRZ Logbook** and **Club Log**
-  (a per-QSO **UP** button, or automatically as each QSO is logged). **LoTW** is
-  handled by exporting ADIF for TQSL signing; LoTW/eQSL **confirmations are
-  downloaded** to mark worked-vs-confirmed.
+- **One-click upload** — push QSOs to **eQSL**, **QRZ Logbook**, **HamQTH** and
+  **Club Log** (a per-QSO **UP** button, or automatically as each QSO is logged).
+  HamQTH uploads with the same login as the callsign lookup — one account does
+  both. **LoTW** is handled by exporting ADIF for TQSL signing; LoTW/eQSL
+  **confirmations are downloaded** to mark worked-vs-confirmed.
 - **Award tracking** — the **AWARDS** window tallies **DXCC**, **WAS**, **WAZ**
   and **grid squares**, worked vs confirmed, with a per-band filter. DXCC entity
   and CQ/ITU zones are resolved from the callsign (bundled `cty.dat`), so spots

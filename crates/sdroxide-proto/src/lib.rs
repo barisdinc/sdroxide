@@ -447,7 +447,18 @@ use sdroxide_types::{
 /// station's radios from away already worked; what did not was *how many* it
 /// has, which meant a headless station's second radio could only be added by
 /// editing `radios.json` on that machine and restarting it.
-pub const PROTO_VERSION: u16 = 73;
+///
+/// **74** — HamQTH joins eQSL/QRZ/Club Log as an upload target. Two appended
+/// fields and two appended variants, and the fields are what force the bump:
+/// `NetworkConfig` gained `auto_upload_hamqth` and `QsoRecord` gained
+/// `hamqth_sent`, both of which ride whole inside `Command::SetNetworkConfig`
+/// and `RadioEvent::Ft8QsoLogged`, so a v73 peer stops reading where each
+/// struct used to end and takes the new field for the start of the next
+/// message. `UploadTarget` and `LoginTarget` gained `HamQth` last, so existing
+/// discriminants keep their numbers, but a v73 client handed one has nowhere to
+/// put it. No new `ServerMsg` or `Command`: the lane reuses `SetNetworkConfig`,
+/// `UploadQso` and `TestLogin`.
+pub const PROTO_VERSION: u16 = 74;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

@@ -652,6 +652,10 @@ pub struct QsoRecord {
     pub qsl_rcvd: bool,
     /// QSL routing / manager.
     pub qsl_via: String,
+    /// Uploaded to the HamQTH logbook. Appended after `qsl_via` rather than
+    /// beside its `*_sent` siblings because this record rides the postcard
+    /// wire, which reads it positionally.
+    pub hamqth_sent: bool,
 }
 
 impl QsoRecord {
@@ -1565,12 +1569,30 @@ fn adif_value(adif: &str, start: usize, len: usize) -> (String, usize) {
     (rest[..end].trim_end().to_string(), start + end)
 }
 
-/// Parse an ADIF (.adi) document into QSO records. Tolerant of unknown fields
-/// (ignored) and of a missing/short header. Used both for importing external
-/// logs and for ingesting downloaded QSL confirmations. The inverse of
-/// [`qso_log_to_adif`] for the fields sdroxide round-trips.
-pub fn adif_to_qso_log(adif: &str) -> Vec<QsoRecord> {
+/// Split an ADIF (.adi) document into records, each a list of
+/// `(UPPERCASE_FIELD, value)` pairs in the order they appear. Header fields
+/// (everything before `<EOH>`) are dropped; a trailing record with no `<EOR>`
+/// is still returned, because some exporters omit it.
+///
+/// Public because ADIF is not only something sdroxide reads into its own log:
+/// HamQTH's real-time logbook wants a *subset* of the fields, under two names
+/// of its own, so `sdroxide-net` re-emits a record rather than parsing one. It
+/// goes through [`adif_visit`] so there is one tokenizer — the byte-vs-character
+/// length disambiguation in [`adif_value`] is exactly the kind of thing a second
+/// copy would get subtly wrong.
+///
+/// This holds every record's fields at once, which is the wrong shape for a
+/// whole-log import — [`adif_to_qso_log`] streams instead. It is the right shape
+/// for the handful of records an upload sends.
+pub fn adif_records(adif: &str) -> Vec<Vec<(String, String)>> {
     let mut records = Vec::new();
+    adif_visit(adif, |fields| records.push(fields.to_vec()));
+    records
+}
+
+/// Tokenize an ADIF (.adi) document, calling `visit` once per record with its
+/// `(UPPERCASE_FIELD, value)` pairs. The one place that reads ADIF's tag syntax.
+fn adif_visit(adif: &str, mut visit: impl FnMut(&[(String, String)])) {
     let mut fields: Vec<(String, String)> = Vec::new();
     let bytes = adif.as_bytes();
     let mut i = 0usize;
@@ -1592,7 +1614,7 @@ pub fn adif_to_qso_log(adif: &str) -> Vec<QsoRecord> {
         }
         if name == "EOR" {
             if !fields.is_empty() {
-                records.push(record_from_fields(&fields));
+                visit(&fields);
             }
             fields.clear();
             continue;
@@ -1612,8 +1634,20 @@ pub fn adif_to_qso_log(adif: &str) -> Vec<QsoRecord> {
     }
     // A final record without a trailing <EOR> (some exporters omit it).
     if !fields.is_empty() {
-        records.push(record_from_fields(&fields));
+        visit(&fields);
     }
+}
+
+/// Parse an ADIF (.adi) document into QSO records. Tolerant of unknown fields
+/// (ignored) and of a missing/short header. Used both for importing external
+/// logs and for ingesting downloaded QSL confirmations. The inverse of
+/// [`qso_log_to_adif`] for the fields sdroxide round-trips.
+pub fn adif_to_qso_log(adif: &str) -> Vec<QsoRecord> {
+    let mut records = Vec::new();
+    // Each record is converted as it is tokenized: importing somebody's
+    // fifty-thousand-QSO log should cost one `QsoRecord` per contact, not that
+    // plus every field of every contact still held as a pair of `String`s.
+    adif_visit(adif, |fields| records.push(record_from_fields(fields)));
     records
 }
 

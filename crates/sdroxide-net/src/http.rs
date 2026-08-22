@@ -29,6 +29,21 @@ pub fn post_form(url: &str, fields: &[(&str, &str)]) -> Result<String, String> {
     body_or_status(agent().post(url).send_form(fields.iter().copied()).map_err(|e| e.to_string())?)
 }
 
+/// POST `fields` as `application/x-www-form-urlencoded`, keeping the HTTP
+/// status alongside the body instead of folding a non-2xx into an error.
+///
+/// For a service whose whole answer *is* the status code — HamQTH's real-time
+/// logbook says 200/400/403/500 and puts only a short sentence in the body —
+/// "wrong password" and "duplicate QSO" are the same string to
+/// [`post_form`]'s caller. Here they are still two different numbers.
+pub fn post_form_status(url: &str, fields: &[(&str, &str)]) -> Result<(u16, String), String> {
+    let mut resp =
+        agent().post(url).send_form(fields.iter().copied()).map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
+    Ok((status, body))
+}
+
 /// The body as a string, or a compact message for an HTTP status error that
 /// keeps the server's own body so the caller can report why it was rejected.
 fn body_or_status(mut resp: ureq::http::Response<ureq::Body>) -> Result<String, String> {

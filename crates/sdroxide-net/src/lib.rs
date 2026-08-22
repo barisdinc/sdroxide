@@ -1,6 +1,6 @@
 //! Native network-cockpit clients for sdroxide: DX-cluster telnet, POTA/SOTA
 //! and PSK Reporter spot feeds, QRZ/HamQTH callsign lookup, and QSO upload /
-//! QSL-confirmation download (eQSL, QRZ Logbook, Club Log, LoTW).
+//! QSL-confirmation download (eQSL, QRZ Logbook, HamQTH, Club Log, LoTW).
 //!
 //! NATIVE ONLY — this crate does blocking network I/O on its own threads and
 //! must never be a dependency of any wasm-targeted crate. The GUI keeps its

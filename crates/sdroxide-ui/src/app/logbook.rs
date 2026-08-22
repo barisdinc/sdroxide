@@ -779,7 +779,12 @@ impl SdroxideApp {
                     // dim ↑ when uploaded-but-unconfirmed, else blank.
                     let (qsl_txt, qsl_col) = if r.is_confirmed() {
                         ("✓", crate::theme::GREEN())
-                    } else if r.lotw_sent || r.eqsl_sent || r.qrz_sent || r.clublog_sent {
+                    } else if r.lotw_sent
+                        || r.eqsl_sent
+                        || r.qrz_sent
+                        || r.hamqth_sent
+                        || r.clublog_sent
+                    {
                         ("↑", crate::theme::gray(140))
                     } else {
                         ("", gray)
@@ -792,6 +797,7 @@ impl SdroxideApp {
                         (r.lotw_sent, "LoTW ↑"),
                         (r.eqsl_sent, "eQSL ↑"),
                         (r.qrz_sent, "QRZ ↑"),
+                        (r.hamqth_sent, "HamQTH ↑"),
                         (r.clublog_sent, "Club Log ↑"),
                     ] {
                         if on {

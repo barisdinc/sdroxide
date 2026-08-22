@@ -26,7 +26,7 @@ pub(in crate::app) mod tle;
 pub(in crate::app) mod ui_tab;
 
 use eframe::egui::{self, Color32, ComboBox, RichText};
-use sdroxide_types::{Command, LoginTarget, LookupProvider, NetworkConfig};
+use sdroxide_types::{Command, LoginTarget, LookupProvider, NetworkConfig, UploadTarget};
 
 use self::controls::settings_controls_tab;
 use self::general::{device_combo, region_combo, remote_access_settings};
@@ -300,6 +300,10 @@ pub(in crate::app) struct SettingsIo<'a> {
     /// regardless of which radio interface is selected.
     tx_eq_edit: &'a mut sdroxide_types::TxEqState,
     tab: &'a mut SettingsTab,
+    /// Which logging service the Uploads tab's own strip is showing. Its own
+    /// field rather than state inside the tab's body, because the body is drawn
+    /// from scratch every frame — see `SdroxideApp::settings_upload_tab`.
+    upload_tab: &'a mut sdroxide_types::UploadTarget,
 }
 
 /// Guard for the three tabs that edit the network config. Returns whether the
@@ -694,6 +698,7 @@ impl SdroxideApp {
         iface_opts.sort_by_key(|b| b.label().to_ascii_lowercase());
 
         let mut tab = self.settings_tab;
+        let mut upload_tab = self.settings_upload_tab;
         let mut open = self.show_settings;
         // The 3D window owns the live copy of its own settings — `view.solar3d`
         // is only the snapshot persisted from it — so this is read out of the
@@ -850,6 +855,7 @@ impl SdroxideApp {
                             region_edit: &mut region_edit,
                             tx_eq_edit: &mut tx_eq_edit,
                             tab: &mut tab,
+                            upload_tab: &mut upload_tab,
                         },
                     );
                 });
@@ -860,6 +866,7 @@ impl SdroxideApp {
         }
         self.show_settings = open;
         self.settings_tab = tab;
+        self.settings_upload_tab = upload_tab;
         // The multi-radio shell drains these after the frame.
         self.radio_tab_requests.append(&mut radio_tab_reqs);
         {
@@ -2443,35 +2450,131 @@ impl SdroxideApp {
                     &mut io.net_edit.auto_lookup,
                     "Auto-fill name/QTH/grid on spot click & QSO",
                 );
-                net_row(ui, "QRZ user", &mut io.net_edit.qrz.user, 140.0);
-                net_secret(ui, "QRZ pass", &mut io.net_edit.qrz.password, 140.0);
-                net_row(ui, "HamQTH user", &mut io.net_edit.hamqth.user, 140.0);
-                net_secret(ui, "HamQTH pass", &mut io.net_edit.hamqth.password, 140.0);
+                // Only the provider in use. Lookups go to exactly one service,
+                // so a second pair of boxes below the chosen one is a login
+                // nothing will read — and, worse, an invitation to fill it in
+                // and wonder why lookups still say the account is not set.
+                match io.net_edit.lookup_provider {
+                    LookupProvider::None => {
+                        ui.label(
+                            RichText::new("Choose a provider to enter its login.")
+                                .size(10.5)
+                                .color(crate::theme::gray(140)),
+                        );
+                    }
+                    LookupProvider::Qrz => {
+                        net_row(ui, "QRZ user", &mut io.net_edit.qrz.user, 140.0);
+                        net_secret(ui, "QRZ pass", &mut io.net_edit.qrz.password, 140.0);
+                    }
+                    LookupProvider::HamQth => {
+                        net_row(ui, "HamQTH user", &mut io.net_edit.hamqth.user, 140.0);
+                        net_secret(ui, "HamQTH pass", &mut io.net_edit.hamqth.password, 140.0);
+                        ui.label(
+                            RichText::new(
+                                "One HamQTH account does both — this login is the one the \
+                                 HamQTH upload tab uses.",
+                            )
+                            .size(10.5)
+                            .color(crate::theme::gray(140)),
+                        );
+                    }
+                }
 
-                net_heading(ui, "Upload — eQSL / QRZ / Club Log");
-                net_row(ui, "eQSL user", &mut io.net_edit.eqsl.user, 140.0);
-                net_secret(ui, "eQSL pass", &mut io.net_edit.eqsl.password, 140.0);
-                net_secret(ui, "QRZ log key", &mut io.net_edit.qrz_logbook_key, 200.0);
-                net_row(ui, "Club Log email", &mut io.net_edit.clublog.user, 200.0);
-                net_secret(ui, "Club Log pass", &mut io.net_edit.clublog.password, 140.0);
-                net_secret(ui, "Club Log key", &mut io.net_edit.clublog_api_key, 200.0);
+                net_heading(ui, "Upload");
                 crate::chrome::checkbox(
                     ui,
                     &mut io.net_edit.auto_upload,
                     "Auto-upload each new QSO",
+                )
+                .on_hover_text(
+                    "The master switch. Which services a QSO goes to is set on each tab below.",
                 );
-                ui.horizontal(|ui| {
-                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_eqsl, "eQSL");
-                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_qrz, "QRZ");
-                    crate::chrome::checkbox(ui, &mut io.net_edit.auto_upload_clublog, "Club Log");
+                ui.add_space(4.0);
+                // A tab per service, rather than four stacked blocks of
+                // credentials: an operator configures the one they have an
+                // account with, and the other three are noise they have to read
+                // past to find it. Each tab now holds everything about that
+                // service — whether it is an auto-upload target, its login, and
+                // the button that checks it.
+                crate::chrome::tab_bar(ui, |ui, bar| {
+                    for t in UploadTarget::ALL {
+                        if bar.tab(ui, *io.upload_tab == t, t.label()).clicked() {
+                            *io.upload_tab = t;
+                        }
+                    }
                 });
+                ui.add_space(6.0);
+                let target = *io.upload_tab;
+                let enable = match target {
+                    UploadTarget::Eqsl => &mut io.net_edit.auto_upload_eqsl,
+                    UploadTarget::QrzLogbook => &mut io.net_edit.auto_upload_qrz,
+                    UploadTarget::HamQth => &mut io.net_edit.auto_upload_hamqth,
+                    UploadTarget::ClubLog => &mut io.net_edit.auto_upload_clublog,
+                };
+                crate::chrome::checkbox(
+                    ui,
+                    enable,
+                    format!("Auto-upload each new QSO to {}", target.label()),
+                );
+                if !io.net_edit.auto_upload {
+                    ui.label(
+                        RichText::new(
+                            "Auto-upload is off above, so nothing is pushed automatically \
+                             yet — the per-QSO UP button in the logbook still works.",
+                        )
+                        .size(10.5)
+                        .color(crate::theme::gray(140)),
+                    );
+                }
+                ui.add_space(4.0);
+                match target {
+                    UploadTarget::QrzLogbook => {
+                        net_secret(ui, "QRZ log key", &mut io.net_edit.qrz_logbook_key, 200.0);
+                        ui.label(
+                            RichText::new(
+                                "The QRZ logbook API key from your QRZ logbook settings — \
+                                 not the XML-lookup login.",
+                            )
+                            .size(10.5)
+                            .color(crate::theme::gray(140)),
+                        );
+                    }
+                    UploadTarget::Eqsl => {
+                        net_row(ui, "eQSL user", &mut io.net_edit.eqsl.user, 140.0);
+                        net_secret(ui, "eQSL pass", &mut io.net_edit.eqsl.password, 140.0);
+                    }
+                    UploadTarget::HamQth => {
+                        // The *same* two fields as the lookup section above, not
+                        // a second pair: HamQTH has one account per operator and
+                        // its logbook endpoint authenticates with it, so
+                        // whichever box the operator finds first is the right one
+                        // to type into. Both pairs are on screen at once when the
+                        // lookup provider is HamQTH too, and that is fine — two
+                        // `TextEdit`s over one `String` each keep their own
+                        // cursor, only the focused one takes input, and the other
+                        // redraws with what was typed.
+                        net_row(ui, "HamQTH user", &mut io.net_edit.hamqth.user, 140.0);
+                        net_secret(ui, "HamQTH pass", &mut io.net_edit.hamqth.password, 140.0);
+                        ui.label(
+                            RichText::new(
+                                "The same login as the HamQTH callsign lookup — filling in \
+                                 either one fills in both.",
+                            )
+                            .size(10.5)
+                            .color(crate::theme::gray(140)),
+                        );
+                    }
+                    UploadTarget::ClubLog => {
+                        net_row(ui, "Club Log email", &mut io.net_edit.clublog.user, 200.0);
+                        net_secret(ui, "Club Log pass", &mut io.net_edit.clublog.password, 140.0);
+                        net_secret(ui, "Club Log key", &mut io.net_edit.clublog_api_key, 200.0);
+                    }
+                }
 
                 // Only where the engine is in this process: the result is not
                 // sent to remote clients, so a button there would spin for ever.
                 if !self.ctrl.engine_is_remote() {
-                    self.login_test_row(ui, cmds, io.net_edit, LoginTarget::Eqsl);
-                    self.login_test_row(ui, cmds, io.net_edit, LoginTarget::QrzLogbook);
-                    self.login_test_row(ui, cmds, io.net_edit, LoginTarget::ClubLog);
+                    self.login_test_row(ui, cmds, io.net_edit, target.login_target());
                 }
 
                 net_heading(ui, "Confirmations (download)");

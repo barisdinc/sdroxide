@@ -192,6 +192,10 @@ pub struct SdroxideApp {
     /// wherever you last were, but a restart starts again at General, so it is
     /// never written to storage in [`eframe::App::save`].
     settings_tab: SettingsTab,
+    /// Which logging service the Uploads tab's own strip is showing. Session-only
+    /// for the same reason as `settings_tab`: it is where the operator happens to
+    /// be in the dialog, not a setting.
+    settings_upload_tab: sdroxide_types::UploadTarget,
     /// Display preferences (frame rate, waterfall + spectrum speed), loaded from
     /// config at startup, edited in the UI tab, persisted on change.
     ui_settings: sdroxide_types::UiSettings,
@@ -899,6 +903,7 @@ impl SdroxideApp {
             probe_waiting: 0,
             probe_wait_until: 0.0,
             settings_tab: SettingsTab::General,
+            settings_upload_tab: sdroxide_types::UploadTarget::QrzLogbook,
             ui_settings,
             applied_look: (ui_settings.theme, ui_settings.button_style, ui_settings.window_style),
             applied_ui_font: ui_settings.menu_font_size,

@@ -41,6 +41,9 @@ fn auto_upload_targets(cfg: &NetworkConfig) -> Vec<UploadTarget> {
     if cfg.auto_upload_qrz {
         t.push(UploadTarget::QrzLogbook);
     }
+    if cfg.auto_upload_hamqth {
+        t.push(UploadTarget::HamQth);
+    }
     if cfg.auto_upload_clublog {
         t.push(UploadTarget::ClubLog);
     }
@@ -56,6 +59,11 @@ pub(in crate::app) fn configured_upload_targets(cfg: &NetworkConfig) -> Vec<Uplo
     }
     if !cfg.qrz_logbook_key.trim().is_empty() {
         t.push(UploadTarget::QrzLogbook);
+    }
+    // The same account as the callsign lookup — a HamQTH user who filled in the
+    // lookup half has already configured the upload half.
+    if !cfg.hamqth.user.trim().is_empty() && !cfg.hamqth.password.trim().is_empty() {
+        t.push(UploadTarget::HamQth);
     }
     if !cfg.clublog.user.trim().is_empty() && !cfg.clublog_api_key.trim().is_empty() {
         t.push(UploadTarget::ClubLog);
@@ -194,6 +202,7 @@ impl SdroxideApp {
                     UploadTarget::Eqsl => rec.eqsl_sent = true,
                     UploadTarget::QrzLogbook => rec.qrz_sent = true,
                     UploadTarget::ClubLog => rec.clublog_sent = true,
+                    UploadTarget::HamQth => rec.hamqth_sent = true,
                 }
                 persist_qso_log(&self.qso_log);
             }

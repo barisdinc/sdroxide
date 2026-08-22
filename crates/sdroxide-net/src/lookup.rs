@@ -150,7 +150,10 @@ fn hamqth_lookup(creds: &Credentials, call: &str) -> Result<CallsignInfo, String
     Err("HamQTH session could not be established".into())
 }
 
-fn hamqth_login(creds: &Credentials) -> Result<String, String> {
+/// Ask HamQTH for a session id, which is also the cheapest read-only proof
+/// that a username and password are good — [`crate::upload::test_login`] uses
+/// it for the logbook, since HamQTH authenticates both with the same account.
+pub(crate) fn hamqth_login(creds: &Credentials) -> Result<String, String> {
     let url = format!(
         "https://www.hamqth.com/xml.php?u={}&p={}",
         urlencode(creds.user.trim()),

@@ -61,6 +61,10 @@ pub enum UploadTarget {
     Eqsl,
     QrzLogbook,
     ClubLog,
+    /// The HamQTH logbook, via its real-time QSO endpoint. Appended last:
+    /// postcard numbers variants by declaration index, so inserting it next to
+    /// QRZ (where it belongs on screen) would renumber Club Log on the wire.
+    HamQth,
 }
 
 impl UploadTarget {
@@ -69,11 +73,31 @@ impl UploadTarget {
             UploadTarget::Eqsl => "eQSL",
             UploadTarget::QrzLogbook => "QRZ",
             UploadTarget::ClubLog => "Club Log",
+            UploadTarget::HamQth => "HamQTH",
         }
     }
 
-    pub const ALL: [UploadTarget; 3] =
-        [UploadTarget::Eqsl, UploadTarget::QrzLogbook, UploadTarget::ClubLog];
+    /// The service whose stored credentials this target's are, for a
+    /// "Test this login" button beside it.
+    ///
+    /// One-way on purpose. Every upload target is testable, so this mapping is
+    /// total; the reverse is not — LoTW can be tested and cannot be uploaded to
+    /// — which is why [`LoginTarget`] stays an enum of its own rather than
+    /// becoming a method on this one.
+    pub fn login_target(self) -> LoginTarget {
+        match self {
+            UploadTarget::Eqsl => LoginTarget::Eqsl,
+            UploadTarget::QrzLogbook => LoginTarget::QrzLogbook,
+            UploadTarget::ClubLog => LoginTarget::ClubLog,
+            UploadTarget::HamQth => LoginTarget::HamQth,
+        }
+    }
+
+    /// Display order, which is deliberately not the declaration order above:
+    /// the variants are numbered by the wire and appended to, while this is
+    /// what the operator reads along a tab strip.
+    pub const ALL: [UploadTarget; 4] =
+        [UploadTarget::QrzLogbook, UploadTarget::Eqsl, UploadTarget::HamQth, UploadTarget::ClubLog];
 }
 
 /// A service whose stored credentials can be checked without logging a QSO.
@@ -88,6 +112,10 @@ pub enum LoginTarget {
     QrzLogbook,
     ClubLog,
     Lotw,
+    /// The HamQTH account — the *same* username and password the callsign
+    /// lookup uses, because HamQTH has one account per operator and the
+    /// real-time logbook endpoint authenticates with it directly.
+    HamQth,
 }
 
 impl LoginTarget {
@@ -97,11 +125,17 @@ impl LoginTarget {
             LoginTarget::QrzLogbook => "QRZ Logbook",
             LoginTarget::ClubLog => "Club Log",
             LoginTarget::Lotw => "LoTW",
+            LoginTarget::HamQth => "HamQTH",
         }
     }
 
-    pub const ALL: [LoginTarget; 4] =
-        [LoginTarget::Eqsl, LoginTarget::QrzLogbook, LoginTarget::ClubLog, LoginTarget::Lotw];
+    pub const ALL: [LoginTarget; 5] = [
+        LoginTarget::Eqsl,
+        LoginTarget::QrzLogbook,
+        LoginTarget::HamQth,
+        LoginTarget::ClubLog,
+        LoginTarget::Lotw,
+    ];
 }
 
 /// The outcome of checking one service's stored credentials.
