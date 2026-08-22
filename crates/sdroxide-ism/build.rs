@@ -9,7 +9,8 @@
 //! so this builds that target rather than curating a source list that would
 //! drift every time upstream adds a decoder.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -19,19 +20,51 @@ fn main() {
     }
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let rtl433 = manifest.join("../../vendor/rtl_433");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let vendor = manifest.join("../../vendor/rtl_433");
 
-    if !rtl433.join("include/r_flow.h").exists() {
+    if !vendor.join("include/r_flow.h").exists() {
         panic!(
             "vendored rtl_433 sources are missing at {}\n\
              run: git submodule update --init --recursive\n\
              (or build with --no-default-features to leave the rtl_433 decoders out)",
-            rtl433.display()
+            vendor.display()
         );
     }
-    let rtl433 = rtl433.canonicalize().expect("canonicalize vendor/rtl_433");
+    let vendor = vendor.canonicalize().expect("canonicalize vendor/rtl_433");
+
+    // `cmake::Config` builds in `<out_dir>/build`; named here rather than left
+    // to default to `<OUT_DIR>/build` so the in-tree copy below cannot land on
+    // a build tree an earlier version of this script left there.
+    let cmake_out = out.join("rtl_433");
+
+    // The windows-gnu build runs through MSYS make, whose makefile parser has no
+    // notion of drive letters. For a source outside the build tree CMake emits
+    // the rule line
+    //     src/CMakeFiles/r_433.dir/abuf.c.o: D:/.../src/abuf.c
+    // whose second colon makes it a malformed static pattern rule — make stops
+    // with "target pattern contains no '%'" before compiling anything. Building
+    // from a copy of the tree in place keeps every path in the generated
+    // makefiles relative, because the source directory then *is* the binary
+    // directory. sdroxide-rade carries the same workaround, for the same reason.
+    let rtl433 = if cfg!(windows) {
+        let in_tree = cmake_out.join("build");
+        // The crate wipes a build directory whose cache names a source
+        // directory other than the one it is handed — which here is the copy
+        // itself, so a cache left by an out-of-source build would take the
+        // copied sources with it. Clear it before copying, not after.
+        if stale_cache(&in_tree) {
+            fs::remove_dir_all(&in_tree)
+                .unwrap_or_else(|e| panic!("clear {}: {e}", in_tree.display()));
+        }
+        copy_tree(&vendor, &in_tree);
+        in_tree
+    } else {
+        vendor.clone()
+    };
 
     let dst = cmake::Config::new(&rtl433)
+        .out_dir(&cmake_out)
         // We hand rtl_433 samples ourselves, so none of its own inputs are
         // wanted. ENABLE_RTLSDR in particular defaults to ON *and is fatal* when
         // librtlsdr is absent, which would make the whole build depend on a
@@ -81,11 +114,53 @@ fn main() {
         .generate()
         .expect("bindgen over shim.h");
 
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out.join("bindings.rs")).expect("write bindings.rs");
 
     println!("cargo:rerun-if-changed=src/rtl433/shim.c");
     println!("cargo:rerun-if-changed=src/rtl433/shim.h");
-    println!("cargo:rerun-if-changed={}", rtl433.join("src").display());
-    println!("cargo:rerun-if-changed={}", rtl433.join("include").display());
+    println!("cargo:rerun-if-changed={}", vendor.join("src").display());
+    println!("cargo:rerun-if-changed={}", vendor.join("include").display());
+}
+
+/// Whether `build` holds a CMake cache from a build of some *other* source
+/// directory, which `cmake::Config` answers by deleting the whole directory.
+fn stale_cache(build: &Path) -> bool {
+    let Ok(cache) = fs::read_to_string(build.join("CMakeCache.txt")) else {
+        return false;
+    };
+    !cache.lines().any(|line| {
+        line.strip_prefix("CMAKE_HOME_DIRECTORY:INTERNAL=")
+            .is_some_and(|home| Path::new(home) == build)
+    })
+}
+
+/// Copy `src` into `dst` recursively, skipping the dot-entries — `.git` above
+/// all, which for a submodule is a *pointer* to the gitdir and would dangle in
+/// the copy. Files already up to date are left alone, so editing the shim does
+/// not rebuild three hundred decoders.
+fn copy_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    let entries = fs::read_dir(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    for entry in entries {
+        let entry = entry.expect("read dir entry");
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let (from, to) = (entry.path(), dst.join(&name));
+        if from.is_dir() {
+            copy_tree(&from, &to);
+            continue;
+        }
+        let stale = match (
+            entry.metadata().and_then(|m| m.modified()),
+            fs::metadata(&to).and_then(|m| m.modified()),
+        ) {
+            (Ok(src_time), Ok(dst_time)) => src_time > dst_time,
+            _ => true,
+        };
+        if stale {
+            fs::copy(&from, &to).unwrap_or_else(|e| panic!("copy {}: {e}", from.display()));
+        }
+    }
 }

@@ -108,8 +108,11 @@ jobs:
           name: web-dist
           path: crates/sdroxide-web/dist
 
+      # --no-default-features drops `soapy`; `rtl433` is a default too and is
+      # named explicitly, so the .msi carries the same ISM decoders as the
+      # release workflow's standard build.
       - name: Build
-        run: cargo build --release --locked -p sdroxide --no-default-features --features embed-web
+        run: cargo build --release --locked -p sdroxide --no-default-features --features embed-web,rtl433
 
       - name: Build MSI
         run: |

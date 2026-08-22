@@ -202,9 +202,13 @@ jobs:
 
       - name: Build
         run: |
-          # `cat` drops the default `soapy` feature; both embed the web client.
+          # `cat` drops the default `soapy` feature. `rtl433` is a default too,
+          # but this build asks for it back: the embedded rtl_433 is statically
+          # linked C, so it costs the SoapySDR-free artifact nothing at run time
+          # and the release notes' "everything above" stays true. Both embed the
+          # web client.
           if [[ "${{ matrix.variant }}" == "cat" ]]; then
-            cargo build --release --locked -p sdroxide --no-default-features --features embed-web
+            cargo build --release --locked -p sdroxide --no-default-features --features embed-web,rtl433
           else
             cargo build --release --locked -p sdroxide --features embed-web
           fi
