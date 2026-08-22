@@ -37,6 +37,7 @@ impl SdroxideApp {
         let transmitting = status.as_ref().map(|s| s.transmitting).unwrap_or(false);
         let rx_text = status.as_ref().map(|s| s.text_rx.clone()).unwrap_or_default();
         let my_call = status.as_ref().map(|s| s.config.my_call.clone()).unwrap_or_default();
+        let on_air = self.on_air_freq_hz();
 
         // Header: where we are listening, what is being heard there, and how
         // fast we send.
@@ -55,6 +56,7 @@ impl SdroxideApp {
             if crate::chrome::chip(ui, false, "+").on_hover_text("Up 10 Hz").clicked() {
                 cmds.push(Command::SetDigiAudioFreq((pitch + 10.0).clamp(200.0, 3000.0)));
             }
+            crate::app::panels::on_air_readout(ui, on_air);
             ui.add_space(8.0);
 
             // Copy state. A CW decoder that is not locked is not "quiet", it is

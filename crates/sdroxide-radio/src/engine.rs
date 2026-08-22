@@ -3403,6 +3403,12 @@ impl Engine {
     /// A band with nothing stored is left alone rather than reset to 1500. The
     /// operator is mid-session on a frequency they chose, and the memory has
     /// nothing better to offer than what is already there.
+    ///
+    /// So is a mode whose tone offset is a standard rather than a choice —
+    /// RTTY's pair is 2125/2295 on every band, and restoring FT8's figure over
+    /// it would leave mark and space wherever the last slot hunt happened to
+    /// land. Nothing writes an entry for those modes either, so this only
+    /// matters where a band already carries one from a slotted mode.
     fn follow_band_tx_offset(&mut self) {
         let band = self.state.band;
         if self.digi_tx_band == Some(band) {
@@ -3410,7 +3416,7 @@ impl Engine {
         }
         self.digi_tx_band = Some(band);
         let Some(hz) = self.digi_config.tx_audio_hz.get(&band).copied() else { return };
-        if let Some(d) = self.digi.as_mut() {
+        if let Some(d) = self.digi.as_mut().filter(|d| !d.mode().holds_standard_tones()) {
             // `restore_audio_hz`, not `set_audio_hz`: this is the one move that
             // goes through a hold. See the trait method.
             d.restore_audio_hz(hz);
@@ -4631,7 +4637,18 @@ impl Engine {
                 // because `hz` is a request: a hold refuses it outright and the
                 // Fox zone floors it, so the value on the air is the only one
                 // worth restoring later.
-                if let Some(actual) = self.digi.as_ref().map(|d| d.audio_hz()) {
+                //
+                // Nothing is remembered for a mode whose offset is a standard
+                // rather than a choice: RTTY's tone pair is the same everywhere,
+                // so there is nothing about it that belongs to a band — and
+                // writing it here would hand FT8 a 2210 Hz transmit offset the
+                // next time that band came round.
+                if let Some(actual) = self
+                    .digi
+                    .as_ref()
+                    .filter(|d| !d.mode().holds_standard_tones())
+                    .map(|d| d.audio_hz())
+                {
                     let band = self.state.band;
                     if self.digi_config.tx_audio_hz.insert(band, actual) != Some(actual) {
                         // Saved on every change, as every other setting here is.

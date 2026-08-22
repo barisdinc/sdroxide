@@ -1413,6 +1413,19 @@ impl SdroxideApp {
         self.caps.as_ref().is_some_and(|c| c.is_transmit_capable())
     }
 
+    /// The frequency actually being worked, which in CW and the digital modes
+    /// is not the dial: the receiver's cursor sits an audio offset away from
+    /// it, and both ends of the contact are on *that* frequency.
+    ///
+    /// The number to log and to quote on the air. A CW dial reads a
+    /// sidetone-pitch (700 Hz, usually) below the signal being copied and
+    /// keyed; RTTY reads a tone pair — a couple of kilohertz — below its mark.
+    /// See [`Mode::on_air_hz`](sdroxide_types::Mode::on_air_hz).
+    pub(in crate::app) fn on_air_freq_hz(&self) -> f64 {
+        let audio_hz = self.digi_status.as_ref().map_or(0.0, |s| s.audio_hz);
+        self.state.rx[0].mode.on_air_hz(self.state.rx_freq_hz(), audio_hz)
+    }
+
     /// What this radio should be called while the operator hasn't named it:
     /// the interface it runs, read from the capabilities the engine reported —
     /// so the name follows a reconfiguration by itself. `None` while there is

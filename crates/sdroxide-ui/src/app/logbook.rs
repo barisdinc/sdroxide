@@ -413,7 +413,11 @@ impl SdroxideApp {
                 ui.horizontal(|ui| {
                     let adding = self.log_edit.as_ref().is_some_and(|f| f.id == 0);
                     if crate::chrome::chip(ui, adding, "+ NEW ENTRY").clicked() {
-                        let freq = self.state.rx_freq_hz();
+                        // The frequency of the contact, not the dial. In CW
+                        // the dial sits a sidetone-pitch below the signal and
+                        // in RTTY a tone pair below it, so logging the readout
+                        // logs every one of those contacts low.
+                        let freq = self.on_air_freq_hz();
                         let mode = self.state.rx[0].mode.label();
                         self.log_edit = Some(LogEditForm::new_entry(now_unix(), freq, mode));
                     }

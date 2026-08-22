@@ -494,6 +494,62 @@ impl Mode {
         if self.is_lower_sideband_at(dial_hz) && lo >= 0.0 { (-hi, -lo) } else { (lo, hi) }
     }
 
+    /// True where the signal being worked sits at an audio offset from the dial
+    /// rather than on it, so the dial alone is not the frequency of the contact.
+    ///
+    /// CW is the surprising one: the dial sits a sidetone-pitch below what is
+    /// being copied — and keyed — so a 700 Hz pitch puts every contact 700 Hz
+    /// above the number in the readout. The digital modes are the familiar
+    /// case, transmitting at the dial plus their tone offset. The
+    /// carrier-centred modes ([`Self::is_carrier_centered`]) are digital and
+    /// deliberately not here: they key the carrier itself, so the dial *is* the
+    /// frequency.
+    pub fn tunes_off_dial(self) -> bool {
+        (self.is_digital() || matches!(self, Mode::Cw)) && !self.is_carrier_centered()
+    }
+
+    /// Where the signal actually is, given the dial and the mode's audio cursor
+    /// (`DigiStatus::audio_hz`, the CW pitch or the digital tone offset).
+    ///
+    /// This is the frequency of the contact: what goes in the log, what is
+    /// quoted on the air, and what another station reads off their own dial.
+    /// The analog modes ignore `audio_hz` and answer with the dial, which for
+    /// them is the same thing.
+    pub fn on_air_hz(self, dial_hz: f64, audio_hz: f32) -> f64 {
+        if !self.tunes_off_dial() {
+            return dial_hz;
+        }
+        if self.is_lower_sideband_at(dial_hz) {
+            dial_hz - f64::from(audio_hz)
+        } else {
+            dial_hz + f64::from(audio_hz)
+        }
+    }
+
+    /// The audio offset this mode's tones stand at where the offset is a
+    /// standard the whole band keeps rather than a slot the operator picks
+    /// inside a sub-band.
+    ///
+    /// RTTY is the one that has one: mark and space are 2125 and 2295 Hz
+    /// wherever you are, and stations are worked by moving the dial onto them,
+    /// not by dragging the tone pair across the passband. The slotted modes are
+    /// the opposite — one agreed dial per band, and the choice of where in the
+    /// sub-band to transmit is worth remembering — which is what
+    /// `DigiConfig::tx_audio_hz` is for, and why RTTY stays out of it.
+    pub fn standard_tone_offset_hz(self) -> Option<f32> {
+        match self {
+            Mode::Rtty => Some(crate::RTTY_CENTER_HZ),
+            _ => None,
+        }
+    }
+
+    /// True where [`Self::standard_tone_offset_hz`] has an answer: the mode's
+    /// tone offset is fixed by convention, so a click tunes the dial onto the
+    /// signal rather than moving the tones onto it.
+    pub fn holds_standard_tones(self) -> bool {
+        self.standard_tone_offset_hz().is_some()
+    }
+
     /// Which carrier position a transceiver puts this mode at, for the per-mode
     /// I.F. offsets of [`crate::PanadapterConfig`].
     ///
@@ -1059,6 +1115,33 @@ mod tests {
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
         }
+    }
+
+    /// The frequency of a contact is the dial only where the mode listens on
+    /// it. CW listens — and keys — a sidetone-pitch up, and RTTY a tone pair
+    /// up, so logging the dial logs both of them low; that was issue #143.
+    #[test]
+    fn on_air_frequency_takes_the_tone_offset_into_account() {
+        // CW at a 700 Hz pitch: the signal is 700 Hz above the readout.
+        assert_eq!(Mode::Cw.on_air_hz(14_050_000.0, 700.0), 14_050_700.0);
+        // RTTY on the standard pair, and the pair is where it starts.
+        assert_eq!(Mode::Rtty.standard_tone_offset_hz(), Some(crate::RTTY_CENTER_HZ));
+        assert_eq!(Mode::Rtty.on_air_hz(14_080_000.0, crate::RTTY_CENTER_HZ), 14_082_210.0);
+        // The analog modes are on the dial and ignore the cursor, whatever a
+        // stale one from the last digital mode happens to hold.
+        assert_eq!(Mode::Usb.on_air_hz(14_200_000.0, 1500.0), 14_200_000.0);
+        assert_eq!(Mode::Lsb.on_air_hz(3_700_000.0, 1500.0), 3_700_000.0);
+        // A mode on the lower sideband works *below* its dial. SSTV is LSB on
+        // 40 m and USB above, and the answer follows the band.
+        assert_eq!(Mode::Sstv.on_air_hz(7_171_000.0, 1500.0), 7_169_500.0);
+        assert_eq!(Mode::Sstv.on_air_hz(14_230_000.0, 1500.0), 14_231_500.0);
+        // The carrier-centred modes key the carrier itself: no offset to take.
+        assert_eq!(Mode::Packet.on_air_hz(144_800_000.0, 1500.0), 144_800_000.0);
+        assert_eq!(Mode::Rifp.on_air_hz(144_800_000.0, 1500.0), 144_800_000.0);
+        // Only RTTY holds its tones; every other keyboard mode picks an offset.
+        assert!(Mode::Rtty.holds_standard_tones());
+        assert!(!Mode::Psk.holds_standard_tones());
+        assert!(!Mode::Ft8.holds_standard_tones());
     }
 
     /// A mode missing from [`Mode::ALL`] compiles, persists and decodes — and

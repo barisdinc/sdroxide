@@ -144,6 +144,20 @@ pub const HOUND_ZONE_MAX_HZ: f32 = 3000.0;
 /// Most signals a Fox may transmit at once (WSJT-X's limit).
 pub const FOX_MAX_SLOTS: u8 = 5;
 
+/// Centre of the standard amateur RTTY tone pair, in Hz above the dial.
+///
+/// Everybody's tones are 2125 and 2295 Hz, and at the 170 Hz amateur shift this
+/// centre is exactly that pair. High in the audio passband on purpose: it is
+/// where every other RTTY program puts them, so a station tuned by ear against
+/// one of those decodes here too, and both tones clear a transmit filter that
+/// rolls off below 300 Hz. A wider shift keeps the same centre and simply
+/// spreads about it — 850 Hz gives 1785/2635, still inside the passband.
+///
+/// The pair is a standard rather than a slot, which is why it does not move
+/// when a signal is clicked and why the per-band transmit offsets do not touch
+/// it — see [`Mode::holds_standard_tones`](crate::Mode::holds_standard_tones).
+pub const RTTY_CENTER_HZ: f32 = 2210.0;
+
 impl DxpedMode {
     pub const ALL: [DxpedMode; 3] = [DxpedMode::Normal, DxpedMode::Hound, DxpedMode::Fox];
 

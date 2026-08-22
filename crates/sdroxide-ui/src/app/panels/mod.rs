@@ -213,6 +213,24 @@ pub(in crate::app) fn pane_index(mode: Mode, name: &str) -> usize {
     panel_panes(mode).iter().position(|p| *p == name).unwrap_or(0)
 }
 
+/// The frequency of the contact, drawn next to the tone offset it is derived
+/// from in the panels whose mode listens away from the dial.
+///
+/// Worth the room it takes: the readout at the top of the window is the *dial*,
+/// and in CW that sits a sidetone-pitch below the signal, in RTTY a tone pair
+/// below its mark. So the number to log, to spot and to say on the air is not
+/// the big one on screen, and without this there is nowhere to read it. The
+/// logbook fills a new entry in from the same place.
+pub(in crate::app) fn on_air_readout(ui: &mut egui::Ui, hz: f64) {
+    ui.label(
+        RichText::new(format!("{:.4} MHz", hz / 1e6)).size(11.0).color(crate::theme::gray(190)),
+    )
+    .on_hover_text(
+        "The frequency you are actually working: the dial plus the tone offset \
+         beside it. This is what goes in the log — the dial alone is that much low.",
+    );
+}
+
 /// The standard dial frequency for `band`, if one exists for `mode`
 /// (matched by which band's edges the frequency falls within).
 ///

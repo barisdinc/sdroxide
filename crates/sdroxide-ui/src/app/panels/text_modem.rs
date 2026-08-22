@@ -35,6 +35,7 @@ impl SdroxideApp {
         let transmitting = status.as_ref().map(|s| s.transmitting).unwrap_or(false);
         let rx_text = status.as_ref().map(|s| s.text_rx.clone()).unwrap_or_default();
         let my_call = status.as_ref().map(|s| s.config.my_call.clone()).unwrap_or_default();
+        let on_air = self.on_air_freq_hz();
 
         // Header: mode + tuning readout / nudges, SETUP + TX indicator.
         ui.horizontal_wrapped(|ui| {
@@ -50,6 +51,7 @@ impl SdroxideApp {
             if crate::chrome::chip(ui, false, "+").on_hover_text("Tune up 10 Hz").clicked() {
                 cmds.push(Command::SetDigiAudioFreq((audio_hz + 10.0).clamp(200.0, 3500.0)));
             }
+            crate::app::panels::on_air_readout(ui, on_air);
             self.digi_freq_chip(ui, cmds);
             // Mode parameters inline next to the tune buttons (RTTY shift/baud,
             // Olivia tones/bandwidth, THOR submode) — no separate setup dialog.

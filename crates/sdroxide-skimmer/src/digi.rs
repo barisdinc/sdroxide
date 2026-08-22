@@ -456,10 +456,20 @@ impl DigiSkimmer {
                     return None;
                 }
                 let callsign = find_callsign(&t.text);
+                // The track sits on the carrier the detector locked, which for
+                // RTTY is the MARK tone — half a shift above the middle of the
+                // signal. Reported at that middle instead: it is where the box
+                // belongs over a two-tone signal, and it is the frequency a
+                // click has to put the receiver's own tone pair on. PSK has one
+                // carrier and the two are the same thing.
+                let pair_offset = match self.kind {
+                    SkimmerKind::Rtty => RTTY_SHIFT / 2.0,
+                    _ => 0.0,
+                };
                 Some(SkimmerSpot {
                     id: t.id,
                     kind: self.kind,
-                    freq_hz: self.skim_center_hz + t.bin as f64 * bin_hz,
+                    freq_hz: self.skim_center_hz + t.bin as f64 * bin_hz - pair_offset,
                     callsign,
                     text: t.text.clone(),
                     snr_db: t.snr_db,

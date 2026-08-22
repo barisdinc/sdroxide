@@ -82,9 +82,10 @@ pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};
 pub use digi::{
     ClockHealth, CwStatus, Decode, DigiConfig, DigiStatus, DxpedMode, FOX_MAX_SLOTS,
     FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg, HOUND_ZONE_MAX_HZ, HellVariant, PACKET_HEARD_MAX,
-    PacketBaud, PacketHeard, PacketStatus, QsoLive, QsoRecord, QsoStep, QueuedCall, RadeStatus,
-    ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health, cq_is_for_us,
-    fmt_report, qso_log_to_adif, qso_log_to_text, utc_ymd_hms, worked_before, ymd_hms_to_unix,
+    PacketBaud, PacketHeard, PacketStatus, QsoLive, QsoRecord, QsoStep, QueuedCall, RTTY_CENTER_HZ,
+    RadeStatus, ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health,
+    cq_is_for_us, fmt_report, qso_log_to_adif, qso_log_to_text, utc_ymd_hms, worked_before,
+    ymd_hms_to_unix,
 };
 pub use entity::{
     EntityInfo, EntityPlace, all_entities, resolve_callsign, resolve_place, resolve_prefix,

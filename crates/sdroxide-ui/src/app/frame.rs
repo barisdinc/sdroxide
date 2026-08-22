@@ -489,7 +489,18 @@ impl eframe::App for SdroxideApp {
                         &mut self.peaks,
                         &mut self.spec_smooth,
                         &mut self.trace_cache,
-                        Some(spectrum_view::AudioCursor { hz: audio_hz, click_sets_offset: true }),
+                        // A click sets the tone offset in the modes that park
+                        // on an agreed dial and pick a signal inside the
+                        // sub-band. Not in RTTY: its tone pair is a standard
+                        // (2125/2295 Hz), stations are spread across the band
+                        // rather than stacked in one window, and dragging mark
+                        // and space onto each one in turn walks them out of the
+                        // transmit filter. There a click tunes the dial so the
+                        // signal lands on the pair, exactly as CW does.
+                        Some(spectrum_view::AudioCursor {
+                            hz: audio_hz,
+                            click_sets_offset: !mode.holds_standard_tones(),
+                        }),
                         if matches!(mode, Mode::Ft8 | Mode::Ft2) {
                             self.digi_status
                                 .as_ref()

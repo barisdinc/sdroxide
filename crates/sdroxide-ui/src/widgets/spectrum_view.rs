@@ -642,9 +642,12 @@ fn draw_net_box(p: &egui::Painter, b: &NetBox, spot: &Spot, hovered: bool, alpha
     }
 }
 
-/// Tune the active VFO onto a network spot and set its mode. CW is dialed a
-/// sidetone-pitch below so the signal lands in the CW passband (as click-tune
-/// on a skimmer spot does).
+/// Tune the active VFO onto a network spot and set its mode. A spot names the
+/// frequency the signal is *on*, so the modes that listen at an audio offset
+/// from the dial are dialed that offset below it: CW by a sidetone-pitch, RTTY
+/// by its tone pair (as click-tune on a skimmer spot does). Everything else —
+/// phone, and the digital modes whose spots quote the agreed dial rather than
+/// a station's tone — goes straight onto the spotted frequency.
 ///
 /// [`Command::TuneInSpan`], like every click on the picture: the receiver
 /// moves onto the spot, and a radio that tunes with its dial comes along
@@ -657,6 +660,15 @@ fn tune_to_net_spot(spot: &Spot, state: &RadioState, cmds: &mut Vec<Command>) {
             let pitch = ((lo + hi) * 0.5) as f64;
             cmds.push(Command::TuneInSpan { vfo: state.active_vfo, hz: spot.freq_hz - pitch });
             cmds.push(Command::SetMode { rx: RxId::Main, mode: Mode::Cw });
+        }
+        Some(m) if m.holds_standard_tones() => {
+            let af = m.standard_tone_offset_hz().unwrap_or_default();
+            cmds.push(Command::TuneInSpan {
+                vfo: state.active_vfo,
+                hz: spot.freq_hz - f64::from(af),
+            });
+            cmds.push(Command::SetMode { rx: RxId::Main, mode: m });
+            cmds.push(Command::SetDigiAudioFreq(af));
         }
         Some(m) => {
             cmds.push(Command::TuneInSpan { vfo: state.active_vfo, hz: spot.freq_hz });
@@ -1334,18 +1346,28 @@ pub fn show_ext(
                                 cmds.push(Command::SetMode { rx: RxId::Main, mode: Mode::Cw });
                             }
                             SkimmerKind::Psk | SkimmerKind::Rtty => {
-                                // Put the signal at a fixed audio offset and open
-                                // the PSK/RTTY panel there for a clean decode.
-                                const AF: f64 = 1500.0;
+                                // Put the signal at the mode's own audio offset
+                                // and open the PSK/RTTY panel there for a clean
+                                // decode. RTTY's is the standard tone pair
+                                // rather than a convenient number: the tones
+                                // this lands on are the ones it will transmit.
+                                // Already in the mode, the operator's own
+                                // cursor wins — the offset they set is where
+                                // they want the signal, and a spot must not
+                                // silently move it.
+                                let m = spot.kind.mode();
+                                let af = f64::from(
+                                    cursor_hz
+                                        .filter(|_| state.rx[0].mode == m)
+                                        .or_else(|| m.standard_tone_offset_hz())
+                                        .unwrap_or(1500.0),
+                                );
                                 cmds.push(Command::TuneInSpan {
                                     vfo: state.active_vfo,
-                                    hz: spot_hz - AF,
+                                    hz: spot_hz - af,
                                 });
-                                cmds.push(Command::SetMode {
-                                    rx: RxId::Main,
-                                    mode: spot.kind.mode(),
-                                });
-                                cmds.push(Command::SetDigiAudioFreq(AF as f32));
+                                cmds.push(Command::SetMode { rx: RxId::Main, mode: m });
+                                cmds.push(Command::SetDigiAudioFreq(af as f32));
                             }
                         }
                     }

@@ -143,11 +143,14 @@ pub struct TextModemController {
 impl TextModemController {
     pub fn new(mode: Mode, cfg: DigiConfig, tap_rate: f64) -> Self {
         // MFSK modes want a higher default centre so their wider tone banks fit
-        // inside the audio passband; the narrow PSK/RTTY carriers sit at 1000 Hz.
-        let audio_hz = if matches!(mode, Mode::Olivia | Mode::Thor | Mode::Fsq) {
-            1500.0f32
-        } else {
-            1000.0f32
+        // inside the audio passband; the narrow PSK carrier sits at 1000 Hz.
+        // RTTY starts on the standard tone pair instead of anywhere convenient:
+        // 2125/2295 Hz is what every other RTTY program sends and expects, and
+        // it is the offset the log has to take off again to name the contact.
+        let audio_hz = match mode {
+            Mode::Olivia | Mode::Thor | Mode::Fsq => 1500.0f32,
+            Mode::Rtty => sdroxide_types::RTTY_CENTER_HZ,
+            _ => 1000.0f32,
         };
         let (baud, shift) = (cfg.rtty_baud as f64, cfg.rtty_shift_hz as f64);
         let (o_tones, o_bw) = (cfg.olivia_tones as usize, cfg.olivia_bw_hz as f64);
@@ -431,5 +434,30 @@ impl DigiEngine for TextModemController {
     fn clear_rx(&mut self) {
         self.rx_text.clear();
         self.status_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RTTY's tone pair is a standard, not a convenience: 2125 and 2295 Hz at
+    /// the 170 Hz amateur shift, which is what every other RTTY program sends
+    /// and expects. It used to start at 915/1085 — decodable here, but low in
+    /// the passband, off what the rest of the band is on, and two kilohertz of
+    /// unexplained offset between the dial and the contact (issue #143).
+    ///
+    /// PSK keeps its own carrier: one tone, no convention to keep.
+    #[test]
+    fn rtty_starts_on_the_standard_tone_pair() {
+        let cfg = DigiConfig::default();
+        let rtty = TextModemController::new(Mode::Rtty, cfg.clone(), 48_000.0);
+        assert_eq!(rtty.audio_hz(), sdroxide_types::RTTY_CENTER_HZ);
+        let shift = cfg.rtty_shift_hz;
+        assert_eq!(rtty.audio_hz() - shift / 2.0, 2125.0, "space tone");
+        assert_eq!(rtty.audio_hz() + shift / 2.0, 2295.0, "mark tone");
+
+        let psk = TextModemController::new(Mode::Psk, cfg, 48_000.0);
+        assert_eq!(psk.audio_hz(), 1000.0);
     }
 }

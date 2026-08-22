@@ -940,6 +940,12 @@ is audible.
   sidetone pitch, a personal preference; you will set it once.
 - Clicking a **CW skimmer box** ([4](#4-skimmers)) does the same thing, so a
   station spotted across the band is one click from being copied.
+- **The MHz figure after the pitch is the frequency you are working** — the
+  dial plus that pitch — and it is what to log and what to give on the air. The
+  big readout at the top of the window is the dial, which sits a sidetone-pitch
+  *below* the signal, so with a 700 Hz pitch it reads 700 Hz low. The logbook's
+  **+ NEW ENTRY** ([3.2.6](#326-logging-and-the-logbook)) fills itself in from
+  the same figure, not from the dial.
 
 **What the header tells you.** A CW decoder cannot fail quietly the way a
 framed digital mode does — fed noise, a naive one produces confident nonsense —
@@ -1764,7 +1770,10 @@ Completed FT8/FT4/FT2 QSOs are logged automatically. Open the full logbook with 
 The logbook lists QSOs grouped by day (newest first) and covers both digital and
 manual entries. You can:
 
-- **+ NEW ENTRY** — add a manual QSO. Besides the basics (Call, Grid, Freq MHz,
+- **+ NEW ENTRY** — add a manual QSO, seeded with the frequency you are actually
+  working rather than the dial: in CW that is the dial plus your sidetone pitch,
+  in RTTY and the other keyboard modes the dial plus the tone offset, and in
+  phone the dial itself. Besides the basics (Call, Grid, Freq MHz,
   Mode, RST sent/received, Date/Time UTC with a **NOW** button, comment) the form
   carries **Name, QTH, State, Country**, transmit **Pwr**, and **Contest** fields
   (contest id and sent/received serial numbers). If you've already worked that
@@ -1807,6 +1816,19 @@ panel is a live **messaging area** instead of a QSO sequencer.
 - Tune exactly onto a signal with the **−/+** buttons (±10 Hz) — or click its
   skimmer label (see [Skimmers](#4-skimmers)). In RTTY, two amber
   lines on the waterfall mark the expected mark/space tones to tune between.
+- **In PSK the cursor moves to the signal; in RTTY the signal moves to the
+  cursor.** Click the waterfall in PSK (or Olivia, THOR, FSQ, Hell) and the tone
+  offset follows your pointer, which is how you work several stations inside one
+  passband. RTTY does not work that way: its tones are standardised at 2125 and
+  2295 Hz, that is where everyone else's receiver expects them and where a
+  transmit filter passes them cleanly, so a click **tunes the dial** until the
+  signal lands on the pair instead of dragging the pair onto the signal — just
+  as CW does ([2.14](#214-cw-decoding-and-keyboard-sending)). The **−/+**
+  buttons still move the tones if you want them somewhere else.
+- **The MHz figure beside the offset is the frequency you are working**, and the
+  one to log and to give on the air. The big readout at the top of the window is
+  the *dial*, which in RTTY sits a whole tone pair — about 2.2 kHz — below the
+  signal.
 - The **SQL** slider in the panel header is a decode squelch: raise it until the
   window stops filling with garbage when no signal is present, lower it (to the
   left) to copy weaker signals. It applies to every keyboard mode
@@ -1840,13 +1862,17 @@ panel is a live **messaging area** instead of a QSO sequencer.
 **Settings (PSK/RTTY setup dialog):**
 
 - **PSK** is BPSK31 — differential BPSK with the standard varicode alphabet.
-- **RTTY** defaults to 45.45 baud, 170 Hz shift, Baudot (ITA2). **Shift**
-  (170 / 425 / 850 Hz) and **Baud** (45 / 50 / 75) are selectable.
+- **RTTY** defaults to 45.45 baud, 170 Hz shift, Baudot (ITA2), on the standard
+  2125/2295 Hz tone pair. **Shift** (170 / 425 / 850 Hz) and **Baud**
+  (45 / 50 / 75) are selectable; a wider shift keeps the same centre and spreads
+  about it.
 - Your callsign and grid (shared with the FT8/FT4/FT2 setup) fill the CQ macro.
 
 **Skimmers:** the PSK and RTTY skimmers (see [Skimmers](#4-skimmers)) label
 signals across each band's PSK/RTTY calling sub-bands. Clicking a label from any
-mode switches to PSK or RTTY, tunes onto the signal, and opens this panel.
+mode switches to PSK or RTTY, tunes onto the signal, and opens this panel — onto
+the standard tone pair in RTTY, so the offset you land on is the one you will
+transmit. A label already in that mode leaves your own offset alone.
 
 ### 3.4 Olivia, THOR and FSQ
 
