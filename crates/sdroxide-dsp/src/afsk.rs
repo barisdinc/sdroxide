@@ -84,6 +84,11 @@ impl AfskProfile {
 
 // ─────────────────────────────── transmit ───────────────────────────────
 
+/// Peak amplitude [`AfskTx::next_block`] reaches. A steady tone, so the figure
+/// is exact — the transmit chain divides it back out to put the over on the air
+/// at full scale (`DigiEngine::tx_peak`).
+pub const AFSK_TX_PEAK: f32 = 0.5;
+
 /// Phase-continuous AFSK. Bits in, audio out.
 ///
 /// Phase continuity is not decoration: a discontinuity is a click, it splatters
@@ -139,8 +144,10 @@ impl AfskTx {
     /// Fill `out` with audio. Returns the number of samples that carry signal;
     /// the rest is silence, which is the caller's cue that the over is done.
     ///
-    /// Amplitude is 0.5 rather than full scale: this is the modulating signal,
-    /// and the transmit chain's drive control is what sets the level on the air.
+    /// Amplitude is [`AFSK_TX_PEAK`] rather than full scale: this is the
+    /// modulating signal, and the transmit chain's drive control is what sets
+    /// the level on the air — it divides this headroom back out again, so half
+    /// scale here is not half a transmitter on the air.
     pub fn next_block(&mut self, out: &mut [f32]) -> usize {
         let mut n = 0;
         for slot in out.iter_mut() {
@@ -158,7 +165,7 @@ impl AfskTx {
             }
             let hz = if self.cur_mark { self.mark_hz } else { self.space_hz };
             self.phase = (self.phase + TAU * hz / self.rate) % TAU;
-            *slot = 0.5 * self.phase.sin() as f32;
+            *slot = AFSK_TX_PEAK * self.phase.sin() as f32;
             self.left -= 1.0;
             n += 1;
         }

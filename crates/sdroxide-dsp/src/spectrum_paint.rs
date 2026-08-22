@@ -30,6 +30,13 @@ pub const CENTER_HZ: f32 = 1800.0;
 /// The transmit-speed control divides this (lower speed ⇒ longer dwell).
 pub const ROW_SECS: f64 = 0.055;
 
+/// Peak amplitude [`SpectrumPaintTx::next_block`] reaches: the bound the burst
+/// is scaled to, since a painted row is a sum of tones whose phases can align.
+/// The transmit chain divides it back out to reach full scale
+/// (`DigiEngine::tx_peak`), so this is headroom against the summing, not power
+/// given away.
+pub const TX_PEAK: f32 = 0.85;
+
 /// Safety caps so a pathological image can't sum an unreasonable number of
 /// simultaneous tones or run for an absurd number of rows. The UI bounds its
 /// bitmaps well below these; anything larger is sub-sampled here.
@@ -97,8 +104,8 @@ impl SpectrumPaintTx {
             .collect();
 
         // Conservative gain: the brightest row's summed tone weight bounds the
-        // worst-case peak (all phases aligned), so scaling by 0.85 / that keeps
-        // headroom for the modulator without a full audio pre-pass.
+        // worst-case peak (all phases aligned), so scaling by `TX_PEAK` / that
+        // keeps headroom for the modulator without a full audio pre-pass.
         let mut max_sum = 0.0f64;
         for t in 0..rows {
             let iy = row_index(t, rows, h);
@@ -109,7 +116,7 @@ impl SpectrumPaintTx {
             }
             max_sum = max_sum.max(s);
         }
-        let gain = if max_sum > 1e-9 { (0.85 / max_sum) as f32 } else { 1.0 };
+        let gain = if max_sum > 1e-9 { (f64::from(TX_PEAK) / max_sum) as f32 } else { 1.0 };
 
         SpectrumPaintTx {
             gray: gray.to_vec(),

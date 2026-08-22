@@ -221,6 +221,19 @@ impl DigiEngine for RadeController {
         self.tx_done
     }
 
+    /// RADE's 6 dB is not headroom the transmitter may have back.
+    ///
+    /// `sdroxide_rade::TX_REAL_SCALE` puts the waveform's *nominal* unit
+    /// amplitude at half scale, exactly as the C library specifies — but this
+    /// is a multi-carrier waveform whose peaks ride well above nominal, and
+    /// that is what the 6 dB is there for. Declaring the level it is already at
+    /// leaves those peaks intact; scaling it up to a nominal full scale would
+    /// flatten every one of them against the limiter, which is the one thing a
+    /// digital voice modem cannot survive.
+    fn tx_peak(&self) -> f32 {
+        1.0
+    }
+
     fn on_burst_done(&mut self) {
         self.keyed = false;
         self.tx_done = false;

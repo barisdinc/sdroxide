@@ -80,6 +80,22 @@ impl Scrambler {
 
 // ─────────────────────────────── transmit ───────────────────────────────
 
+/// Symbol level before shaping. Half scale, as everywhere else in the transmit
+/// chain — the level the signal goes out at is the transmit chain's to set.
+const SYMBOL: f32 = 0.5;
+
+/// Peak amplitude [`G3ruhTx::next_block`] reaches, [`SYMBOL`] plus the shaping
+/// filter's overshoot.
+///
+/// Higher than the plain symbol level because a low-pass fed a run of hard
+/// transitions rings past them, and that ring is part of the waveform: the
+/// transmit chain divides this back out to reach full scale
+/// (`DigiEngine::tx_peak`), so using the symbol level here instead would drive
+/// the shaping peaks a third of the way into the limiter and close the eye the
+/// filter was widening. Measured against random data — see
+/// `the_shaped_peak_stays_inside_what_is_declared`.
+pub const G3RUH_TX_PEAK: f32 = 0.67;
+
 /// Shaped, scrambled baseband. Bits in, modulating signal out.
 pub struct G3ruhTx {
     spb: f64,
@@ -135,7 +151,7 @@ impl G3ruhTx {
             if self.left <= 0.0 {
                 match self.bits.pop_front() {
                     Some(b) => {
-                        self.level = if self.scram.scramble(b) { 0.5 } else { -0.5 };
+                        self.level = if self.scram.scramble(b) { SYMBOL } else { -SYMBOL };
                         self.left = self.spb;
                     }
                     None => {
@@ -270,6 +286,31 @@ impl G3ruhRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The declared peak has to be the real one: the transmit chain divides it
+    /// out to reach full scale, so a figure below the waveform clips the
+    /// shaping ring and one far above it transmits quiet.
+    #[test]
+    fn the_shaped_peak_stays_inside_what_is_declared() {
+        let mut tx = G3ruhTx::new(48_000.0);
+        let mut seed = 7u32;
+        let bits: Vec<bool> = (0..8000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                seed >> 20 & 1 != 0
+            })
+            .collect();
+        tx.push_bits(&bits);
+        let mut peak = 0.0f32;
+        let mut blk = [0.0f32; 480];
+        while !tx.idle() {
+            tx.next_block(&mut blk);
+            peak = blk.iter().fold(peak, |a, s| a.max(s.abs()));
+        }
+        assert!(peak <= G3RUH_TX_PEAK, "shaped baseband peaks at {peak}");
+        // …and not so far inside it that the declaration is throwing power away.
+        assert!(peak > G3RUH_TX_PEAK * 0.9, "declared {G3RUH_TX_PEAK}, measured only {peak}");
+    }
 
     /// Scramble then descramble is the identity, once the register has filled.
     ///

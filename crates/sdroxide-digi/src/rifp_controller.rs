@@ -767,6 +767,14 @@ impl DigiEngine for RifpController {
         self.keyed
     }
 
+    /// Not audio at all: `RifpTx` emits the ±1 NRZ symbol waveform that the
+    /// CPFSK modulator integrates into carrier phase, and the ±1 is the
+    /// profile's, not a level. Declaring full scale leaves it exactly as the
+    /// modem built it — scaling it would move the deviation, not the power.
+    fn tx_peak(&self) -> f32 {
+        1.0
+    }
+
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {
         match &mut self.tx {
             Some(tx) => {

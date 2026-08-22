@@ -1085,6 +1085,18 @@ const TX_MONITOR_RATE: f64 = 48_000.0;
 /// the display ceiling — i.e. about as bright as a strong received signal.
 const TX_MON_HEADROOM_DB: f32 = -30.0;
 
+/// The gain that brings a digital mode's modulating signal up to full scale.
+///
+/// [`sdroxide_digi::DigiEngine::tx_peak`] is the fraction of full scale the
+/// mode's own synthesiser reaches — half of it for nearly all of them, which
+/// is 6 dB of headroom the transmitter must not be made to pay for. Anything
+/// outside `(0, 1]` is not a headroom figure at all, so it is read as "already
+/// full scale" and the over goes out at the level the mode built it at, rather
+/// than at some wild multiple of it.
+fn digi_tx_gain(peak: f32) -> f32 {
+    if peak > 0.0 && peak <= 1.0 { 1.0 / peak } else { 1.0 }
+}
+
 /// Wall-clock pace one produced TX block to real time so the downstream buffer
 /// (sound card, HPSDR/TCI network ring) stays near-empty instead of filling to
 /// its full 0.5–1 s depth. Every backend's `tx_write` already blocks on
@@ -8814,10 +8826,26 @@ impl Engine {
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         let mut audio = [0.0f32; TX_AUDIO_BLOCK];
+        let mut digi_gain = 1.0;
         let done = match self.digi.as_mut() {
-            Some(d) => d.fill_tx_block(&mut audio),
+            Some(d) => {
+                digi_gain = digi_tx_gain(d.tx_peak());
+                d.fill_tx_block(&mut audio)
+            }
             None => true,
         };
+        // The modem's own headroom, divided back out (`DigiEngine::tx_peak`) so
+        // the modulator is handed a full-scale modulating signal and a full
+        // Drive is a full transmitter. Here rather than on the modulated
+        // samples below, because on a sideband mode the two are the same thing
+        // but on FM they are not: there the level is the deviation, and scaling
+        // the modulator's constant envelope would raise the power while leaving
+        // a packet over half as wide as the channel expects it to be.
+        if digi_gain != 1.0 {
+            for a in &mut audio {
+                *a = (*a * digi_gain).clamp(-1.0, 1.0);
+            }
+        }
         if let Some(mixer) = self.mixer.as_mut() {
             mixer.push_tx(&audio);
         }
@@ -8891,7 +8919,29 @@ impl Engine {
 
         if self.digi_tx {
             self.feed_digi_mic();
-            burst_done = self.digi.as_mut().map(|d| d.fill_tx_block(&mut audio)).unwrap_or(true);
+            let mut digi_gain = 1.0;
+            burst_done = self
+                .digi
+                .as_mut()
+                .map(|d| {
+                    digi_gain = digi_tx_gain(d.tx_peak());
+                    d.fill_tx_block(&mut audio)
+                })
+                .unwrap_or(true);
+            // Full scale into the rig, as the tune tone below goes out on a
+            // radio with its own power control — and for the same reason. That
+            // power control cannot make up 6 dB the audio never had: a
+            // half-scale burst asks for a quarter of the power a TUNE at the
+            // same slider setting gets out of the same radio, and the Drive
+            // slider looks dead, because what the output is riding on is the
+            // audio and not the power register (issue #131). A rig without a
+            // power control has its level set at the radio, where every other
+            // digital-mode program's full-scale audio expects to meet it.
+            if digi_gain != 1.0 {
+                for a in &mut audio {
+                    *a = (*a * digi_gain).clamp(-1.0, 1.0);
+                }
+            }
         } else if self.state.tx.tune {
             // An audio-modulated rig (CAT/TCI) needs a tone to produce a carrier;
             // silence would key up with no output. On a rig with its own power

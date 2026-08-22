@@ -38,7 +38,7 @@ use sdroxide_ax25::{
     Addr, Deframer, Discard, Framer, Packet, PacketType, PortEndpoint, PortEvent, PortRequest,
     state,
 };
-use sdroxide_dsp::{AfskProfile, AfskRx, AfskTx, G3ruhRx, G3ruhTx};
+use sdroxide_dsp::{AFSK_TX_PEAK, AfskProfile, AfskRx, AfskTx, G3RUH_TX_PEAK, G3ruhRx, G3ruhTx};
 use sdroxide_types::{
     DigiConfig, DigiStatus, Mode, PACKET_HEARD_MAX, PacketBaud, PacketHeard, PacketStatus, QsoStep,
     TranscriptLine,
@@ -119,6 +119,16 @@ impl TxModem {
         match self {
             TxModem::Afsk(m) => m.idle(),
             TxModem::G3ruh(m) => m.idle(),
+        }
+    }
+
+    /// The loudest sample this modem produces. The two differ: the AFSK tone is
+    /// exactly its half-scale amplitude, while the 9600 baseband rings past its
+    /// symbol level wherever the shaping filter meets a run of transitions.
+    fn peak(&self) -> f32 {
+        match self {
+            TxModem::Afsk(_) => AFSK_TX_PEAK,
+            TxModem::G3ruh(_) => G3RUH_TX_PEAK,
         }
     }
 }
@@ -775,6 +785,14 @@ impl DigiEngine for PacketController {
 
     fn tx_burst_active(&self) -> bool {
         self.keyed
+    }
+
+    /// Whichever modem this speed uses, its own headroom — the shaped 9600
+    /// baseband keeps more of it than the 1200 tone does, and declaring the
+    /// tone's figure for both would drive the shaping peaks into the limiter
+    /// and close the eye.
+    fn tx_peak(&self) -> f32 {
+        self.tx_modem.peak()
     }
 
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {

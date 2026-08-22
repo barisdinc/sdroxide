@@ -73,6 +73,34 @@ pub trait DigiEngine: Send {
     fn poll(&mut self, now: SystemTime, dial_hz: f64) -> Vec<DigiAction>;
     fn tx_burst_active(&self) -> bool;
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool;
+
+    /// The peak amplitude [`fill_tx_block`](Self::fill_tx_block) reaches, as a
+    /// fraction of full scale.
+    ///
+    /// Nearly every modem here synthesises its modulating signal at half scale
+    /// — `RttyTx`, `SstvTx`, `HellTx`, the AFSK and G3RUH packet modems, the
+    /// Olivia/THOR/FSQ tone generators, and the FT8/FT4/JS8/WSPR burst
+    /// synthesisers all agree on 0.5 — leaving 6 dB of headroom above the
+    /// waveform. That headroom belongs to the modem, not to the transmitter:
+    /// the chain divides it out again so a hundred-percent Drive puts the over
+    /// on the air at full scale, the same level a TUNE goes out at. Without
+    /// that, every digital over sat 6 dB — three quarters of the power — below
+    /// what the Drive slider said, and on a rig that modulates the audio we
+    /// send it no slider could get that back: the radio was simply never asked
+    /// for more than a quarter of its power ([issue #131]).
+    ///
+    /// Overridden wherever that is not the figure: the modes whose signal is
+    /// already at the level it wants ([`CwController`], [`RadeController`],
+    /// [`RifpController`]) and the ones that leave a different amount of room
+    /// ([`PacketController`] at 9600, [`RfPaintController`], which sums tones).
+    /// A mode that gets this wrong transmits quiet or transmits into the
+    /// limiter, so it is worth measuring rather than assuming.
+    ///
+    /// [issue #131]: https://github.com/dividebysandwich/sdroxide/issues/131
+    fn tx_peak(&self) -> f32 {
+        0.5
+    }
+
     fn on_burst_done(&mut self);
     fn abort(&mut self);
     fn abort_tx(&mut self);

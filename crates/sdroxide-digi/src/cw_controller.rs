@@ -605,6 +605,13 @@ impl DigiEngine for CwController {
         !self.producing() && self.tx48.is_empty()
     }
 
+    /// The keyer's sidetone is already full scale: its raised-cosine envelope
+    /// runs the whole way from silence to 1.0, so there is no headroom here for
+    /// the transmit chain to divide out.
+    fn tx_peak(&self) -> f32 {
+        1.0
+    }
+
     fn on_burst_done(&mut self) {
         self.keyed = false;
         self.idle_samples = 0;

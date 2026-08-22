@@ -816,6 +816,36 @@ mod tests {
         assert!(any_signal, "burst produced only silence");
     }
 
+    /// The headroom this mode declares has to be the headroom it actually
+    /// leaves: the transmit chain divides `tx_peak` back out to put the over on
+    /// the air at full scale, so a burst quieter than it claims is transmitted
+    /// quiet and one louder than it claims is transmitted into the limiter.
+    /// See [`crate::DigiEngine::tx_peak`] and issue #131.
+    #[test]
+    fn the_burst_is_as_loud_as_the_headroom_it_declares() {
+        use crate::DigiEngine;
+
+        let mut c = DigiController::new(Mode::Ft8, cfg(), 12_000.0);
+        c.call_cq();
+        let now = UNIX_EPOCH + Duration::from_secs_f64(1_609_459_201.0);
+        c.poll(now, 14_074_000.0);
+        assert!(c.tx_burst_active(), "no burst to measure");
+
+        // A second of audio: long enough to be past the burst's opening ramp
+        // and well into the tones themselves.
+        let mut block = [0.0f32; 480];
+        let mut peak = 0.0f32;
+        for _ in 0..100 {
+            DigiController::fill_tx_block(&mut c, &mut block);
+            peak = block.iter().fold(peak, |a, s| a.max(s.abs()));
+        }
+        let declared = DigiEngine::tx_peak(&c);
+        assert!(
+            (peak - declared).abs() < 0.02,
+            "the burst peaks at {peak} against the {declared} it declares"
+        );
+    }
+
     #[test]
     fn no_burst_without_a_callsign() {
         let mut c = DigiController::new(Mode::Ft8, DigiConfig::default(), 12_000.0);

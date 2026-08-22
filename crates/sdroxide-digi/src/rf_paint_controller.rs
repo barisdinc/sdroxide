@@ -114,6 +114,13 @@ impl DigiEngine for RfPaintController {
         self.keyed
     }
 
+    /// The bound the painter scales its rows to, which is higher than the
+    /// half scale a single-tone modem leaves: a painted row is a sum of tones
+    /// and the headroom is against them landing in phase together.
+    fn tx_peak(&self) -> f32 {
+        sdroxide_dsp::RF_PAINT_TX_PEAK
+    }
+
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {
         match &mut self.tx {
             Some(tx) => {

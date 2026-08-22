@@ -41,7 +41,7 @@ mod wbspectrum;
 pub mod wefax;
 mod window;
 
-pub use afsk::{AfskProfile, AfskRx, AfskTx};
+pub use afsk::{AFSK_TX_PEAK, AfskProfile, AfskRx, AfskTx};
 pub use agc::Agc;
 pub use ctcss::{SubToneDetect, golay23_decode, golay23_encode};
 pub use cw::{CwDecoder, CwRx, CwTx, morse_decode, morse_encode, text_duration_s};
@@ -53,7 +53,7 @@ pub use eq::ParametricEq;
 pub use fir::{ComplexFir, RealFir, bandpass_taps};
 pub use fsq::{FsqRx, FsqTx};
 pub use fsq_image::{FsqImageRx, FsqImageTx, IMG_H as FSQ_IMG_H, IMG_W as FSQ_IMG_W};
-pub use g3ruh::{G3ruhRx, G3ruhTx, Scrambler};
+pub use g3ruh::{G3RUH_TX_PEAK, G3ruhRx, G3ruhTx, Scrambler};
 pub use hell::{HELL_CELL_COLS, HELL_ROWS, HellRx, HellTx, render_columns as hell_columns};
 pub use interp::{Duc, HalfbandInterp};
 pub use iqcorrect::IqCorrect;
@@ -73,7 +73,7 @@ pub use sbnr::SpecBleachNr;
 pub use spectrum::SpectrumAnalyzer;
 pub use spectrum_paint::{
     BAND_HI_HZ as RF_PAINT_BAND_HI, BAND_LO_HZ as RF_PAINT_BAND_LO, CENTER_HZ as RF_PAINT_CENTER,
-    SpectrumPaintTx,
+    SpectrumPaintTx, TX_PEAK as RF_PAINT_TX_PEAK,
 };
 pub use sstv::{SstvEvent, SstvRx, SstvTx};
 pub use thor::{ThorRx, ThorTx};
