@@ -819,6 +819,11 @@ fn needle_motion(ui: &Ui, id: Id, target: f32) -> f32 {
 /// `request_repaint`: on a busy band the needle is always creeping somewhere,
 /// and an unpaced request would pin the whole window — panadapter included — at
 /// the display's refresh rate for the sake of one small widget.
+///
+/// 33 ms is a ceiling on how fast the needle needs to move, not a promise that
+/// it will: [`crate::repaint::after_ms`] floors every request at one frame, so
+/// below 30 fps the meter follows the rate the operator set rather than
+/// dragging the window up to its own.
 fn animate(ui: &Ui) {
     crate::repaint::after_ms(ui.ctx(), 33);
 }

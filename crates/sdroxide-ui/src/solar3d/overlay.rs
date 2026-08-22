@@ -740,7 +740,7 @@ fn advance_lapse(ui: &egui::Ui, st: &mut SolarUi, dt: f32) {
     let step = dt.max(0.0) as f64 * st.view.lapse_speed.clamp(1.0, 600.0) as f64;
     let back = st.lapse_back_s - step;
     st.set_lapse_back(if back <= 0.0 { crate::digi_map::HISTORY_S as f64 } else { back });
-    ui.ctx().request_repaint();
+    crate::repaint::animate(ui.ctx());
 }
 
 /// The 3D scene: mouse interaction, the wgpu paint callback, then the readouts
@@ -1183,7 +1183,7 @@ fn qso_card(
     // The window animates the globe anyway; this only guarantees the cursor
     // keeps its rhythm if that ever stops.
     if typing || elapsed < lines.len() as f64 * CARD_LINE_S + 1.0 {
-        ui.ctx().request_repaint();
+        crate::repaint::animate(ui.ctx());
     } else {
         crate::repaint::after_ms(ui.ctx(), 120);
     }
@@ -2643,7 +2643,7 @@ fn advance_tour(ui: &egui::Ui, st: &mut SolarUi, data: Option<&SolarData>, sim_n
     let pivot = tour.step(&mut st.view, &b, dt, qso, sat, st.qth);
     st.tour = tour;
     st.focus_override = Some(pivot);
-    ui.ctx().request_repaint();
+    crate::repaint::animate(ui.ctx());
 }
 
 /// Drag to rotate, scroll or pinch to zoom, double-click to reframe. Any of them
@@ -2696,7 +2696,7 @@ fn interact(ui: &egui::Ui, st: &mut SolarUi, resp: &egui::Response) {
     // Continuous repaint only while something is actually moving; otherwise the
     // window idles and is woken by input or by the data feed.
     if touched || st.view.auto || resp.is_pointer_button_down_on() {
-        ui.ctx().request_repaint();
+        crate::repaint::animate(ui.ctx());
     }
 }
 

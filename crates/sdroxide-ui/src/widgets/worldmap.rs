@@ -303,7 +303,7 @@ pub fn show(
     }
     // Mouse/touch pan and zoom, applied on top of (and suspending) the auto-fit.
     if interact(ui, view, &resp, aspect) {
-        ui.ctx().request_repaint();
+        crate::repaint::animate(ui.ctx());
     }
     let (clat, clon, lon_span) = (view.clat, view.clon, view.lon_span);
     let lat_span = lon_span * aspect;

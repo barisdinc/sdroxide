@@ -157,7 +157,7 @@ impl LoginForm {
         ));
         // Nothing else drives this screen's repaints — a socket that is waiting
         // for a password sends nothing — so the globe has to ask for its own.
-        ui.ctx().request_repaint();
+        crate::repaint::animate(ui.ctx());
     }
 
     /// An answer this connection can give without asking anybody: the sign-in

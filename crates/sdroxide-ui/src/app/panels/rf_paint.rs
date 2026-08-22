@@ -133,7 +133,7 @@ fn draw_scroll_preview(
             let off = (-(time as f32) * 45.0 / th).rem_euclid(1.0);
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, off), egui::pos2(1.0, off + vspan));
             egui::Image::new(tex).uv(uv).paint_at(ui, rect);
-            ui.ctx().request_repaint(); // keep the scroll animating
+            crate::repaint::animate(ui.ctx()); // keep the scroll animating
         }
         None => {
             p.text(

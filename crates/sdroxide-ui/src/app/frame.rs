@@ -95,6 +95,10 @@ impl eframe::App for SdroxideApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        // The rate every animation in the tree paces itself to. Published here,
+        // before anything draws, so a change in Settings → UI reaches the
+        // needle and the waterfall on the same frame it reaches the scheduler.
+        crate::repaint::set_frame_period_ms(1000 / u64::from(self.ui_settings.fps().max(1)));
         // Which radio the ids minted below belong to. Split view draws several
         // apps per frame; each declares itself before it draws anything.
         crate::layout::set_radio_salt(&ctx, self.radio_id);
@@ -164,7 +168,7 @@ impl eframe::App for SdroxideApp {
             }
             // The socket wakes the UI when the server answers; this is only so
             // a spinner-less "CHECKING…" cannot look like a hung window.
-            crate::repaint::after_ms(&ctx, IDLE_POLL_MS);
+            crate::repaint::schedule_ms(&ctx, IDLE_POLL_MS);
             return;
         }
 
@@ -869,7 +873,7 @@ impl eframe::App for SdroxideApp {
             let ms = ((at - now).max(0.0) * 1000.0).ceil() as u64;
             wait_ms = wait_ms.min(ms.max(1));
         }
-        crate::repaint::after_ms(&ctx, wait_ms);
+        crate::repaint::schedule_ms(&ctx, wait_ms);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

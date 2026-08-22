@@ -446,7 +446,7 @@ impl InputRuntime {
         let (midi, midi_sent) = {
             let want = midi_config(&cfg);
             let ctx = ctx.clone();
-            (Some(sdroxide_midi::spawn(want.clone(), move || ctx.request_repaint())), want)
+            (Some(sdroxide_midi::spawn(want.clone(), move || crate::repaint::animate(&ctx))), want)
         };
         #[cfg(target_arch = "wasm32")]
         let _ = ctx;

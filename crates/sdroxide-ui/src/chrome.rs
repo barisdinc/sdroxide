@@ -217,7 +217,7 @@ pub fn popup_fade_alpha(
         *since = None;
         0.0
     } else if elapsed > HOLD {
-        ctx.request_repaint(); // animate the fade
+        crate::repaint::animate(ctx); // animate the fade
         (1.0 - (elapsed - HOLD) / FADE) as f32
     } else {
         // Wake up exactly when the fade should begin.

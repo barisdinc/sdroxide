@@ -1401,7 +1401,7 @@ pub fn show_ext(
             }
             // The coast is animation, not a response to input: without this it
             // would advance only when something else happened to repaint.
-            ui.ctx().request_repaint();
+            crate::repaint::animate(ui.ctx());
         }
     }
     // The swallow only covers the one press/release pair that caught the dial.
@@ -1999,7 +1999,7 @@ pub fn show_ext(
                 end_hz,
                 alpha,
             );
-            ui.ctx().request_repaint(); // keep animating the fade to completion
+            crate::repaint::animate(ui.ctx()); // keep animating the fade to completion
         } else {
             ui.data_mut(|d| d.insert_temp(fade_id, None::<(f64, f64, f64)>));
         }

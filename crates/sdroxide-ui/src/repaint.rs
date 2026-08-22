@@ -34,25 +34,76 @@
 //! than hard-coding 16.67 ms keeps the compensation exact if egui ever starts
 //! filling the field in for real.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use eframe::egui;
 
-/// Ask for the next pass in `delay`, and mean it.
+/// One frame at the rate the operator chose, in milliseconds. Written once a
+/// frame by the app; read by every animation that wants the next frame.
 ///
-/// Drop-in for [`egui::Context::request_repaint_after`]; see the module docs
-/// for why calling that directly does not do what it says.
+/// Starts at the default 60 fps so anything drawn before the first frame sets
+/// it — the sign-in screen's globe — is paced rather than free.
+static FRAME_PERIOD_MS: AtomicU64 = AtomicU64::new(1000 / 60);
+
+/// Publish the frame period Settings → UI is asking for. Called once per frame,
+/// before anything draws.
+pub fn set_frame_period_ms(ms: u64) {
+    FRAME_PERIOD_MS.store(ms.max(1), Ordering::Relaxed);
+}
+
+fn frame_period() -> Duration {
+    Duration::from_millis(FRAME_PERIOD_MS.load(Ordering::Relaxed))
+}
+
+/// What [`egui::Context::request_repaint_after`] is about to subtract.
+/// `predicted_dt` is seconds as `f32` and always positive, so the conversion
+/// cannot fail — but a zero on the error path only leaves egui's own behaviour
+/// in place.
+fn bias(ctx: &egui::Context) -> Duration {
+    Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or(Duration::ZERO)
+}
+
+/// Ask for the next pass in `delay`, and never sooner than one frame.
+///
+/// Drop-in for [`egui::Context::request_repaint_after`] everywhere except the
+/// frame scheduler itself — see the module docs for why calling egui's version
+/// does not do what it says, and [`animate`] for why the floor is here.
 pub fn after(ctx: &egui::Context, delay: Duration) {
-    // What `Context::request_repaint_after` is about to subtract. `predicted_dt`
-    // is seconds as `f32` and always positive, so the conversion cannot fail —
-    // but a zero on the error path only leaves egui's own behaviour in place.
-    let bias = Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or(Duration::ZERO);
-    ctx.request_repaint_after(delay + bias);
+    ctx.request_repaint_after(delay.max(frame_period()) + bias(ctx));
 }
 
 /// [`after`] in whole milliseconds, which is how most callers say it.
 pub fn after_ms(ctx: &egui::Context, ms: u64) {
     after(ctx, Duration::from_millis(ms));
+}
+
+/// The next frame, for something that is animating: a fade, a scroll, a needle
+/// settling, a fling coasting.
+///
+/// egui's own `request_repaint()` means *immediately*, and immediately is not a
+/// rate — a widget that calls it every frame while it animates pins the whole
+/// window at whatever the machine can draw, which is how the S-meter needle and
+/// the waterfall scroll went on running flat out after the panadapter started
+/// honouring Settings → UI. An animation wants the *next* frame, and which
+/// frame that is belongs to the frame rate, not to the widget.
+pub fn animate(ctx: &egui::Context) {
+    after(ctx, Duration::ZERO);
+}
+
+/// The frame scheduler's own request: the cadence itself, not something
+/// following it, so this is the one call that is not floored at a frame.
+///
+/// [`crate::app`]'s scheduler already computes the period from the same
+/// setting, and shortens it deliberately for a settle timer that has to land
+/// between frames.
+pub fn schedule(ctx: &egui::Context, delay: Duration) {
+    ctx.request_repaint_after(delay + bias(ctx));
+}
+
+/// [`schedule`] in whole milliseconds.
+pub fn schedule_ms(ctx: &egui::Context, ms: u64) {
+    schedule(ctx, Duration::from_millis(ms));
 }
 
 #[cfg(test)]

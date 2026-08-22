@@ -403,7 +403,7 @@ pub fn show(
         if elapsed < spectrum_view::BW_FADE_SECS {
             let alpha = (1.0 - elapsed / spectrum_view::BW_FADE_SECS) as f32;
             spectrum_view::draw_bw_measure(&painter, x_of, &rect, start_hz, end_hz, alpha);
-            ui.ctx().request_repaint(); // keep animating the fade to completion
+            crate::repaint::animate(ui.ctx()); // keep animating the fade to completion
         } else {
             ui.data_mut(|d| d.insert_temp(fade_id, None::<(f64, f64, f64)>));
         }
