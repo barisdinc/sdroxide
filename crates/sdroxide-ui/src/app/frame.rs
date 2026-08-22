@@ -836,35 +836,40 @@ impl eframe::App for SdroxideApp {
             self.ctrl.send(c);
         }
 
-        // Data-driven repaint: redraw immediately when data is already waiting
-        // (arrived while this frame was being built — checked after the drain,
-        // so this can't busy-loop), otherwise wake at the next expected
-        // spectrum frame, or idle-poll when nothing is streaming. User input
+        // Data-driven repaint: wake at the next expected spectrum frame while
+        // something is streaming, and idle-poll when nothing is. User input
         // wakes eframe by itself, so interactivity is unaffected.
-        if self.ctrl.wants_repaint_soon() {
-            ctx.request_repaint();
-        } else {
-            let fps = self
-                .sent_cfg
-                .or(self.desired_cfg)
-                .map(|c| c.fps)
-                .unwrap_or(SpectrumConfig::default().fps)
-                .max(1) as u64;
-            let streaming = self.frame.is_some()
+        //
+        // Data already waiting — it arrived while this frame was being built,
+        // and is checked after the drain — counts as streaming, so a receiver
+        // that is delivering keeps the frame cadence rather than dropping to
+        // the idle poll. It does *not* earn a frame early: this used to ask for
+        // an unpaced `request_repaint` instead, and because a real radio has
+        // something waiting at the end of almost every frame, that branch was
+        // the one always taken and the frame-rate setting did nothing at all.
+        // A synthetic source never showed it — it has nothing to say between
+        // frames — which is exactly why it stood for so long.
+        let fps = self
+            .sent_cfg
+            .or(self.desired_cfg)
+            .map(|c| c.fps)
+            .unwrap_or(SpectrumConfig::default().fps)
+            .max(1) as u64;
+        let streaming = self.ctrl.wants_repaint_soon()
+            || (self.frame.is_some()
                 && self.error.is_none()
-                && now - self.last_spectrum_at < STREAM_STALE_S;
-            // Floor division keeps the poll period <= the stream period, so no
-            // frame is ever skipped (the spectrum buffer is latest-wins).
-            let mut wait_ms = if streaming { 1000 / fps } else { IDLE_POLL_MS };
-            // A settle timer only fires when a frame runs. Idling at a quarter
-            // of a second would smear a 600 ms frequency settle across most of
-            // a second, so wake for it instead.
-            if let Some(at) = speech_deadline {
-                let ms = ((at - now).max(0.0) * 1000.0).ceil() as u64;
-                wait_ms = wait_ms.min(ms.max(1));
-            }
-            crate::repaint::after_ms(&ctx, wait_ms);
+                && now - self.last_spectrum_at < STREAM_STALE_S);
+        // Floor division keeps the poll period <= the stream period, so no
+        // frame is ever skipped (the spectrum buffer is latest-wins).
+        let mut wait_ms = if streaming { 1000 / fps } else { IDLE_POLL_MS };
+        // A settle timer only fires when a frame runs. Idling at a quarter
+        // of a second would smear a 600 ms frequency settle across most of
+        // a second, so wake for it instead.
+        if let Some(at) = speech_deadline {
+            let ms = ((at - now).max(0.0) * 1000.0).ceil() as u64;
+            wait_ms = wait_ms.min(ms.max(1));
         }
+        crate::repaint::after_ms(&ctx, wait_ms);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
