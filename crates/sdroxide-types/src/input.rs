@@ -312,9 +312,17 @@ impl Action {
 /// One input sample, whatever produced it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ActionInput {
-    /// Signed detents/ticks, already summed for this frame. Acceleration is
-    /// applied by the resolver, not by the transport.
-    Delta(f32),
+    /// Signed move `d` in the action's own units, already summed for this
+    /// frame. Acceleration is applied by the resolver, not by the transport.
+    ///
+    /// `step` is the binding's own step — the grid a stepped action lands on,
+    /// so that a dial left off it by a continuous gesture (a panadapter drag)
+    /// is put back on it rather than carrying the offset forever. 0 asks for
+    /// no grid at all.
+    Delta {
+        d: f32,
+        step: f32,
+    },
     /// Absolute position, 0.0..=1.0 (fader, absolute CC, pitch bend).
     Absolute(f32),
     Press,

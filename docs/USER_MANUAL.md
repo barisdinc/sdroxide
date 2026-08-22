@@ -214,6 +214,10 @@ The smaller grey number below the readout is the *inactive* VFO's frequency.
 - **Up / Down arrow:** ±1 kHz.
 - **Page Up / Page Down:** ±10 kHz.
 
+Each of these lands on a multiple of its own step, so a dial left on an odd
+frequency by a drag is put back on a round one by the next key press. Wheel
+tuning does the same, and one notch of the wheel is one step of it.
+
 ![Tuning on the panadapter, showing the VFO marker and filter passband](images/03-panadapter-tuning.png)
 
 **Band-plan strip.** A colour-coded strip along the bottom of the waterfall (its
@@ -6205,7 +6209,7 @@ back to receive rather than transmitting your office.
 - **Wheel** and **Wheel + Shift** — the plain and shifted wheel actions; by
   default zoom and tune. Swapping them is a single dropdown if you would rather
   scroll to tune.
-- **Tune step** — the Hz per wheel detent.
+- **Tune step** — the Hz per wheel detent, and the grid wheel tuning lands on.
 - **Zoom rate** — scales how far one detent zooms.
 - **Click-tune rounding** — the step click-to-tune snaps to.
 - **Invert wheel direction** — flips both wheel actions.

@@ -10,8 +10,6 @@ use sdroxide_types::WheelSettings;
 /// The readout's design size, and the largest it is ever drawn at. Narrower
 /// layouts fit smaller digits into the room they have — see `freq_module`.
 pub const DIGIT_SIZE: f32 = 40.0;
-/// Smooth-scroll points per tuning step.
-const SCROLL_STEP: f32 = 30.0;
 /// The lit digits' amber, shared by both readouts and the type-in field.
 ///
 /// The readout is the one number an operator reads from across the shack, so
@@ -66,24 +64,16 @@ pub fn show(ui: &mut Ui, id: egui::Id, hz: f64, wheel: WheelSettings, size: f32)
                     resp.rect.bottom() - 1.0,
                     (2.0, digit_ink()),
                 );
-                let scroll = if wheel.digit_wheel {
-                    let s = ui.input(|i| i.smooth_scroll_delta.y);
-                    if wheel.invert { -s } else { s }
+                let acc_id = id.with("acc").with(p);
+                let mut acc = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(0.0);
+                let detents = if wheel.digit_wheel {
+                    let n = crate::widgets::wheel_detents(ui, false, &mut acc);
+                    if wheel.invert { -n } else { n }
                 } else {
                     0.0
                 };
-                let acc_id = id.with("acc").with(p);
-                let mut acc = ui.data_mut(|d| d.get_temp::<f32>(acc_id).unwrap_or(0.0));
-                acc += scroll;
-                while acc >= SCROLL_STEP {
-                    freq += step;
-                    acc -= SCROLL_STEP;
-                }
-                while acc <= -SCROLL_STEP {
-                    freq = (freq - step).max(0);
-                    acc += SCROLL_STEP;
-                }
                 ui.data_mut(|d| d.insert_temp(acc_id, acc));
+                freq = (freq + step * detents as i64).max(0);
             }
 
             if resp.clicked() {

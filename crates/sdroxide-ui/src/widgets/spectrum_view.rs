@@ -29,9 +29,6 @@ fn scale_h() -> f32 {
 /// Tuning rounds to this step on click-tune, unless the operator has changed
 /// [`WheelSettings::click_tune_step_hz`].
 const CLICK_TUNE_STEP: f64 = 10.0;
-/// Smooth-scroll points per wheel detent, matching the frequency readout so the
-/// two feel the same under the finger.
-const SCROLL_PER_DETENT: f32 = 30.0;
 /// Pixel distance for grabbing a filter edge with a mouse, and the floor a
 /// touched layout's wider zone is never squeezed below. See `edge_grab`.
 const EDGE_GRAB_PX: f32 = 6.0;
@@ -1214,7 +1211,19 @@ pub fn show_ext(
             let scroll = if shift { delta.x + delta.y } else { delta.y };
             let scroll = if wheel.invert { -scroll } else { scroll };
             let act = if shift { wheel.wheel_shift } else { wheel.wheel };
-            if scroll.abs() > 0.1 {
+            // Zooming rides the smoothed points, which is what makes it ramp;
+            // tuning counts whole notches instead, so it needs a bank kept
+            // across frames. See `wheel_detents`.
+            let detents = if act == WheelAction::Tune {
+                let acc_id = ui.id().with("wheel-acc");
+                let mut acc = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(0.0);
+                let n = super::wheel_detents(ui, shift, &mut acc);
+                ui.data_mut(|d| d.insert_temp(acc_id, acc));
+                if wheel.invert { -n } else { n }
+            } else {
+                0.0
+            };
+            if scroll.abs() > 0.1 || detents != 0.0 {
                 // Zooming or wheel-tuning is a fresh command to the dial; a coast
                 // still running would fight it.
                 fling = None;
@@ -1225,11 +1234,21 @@ pub fn show_ext(
                         let factor = 0.998f64.powf(scroll as f64 * 2.0 * rate);
                         zoom_about(view, pos.x, &rect, factor, dev_span);
                     }
-                    WheelAction::Tune => {
+                    WheelAction::Tune if detents != 0.0 => {
+                        // Onto the step grid, not one step from wherever the
+                        // dial was left: dragging the panadapter tunes
+                        // continuously, and the fraction of a step it leaves
+                        // behind would otherwise ride along for good. Click-to-
+                        // tune has always rounded — this is the same courtesy.
+                        let step = wheel.tune_step_hz;
+                        let hz = if step > 0.0 {
+                            (state.active_freq_hz() / step).round() * step + detents as f64 * step
+                        } else {
+                            state.active_freq_hz()
+                        };
                         // Same optimistic echo as the drag arm above, so the
                         // readout keeps up with a fast scroll.
-                        let detents = (scroll / SCROLL_PER_DETENT) as f64;
-                        let hz = (state.active_freq_hz() + detents * wheel.tune_step_hz).max(0.0);
+                        let hz = hz.max(0.0);
                         match state.active_vfo {
                             Vfo::A => state.vfo_a_hz = hz,
                             Vfo::B => state.vfo_b_hz = hz,
@@ -1238,7 +1257,7 @@ pub fn show_ext(
                         // readout's digits take, made over the picture.
                         cmds.push(Command::SetVfo { vfo: state.active_vfo, hz });
                     }
-                    WheelAction::None => {}
+                    WheelAction::Tune | WheelAction::None => {}
                 }
             }
         }

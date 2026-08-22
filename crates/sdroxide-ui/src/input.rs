@@ -125,9 +125,9 @@ pub(crate) fn apply_action(
     // ── Continuous ──────────────────────────────────────────────────────────
     if act.kind() == ActionKind::Continuous {
         // `delta` is in the action's own units; `abs` is a 0..=1 fader position.
-        let (delta, abs) = match input {
-            ActionInput::Delta(d) => (d, None),
-            ActionInput::Absolute(p) => (0.0, Some(p.clamp(0.0, 1.0))),
+        let (delta, grid, abs) = match input {
+            ActionInput::Delta { d, step } => (d, step.abs() as f64, None),
+            ActionInput::Absolute(p) => (0.0, 0.0, Some(p.clamp(0.0, 1.0))),
             // A button bound to a continuous action does nothing.
             ActionInput::Press | ActionInput::Release => return,
         };
@@ -141,7 +141,22 @@ pub(crate) fn apply_action(
         let rx = RxId::Main;
         match act {
             Tune => {
-                let hz = (state.active_freq_hz() + delta as f64).max(0.0);
+                // Land on the step grid, not one step from wherever the dial
+                // happened to sit. Panadapter dragging tunes continuously and
+                // leaves a fraction of a step behind it; without this, every
+                // later step carries that fraction along for good, and the
+                // readout never reaches a round number again.
+                let d = delta as f64;
+                // A binding may be set to move by less than its own step (a
+                // half-detent encoder); then that smaller move is the grid.
+                let grid = if d != 0.0 { grid.min(d.abs()) } else { grid };
+                let hz = if grid > 0.0 {
+                    // Whole grid units, so an accelerated spin stays on it too.
+                    (state.active_freq_hz() / grid).round() * grid + (d / grid).round() * grid
+                } else {
+                    state.active_freq_hz() + d
+                };
+                let hz = hz.max(0.0);
                 match state.active_vfo {
                     Vfo::A => state.vfo_a_hz = hz,
                     Vfo::B => state.vfo_b_hz = hz,
@@ -663,7 +678,8 @@ impl InputRuntime {
                     let HeldSource::Key(ix) = src else { continue };
                     let Some(b) = self.cfg.keys.get(ix).cloned() else { continue };
                     let d = self.scaled(b.action, &b.tuning, now, detents);
-                    apply_action(b.action, ActionInput::Delta(d), b.button, state, ui, cmds);
+                    let input = ActionInput::Delta { d, step: b.tuning.step };
+                    apply_action(b.action, input, b.button, state, ui, cmds);
                 }
                 Fire::Button(src, down) => {
                     let Some((action, mode)) = self.binding_button(src) else { continue };
@@ -777,7 +793,8 @@ impl InputRuntime {
         for (ix, detents) in deltas {
             let Some(b) = self.cfg.midi.bindings.get(ix).cloned() else { continue };
             let d = self.scaled(b.action, &b.tuning, now, detents);
-            apply_action(b.action, ActionInput::Delta(d), b.button_mode, state, ui, cmds);
+            let input = ActionInput::Delta { d, step: b.tuning.step };
+            apply_action(b.action, input, b.button_mode, state, ui, cmds);
         }
         for (ix, p) in absolutes {
             let Some(b) = self.cfg.midi.bindings.get(ix).cloned() else { continue };
@@ -1040,7 +1057,7 @@ mod tests {
         let mut cmds = Vec::new();
         apply_action(
             Action::Tune,
-            ActionInput::Delta(300.0),
+            ActionInput::Delta { d: 300.0, step: 100.0 },
             ButtonMode::Momentary,
             &mut state,
             &mut ui,
@@ -1048,6 +1065,45 @@ mod tests {
         );
         assert_eq!(state.vfo_a_hz, 14_074_300.0);
         assert_eq!(cmds, vec![Command::SetVfo { vfo: Vfo::A, hz: 14_074_300.0 }]);
+    }
+
+    /// Issue #136: a step lands on the step *grid*. Panadapter dragging tunes
+    /// continuously, so it leaves the dial a fraction of a step off; the next
+    /// step has to put it back rather than carry the offset along forever.
+    #[test]
+    fn tuning_snaps_onto_the_step_grid() {
+        let tune = |hz: f64, d: f32, step: f32| {
+            let mut state =
+                RadioState { vfo_a_hz: hz, active_vfo: Vfo::A, ..RadioState::default() };
+            let mut view = ViewState::default();
+            let mut flags = [false; 6];
+            let mut speech_acts = Vec::new();
+            let mut ui = sink(&mut view, &mut flags, &mut speech_acts);
+            let mut cmds = Vec::new();
+            apply_action(
+                Action::Tune,
+                ActionInput::Delta { d, step },
+                ButtonMode::Momentary,
+                &mut state,
+                &mut ui,
+                &mut cmds,
+            );
+            state.vfo_a_hz
+        };
+        // Left behind 37.4 Hz off the grid by a drag, and stepped either way.
+        assert_eq!(tune(14_074_037.4, 100.0, 100.0), 14_074_100.0);
+        assert_eq!(tune(14_074_037.4, -100.0, 100.0), 14_073_900.0);
+        // A finer binding keeps its own grid, and a coarser one its own.
+        assert_eq!(tune(14_074_037.4, 10.0, 10.0), 14_074_050.0);
+        assert_eq!(tune(14_074_037.4, 1_000.0, 1_000.0), 14_075_000.0);
+        // Acceleration moves by whole steps rather than off the grid.
+        assert_eq!(tune(14_074_000.0, 137.0, 100.0), 14_074_100.0);
+        assert_eq!(tune(14_074_000.0, 262.0, 100.0), 14_074_300.0);
+        // A binding set to move by less than its step tunes by that instead,
+        // on the grid its own move makes.
+        assert_eq!(tune(14_074_037.4, 50.0, 100.0), 14_074_100.0);
+        // No step at all is the old free-running behaviour.
+        assert_eq!(tune(14_074_037.4, 100.0, 0.0), 14_074_137.4);
     }
 
     #[test]
@@ -1060,7 +1116,7 @@ mod tests {
         let mut cmds = Vec::new();
         apply_action(
             Action::Tune,
-            ActionInput::Delta(-5_000.0),
+            ActionInput::Delta { d: -5_000.0, step: 100.0 },
             ButtonMode::Momentary,
             &mut state,
             &mut ui,
@@ -1215,7 +1271,7 @@ mod tests {
         for _ in 0..200 {
             apply_action(
                 Action::FilterWidth,
-                ActionInput::Delta(-500.0),
+                ActionInput::Delta { d: -500.0, step: 50.0 },
                 ButtonMode::Momentary,
                 &mut state,
                 &mut ui,
