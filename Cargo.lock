@@ -5494,6 +5494,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "eframe",
+ "egui-winit",
  "ewebsock",
  "image",
  "js-sys",

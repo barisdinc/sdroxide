@@ -268,17 +268,20 @@ pub(in crate::app) fn snr_color(snr_db: i16) -> Color32 {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::app) fn pick_image(inbox: Arc<Mutex<Option<Vec<u8>>>>) {
-    std::thread::spawn(move || {
-        if let Some(path) =
-            rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file()
-        {
-            if let Ok(bytes) = std::fs::read(&path) {
-                if let Ok(mut g) = inbox.lock() {
-                    *g = Some(bytes);
+    std::thread::Builder::new()
+        .name("sdroxide-pick".into())
+        .spawn(move || {
+            if let Some(path) =
+                rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file()
+            {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(mut g) = inbox.lock() {
+                        *g = Some(bytes);
+                    }
                 }
             }
-        }
-    });
+        })
+        .ok();
 }
 
 #[cfg(target_arch = "wasm32")]

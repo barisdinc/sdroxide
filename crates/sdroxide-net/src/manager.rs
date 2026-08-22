@@ -269,14 +269,17 @@ impl SpotManager {
         let qrz = self.cfg.qrz.clone();
         let hamqth = self.cfg.hamqth.clone();
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || match crate::lookup::lookup(provider, &qrz, &hamqth, &call) {
-            Ok(info) => {
-                let _ = tx.send(NetEvent::Callsign(info));
-            }
-            Err(e) => {
-                let _ = tx.send(NetEvent::Status(Some(format!("Lookup {call}: {e}"))));
-            }
-        });
+        std::thread::Builder::new()
+            .name("sdroxide-lookup".into())
+            .spawn(move || match crate::lookup::lookup(provider, &qrz, &hamqth, &call) {
+                Ok(info) => {
+                    let _ = tx.send(NetEvent::Callsign(info));
+                }
+                Err(e) => {
+                    let _ = tx.send(NetEvent::Status(Some(format!("Lookup {call}: {e}"))));
+                }
+            })
+            .ok();
     }
 
     /// Upload one QSO's ADIF to the given targets; results arrive via `poll`.
@@ -284,15 +287,18 @@ impl SpotManager {
         let cfg = self.cfg.clone();
         let my_call = self.op_call.clone();
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            for target in targets {
-                let (ok, message) = match crate::upload::upload(&cfg, &my_call, target, &adif) {
-                    Ok(m) => (true, m),
-                    Err(e) => (false, e),
-                };
-                let _ = tx.send(NetEvent::Upload(UploadResult { qso_id, target, ok, message }));
-            }
-        });
+        std::thread::Builder::new()
+            .name("sdroxide-upload".into())
+            .spawn(move || {
+                for target in targets {
+                    let (ok, message) = match crate::upload::upload(&cfg, &my_call, target, &adif) {
+                        Ok(m) => (true, m),
+                        Err(e) => (false, e),
+                    };
+                    let _ = tx.send(NetEvent::Upload(UploadResult { qso_id, target, ok, message }));
+                }
+            })
+            .ok();
     }
 
     /// Check one service's stored credentials; the result arrives via `poll`.
@@ -311,33 +317,39 @@ impl SpotManager {
         let cfg = self.cfg.clone();
         let my_call = self.op_call.clone();
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let (ok, message) = match crate::upload::test_login(&cfg, &my_call, target) {
-                Ok(m) => (true, m),
-                Err(e) => (false, e),
-            };
-            let _ = tx.send(NetEvent::LoginTest(sdroxide_types::LoginTestResult {
-                target,
-                ok,
-                message,
-            }));
-        });
+        std::thread::Builder::new()
+            .name("sdroxide-login".into())
+            .spawn(move || {
+                let (ok, message) = match crate::upload::test_login(&cfg, &my_call, target) {
+                    Ok(m) => (true, m),
+                    Err(e) => (false, e),
+                };
+                let _ = tx.send(NetEvent::LoginTest(sdroxide_types::LoginTestResult {
+                    target,
+                    ok,
+                    message,
+                }));
+            })
+            .ok();
     }
 
     /// Download QSL confirmations; results arrive via `poll`.
     pub fn sync_confirmations(&self) {
         let cfg = self.cfg.clone();
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(NetEvent::Status(Some("Syncing confirmations…".into())));
-            let (recs, errs) = crate::upload::sync_confirmations(&cfg);
-            for e in errs {
-                let _ = tx.send(NetEvent::Status(Some(e)));
-            }
-            let n = recs.len();
-            let _ = tx.send(NetEvent::Confirmations(recs));
-            let _ = tx.send(NetEvent::Status(Some(format!("Confirmation sync: {n} records"))));
-        });
+        std::thread::Builder::new()
+            .name("sdroxide-qsl".into())
+            .spawn(move || {
+                let _ = tx.send(NetEvent::Status(Some("Syncing confirmations…".into())));
+                let (recs, errs) = crate::upload::sync_confirmations(&cfg);
+                for e in errs {
+                    let _ = tx.send(NetEvent::Status(Some(e)));
+                }
+                let n = recs.len();
+                let _ = tx.send(NetEvent::Confirmations(recs));
+                let _ = tx.send(NetEvent::Status(Some(format!("Confirmation sync: {n} records"))));
+            })
+            .ok();
     }
 
     /// Drain everything pending: feed updates (merged into a fresh spot

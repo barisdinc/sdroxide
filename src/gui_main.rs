@@ -161,7 +161,7 @@ pub fn run_multi(
     // Engine threads are joined by each controller's `shutdown()` — on tab
     // close, and for the rest in `SdroxideApp::on_exit` — so every device
     // closes before process teardown can race the C libraries' exit handlers.
-    eframe::run_native(
+    sdroxide_ui::event_loop::run(
         "sdroxide",
         options,
         Box::new(move |cc| {
@@ -371,7 +371,7 @@ pub fn run_remote(url: &str) -> Result<()> {
     // Connect inside the creator so the socket can wake the UI (repaint) the
     // moment a message arrives, instead of waiting for the next poll.
     let url = url.to_string();
-    eframe::run_native(
+    sdroxide_ui::event_loop::run(
         "sdroxide-remote",
         options,
         Box::new(move |cc| {

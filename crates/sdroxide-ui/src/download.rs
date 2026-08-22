@@ -32,13 +32,16 @@ pub fn save_as(name: &str, data: &[u8], _mime: Mime) {
     let data = data.to_vec();
     let name = name.to_string();
     // rfd's dialog is blocking; run it off the UI thread.
-    std::thread::spawn(move || {
-        if let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() {
-            if let Err(e) = std::fs::write(&path, &data) {
-                eprintln!("sdroxide: saving {}: {e}", path.display());
+    std::thread::Builder::new()
+        .name("sdroxide-save".into())
+        .spawn(move || {
+            if let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+                if let Err(e) = std::fs::write(&path, &data) {
+                    eprintln!("sdroxide: saving {}: {e}", path.display());
+                }
             }
-        }
-    });
+        })
+        .ok();
 }
 
 /// Open a text file via a native "Open" dialog (off the UI thread) and store
@@ -52,20 +55,23 @@ pub fn load_text(
 ) {
     let filter_name = filter_name.to_string();
     let ext = ext.to_string();
-    std::thread::spawn(move || {
-        if let Some(path) =
-            rfd::FileDialog::new().add_filter(&filter_name, &[ext.as_str()]).pick_file()
-        {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    if let Ok(mut g) = inbox.lock() {
-                        *g = Some(text);
+    std::thread::Builder::new()
+        .name("sdroxide-open".into())
+        .spawn(move || {
+            if let Some(path) =
+                rfd::FileDialog::new().add_filter(&filter_name, &[ext.as_str()]).pick_file()
+            {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        if let Ok(mut g) = inbox.lock() {
+                            *g = Some(text);
+                        }
                     }
+                    Err(e) => eprintln!("sdroxide: reading {}: {e}", path.display()),
                 }
-                Err(e) => eprintln!("sdroxide: reading {}: {e}", path.display()),
             }
-        }
-    });
+        })
+        .ok();
 }
 
 #[cfg(target_arch = "wasm32")]
