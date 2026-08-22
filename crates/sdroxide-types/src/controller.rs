@@ -523,6 +523,29 @@ pub trait RadioController {
         let (_, _) = (id, name);
     }
 
+    /// Whether the radio this connection is on is switched on at the station
+    /// that holds it, where that station lets a client throw the switch.
+    ///
+    /// `None` where there is no switch to show: an in-process engine (this
+    /// machine's own roster answers for those, and the shell reads it
+    /// directly), a station whose host wired none of it up, and until the
+    /// roster has landed.
+    fn station_power(&self) -> Option<bool> {
+        None
+    }
+
+    /// Ask the station at the far end to switch one of its radios on or off.
+    /// `id` is the station's own id for it ([`PeerRadio::id`]), as with the
+    /// roster edits above.
+    ///
+    /// Nothing comes back here either: what answers is the station's roster,
+    /// which carries the switch's new position to every client on it —
+    /// including this one, which is why the button shown follows the station
+    /// rather than this screen's guess at what it just did.
+    fn switch_station_radio(&mut self, id: u32, on: bool) {
+        let (_, _) = (id, on);
+    }
+
     /// Whether the station has just said that the radio this connection is on
     /// is no longer one of its own — the roster it announced does not list it.
     ///

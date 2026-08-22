@@ -458,7 +458,17 @@ use sdroxide_types::{
 /// discriminants keep their numbers, but a v73 client handed one has nowhere to
 /// put it. No new `ServerMsg` or `Command`: the lane reuses `SetNetworkConfig`,
 /// `UploadQso` and `TestLogin`.
-pub const PROTO_VERSION: u16 = 74;
+///
+/// **75** — a radio's power switch reaches a client. `RadioInfo` gained
+/// `enabled`, and it rides inside `ServerMsg::Radios` ahead of that message's
+/// `editable` flag, so a v74 client reading the announcement would take the
+/// new field for the roster's next entry. Appended beside it:
+/// `ClientMsg::SetRadioEnabled`, and `Command::ReopenSource` — which the
+/// station sends its own engine, but which shares the discriminant space every
+/// command rides in. Switching a radio off already worked at the station; what
+/// did not was doing it from away, which meant the browser client — a headless
+/// station's *only* screen — could not put a radio down and pick it back up.
+pub const PROTO_VERSION: u16 = 75;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -551,6 +561,19 @@ pub enum ClientMsg {
     RenameRadio {
         id: u32,
         name: String,
+    },
+    /// Switch one of the station's radios on or off — the same switch the
+    /// station's own tab strip carries, thrown from away.
+    ///
+    /// Not a [`Command`], for the same reason as the three above: this decides
+    /// whether a radio has a front end at all, which is the station's business
+    /// and not that radio engine's. The station writes its roster, has the
+    /// engine rebuild its front end from it — an interface opened, or let go —
+    /// and announces the roster again, which is how the client that asked and
+    /// every other client on the station find out.
+    SetRadioEnabled {
+        id: u32,
+        on: bool,
     },
 }
 
@@ -857,6 +880,15 @@ pub struct RadioInfo {
     /// then connected to, which follows the interface the way the station's own
     /// tab strip does.
     pub named: bool,
+    /// Whether the radio is switched on, where this station holds a switch a
+    /// client may throw ([`ClientMsg::SetRadioEnabled`]). `None` where it does
+    /// not — a host that wired none of it up — and the client then shows no
+    /// switch rather than one that would be quietly ignored.
+    ///
+    /// A radio that is off keeps its engine, its scope and its address: its
+    /// interface is simply not opened, which is what lets the device go and
+    /// leaves the radio one button away from coming back.
+    pub enabled: Option<bool>,
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, ProtoError> {
@@ -904,6 +936,7 @@ mod tests {
             ClientMsg::AddRadio { name: String::new() },
             ClientMsg::RemoveRadio { id: 3 },
             ClientMsg::RenameRadio { id: 3, name: "The Pluto".into() },
+            ClientMsg::SetRadioEnabled { id: 3, on: false },
         ];
         for m in &roster {
             let bytes = encode(m).unwrap();
@@ -913,8 +946,13 @@ mod tests {
         let announced = ServerMsg::Radios {
             me: 1,
             radios: vec![
-                RadioInfo { id: 0, name: "Signal generator".into(), named: false },
-                RadioInfo { id: 1, name: "The Pluto".into(), named: true },
+                RadioInfo {
+                    id: 0,
+                    name: "Signal generator".into(),
+                    named: false,
+                    enabled: Some(true),
+                },
+                RadioInfo { id: 1, name: "The Pluto".into(), named: true, enabled: None },
             ],
             editable: true,
         };

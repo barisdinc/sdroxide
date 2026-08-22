@@ -1220,12 +1220,15 @@ impl SdroxideApp {
         self.radio_roster.iter().find(|c| c.id == self.radio_id)?.attached_to
     }
 
-    /// Whether this radio is switched on, where this station is the one
-    /// holding the switch — what the top bar's power chip shows. `None` when
-    /// there is no switch to draw: the roster is empty (a remote client, the
-    /// browser), the radio lives at the far end of a connection and is
-    /// switched on and off there, or its front end is lent out as somebody's
-    /// panadapter receiver — the same radios the strip offers no switch for.
+    /// Whether this radio is switched on — what the top bar's power chip
+    /// shows. `None` when there is no switch to draw: the roster is empty, the
+    /// radio is at the far end of a station that holds no switch a client may
+    /// throw, or its front end is lent out as somebody's panadapter receiver —
+    /// the same radios the strip offers no switch for.
+    ///
+    /// Read from the shell's roster either way, so a radio of this machine's
+    /// own and one at a station are answered the same: the shell is what knows
+    /// which of the two this tab is, and it has already asked the station.
     pub(crate) fn own_power_state(&self) -> Option<bool> {
         let chip = self.radio_roster.iter().find(|c| c.id == self.radio_id)?;
         (chip.switchable && chip.attached_to.is_none()).then_some(chip.enabled)
@@ -1240,6 +1243,19 @@ impl SdroxideApp {
 
     pub(crate) fn peer_url(&self) -> Option<String> {
         self.ctrl.peer_url()
+    }
+
+    /// The position of the switch the station at the far end holds for this
+    /// radio, or `None` where it holds none. The shell asks once a frame and
+    /// publishes the answer in the roster — see
+    /// [`sdroxide_types::RadioController::station_power`].
+    pub(crate) fn station_power(&self) -> Option<bool> {
+        self.ctrl.station_power()
+    }
+
+    /// Ask that station to switch one of its radios on or off, by its own id.
+    pub(crate) fn switch_station_radio(&mut self, id: u32, on: bool) {
+        self.ctrl.switch_station_radio(id, on);
     }
 
     pub(crate) fn peer_name(&self) -> Option<String> {

@@ -3103,10 +3103,11 @@ impl SdroxideApp {
                 // The switch. A radio that is off keeps everything on this page
                 // — it is simply not opened — so this is where a rig that has
                 // been put away for the season is left, rather than being
-                // deleted and set up again in the spring. Not offered for a
-                // radio lent out as somebody's panadapter (its front end is
-                // theirs to hold), nor for one at the far end of a connection
-                // (it is switched off where it lives).
+                // deleted and set up again in the spring. One at the far end of
+                // a connection is switched off where it lives, and this asks
+                // its station to do that. Not offered for a radio lent out as
+                // somebody's panadapter, whose front end is the borrower's to
+                // hold — nor by a station that does not take the request.
                 if chip.switchable
                     && chip.attached_to.is_none()
                     && self.radio_roster.len() > 1

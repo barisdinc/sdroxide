@@ -606,4 +606,16 @@ pub enum Command {
     /// sensors already on screen. Whatever the file had to say comes back as a
     /// [`crate::RadioEvent::Notice`] and in the ISM status.
     ReloadIsmDecoders,
+
+    /// Rebuild the front end from the persisted radio configuration, without
+    /// writing anything to it. Appended for the usual reason: postcard numbers
+    /// variants by position.
+    ///
+    /// What [`Command::SetRadioConfig`]'s `reopen` does, for the caller that
+    /// has nothing to save — a station switching one of its radios on or off.
+    /// The switch is a line in the station's *roster*, not in this radio's
+    /// configuration, and the factory that opens the interface reads it: so
+    /// all that is left is to ask the engine to run the factory again, which
+    /// is exactly this.
+    ReopenSource,
 }

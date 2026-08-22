@@ -268,6 +268,8 @@ The **VFO** module has:
   the strip carries (see [§2.17](#217-running-more-than-one-radio)), lit while
   the radio is on. It is on the main window so that a *single*-radio session —
   which has no tab strip — can still put its radio down and pick it back up.
+  On the compact layouts, where the frequency box has no room to stack it, it is
+  the first thing in the **VFO** menu instead, labelled in words.
 - **Swap VFOs** — exchange A and B.
 - **Copy A to B** — copy the active VFO to the other.
 - **SPLIT** — transmit on one VFO and receive on the other.
@@ -1232,8 +1234,9 @@ switch again and the radio opens where it left off.
 The same switch is in the roster at the top of **Settings → Radio**, which is
 where the choice is easiest to see across all the radios at once — and on the
 main window itself, as the **⏻ power button** above the A/B selector in the
-Frequency module, which switches whichever radio the pane it sits on is
-showing. All three are one switch: press any of them and the others follow. It is
+Frequency module (at the top of the **VFO** menu on a tablet- or phone-width
+layout), which switches whichever radio the pane it sits on is showing. All
+three are one switch: press any of them and the others follow. It is
 remembered: a radio switched off is still switched off after a restart, and
 sdroxide never touches its device at start-up. That is what makes it the right
 place to leave the rig that is boxed for the summer, or the dongle somebody has
@@ -1245,12 +1248,21 @@ told not to reach. Its spectrum and waterfall hold the last picture they drew
 and stop scrolling — the waterfall's vertical axis is time, and rows repeated
 while nothing is being received would be time that never happened. The first radio is not treated specially here — the station's
 own radio can be switched off like any other, and its shared services keep
-running. Two tabs have no switch: a receiver lent out as another radio's
-panadapter, whose front end is the borrower's to hold, and a radio reached over
-the network, which is switched on and off at the station it lives on. With a
-single radio the strip stays out of the way entirely and the Settings roster
-offers no switch — the Frequency module's power button is then the one place
-the radio is switched off and back on.
+running. One tab has no switch: a receiver lent out as another radio's
+panadapter, whose front end is the borrower's to hold. With a single radio the
+strip stays out of the way entirely and the Settings roster offers no switch —
+the Frequency module's power button is then the one place the radio is switched
+off and back on.
+
+**A radio at a station.** The switch works the same way over a connection,
+from a native remote client and from the browser client alike: pressing it asks
+the station to switch that radio, and what comes back is the station's answer —
+so the button shows where the switch really stands, not what this screen asked
+for a moment ago. Everyone connected sees it move, including whoever is sitting
+at the station. This is how a headless station's radio is put down at all: with
+no screen of its own, the browser is the only place its switch exists. A station
+running an older sdroxide than this screen offers no switch, and none is drawn
+rather than one that would be quietly ignored.
 
 **Split view.** The **⊞** toggle gives a radio a pane of its own: toggle it
 on a second radio and the main area splits into two equal columns, side by

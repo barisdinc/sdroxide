@@ -51,7 +51,8 @@ impl NullSource {
         NullSource {
             center: center_hz,
             status: "This radio is switched off — its interface is not open. Switch it back on \
-                     with the ON button on its tab, or in Settings → Radio."
+                     with the power button above the A/B selector (in the VFO menu on a \
+                     compact layout), on its tab, or in Settings → Radio."
                 .into(),
             retry: false,
         }

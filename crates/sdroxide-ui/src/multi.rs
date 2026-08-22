@@ -84,8 +84,13 @@ struct Tab {
     attached_to: Option<u32>,
     /// Whether this radio is switched on ([`RadioTab::enabled`]). The roster on
     /// disk is what the interface factory reads; this is the shell's copy of
-    /// the same answer, kept because the strip draws it every frame and the
-    /// only thing that ever changes it is the switch below.
+    /// the same answer, kept because the strip draws it every frame.
+    ///
+    /// For one of this machine's own radios the switch below is the only thing
+    /// that ever changes it. For a radio at a station the roster on disk is
+    /// *that* machine's, and the switch may be thrown by another client or at
+    /// the station itself — so this follows what the station announces, once a
+    /// frame ([`MultiApp::refresh_power`]).
     enabled: bool,
     /// What to call this tab while nobody has named it and its radio has no
     /// interface to be named after: the address its connection was opened at,
@@ -98,10 +103,9 @@ struct Tab {
     /// still there, and now wrong, once they had chosen an interface for it.
     fallback: Option<String>,
     /// Somebody else's station, reached over the network. It has no entry in
-    /// this machine's radio roster, so closing or renaming it must not go
-    /// looking for one. In the browser there is no roster and every tab is
-    /// one of these, so nothing there has cause to ask.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// this machine's radio roster, so closing, renaming or switching it must
+    /// not go looking for one — each of those goes to the station instead. In
+    /// the browser there is no roster at all and every tab is one of these.
     remote: bool,
 }
 
@@ -258,6 +262,32 @@ impl MultiApp {
         }
     }
 
+    /// Re-read the switch on every radio that is at a station rather than on
+    /// this machine.
+    ///
+    /// A radio here is switched by the button below and nothing else, so its
+    /// `enabled` is the shell's own. One at a station is switched *there* — by
+    /// this client, by another one on it, or at the station itself — so what is
+    /// shown is what the station last announced, never what this screen thinks
+    /// it asked for. A station that holds no switch for it says so by not
+    /// answering, and the radio stays as it arrived: on.
+    fn refresh_power(&mut self) {
+        for tab in self.tabs.iter_mut().filter(|t| t.remote) {
+            if let Some(on) = tab.app.station_power() {
+                tab.enabled = on;
+            }
+        }
+    }
+
+    /// Whether this tab's radio has a switch on this screen. One of this
+    /// machine's own always does — its roster is here. One at a station has one
+    /// only where the station said it would take the request; the rest are
+    /// stations too old to have been asked, or hosts that wired none of it up,
+    /// and a button there would do nothing.
+    fn switchable(t: &Tab) -> bool {
+        !t.remote || t.app.station_power().is_some()
+    }
+
     /// The roster as published to the visible tabs, for the settings dialog's
     /// copy of the strip.
     fn roster(&self) -> Vec<RadioChip> {
@@ -282,9 +312,9 @@ impl MultiApp {
                 focused: i == self.focused,
                 attached_to: t.attached_to,
                 enabled: t.enabled,
-                // Only a radio of this station's own has a switch here: the
-                // roster the factories read is this machine's file.
-                switchable: !t.remote,
+                // A radio of this machine's own, or one at a station that
+                // takes the request — see [`MultiApp::switchable`].
+                switchable: Self::switchable(t),
                 // Whether the roster this radio is in takes edits from here.
                 // For one of this machine's own that is whether the shell can
                 // build a radio at all (the browser cannot); for one at the far
@@ -488,13 +518,25 @@ impl MultiApp {
     /// interface factory reads the roster and either opens the radio or hands
     /// back the stand-in that holds nothing open.
     ///
+    /// For a radio at a station both of those happen *there*, and this only
+    /// asks. Same switch, same result; the roster it is written in is the one
+    /// the radio's own machine keeps.
+    ///
     /// The tab, its engine and its whole configuration stay exactly where they
     /// are either way. This is not closing a radio; it is putting it down.
     fn set_power(&mut self, id: u32, on: bool) {
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
-        // Somebody else's radio has no entry in this machine's roster, and the
-        // switch is not offered on those tabs (see [`Tab::enabled`]).
-        if tab.remote || tab.enabled == on {
+        if tab.enabled == on {
+            return;
+        }
+        // Somebody else's radio has no entry in this machine's roster: the
+        // request goes over that tab's own connection, named the way the
+        // station numbers its radios. Nothing is changed here — the station
+        // announces the switch's new position to everyone on it, this client
+        // included, and `refresh_power` picks it up next frame.
+        if tab.remote {
+            let station_id = tab.app.station_radio_id();
+            tab.app.switch_station_radio(station_id, on);
             return;
         }
         tab.enabled = on;
@@ -568,9 +610,10 @@ impl MultiApp {
                     } else if tab.app.tab_error() && tab.enabled {
                         ui.label(RichText::new("⚠").size(11.0).color(crate::theme::ALERT()));
                     }
-                    // The switch — this station's own radios only: a radio at
-                    // the far end of a connection is switched on and off there.
-                    if !tab.remote && tab.attached_to.is_none() {
+                    // The switch. A radio at the far end of a connection has
+                    // one too — the request goes to the station, which is where
+                    // such a radio has always been switched on and off.
+                    if Self::switchable(tab) && tab.attached_to.is_none() {
                         let power = crate::chrome::chip(
                             ui,
                             !tab.enabled,
@@ -1027,6 +1070,7 @@ impl eframe::App for MultiApp {
         // radios have been lent out is settled first: both the strip and the
         // roster are drawn from it.
         self.refresh_attachments();
+        self.refresh_power();
         let roster = self.roster();
         let mut actions: Vec<StripAction> = Vec::new();
         let mut reqs: Vec<RadioTabRequest> = Vec::new();

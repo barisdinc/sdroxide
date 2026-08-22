@@ -87,6 +87,19 @@ pub type RemoveRadioFn = Box<dyn Fn(u32) -> Result<(), String> + Send + Sync>;
 /// puts it back on the interface-derived default.
 pub type RenameRadioFn = Box<dyn Fn(u32, &str) -> Result<(), String> + Send + Sync>;
 
+/// Where this station keeps its radios' power switches — its roster file, which
+/// is the host's, not the server's.
+///
+/// One callback for both directions: `None` asks where the switch stands,
+/// `Some(on)` throws it, and either way what comes back is the position it is
+/// now in. A switch a client could throw but not read — or read but not throw —
+/// would be half a switch, and the client would have to guess the other half.
+///
+/// `None` for the whole hook leaves the station's radios as they were started
+/// and clients are told so ([`sdroxide_proto::RadioInfo::enabled`] is then
+/// `None`), rather than left pressing a button that does nothing.
+pub type RadioPowerFn = Box<dyn Fn(u32, Option<bool>) -> Result<bool, String> + Send + Sync>;
+
 /// One radio's engine endpoints. A station hands the server one of these per
 /// radio in its roster, and each gets an address of its own on the socket —
 /// see [`ServerParams::radios`].
@@ -143,6 +156,11 @@ pub struct ServerParams {
     pub add_radio: Option<AddRadioFn>,
     pub remove_radio: Option<RemoveRadioFn>,
     pub rename_radio: Option<RenameRadioFn>,
+    /// How a client switches one of this station's radios off and on again —
+    /// the switch the station's own tab strip carries. `None` leaves it off
+    /// every client's, which for a headless station means nobody has one at
+    /// all. See [`RadioPowerFn`].
+    pub radio_power: Option<RadioPowerFn>,
 }
 
 pub(crate) struct SessionTx {
@@ -243,6 +261,7 @@ pub(crate) struct Station {
     add: Option<AddRadioFn>,
     remove: Option<RemoveRadioFn>,
     rename: Option<RenameRadioFn>,
+    power: Option<RadioPowerFn>,
     /// One roster edit at a time, across every client on the station. The
     /// callbacks below read `radios.json`, change it and write it back, so two
     /// sessions adding a radio at the same moment would each hand out the id
@@ -291,6 +310,13 @@ impl Station {
                 id: r.id,
                 name: r.display_name(),
                 named: !r.name.lock().unwrap().trim().is_empty(),
+                // Read through the hook on every announcement rather than
+                // cached here: the switch lives in the host's roster file, and
+                // that file is the one thing both this and the factory that
+                // opens the interface agree on. A radio the host cannot answer
+                // for gets no switch on any client, which is the same answer as
+                // a station that wired none.
+                enabled: self.power.as_ref().and_then(|p| p(r.id, None).ok()),
             })
             .collect()
     }
@@ -407,6 +433,32 @@ impl Station {
         rename(id, name)?;
         *radio.name.lock().unwrap() = name.to_string();
         self.announce_roster();
+        Ok(())
+    }
+
+    /// Switch one of the station's radios on or off: the host's roster records
+    /// it, and the radio's engine rebuilds its front end from that roster — so
+    /// switching off is a device let go, and switching on is one claimed again.
+    ///
+    /// The engine, its configuration scope and its address all stay: this is a
+    /// radio put down, not one closed ([`Station::remove_radio`]), and the
+    /// session looking at it stays connected to watch it come back.
+    pub(crate) fn set_radio_power(&self, id: u32, on: bool) -> Result<(), String> {
+        let Some(power) = self.power.as_ref() else {
+            return Err("this station's radios cannot be switched from here".into());
+        };
+        let _edit = self.edit.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(radio) = self.radio(id) else {
+            return Err(format!("this station has no radio {id}"));
+        };
+        power(id, Some(on))?;
+        // The roster is what the interface factory reads, so the engine is
+        // simply asked to run it again. Sent after the write and before the
+        // announcement, so nobody is told the switch moved until the radio it
+        // belongs to has been told the same.
+        let _ = radio.cmd_tx.send(Command::ReopenSource);
+        self.announce_roster();
+        info!(radio = id, "radio switched {}", if on { "on" } else { "off" });
         Ok(())
     }
 
@@ -549,6 +601,7 @@ pub async fn serve(params: ServerParams) -> Result<(), ServerError> {
         add: params.add_radio,
         remove: params.remove_radio,
         rename: params.rename_radio,
+        power: params.radio_power,
         edit: Mutex::new(()),
     });
 

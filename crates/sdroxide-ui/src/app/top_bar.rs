@@ -1053,6 +1053,7 @@ impl SdroxideApp {
     ) {
         let btn = btn.on_hover_text("VFO A/B, split, and the RIT/XIT offsets");
         crate::chrome::menu_popup(ui, &btn, |ui| {
+            self.power_menu_row(ui);
             if selector {
                 crate::chrome::menu_caption(ui, "VFO");
                 let active = self.state.active_vfo;
@@ -1258,14 +1259,12 @@ impl SdroxideApp {
             // VFO A/B selector, vertically centred in the full box height —
             // with the radio's power switch stacked above it where this
             // station holds the switch and the box has room for both rows.
-            // The touched tiers' taller chips leave no such room, and lose
-            // nothing: their radio strip carries the same switch. Measured,
-            // not assumed by tier, so a style change cannot overflow the box.
-            let power = self.own_power_state();
+            // Where it has not — the touched tiers, whose chips are half again
+            // as tall — the VFO menu carries the same switch instead, and the
+            // two ask [`Self::stacked_power`] so they cannot both answer yes.
             let ab_h = crate::chrome::chip_height(ui, Some(15.0));
             let power_h = crate::chrome::chip_height(ui, Some(POWER_TEXT));
-            let stacked = power.is_some() && ab_h + POWER_GAP + power_h <= full_h;
-            if let Some(on) = power.filter(|_| stacked) {
+            if let Some(on) = self.stacked_power(ui) {
                 ui.allocate_ui_with_layout(
                     egui::vec2(ab_w, full_h),
                     egui::Layout::top_down(egui::Align::Min),
@@ -1358,6 +1357,46 @@ impl SdroxideApp {
                     self.band_mode_button(ui, cmds);
                 },
             );
+        });
+    }
+
+    /// Whether the frequency box stacks the power switch above the A/B pair —
+    /// and where the switch stands if it does.
+    ///
+    /// Measured against the live style rather than assumed by tier, so a
+    /// roomier chip cannot silently overflow the box; and asked in both places
+    /// that could draw the switch — the box, and the VFO menu that carries it
+    /// for the layouts whose box has no room — so it can never come out in
+    /// both at once, or in neither.
+    fn stacked_power(&self, ui: &egui::Ui) -> Option<bool> {
+        let rows = crate::chrome::chip_height(ui, Some(15.0))
+            + POWER_GAP
+            + crate::chrome::chip_height(ui, Some(POWER_TEXT));
+        self.own_power_state()
+            .filter(|_| rows <= crate::chrome::module_content_h(crate::chrome::MODULE_TALL_H))
+    }
+
+    /// The power switch as the VFO menu carries it, for the compact strips
+    /// whose frequency box had no room to stack it — which is every touched
+    /// tier. The menu is the A/B selector's other home, so it is where the
+    /// switch that sits above that selector belongs.
+    ///
+    /// Spelled out in words beside the symbol, unlike the box's: a menu has
+    /// the width for it, and a finger gets no hover text to read the symbol
+    /// by. Without this a single-radio touch layout — a phone browser on a
+    /// headless station, most of all — has nowhere at all to switch its radio:
+    /// there is no tab strip with one radio, and the settings roster leaves
+    /// the switch off for the same reason.
+    fn power_menu_row(&mut self, ui: &mut egui::Ui) {
+        let Some(on) = self.own_power_state().filter(|_| self.stacked_power(ui).is_none()) else {
+            return;
+        };
+        crate::chrome::menu_caption(ui, "Radio");
+        ui.horizontal(|ui| {
+            let h = crate::chrome::chip_height(ui, Some(POWER_TEXT));
+            self.power_chip(ui, on, egui::vec2(2.0 * h, h));
+            let label = if on { "Switched on" } else { "Switched off" };
+            ui.label(RichText::new(label).size(12.5).color(crate::theme::gray(160)));
         });
     }
 

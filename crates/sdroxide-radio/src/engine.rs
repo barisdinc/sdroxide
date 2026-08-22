@@ -5186,6 +5186,15 @@ impl Engine {
                 }
                 return;
             }
+
+            // The same rebuild with nothing to save first: the station has
+            // switched this radio on or off in its roster, and the factory
+            // reads the roster. No `RadioState` change of its own — what
+            // changed is the front end, which announces itself.
+            ReopenSource => {
+                self.reopen_source();
+                return;
+            }
         }
         let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
     }

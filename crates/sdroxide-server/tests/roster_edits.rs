@@ -1,8 +1,12 @@
-//! Adding and closing a station's radios from a client, over real sockets.
+//! Adding, switching and closing a station's radios from a client, over real
+//! sockets.
 //!
 //! This is what lets a station with no screen gain a radio at all: before it,
 //! `radios.json` on the server was the only way, and editing it meant
-//! restarting the server and dropping everyone on the air to add a dongle.
+//! restarting the server and dropping everyone on the air to add a dongle. The
+//! switch is the same story one step smaller — a radio put down for the season
+//! rather than closed, and until it went on the wire the only way to put one
+//! down was to stop the server.
 //!
 //! Its own test binary because it redirects the config directory through the
 //! environment, which is process-global — the same reason `multi_radio.rs` and
@@ -144,7 +148,7 @@ async fn http_get(path: &str) -> (String, String) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_client_adds_renames_and_closes_the_stations_radios() {
+async fn a_client_adds_renames_switches_and_closes_the_stations_radios() {
     let root = std::env::temp_dir().join(format!("sdroxide-roster-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("scratch config dir");
@@ -179,6 +183,15 @@ async fn a_client_adds_renames_and_closes_the_stations_radios() {
         rename_radio: Some(Box::new(|id, name| {
             sdroxide_config::rename_radio(id, name).map_err(|e| e.to_string())
         })),
+        // The roster file in both directions, as the binary wires it: the same
+        // file the interface factory reads, so a switch thrown from a client
+        // and an engine rebuilding on it are looking at one answer.
+        radio_power: Some(Box::new(|id, set| {
+            if let Some(on) = set {
+                sdroxide_config::set_radio_enabled(id, on).map_err(|e| e.to_string())?;
+            }
+            Ok(sdroxide_config::load_radios().is_enabled(id))
+        })),
     }));
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -190,6 +203,7 @@ async fn a_client_adds_renames_and_closes_the_stations_radios() {
     assert_eq!(me, 0);
     assert_eq!(radios.len(), 1, "the station started with one radio");
     assert!(editable, "a station wired for roster edits did not say so");
+    assert_eq!(radios[0].enabled, Some(true), "a station holding the switch did not say so");
 
     // --- add ----------------------------------------------------------
     send(&mut first, &ClientMsg::AddRadio { name: String::new() }).await;
@@ -242,6 +256,32 @@ async fn a_client_adds_renames_and_closes_the_stations_radios() {
             .map(|r| r.name.clone()),
         Some("The Pluto".to_string())
     );
+
+    // --- switch off, and back on --------------------------------------
+    //
+    // A radio put down rather than closed: its engine, its scope and its
+    // address all stay, and only its interface is let go. This is the whole of
+    // what a browser client — the only screen a headless station has — needs to
+    // free a dongle without stopping the server.
+    send(&mut first, &ClientMsg::SetRadioEnabled { id: added, on: false }).await;
+    let (_, radios) =
+        radios_until(&mut first, |r| r.iter().any(|x| x.id == added && x.enabled == Some(false)))
+            .await;
+    assert_eq!(radios.len(), 2, "switching a radio off took it out of the roster");
+    // Recorded where the interface factory will read it, not just announced.
+    assert!(!sdroxide_config::load_radios().is_enabled(added));
+    // Everyone on the station hears, not only whoever pressed the button —
+    // including the client that is on the radio that was switched.
+    let (me, radios) =
+        radios_until(&mut second, |r| r.iter().any(|x| x.id == added && x.enabled == Some(false)))
+            .await;
+    assert_eq!(me, added);
+    assert_eq!(radios.len(), 2);
+    // Its socket is still open, which is what lets that client switch it back
+    // on — from the tab that is looking at it.
+    send(&mut second, &ClientMsg::SetRadioEnabled { id: added, on: true }).await;
+    radios_until(&mut second, |r| r.iter().any(|x| x.id == added && x.enabled == Some(true))).await;
+    assert!(sdroxide_config::load_radios().is_enabled(added));
 
     // --- the first radio is not closeable -----------------------------
     send(&mut first, &ClientMsg::RemoveRadio { id: 0 }).await;

@@ -513,6 +513,18 @@ impl RadioController for RemoteController {
         self.send_msg(ClientMsg::RenameRadio { id, name: name.to_string() });
     }
 
+    /// The switch's position as the station last announced it — for *this*
+    /// connection's radio, which is the one the tab holding this controller
+    /// draws a switch for. `None` where the station offers none.
+    fn station_power(&self) -> Option<bool> {
+        let (me, radios) = self.peers.as_ref()?;
+        radios.iter().find(|r| r.id == *me)?.enabled
+    }
+
+    fn switch_station_radio(&mut self, id: u32, on: bool) {
+        self.send_msg(ClientMsg::SetRadioEnabled { id, on });
+    }
+
     fn peer_removed(&self) -> bool {
         // Only once a roster has actually arrived: before that there is
         // nothing to be missing from, and a tab that read silence as "you have

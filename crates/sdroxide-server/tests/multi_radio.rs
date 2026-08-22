@@ -130,6 +130,7 @@ async fn every_radio_in_the_roster_is_served_and_separately_addressable() {
         add_radio: None,
         remove_radio: None,
         rename_radio: None,
+        radio_power: None,
     }));
     tokio::time::sleep(Duration::from_millis(400)).await;
 

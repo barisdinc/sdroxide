@@ -189,6 +189,18 @@ pub fn run(
         rename_radio: Some(Box::new(|id, name| {
             sdroxide_config::rename_radio(id, name).map_err(|e| e.to_string())
         })),
+        // The roster file again, in both directions. The switch has to live
+        // there and nowhere else: the factory that opens a radio's interface
+        // reads the same file, so a client throwing this and the engine
+        // rebuilding on it are looking at one answer. Without it a headless
+        // station's radio could only be put down by stopping the whole server
+        // — dropping everyone on the air to free one dongle.
+        radio_power: Some(Box::new(|id, set| {
+            if let Some(on) = set {
+                sdroxide_config::set_radio_enabled(id, on).map_err(|e| e.to_string())?;
+            }
+            Ok(sdroxide_config::load_radios().is_enabled(id))
+        })),
     })?;
     Ok(())
 }

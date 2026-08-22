@@ -354,9 +354,9 @@ pub fn module_bare_h<R>(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&
                 .inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 5 })
                 .show(ui, |ui| {
                     ui.set_width(width - 16.0);
-                    ui.set_min_height(height - 9.0);
+                    ui.set_min_height(module_content_h(height));
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_min_height(height - 9.0);
+                        ui.set_min_height(module_content_h(height));
                         add(ui)
                     })
                     .inner
@@ -365,6 +365,18 @@ pub fn module_bare_h<R>(ui: &mut Ui, width: f32, height: f32, add: impl FnOnce(&
         },
     )
     .inner
+}
+
+/// How much of a [`module_bare_h`] box of `height` its contents get: the box
+/// less the inner margin above and below them.
+///
+/// Exposed because a caller sometimes has to know whether two rows will fit
+/// *before* it starts drawing — the frequency box decides between stacking the
+/// power switch above the A/B pair and leaving it to the VFO menu — and the
+/// alternative is that margin written out a second time somewhere it would not
+/// follow this one.
+pub fn module_content_h(height: f32) -> f32 {
+    height - 9.0
 }
 
 /// Like [`module_bare_h`] but with zero inner margin and no border, so the

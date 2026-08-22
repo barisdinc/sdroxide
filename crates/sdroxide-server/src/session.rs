@@ -403,6 +403,16 @@ async fn run_session(
                         tokio::task::spawn_blocking(move || station.rename_radio(id, &name)).await;
                     report(shared, done, "renaming a radio");
                 }
+                // Also the station's business, not this radio's engine: it is
+                // the roster that says whether a radio has an interface at all.
+                // Blocking for the same reason as the rest — it writes the
+                // host's roster file.
+                Ok(ClientMsg::SetRadioEnabled { id, on }) => {
+                    let station = roster.clone();
+                    let done =
+                        tokio::task::spawn_blocking(move || station.set_radio_power(id, on)).await;
+                    report(shared, done, "switching a radio");
+                }
                 Ok(ClientMsg::Ping(t)) => {
                     if let Some(s) = shared.session.lock().unwrap().as_ref() {
                         let _ = s.reliable.try_send(ServerMsg::Pong(t));
