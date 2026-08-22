@@ -326,8 +326,23 @@ pub fn effective_lpf_bw(want_hz: f64, center_hz: f64, rate_hz: f64, range: ffi::
 /// LimeSuite has an "auto" value for this, but what it does is undocumented, so
 /// the choice is made here where it can be read. LNAL is the low-band input and
 /// LNAH the high one; LNAW spans both at the cost of a couple of dB.
-pub fn auto_antenna_rx(hz: f64, available: &[String]) -> Option<String> {
-    let want = if hz < 1.5e9 { "LNAL" } else { "LNAH" };
+///
+/// **A LimeRFE settles it on its own, at every frequency.** The front end is
+/// one coaxial cable into one socket, and retuning does not move it — so the
+/// rule that serves a bare board, follow the dial from one input to another,
+/// is the rule that leaves a board with a front end listening on a socket with
+/// nothing plugged into it. LNAW is the wideband input and the one a LimeRFE is
+/// cabled to, because it is the only one that spans everything the board's
+/// filters present; an operator who wired theirs to LNAL or LNAH names it
+/// instead and [`crate::LimeHandle::set_antenna`] then pins it.
+pub fn auto_antenna_rx(hz: f64, available: &[String], has_rfe: bool) -> Option<String> {
+    let want = if has_rfe {
+        "LNAW"
+    } else if hz < 1.5e9 {
+        "LNAL"
+    } else {
+        "LNAH"
+    };
     available
         .iter()
         .find(|a| a.eq_ignore_ascii_case(want))
@@ -410,14 +425,14 @@ mod tests {
     #[test]
     fn the_automatic_port_follows_the_frequency_and_falls_back() {
         let all: Vec<String> = ["LNAH", "LNAL", "LNAW"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(auto_antenna_rx(14.2e6, &all).as_deref(), Some("LNAL"));
-        assert_eq!(auto_antenna_rx(2.4e9, &all).as_deref(), Some("LNAH"));
+        assert_eq!(auto_antenna_rx(14.2e6, &all, false).as_deref(), Some("LNAL"));
+        assert_eq!(auto_antenna_rx(2.4e9, &all, false).as_deref(), Some("LNAH"));
 
         // A board that offers only the wideband input still gets an answer.
         let wide = vec!["LNAW".to_string()];
-        assert_eq!(auto_antenna_rx(14.2e6, &wide).as_deref(), Some("LNAW"));
+        assert_eq!(auto_antenna_rx(14.2e6, &wide, false).as_deref(), Some("LNAW"));
         // And one that offers nothing at all gets none, rather than a guess.
-        assert_eq!(auto_antenna_rx(14.2e6, &[]), None);
+        assert_eq!(auto_antenna_rx(14.2e6, &[], false), None);
     }
 
     #[test]
@@ -427,5 +442,24 @@ mod tests {
         let only2 = vec!["BAND2".to_string()];
         assert_eq!(auto_antenna_tx(&only2).as_deref(), Some("BAND2"));
         assert_eq!(auto_antenna_tx(&[]), None);
+    }
+
+    /// The field report this exists for: with a LimeRFE on the wideband socket
+    /// and the port left automatic, the frequency rule picked LNAL and the
+    /// radio listened to an empty connector. A front end is one cable into one
+    /// socket, so the answer must not move when the dial does.
+    #[test]
+    fn a_limerfe_pins_the_port_to_the_wideband_socket() {
+        let all: Vec<String> = ["LNAH", "LNAL", "LNAW"].iter().map(|s| s.to_string()).collect();
+        for hz in [3.7e6, 14.2e6, 145.5e6, 432.1e6, 1296.0e6, 2400.0e6] {
+            assert_eq!(
+                auto_antenna_rx(hz, &all, true).as_deref(),
+                Some("LNAW"),
+                "a front end does not move between sockets at {hz:.0} Hz"
+            );
+        }
+        // And without one the same frequencies still split across the two
+        // narrow inputs, which is right for a bare board.
+        assert_eq!(auto_antenna_rx(145.5e6, &all, false).as_deref(), Some("LNAL"));
     }
 }

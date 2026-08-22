@@ -5867,7 +5867,15 @@ where the library is absent.
   slider left between two of them is a radio at the lower one, and the panel
   shows what the chip actually got rather than what it was asked for.
 - **Receive port** — `LNAL` (low band), `LNAH` (high band), `LNAW` (both, at the
-  cost of a couple of dB), or **Automatic**, which follows the frequency.
+  cost of a couple of dB), or **Automatic**. Automatic follows the frequency on a
+  bare board — `LNAL` low, `LNAH` high — and **stops following it as soon as a
+  LimeRFE is connected**, because the front end is one coaxial cable into one
+  socket and no amount of retuning moves it. With one attached, Automatic is
+  `LNAW` at every frequency: that is the wideband input, the one the LimeRFE is
+  normally cabled to, and the only one that spans everything the board's filters
+  present. If yours is wired to `LNAL` or `LNAH` instead, name it here — a port
+  named by hand is never overridden. The choice takes effect at once, so you can
+  try one and listen.
 - **Analog filter** — `0` follows the sample rate, which is what you want.
   Worth leaving there: a filter narrower than a quarter of the span silently
   withdraws the zero-IF LO offset, which puts the LO leakage back on top of what
@@ -5890,6 +5898,15 @@ no filtering of its own; use a low-pass filter, an appropriate LimeRFE channel,
 or a dummy load.
 
 ##### The LimeRFE
+
+Two cables decide whether any of this works, and only one of them is a setting.
+The LimeRFE's **receive output goes to one of the LimeSDR's receive sockets** —
+`RX1_W`, the wideband input LimeSuite calls `LNAW`, unless you have chosen
+otherwise — and its transmit input comes from `TX1_1`. Whichever socket you used
+is the one **Receive port** above has to be on: the radio listens to one input at
+a time, and a LimeSDR listening on `LNAL` with the front end on `LNAW` is deaf
+rather than merely quieter. Leaving it on *Automatic* does the right thing for
+the usual cabling.
 
 **Connected by** is *Not connected* until you say otherwise. That default is
 deliberate: this board switches a power amplifier, and an accessory that could
@@ -9076,6 +9093,12 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   opens wide on purpose (the LMS7002M's synthesisers stop at 30 MHz).
 - Transmit has **no filtering of its own**: low-pass filter, a LimeRFE
   channel, or a dummy load.
+- **A LimeRFE that answers but passes nothing** is almost always the
+  **Receive port**: the front end feeds one of the LimeSDR's receive sockets,
+  and the radio has to be listening on that one. Cabled to `RX1_W`, which is
+  the usual place, *Automatic* is right; cabled anywhere else, name the socket.
+  The quick test is to move the aerial straight to the socket the radio is on —
+  if signals appear, the front end was never in the path.
 - **LimeRFE:** prefer its own USB cable if you change band often — the
   through-the-LimeSDR link costs the better part of a second per transaction.
   On HF, **J5 is the only path to the amplifier and is one jack for both

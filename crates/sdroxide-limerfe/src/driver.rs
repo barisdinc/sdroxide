@@ -61,8 +61,13 @@ pub struct Follower {
     consecutive_failures: u32,
     presence: Presence,
     /// Latest receive and transmit frequencies, as the source last reported.
-    rx_hz: f64,
-    tx_hz: f64,
+    ///
+    /// `None` until it has. Nothing is sent while the receive one is unknown,
+    /// because zero resolves to the *HF* channel: the opening transaction would
+    /// otherwise put the 30 MHz filter in circuit on a station tuned nowhere
+    /// near it, and on a shared connector move the relays to do it.
+    rx_hz: Option<f64>,
+    tx_hz: Option<f64>,
     /// Whether the operator is keyed, when the cabling makes that matter.
     keyed: bool,
 }
@@ -78,8 +83,8 @@ impl Follower {
             interval: MIN_INTERVAL.max(round_trip * 4),
             consecutive_failures: 0,
             presence: Presence::Present,
-            rx_hz: 0.0,
-            tx_hz: 0.0,
+            rx_hz: None,
+            tx_hz: None,
             keyed: false,
         }
     }
@@ -102,11 +107,11 @@ impl Follower {
     }
 
     pub fn set_rx_hz(&mut self, hz: f64) {
-        self.rx_hz = hz;
+        self.rx_hz = Some(hz);
     }
 
     pub fn set_tx_hz(&mut self, hz: f64) {
-        self.tx_hz = hz;
+        self.tx_hz = Some(hz);
     }
 
     pub fn set_keyed(&mut self, keyed: bool) {
@@ -119,8 +124,12 @@ impl Follower {
     /// receive one, so a cross-band or split contact puts the right filter in
     /// each path rather than one band's filter in both.
     pub fn want(&self) -> RfeState {
-        let (channel_rx, channel_tx) =
-            sdroxide_types::rfe_resolve(&self.cfg, self.rx_hz, self.tx_hz);
+        let rx_hz = self.rx_hz.unwrap_or(0.0);
+        // A transceiver whose transmit frequency has not been reported yet is
+        // on the receive one, not on zero — which is HF, and would put the
+        // wideband path in the transmit chain for a station on 2 m.
+        let tx_hz = self.tx_hz.or(self.rx_hz).unwrap_or(0.0);
+        let (channel_rx, channel_tx) = sdroxide_types::rfe_resolve(&self.cfg, rx_hz, tx_hz);
         let mode = if self.keyed {
             // `tx_mode` is None on split connectors, where the standing mode
             // already transmits and key-down costs no transaction at all.
@@ -150,6 +159,12 @@ impl Follower {
     /// expired, no board is configured, or it has been given up on.
     pub fn due(&self, now: Instant) -> Option<Action> {
         if self.cfg.link == RfeLink::Off || self.presence == Presence::Absent {
+            return None;
+        }
+        // Hold everything until the dial is known, where the dial is what
+        // decides. See `rx_hz`. With the band pinned by hand there is nothing
+        // to wait for and the opening state goes out at once as before.
+        if self.cfg.follow_band && self.rx_hz.is_none() {
             return None;
         }
         let want = self.want();
@@ -413,8 +428,50 @@ mod tests {
     /// interval nothing has used yet.
     #[test]
     fn the_first_state_is_sent_immediately() {
-        let f = Follower::new(split_cabling(), Duration::from_millis(45));
+        let mut f = Follower::new(split_cabling(), Duration::from_millis(45));
+        f.set_rx_hz(145.5e6);
         assert!(matches!(f.due(Instant::now()), Some(Action::Configure(_))));
+    }
+
+    /// ...but not before there is a dial to send it for.
+    ///
+    /// An unreported receive frequency is zero, and zero resolves to the *HF*
+    /// channel — so a board configured before the source has said where it is
+    /// gets the 30 MHz filter put in circuit under a station on 2 m, and on a
+    /// shared connector has its relays moved to do it.
+    #[test]
+    fn nothing_is_sent_until_the_dial_has_been_reported() {
+        let mut f = Follower::new(split_cabling(), Duration::from_millis(45));
+        let now = Instant::now();
+        assert_eq!(f.due(now), None, "no dial, nothing to say");
+        // Even keying does not force a state out of a follower that does not
+        // know where the radio is.
+        f.set_keyed(true);
+        assert_eq!(f.due(now + Duration::from_secs(5)), None);
+
+        f.set_rx_hz(145.5e6);
+        let Some(Action::Configure(st)) = f.due(now + Duration::from_secs(5)) else {
+            panic!("and once it knows, it speaks")
+        };
+        assert_eq!(st.channel_rx, RfeChannel::Ham0145);
+        // The transmit path follows the receive dial rather than falling to
+        // zero and taking the HF rule with it.
+        assert_eq!(st.channel_tx, RfeChannel::Ham0145);
+    }
+
+    /// A hand-pinned band has nothing to wait for, so the hold above must not
+    /// apply to it — otherwise a board with *Follow the dial* off would sit
+    /// unconfigured on a receive-only station that never reports a frequency.
+    #[test]
+    fn a_pinned_band_is_sent_without_waiting_for_a_dial() {
+        let f = Follower::new(
+            LimeRfeConfig { follow_band: false, channel: RfeChannel::Ham0435, ..split_cabling() },
+            Duration::from_millis(45),
+        );
+        let Some(Action::Configure(st)) = f.due(Instant::now()) else {
+            panic!("a pinned band needs no dial")
+        };
+        assert_eq!(st.channel_rx, RfeChannel::Ham0435);
     }
 
     /// The whole point of the design: a dial dragged inside one band puts

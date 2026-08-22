@@ -70,10 +70,25 @@ impl LimeSource {
         // board's GPIO needs the device handle and so is built in the crate
         // that owns it.
         let (rfe, rfe_note) = Self::open_rfe(cfg, &handle);
+        if let Some(r) = &rfe {
+            // Where we are, before its thread decides anything. It holds off
+            // until a dial has been reported rather than configuring itself
+            // from a zero that resolves to HF, and the engine's first tuning
+            // update is tens of milliseconds away — long enough to be heard as
+            // a front end that does nothing at all. The IF offset is not known
+            // yet, so this is the centre; it is within a quarter of a span and
+            // the first `set_if_offset` corrects it.
+            r.set_rx_hz(center_hz);
+            r.set_tx_hz(center_hz);
+        }
 
         tracing::info!(
             "LimeSDR source ready: {label}, centre {center_hz:.0} Hz, LO offset \
-             {lo_offset:.0} Hz (0 = LO on the VFO){}",
+             {lo_offset:.0} Hz (0 = LO on the VFO), receiving on {}{}",
+            // Which socket, always — a front end feeding one the radio is not
+            // listening on is silent rather than faulty, and the log is where
+            // that gets diagnosed.
+            handle.antenna_rx(),
             match &rfe {
                 Some(r) => format!(", {}", r.describe()),
                 None => String::new(),
@@ -278,11 +293,25 @@ impl IqSource for LimeSource {
     }
 
     fn set_antenna(&mut self, name: &str) -> Result<()> {
-        self.handle.set_antenna(false, name).map_err(|e| RadioError::Msg(e.to_string()))
+        self.handle.set_antenna(false, name).map_err(|e| RadioError::Msg(e.to_string()))?;
+        // Kept in step with the handle's own copy, which pins the choice so the
+        // automatic one stops overriding it. Here it is what stops
+        // [`Self::owns_rx_antenna`] going on claiming a socket the operator has
+        // since named for themselves.
+        self.cfg.antenna_rx = name.to_string();
+        Ok(())
     }
 
     fn current_antenna(&self) -> String {
         self.handle.antenna_rx().to_string()
+    }
+
+    /// With a LimeRFE in front, the socket is the cabling's answer rather than
+    /// the session's — see [`IqSource::owns_rx_antenna`]. Not claimed once the
+    /// operator has named one: then the interface's own configuration holds it
+    /// and there is nothing for a remembered port to disagree with anyway.
+    fn owns_rx_antenna(&self) -> bool {
+        self.cfg.rfe.link != RfeLink::Off && self.cfg.antenna_rx.trim().is_empty()
     }
 
     // ---- transmit --------------------------------------------------------
@@ -347,7 +376,9 @@ impl IqSource for LimeSource {
     }
 
     fn set_tx_antenna(&mut self, name: &str) -> Result<()> {
-        self.handle.set_antenna(true, name).map_err(|e| RadioError::Msg(e.to_string()))
+        self.handle.set_antenna(true, name).map_err(|e| RadioError::Msg(e.to_string()))?;
+        self.cfg.antenna_tx = name.to_string();
+        Ok(())
     }
 
     fn current_tx_antenna(&self) -> String {

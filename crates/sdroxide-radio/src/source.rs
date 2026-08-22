@@ -180,6 +180,19 @@ pub trait IqSource: Send {
     fn current_antenna(&self) -> String {
         String::new()
     }
+    /// Whether the receive port is the source's own to decide, so a remembered
+    /// one must not be restored over the top of it.
+    ///
+    /// The LimeRFE is what this exists for. That front end is one coaxial cable
+    /// into one of the LimeSDR's receive sockets, so which socket to listen on
+    /// is a fact about the cabling rather than a preference worth carrying
+    /// between sessions — and a `session.json` holding the socket some earlier
+    /// run happened to land on would keep the radio listening to an empty
+    /// connector for good. An operator who wants a different one names it in
+    /// the interface's own configuration, which is read at every open.
+    fn owns_rx_antenna(&self) -> bool {
+        false
+    }
 
     // Transmit path — implemented by transmit-capable devices only.
     // Half-duplex sequencing (pausing RX) is the implementation's job.
@@ -789,6 +802,10 @@ impl IqSource for ConvertedSource {
 
     fn current_antenna(&self) -> String {
         self.inner.current_antenna()
+    }
+
+    fn owns_rx_antenna(&self) -> bool {
+        self.inner.owns_rx_antenna()
     }
 
     /// Translated by the *transmit* offset, which is a different number from the

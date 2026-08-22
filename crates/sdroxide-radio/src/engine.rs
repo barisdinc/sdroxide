@@ -7229,6 +7229,11 @@ impl Engine {
     /// so the UI shows the port in use rather than the one that was wanted.
     fn restore_antennas(&mut self) {
         let (want_rx, want_tx) = self.want_antenna.clone();
+        // Not where the source owns the receive port. A LimeSDR with a LimeRFE
+        // in front of it listens on the socket the front end is cabled to, and
+        // a port some earlier run happened to record would put it back on an
+        // empty connector at every start — see [`IqSource::owns_rx_antenna`].
+        let want_rx = want_rx.filter(|_| !self.source.owns_rx_antenna());
         if let Some(name) = want_rx.filter(|n| self.caps.antennas_rx.contains(n))
             && self.state.antenna_rx != name
         {

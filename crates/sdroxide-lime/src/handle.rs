@@ -167,8 +167,9 @@ impl LimeHandle {
 
         let antennas_rx = ctl.antennas(false);
         let antennas_tx = if want_tx { ctl.antennas(true) } else { Vec::new() };
+        let has_rfe = cfg.rfe.link != sdroxide_types::RfeLink::Off;
         let antenna_rx = if cfg.antenna_rx.trim().is_empty() {
-            device::auto_antenna_rx(center_hz, &antennas_rx).unwrap_or_default()
+            device::auto_antenna_rx(center_hz, &antennas_rx, has_rfe).unwrap_or_default()
         } else {
             cfg.antenna_rx.clone()
         };
@@ -380,9 +381,11 @@ impl LimeHandle {
         self.center = hz;
         // A port chosen automatically follows the frequency, because LNAL and
         // LNAH are wired to different pins and the wrong one is deaf rather
-        // than merely worse.
+        // than merely worse. With a LimeRFE in front the answer is the same at
+        // every frequency and this never fires — see `device::auto_antenna_rx`.
+        let has_rfe = self.cfg.rfe.link != sdroxide_types::RfeLink::Off;
         if self.cfg.antenna_rx.trim().is_empty()
-            && let Some(want) = device::auto_antenna_rx(hz, &self.antennas_rx)
+            && let Some(want) = device::auto_antenna_rx(hz, &self.antennas_rx, has_rfe)
             && want != self.antenna_rx
         {
             self.ctl().set_antenna_named(false, &want)?;
@@ -429,13 +432,21 @@ impl LimeHandle {
         Ok(())
     }
 
+    /// Move to a named port, and stop choosing one automatically.
+    ///
+    /// The pinning is the point. `set_center_hz` re-runs the automatic choice
+    /// only while no port has been named, so without this a socket the operator
+    /// picked by hand — the LimeRFE's, most of the time — would be silently put
+    /// back on the next retune, and the control would look like it did nothing.
     pub fn set_antenna(&mut self, tx: bool, name: &str) -> Result<()> {
         self.ensure_open()?;
         self.ctl().set_antenna_named(tx, name)?;
         if tx {
             self.antenna_tx = name.to_string();
+            self.cfg.antenna_tx = name.to_string();
         } else {
             self.antenna_rx = name.to_string();
+            self.cfg.antenna_rx = name.to_string();
         }
         Ok(())
     }

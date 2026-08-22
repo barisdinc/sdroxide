@@ -144,6 +144,53 @@ impl IqSource for ReportingRig {
     }
 }
 
+/// A LimeSDR with a LimeRFE bolted in front of it: the front end is one coaxial
+/// cable into one of the receive sockets, so which socket to listen on is a fact
+/// about the cabling and the source says so ([`IqSource::owns_rx_antenna`]).
+struct CabledRig {
+    ports: Ports,
+}
+
+impl IqSource for CabledRig {
+    fn sample_rate(&self) -> f64 {
+        RATE
+    }
+    fn center_hz(&self) -> f64 {
+        CENTER
+    }
+    fn set_center_hz(&mut self, _hz: f64) -> Result<()> {
+        Ok(())
+    }
+    fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = buf.len().min(256);
+        buf[..n].fill(Complex32::new(0.0, 0.0));
+        Ok(n)
+    }
+    fn describe(&self) -> String {
+        "LimeSDR behind a LimeRFE".into()
+    }
+    fn owns_rx_antenna(&self) -> bool {
+        true
+    }
+    fn set_antenna(&mut self, name: &str) -> Result<()> {
+        self.ports.asked.lock().unwrap().push((Direction::Rx, name.into()));
+        *self.ports.rx.lock().unwrap() = name.into();
+        Ok(())
+    }
+    fn current_antenna(&self) -> String {
+        self.ports.rx()
+    }
+    fn set_tx_antenna(&mut self, name: &str) -> Result<()> {
+        self.ports.asked.lock().unwrap().push((Direction::Tx, name.into()));
+        *self.ports.tx.lock().unwrap() = name.into();
+        Ok(())
+    }
+    fn current_tx_antenna(&self) -> String {
+        self.ports.tx()
+    }
+}
+
 fn caps() -> DeviceCaps {
     DeviceCaps {
         driver: "lime".into(),
@@ -375,6 +422,56 @@ fn a_port_the_operator_asked_for_outranks_what_the_radio_reports() {
         vec![(Direction::Rx, "LNAW".to_string())],
         "nothing may be re-commanded on the strength of the report either"
     );
+
+    drop(h);
+    let _ = thread.map(|t| t.join());
+}
+
+/// The field report behind this: a LimeRFE cabled to the wideband socket, a
+/// `session.json` written by an earlier run that had put the radio on LNAL, and
+/// a receiver listening to an empty connector at every start. Where the source
+/// owns the receive socket, a remembered one is not restored over it.
+#[test]
+fn a_remembered_port_does_not_override_the_cabling() {
+    let ports = Ports::fresh();
+    *ports.rx.lock().unwrap() = "LNAW".into();
+    let cfg = EngineConfig {
+        // What an earlier session recorded, which was never a decision.
+        initial_antenna: (Some("LNAL".into()), Some("BAND2".into())),
+        ..Default::default()
+    };
+    let mut h = start_engine(Box::new(CabledRig { ports: ports.clone() }), caps(), cfg);
+    let thread = h.thread.take();
+
+    assert!(wait_for_state(&h.event_rx, |s| s.antenna_rx == "LNAW"));
+    assert_eq!(ports.rx(), "LNAW", "the front end must be left on the socket it is wired to");
+    assert!(
+        !ports.asked().iter().any(|(d, _)| *d == Direction::Rx),
+        "nothing may be asked of the receive path at all: {:?}",
+        ports.asked()
+    );
+    // Transmit is untouched by this — that port really is a preference, and the
+    // remembered one still has to reach the hardware.
+    assert_eq!(ports.tx(), "BAND2");
+
+    drop(h);
+    let _ = thread.map(|t| t.join());
+}
+
+/// Owning the socket is about not *restoring* one, never about refusing the
+/// operator: somebody who wired their front end to LNAL still has to be able to
+/// say so and be listened to.
+#[test]
+fn the_operator_can_still_move_a_cabled_front_end() {
+    let ports = Ports::fresh();
+    *ports.rx.lock().unwrap() = "LNAW".into();
+    let mut h =
+        start_engine(Box::new(CabledRig { ports: ports.clone() }), caps(), EngineConfig::default());
+    let thread = h.thread.take();
+
+    h.cmd_tx.send(Command::SetAntenna { dir: Direction::Rx, name: "LNAL".into() }).unwrap();
+    assert!(wait_for_state(&h.event_rx, |s| s.antenna_rx == "LNAL"));
+    assert_eq!(ports.rx(), "LNAL");
 
     drop(h);
     let _ = thread.map(|t| t.join());

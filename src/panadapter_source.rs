@@ -348,6 +348,13 @@ impl IqSource for PanadapterSource {
         self.rx.current_antenna()
     }
 
+    /// The lent receiver's answer, like every other front-end question here:
+    /// a LimeSDR behind a LimeRFE still owns its socket when it is somebody
+    /// else's panadapter.
+    fn owns_rx_antenna(&self) -> bool {
+        self.rx.owns_rx_antenna()
+    }
+
     fn discard_pending_rx(&mut self) {
         self.rx.discard_pending_rx();
         self.ctrl.discard_pending_rx();
