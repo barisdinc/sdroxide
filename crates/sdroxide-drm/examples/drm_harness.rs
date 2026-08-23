@@ -15,6 +15,7 @@ use num_complex::Complex32;
 use rustfft::FftPlanner;
 use sdroxide_drm::{DrmDemod, DrmWorker};
 use sdroxide_dsp::Demodulator;
+use sdroxide_types::DrmChannel;
 
 const RATE: f64 = 48_000.0;
 
@@ -58,6 +59,7 @@ fn main() {
 /// channels, with the decoder left to find the carrier anywhere in the band.
 fn run_real(mono: &[f32]) {
     let worker = DrmWorker::new(false, false).expect("start the decoder");
+    worker.set_constellation(Some(DrmChannel::Msc));
     let mut interleaved = Vec::with_capacity(mono.len() * 2);
     for &s in mono {
         let v = (s * 32_767.0) as i16;
@@ -94,6 +96,7 @@ fn run_iq(mono: &[f32], shift_hz: f64) {
 
     let baseband = to_baseband(mono, carrier);
     let mut demod = DrmDemod::new(RATE);
+    Demodulator::set_drm_constellation(&mut demod, Some(DrmChannel::Msc));
     let mut out = Vec::new();
     let mut frames = 0usize;
     let mut status = Default::default();
@@ -173,6 +176,40 @@ fn to_baseband(mono: &[f32], carrier_hz: f64) -> Vec<Complex32> {
         .collect()
 }
 
+/// How far the decoded symbols sit from the constellation they should land on.
+///
+/// This is the check on the scaling: the standard normalises each constellation
+/// to unit average power, and if that assumption were wrong the cloud would
+/// come out at some other radius entirely and the error here would be of the
+/// same order as the spacing rather than a small fraction of it.
+fn report_constellation(c: &sdroxide_types::DrmConstellation) {
+    let levels = c.ideal_levels();
+    let axis =
+        |v: f32| levels.iter().map(|&l| (v - l.copysign(v)).abs()).fold(f32::INFINITY, f32::min);
+    let mut sum_sq = 0.0f64;
+    let mut worst = 0.0f32;
+    let mut rms_mag = 0.0f64;
+    for (re, im) in c.iter() {
+        let (dx, dy) = (axis(re), axis(im));
+        let d = (dx * dx + dy * dy).sqrt();
+        sum_sq += f64::from(d) * f64::from(d);
+        worst = worst.max(d);
+        rms_mag += f64::from(re * re + im * im);
+    }
+    let n = c.len().max(1) as f64;
+    let rms = (sum_sq / n).sqrt();
+    let half_spacing = levels.first().copied().unwrap_or(0.5);
+    println!(
+        "constel {}-QAM {} pts \u{00b7} rms |z|={:.3} (ideal 1.000) \u{00b7}          rms error={:.3} worst={:.3} (half-spacing {:.3})",
+        c.qam,
+        c.len(),
+        (rms_mag / n).sqrt(),
+        rms,
+        worst,
+        half_spacing,
+    );
+}
+
 fn report(st: &sdroxide_types::DrmStatus, audio_frames: usize) {
     println!("\n--- decode ---");
     println!(
@@ -205,6 +242,9 @@ fn report(st: &sdroxide_types::DrmStatus, audio_frames: usize) {
         println!("text    {}", st.service.text);
     }
     println!("audio   {:.1} s decoded", audio_frames as f64 / RATE);
+    if let Some(c) = st.constellation.as_ref() {
+        report_constellation(c);
+    }
 }
 
 fn tracing_subscriber_init() {}

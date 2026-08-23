@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use sdroxide_types::DrmStatus;
+use sdroxide_types::{DrmChannel, DrmStatus};
 use tracing::{debug, warn};
 
 use crate::{Decoder, DrmError, Ring};
@@ -34,6 +34,9 @@ pub struct DrmWorker {
     stop: Arc<AtomicBool>,
     /// Service the operator has asked for, or -1 for "leave it alone".
     select: Arc<AtomicI32>,
+    /// Logical channel whose constellation to read back, or -1 for none —
+    /// which is the case whenever nobody has one on screen.
+    constellation: Arc<AtomicI32>,
     restart: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -48,6 +51,7 @@ impl DrmWorker {
         let stop = Arc::new(AtomicBool::new(false));
         let select = Arc::new(AtomicI32::new(-1));
         let restart = Arc::new(AtomicBool::new(false));
+        let constellation = Arc::new(AtomicI32::new(-1));
 
         // The receiver has to be built on the thread that will drive it, so the
         // outcome comes back over a channel rather than as a return value.
@@ -59,6 +63,7 @@ impl DrmWorker {
             let stop = Arc::clone(&stop);
             let select = Arc::clone(&select);
             let restart = Arc::clone(&restart);
+            let constellation = Arc::clone(&constellation);
             std::thread::Builder::new()
                 .name("drm".into())
                 .spawn(move || {
@@ -90,7 +95,14 @@ impl DrmWorker {
                         let now = Instant::now();
                         if now >= next_status {
                             next_status = now + STATUS_INTERVAL;
-                            let snapshot = decoder.status();
+                            let mut snapshot = decoder.status();
+                            // Reading the constellation copies a frame's worth
+                            // of cells under the decoder's own lock, so it only
+                            // happens while a plot is actually open.
+                            let want = constellation.load(Ordering::Relaxed);
+                            if let Some(ch) = channel_from_raw(want) {
+                                snapshot.constellation = decoder.constellation(ch);
+                            }
                             if let Ok(mut slot) = status.lock() {
                                 *slot = snapshot;
                             }
@@ -113,7 +125,7 @@ impl DrmWorker {
             }
         }
 
-        Ok(DrmWorker { ring, status, stop, select, restart, thread: Some(thread) })
+        Ok(DrmWorker { ring, status, stop, select, constellation, restart, thread: Some(thread) })
     }
 
     /// Queue interleaved I/Q. Returns how many samples were dropped for want of
@@ -143,6 +155,21 @@ impl DrmWorker {
     /// Ask for a different service of the multiplex.
     pub fn select_service(&self, service: u8) {
         self.select.store(i32::from(service), Ordering::Relaxed);
+    }
+
+    /// Start or stop reading back a logical channel's constellation. `None`
+    /// stops, and is the state whenever no plot is on screen.
+    pub fn set_constellation(&self, channel: Option<DrmChannel>) {
+        self.constellation.store(channel.map(|c| c.as_raw()).unwrap_or(-1), Ordering::Relaxed);
+    }
+}
+
+fn channel_from_raw(v: i32) -> Option<DrmChannel> {
+    match v {
+        0 => Some(DrmChannel::Fac),
+        1 => Some(DrmChannel::Sdc),
+        2 => Some(DrmChannel::Msc),
+        _ => None,
     }
 }
 

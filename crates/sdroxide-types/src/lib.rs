@@ -90,7 +90,8 @@ pub use digi::{
     ymd_hms_to_unix,
 };
 pub use drm::{
-    DrmCodec, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime, spectrum_occupancy_khz,
+    DrmChannel, DrmCodec, DrmConstellation, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime,
+    spectrum_occupancy_khz,
 };
 pub use entity::{
     EntityInfo, EntityPlace, all_entities, resolve_callsign, resolve_place, resolve_prefix,

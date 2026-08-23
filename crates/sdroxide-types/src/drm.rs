@@ -173,6 +173,115 @@ pub struct DrmService {
     pub stereo: bool,
 }
 
+/// Which of the multiplex's three logical channels a constellation came from.
+///
+/// They are decoded in this order and carry progressively more: the FAC says
+/// what the transmission is, the SDC what its services are, and the MSC the
+/// programme itself. The FAC is always 4-QAM; the other two carry whatever the
+/// transmission signalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DrmChannel {
+    Fac,
+    Sdc,
+    #[default]
+    Msc,
+}
+
+impl DrmChannel {
+    pub const ALL: [DrmChannel; 3] = [DrmChannel::Fac, DrmChannel::Sdc, DrmChannel::Msc];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DrmChannel::Fac => "FAC",
+            DrmChannel::Sdc => "SDC",
+            DrmChannel::Msc => "MSC",
+        }
+    }
+
+    /// What this channel carries, for the picker's hover text.
+    pub fn describes(self) -> &'static str {
+        match self {
+            DrmChannel::Fac => "Fast Access Channel — what the transmission is. Always 4-QAM",
+            DrmChannel::Sdc => "Service Description Channel — what services the multiplex carries",
+            DrmChannel::Msc => "Main Service Channel — the programme itself",
+        }
+    }
+
+    /// The order the C side numbers them in.
+    pub fn as_raw(self) -> i32 {
+        match self {
+            DrmChannel::Fac => 0,
+            DrmChannel::Sdc => 1,
+            DrmChannel::Msc => 2,
+        }
+    }
+}
+
+/// A snapshot of one logical channel's equalised symbols — the constellation.
+///
+/// This is the picture of *how well* the signal is being decoded, as opposed to
+/// whether it is: tight clusters on the ideal points mean margin, a smeared
+/// cloud means the decoder is working near its limit, and a ring means the
+/// equaliser has not resolved the channel's phase.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DrmConstellation {
+    #[serde(default)]
+    pub channel: DrmChannel,
+    /// 4, 16 or 64.
+    #[serde(default)]
+    pub qam: u8,
+    /// Interleaved real/imaginary pairs, normalised the way the standard
+    /// defines the constellations — see [`DrmConstellation::ideal_levels`].
+    ///
+    /// Flat rather than a vector of pairs so the wire carries one
+    /// length-prefixed run of floats instead of a length per point.
+    #[serde(default)]
+    pub points: Vec<f32>,
+}
+
+impl DrmConstellation {
+    pub fn len(&self) -> usize {
+        self.points.len() / 2
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.len() < 2
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.points.chunks_exact(2).map(|p| (p[0], p[1]))
+    }
+
+    /// The positive coordinates an ideal symbol of this constellation sits on,
+    /// per axis. Every ideal point is a pair drawn from these and their
+    /// negatives.
+    ///
+    /// The standard normalises each constellation to unit average power, so the
+    /// levels are the odd integers divided by the RMS of the whole set: 1/√2
+    /// for 4-QAM, {1,3}/√10 for 16-QAM and {1,3,5,7}/√42 for 64-QAM.
+    pub fn ideal_levels(&self) -> Vec<f32> {
+        let (levels, norm): (&[f32], f32) = match self.qam {
+            4 => (&[1.0], 2.0),
+            16 => (&[1.0, 3.0], 10.0),
+            _ => (&[1.0, 3.0, 5.0, 7.0], 42.0),
+        };
+        let scale = norm.sqrt();
+        levels.iter().map(|l| l / scale).collect()
+    }
+
+    /// Half-width of a plot that shows the whole constellation with a margin —
+    /// one level's worth beyond the outermost point, which is the scale Dream's
+    /// own display uses.
+    pub fn plot_extent(&self) -> f32 {
+        let (outer, norm): (f32, f32) = match self.qam {
+            4 => (2.0, 2.0),
+            16 => (4.0, 10.0),
+            _ => (8.0, 42.0),
+        };
+        outer / norm.sqrt()
+    }
+}
+
 /// Everything the DRM decoder knows right now.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DrmStatus {
@@ -245,6 +354,15 @@ pub struct DrmStatus {
     pub service: DrmService,
     #[serde(default)]
     pub time: Option<DrmTime>,
+
+    /// The equalised symbols of one logical channel, when the operator has a
+    /// constellation on screen.
+    ///
+    /// `None` the rest of the time, and deliberately: this is hundreds of
+    /// floats several times a second, which is worth sending to a remote
+    /// client while somebody is watching it and pure waste when nobody is.
+    #[serde(default)]
+    pub constellation: Option<DrmConstellation>,
 }
 
 impl DrmStatus {

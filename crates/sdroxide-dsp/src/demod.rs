@@ -3,7 +3,7 @@
 //! The wanted signal's carrier sits at DC; the passband filter edges are in
 //! Hz relative to that carrier (negative = lower sideband).
 
-use sdroxide_types::{DrmStatus, Mode, RdsData, SubTone};
+use sdroxide_types::{DrmChannel, DrmStatus, Mode, RdsData, SubTone};
 
 use crate::Complex32;
 use crate::decim::RealFirDecim;
@@ -96,6 +96,11 @@ pub trait Demodulator: Send {
     /// broadcasts carry one; a few carry a second programme or a data service
     /// alongside it.
     fn set_drm_service(&mut self, _service: u8) {}
+
+    /// Start or stop reading back a DRM logical channel's constellation.
+    /// `None` stops it, which is the state whenever nobody has one on screen —
+    /// it is hundreds of floats several times a second.
+    fn set_drm_constellation(&mut self, _channel: Option<DrmChannel>) {}
 }
 
 /// The channel rate a mode's demodulator wants from the DDC.

@@ -41,7 +41,8 @@ pub use worker::DrmWorker;
 use std::ffi::CStr;
 
 use sdroxide_types::{
-    DrmCodec, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime, spectrum_occupancy_khz,
+    DrmChannel, DrmCodec, DrmConstellation, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime,
+    spectrum_occupancy_khz,
 };
 
 /// The sample rate Dream is driven at. It accepts 24, 48, 96 and 192 kHz and
@@ -51,6 +52,14 @@ pub const SIGNAL_RATE: f64 = 48_000.0;
 
 /// The rate decoded audio comes back at.
 pub const AUDIO_RATE: f64 = 48_000.0;
+
+/// Most constellation points read back per update.
+///
+/// The MSC carries a couple of thousand cells a frame. Every one of them on a
+/// plot a few hundred pixels across is ink on ink, and it is also several times
+/// the wire cost — this is a scatter plot, where the shape of the cloud is the
+/// information and the sample is as good as the population.
+pub const CONSTELLATION_POINTS: usize = 512;
 
 /// Errors crossing the C boundary.
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +173,29 @@ impl Decoder {
         unsafe { sys::sdrx_drm_select_service(self.handle, i32::from(service)) }
     }
 
+    /// The equalised symbols of one logical channel, at most
+    /// [`CONSTELLATION_POINTS`] of them.
+    pub fn constellation(&mut self, channel: DrmChannel) -> Option<DrmConstellation> {
+        let mut points = vec![0.0f32; CONSTELLATION_POINTS * 2];
+        let mut qam: i32 = 0;
+        // SAFETY: same-thread use of a handle this type owns; the C side writes
+        // at most `CONSTELLATION_POINTS` pairs into a buffer of that size.
+        let n = unsafe {
+            sys::sdrx_drm_constellation(
+                self.handle,
+                channel.as_raw(),
+                points.as_mut_ptr(),
+                CONSTELLATION_POINTS as i32,
+                &mut qam,
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        points.truncate(n as usize * 2);
+        Some(DrmConstellation { channel, qam: qam.clamp(0, 255) as u8, points })
+    }
+
     pub fn status(&mut self) -> DrmStatus {
         let mut raw = unsafe { std::mem::zeroed::<sys::sdrx_drm_status>() };
         // SAFETY: as above, writing one fully-owned struct.
@@ -241,5 +273,8 @@ fn convert_status(raw: &sys::sdrx_drm_status) -> DrmStatus {
         current_service: raw.cur_service.clamp(0, 255) as u8,
         service,
         time,
+        // Filled in by the worker only when somebody is looking at one; the
+        // status conversion has no way to know that.
+        constellation: None,
     }
 }

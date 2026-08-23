@@ -270,6 +270,16 @@ pub struct SdroxideApp {
     /// A whole snapshot each time — unlike RDS there is no delta inside it.
     show_drm: bool,
     drm: Option<sdroxide_types::DrmStatus>,
+    /// Which logical channel's constellation the window is showing.
+    drm_channel: sdroxide_types::DrmChannel,
+    /// The constellation request last sent to the engine, so the command only
+    /// goes when it actually changes — the decoder only reads the cells back
+    /// while somebody is watching them.
+    drm_const_req: Option<sdroxide_types::DrmChannel>,
+    /// Signal quality over the last minute as (SNR, MER) pairs, accumulated
+    /// here from the status stream rather than sent: the engine would be
+    /// resending the same history several times a second to say one new thing.
+    drm_history: std::collections::VecDeque<(f32, f32)>,
     /// Which half of the RDS window is showing.
     rds_tab: rds::RdsTab,
     /// The station picture from the engine's RDS decoder, minus the group log —
@@ -954,6 +964,9 @@ impl SdroxideApp {
             show_rds: false,
             show_drm: false,
             drm: None,
+            drm_channel: sdroxide_types::DrmChannel::Msc,
+            drm_const_req: None,
+            drm_history: std::collections::VecDeque::new(),
             rds_tab: rds::RdsTab::default(),
             rds: None,
             rds_log: std::collections::VecDeque::new(),

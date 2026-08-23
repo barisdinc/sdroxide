@@ -803,6 +803,13 @@ impl RxChain {
             d.set_drm_service(service);
         }
     }
+
+    /// Start or stop reading back a DRM constellation.
+    fn set_drm_constellation(&mut self, channel: Option<sdroxide_types::DrmChannel>) {
+        if let Some(d) = self.demod.as_mut() {
+            d.set_drm_constellation(channel);
+        }
+    }
 }
 
 /// Where a running scan has got to.
@@ -4399,6 +4406,11 @@ impl Engine {
             SetDrmService { service } => {
                 if let Some(c) = self.main.as_mut() {
                     c.set_drm_service(service);
+                }
+            }
+            SetDrmConstellation { channel } => {
+                if let Some(c) = self.main.as_mut() {
+                    c.set_drm_constellation(channel);
                 }
             }
             SetToneSquelch { rx, tone } => self.state.rx[rx.index()].tone_sql = tone,

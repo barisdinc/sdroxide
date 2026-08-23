@@ -1581,6 +1581,49 @@ programme alongside a data service. When they do, a row of numbered buttons
 appears; click one to decode that service instead. Most broadcasts carry one and
 the row does not appear.
 
+**QUALITY** plots SNR and MER over the last minute. Two traces on one scale,
+because the *gap between them* is the reading: SNR is what the receiver measures
+of the channel, MER what the demodulator actually achieved on it. On a clean
+path they track each other. MER falling away from SNR means something the noise
+figure does not describe — multipath, a drifting transmitter, an overloaded
+front end — is costing the decoder margin, and that is a different problem from
+a weak signal. The trace restarts rather than joining across a dropout, so a
+gap in it is a real loss of sync and not a slow patch.
+
+**CONSTELLATION** is the picture of *how well* the signal is being decoded, as
+opposed to whether it is. It plots the equalised symbols of one of the three
+logical channels — **FAC**, **SDC** or **MSC**, chosen with the buttons — against
+faint rings marking where an ideal symbol would land. The MSC is the one to
+watch: it carries the programme, and it uses the densest constellation, so it
+runs out of margin first.
+
+Read it by shape:
+
+- **Tight clusters on the rings** — margin in hand. Points are drawn green when
+  they sit comfortably inside their own decision region, amber as they approach
+  the boundary, and red past it, where a symbol would have been read as its
+  neighbour had the error correction not caught it. A signal that decodes
+  cleanly is mostly green with a scattering of amber.
+- **Clouds grown until neighbours touch** — the decoder is at its limit. This is
+  what a rising error rate looks like *before* the audio starts breaking up, so
+  it is the earliest warning you get that a station is about to go.
+- **A ring, or a cloud rotated off the rings** — not a weak signal but an
+  equaliser that has not resolved the channel's phase. Check the tuning: a
+  carrier well off the channel centre does this.
+- **A tight cloud in the middle only** — nothing decoded yet.
+
+The number of clusters is the constellation's order, which the transmission
+chooses: 4-QAM is four, 16-QAM sixteen, 64-QAM the sixty-four you will usually
+see on the MSC. The FAC is always 4-QAM, because it has to be readable before
+anything has said what the rest of the multiplex uses.
+
+The MSC carries a couple of thousand cells per frame; the plot shows 512 of
+them, taken evenly across the whole frame rather than from the front, so fading
+spread across the frame shows up rather than being cropped out. The decoder is
+only asked for them while the window is open — on a remote link that is a few
+hundred numbers several times a second, worth carrying while you are watching
+and pure waste when you are not.
+
 **Audio.** The decoder's output goes to the speaker in place of the demodulated
 signal, and the AGC is bypassed — what you hear is the level the broadcaster
 mixed, not a level the receiver invented. If a station is stereo, it is played

@@ -12,9 +12,14 @@
 //! S-meter does. That is the transmission, not the display.
 
 use eframe::egui::{self, Color32, RichText};
-use sdroxide_types::{Command, DrmStatus, DrmSync, Mode};
+use sdroxide_types::{Command, DrmChannel, DrmStatus, DrmSync, Mode};
 
 use crate::app::SdroxideApp;
+
+/// How many status snapshots the quality history keeps. The engine sends four
+/// a second, so this is about a minute — long enough to watch a fade come and
+/// go, which is the thing worth watching on shortwave.
+const HISTORY_LEN: usize = 240;
 
 /// Field labels and anything the reader is not meant to look at first.
 fn dim_ink() -> Color32 {
@@ -33,12 +38,59 @@ fn sync_ink(s: DrmSync) -> Color32 {
     }
 }
 
+/// Distance from a received symbol to the nearest ideal one.
+fn nearest_error(re: f32, im: f32, levels: &[f32]) -> f32 {
+    // The constellation is a square grid symmetric about both axes, so the
+    // nearest point is found per axis independently.
+    let axis =
+        |v: f32| levels.iter().map(|&l| (v - l.copysign(v)).abs()).fold(f32::INFINITY, f32::min);
+    let (dx, dy) = (axis(re), axis(im));
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Green where a symbol is comfortably inside its own decision region, amber
+/// as it approaches the boundary, red past it — which is a symbol that would
+/// have been decoded as its neighbour had the FEC not caught it.
+fn error_ink(err: f32) -> Color32 {
+    let t = err.clamp(0.0, 1.5) / 1.5;
+    let (r, g, b) = if t < 0.5 {
+        let k = t / 0.5;
+        (90.0 + k * 130.0, 200.0 + k * 10.0, 120.0 - k * 50.0)
+    } else {
+        let k = (t - 0.5) / 0.5;
+        (220.0, 210.0 - k * 120.0, 70.0 - k * 10.0)
+    };
+    Color32::from_rgb(r as u8, g as u8, b as u8)
+}
+
 impl SdroxideApp {
     pub(in crate::app) fn on_drm(&mut self, data: DrmStatus) {
+        // Only while locked: the figures mean nothing otherwise, and plotting
+        // the zeros a dropout leaves would draw a cliff that says "the signal
+        // got worse" when what happened is that it went away.
+        if data.locked {
+            if self.drm_history.len() >= HISTORY_LEN {
+                self.drm_history.pop_front();
+            }
+            self.drm_history.push_back((data.snr_db, data.wmer_db));
+        } else if !self.drm_history.is_empty() && !data.time_sync.is_ok() {
+            // Sync well and truly gone — start the trace again rather than
+            // joining across the gap.
+            self.drm_history.clear();
+        }
         self.drm = Some(data);
     }
 
     pub(in crate::app) fn drm_window(&mut self, ctx: &egui::Context, cmds: &mut Vec<Command>) {
+        // The decoder copies a frame of cells under its own lock to answer
+        // this, so it is asked only while the plot is actually on screen.
+        let want =
+            (self.show_drm && self.state.rx[0].mode == Mode::Drm).then_some(self.drm_channel);
+        if want != self.drm_const_req {
+            self.drm_const_req = want;
+            cmds.push(Command::SetDrmConstellation { channel: want });
+        }
+
         if !self.show_drm {
             return;
         }
@@ -94,7 +146,94 @@ impl SdroxideApp {
         self.drm_signal(ui, &d);
         ui.add_space(8.0);
         self.drm_service(ui, &d, &mut cmds);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        self.drm_quality_history(ui);
+        ui.add_space(8.0);
+        self.drm_constellation(ui);
         cmds
+    }
+
+    /// SNR and MER over the last minute.
+    ///
+    /// Two traces on one scale, because the gap between them is itself the
+    /// reading: SNR is what the receiver measures of the channel, MER what the
+    /// demodulator actually achieved on it. They track each other on a clean
+    /// path, and MER falls away from SNR when something the noise figure does
+    /// not describe — multipath, a drifting transmitter, an overloaded front
+    /// end — is costing the decoder margin.
+    fn drm_quality_history(&self, ui: &mut egui::Ui) {
+        let dim = |s: &str| RichText::new(s).size(9.5).color(dim_ink());
+        ui.horizontal(|ui| {
+            ui.label(dim("QUALITY"));
+            ui.label(RichText::new("SNR").size(9.0).color(Color32::from_rgb(90, 190, 230)));
+            ui.label(RichText::new("MER").size(9.0).color(Color32::from_rgb(150, 210, 120)));
+            ui.label(dim("last minute"));
+        });
+
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.0), egui::Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, crate::theme::gray(24));
+
+        if self.drm_history.len() < 2 {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "waiting for a locked signal",
+                egui::FontId::proportional(10.0),
+                dim_ink(),
+            );
+            return;
+        }
+
+        // A fixed 0–35 dB window, widened only if the signal goes past it.
+        // Autoscaling to the data would make a steady signal look like it was
+        // moving, which is the opposite of what a history is for.
+        let top =
+            self.drm_history.iter().flat_map(|&(s, m)| [s, m]).fold(35.0f32, f32::max).min(60.0);
+        // Newest at the right edge, so "now" is always in the same place and a
+        // history that has not filled the minute yet leaves the gap behind it
+        // rather than in front of it.
+        let newest = self.drm_history.len().saturating_sub(1);
+        let x_at = |i: usize| {
+            rect.right() - rect.width() * ((newest - i) as f32 / (HISTORY_LEN - 1) as f32)
+        };
+        let y_at = |db: f32| rect.bottom() - rect.height() * (db.clamp(0.0, top) / top);
+
+        // Ten-dB rules, so the height can be read without an axis.
+        let mut db = 10.0;
+        while db < top {
+            let y = y_at(db);
+            p.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                egui::Stroke::new(1.0, crate::theme::gray(40)),
+            );
+            p.text(
+                egui::pos2(rect.left() + 3.0, y),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{db:.0}"),
+                egui::FontId::proportional(8.0),
+                crate::theme::gray(70),
+            );
+            db += 10.0;
+        }
+
+        for (pick, color) in
+            [(0usize, Color32::from_rgb(90, 190, 230)), (1usize, Color32::from_rgb(150, 210, 120))]
+        {
+            let pts: Vec<egui::Pos2> = self
+                .drm_history
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, m))| egui::pos2(x_at(i), y_at(if pick == 0 { s } else { m })))
+                .collect();
+            p.add(egui::Shape::line(pts, egui::Stroke::new(1.2, color)));
+        }
     }
 
     /// How far up the chain the decoder has got, left to right in the order the
@@ -110,7 +249,6 @@ impl SdroxideApp {
         ];
         ui.horizontal_wrapped(|ui| {
             for (label, state, hover) in stages {
-                let dot = RichText::new("\u{25cf}").size(11.0).color(sync_ink(state));
                 let text = RichText::new(label).size(9.5).color(if state.is_ok() {
                     crate::theme::gray(200)
                 } else {
@@ -118,7 +256,12 @@ impl SdroxideApp {
                 });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(dot);
+                    // Painted rather than a text bullet: the bundled fonts have
+                    // no U+25CF, and a missing glyph draws as a hollow box —
+                    // which reads as its own indicator state.
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.5, sync_ink(state));
                     ui.label(text);
                 })
                 .response
@@ -126,6 +269,115 @@ impl SdroxideApp {
                 ui.add_space(6.0);
             }
         });
+    }
+
+    /// The constellation of one logical channel — the picture of how well the
+    /// signal is being decoded rather than whether it is.
+    ///
+    /// Tight clusters on the ideal points mean margin. A cloud that has grown
+    /// until neighbouring clusters touch is a decoder at its limit, and is what
+    /// a rising bit error rate looks like before the audio starts breaking up.
+    /// A ring, or a cloud rotated off the reference points, is an equaliser
+    /// that has not resolved the channel rather than a weak signal.
+    fn drm_constellation(&mut self, ui: &mut egui::Ui) {
+        let dim = |s: &str| RichText::new(s).size(9.5).color(dim_ink());
+
+        ui.horizontal(|ui| {
+            ui.label(dim("CONSTELLATION"));
+            for ch in DrmChannel::ALL {
+                if crate::chrome::chip(ui, self.drm_channel == ch, ch.label())
+                    .on_hover_text(ch.describes())
+                    .clicked()
+                {
+                    self.drm_channel = ch;
+                }
+            }
+            if let Some(c) = self.drm.as_ref().and_then(|d| d.constellation.as_ref()) {
+                ui.label(dim(&format!("{}-QAM", c.qam)));
+            }
+        });
+
+        // Square: the two axes are the same quantity and a stretched plot would
+        // make a round cloud look elliptical, which is a real fault it must not
+        // be able to fake.
+        let side = ui.available_width().clamp(120.0, 260.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, crate::theme::gray(24));
+
+        let Some(c) = self.drm.as_ref().and_then(|d| d.constellation.as_ref()) else {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "waiting for decoded symbols",
+                egui::FontId::proportional(10.0),
+                dim_ink(),
+            );
+            return;
+        };
+        if c.is_empty() {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{} not decoding", c.channel.label()),
+                egui::FontId::proportional(10.0),
+                dim_ink(),
+            );
+            return;
+        }
+
+        let extent = c.plot_extent().max(1e-6);
+        let half = rect.width() * 0.5;
+        let centre = rect.center();
+        let to_px = |re: f32, im: f32| {
+            // Imaginary counts upwards, so the screen's y is negated.
+            egui::pos2(centre.x + re / extent * half, centre.y - im / extent * half)
+        };
+
+        // Axes through the origin.
+        let axis = egui::Stroke::new(1.0, crate::theme::gray(45));
+        p.line_segment(
+            [egui::pos2(rect.left(), centre.y), egui::pos2(rect.right(), centre.y)],
+            axis,
+        );
+        p.line_segment(
+            [egui::pos2(centre.x, rect.top()), egui::pos2(centre.x, rect.bottom())],
+            axis,
+        );
+
+        // The ideal symbols, as faint rings the received cloud should sit in.
+        let levels = c.ideal_levels();
+        let ideal_ink = crate::theme::gray(70);
+        for &lx in &levels {
+            for &ly in &levels {
+                for (sx, sy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                    p.circle_stroke(
+                        to_px(lx * sx, ly * sy),
+                        2.5,
+                        egui::Stroke::new(1.0, ideal_ink),
+                    );
+                }
+            }
+        }
+
+        // Half the spacing between neighbouring ideal points: the distance at
+        // which a symbol is as close to its neighbour as to its own point, and
+        // therefore the natural unit for "how wrong is this one".
+        let tolerance = levels.first().copied().unwrap_or(0.5).max(1e-6);
+        let radius = if c.len() > 300 { 1.0 } else { 1.4 };
+        for (re, im) in c.iter() {
+            let err = nearest_error(re, im, &levels) / tolerance;
+            p.circle_filled(to_px(re, im), radius, error_ink(err));
+        }
+
+        ui.label(dim(&format!(
+            "{} symbols \u{00b7} {}",
+            c.len(),
+            if c.channel == DrmChannel::Msc { "sampled across the frame" } else { "whole frame" }
+        )));
     }
 
     fn drm_signal(&self, ui: &mut egui::Ui, d: &DrmStatus) {
@@ -212,7 +464,7 @@ impl SdroxideApp {
                 ui.label(dim("SERVICE"));
                 for i in 0..d.audio_services {
                     let on = i == d.current_service;
-                    if crate::chrome::chip(ui, on, &format!("{}", i + 1))
+                    if crate::chrome::chip(ui, on, (i + 1).to_string())
                         .on_hover_text("Decode this service of the multiplex")
                         .clicked()
                         && !on

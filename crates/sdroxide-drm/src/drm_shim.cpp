@@ -169,6 +169,64 @@ void sdrx_drm_select_service(sdrx_drm* h, int32_t service)
     p.Unlock();
 }
 
+/* 4-QAM, 16-QAM or 64-QAM, from the coding scheme the transmission signalled. */
+static int32_t qam_order(ECodScheme scheme)
+{
+    switch (scheme)
+    {
+    case CS_1_SM: return 4;
+    case CS_2_SM: return 16;
+    default:      return 64;
+    }
+}
+
+int32_t sdrx_drm_constellation(sdrx_drm* h, int32_t channel, float* out,
+                               int32_t max_points, int32_t* qam)
+{
+    if (out == nullptr || max_points <= 0)
+        return 0;
+
+    CVector<_COMPLEX> cells;
+    CParameter& p = *h->receiver.GetParameters();
+
+    p.Lock();
+    ECodScheme sdc = p.eSDCCodingScheme;
+    ECodScheme msc = p.eMSCCodingScheme;
+    p.Unlock();
+
+    switch (channel)
+    {
+    case SDRX_DRM_CHANNEL_FAC:
+        /* The FAC is 4-QAM in every transmission there is; it has to be
+           readable before anything says what the rest of the multiplex uses. */
+        h->receiver.GetFACMLC()->GetVectorSpace(cells);
+        if (qam) *qam = 4;
+        break;
+    case SDRX_DRM_CHANNEL_SDC:
+        h->receiver.GetSDCMLC()->GetVectorSpace(cells);
+        if (qam) *qam = qam_order(sdc);
+        break;
+    default:
+        h->receiver.GetMSCMLC()->GetVectorSpace(cells);
+        if (qam) *qam = qam_order(msc);
+        break;
+    }
+
+    const int32_t have = int32_t(cells.Size());
+    if (have <= 0)
+        return 0;
+
+    const int32_t want = have < max_points ? have : max_points;
+    for (int32_t i = 0; i < want; i++)
+    {
+        /* Even stride over the whole frame — see the header. */
+        const int32_t src = int32_t((int64_t(i) * have) / want);
+        out[2 * i] = float(cells[src].real());
+        out[2 * i + 1] = float(cells[src].imag());
+    }
+    return want;
+}
+
 static void copy_str(char* dst, size_t cap, const std::string& src)
 {
     size_t n = src.size() < cap - 1 ? src.size() : cap - 1;

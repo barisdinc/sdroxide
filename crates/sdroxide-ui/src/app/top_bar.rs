@@ -2477,7 +2477,7 @@ impl SdroxideApp {
                     Some(d) if decoding && !d.service.label.is_empty() => {
                         format!("DRM: {}. Click for the broadcast's details", d.service.label)
                     }
-                    Some(d) if decoding => "DRM is decoding — click for the details".to_string(),
+                    Some(_) if decoding => "DRM is decoding — click for the details".to_string(),
                     Some(d) => format!("DRM: {} — click for the decoder's state", d.summary()),
                     None => "DRM — click for the decoder's state".to_string(),
                 };

@@ -681,4 +681,13 @@ pub enum Command {
     SetDrmService {
         service: u8,
     },
+
+    /// Start or stop reading back a DRM logical channel's constellation.
+    ///
+    /// `None` stops it. The plot is a few hundred floats several times a
+    /// second, which is worth carrying to a remote client while somebody has it
+    /// open and pure waste otherwise, so the client says when it is looking.
+    SetDrmConstellation {
+        channel: Option<crate::DrmChannel>,
+    },
 }

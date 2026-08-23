@@ -571,8 +571,8 @@ use sdroxide_types::{
 /// and an event, so a v83 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying.
 /// v85: DRM (Digital Radio Mondiale) — `Mode::Drm`, `ServerMsg::Drm` carrying
-/// `DrmStatus`, and `Command::SetDrmService`. Both are appended, so no existing
-/// discriminant moves.
+/// `DrmStatus`, and `Command::SetDrmService` / `SetDrmConstellation`. All are
+/// appended, so no existing discriminant moves.
 pub const PROTO_VERSION: u16 = 85;
 const VERSION_BYTE: u8 = 0x12;
 

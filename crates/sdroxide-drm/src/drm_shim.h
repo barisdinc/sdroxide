@@ -95,6 +95,24 @@ void sdrx_drm_restart(sdrx_drm*);
 void sdrx_drm_get_status(sdrx_drm*, sdrx_drm_status*);
 /* Pick which service of the multiplex to decode. */
 void sdrx_drm_select_service(sdrx_drm*, int32_t service);
+
+/* Which logical channel's equalised symbols to read back. */
+#define SDRX_DRM_CHANNEL_FAC 0
+#define SDRX_DRM_CHANNEL_SDC 1
+#define SDRX_DRM_CHANNEL_MSC 2
+
+/* Copy the constellation of one logical channel into `out` as interleaved
+ * re/im pairs, writing at most `max_points` of them.
+ *
+ * The MSC carries a couple of thousand cells per frame, far more than a plot
+ * needs, so the points are taken at an even stride across the whole frame
+ * rather than from the front of it — a prefix would be one corner of the time
+ * -frequency grid and would not show fading spread across the rest.
+ *
+ * Returns the number of points written, or 0 when the channel has not been
+ * decoded yet. `qam` receives 4, 16 or 64. */
+int32_t sdrx_drm_constellation(sdrx_drm*, int32_t channel, float* out,
+                               int32_t max_points, int32_t* qam);
 /* "faad2 2.11.2" or "" when no AAC decoder is present. */
 const char* sdrx_drm_codec_version(void);
 

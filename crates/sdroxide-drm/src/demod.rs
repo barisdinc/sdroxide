@@ -16,7 +16,7 @@
 
 use num_complex::Complex32;
 use sdroxide_dsp::{ComplexResampler, Demodulator};
-use sdroxide_types::DrmStatus;
+use sdroxide_types::{DrmChannel, DrmStatus};
 use tracing::{debug, warn};
 
 use crate::{AUDIO_RATE, DrmWorker, SIGNAL_RATE};
@@ -258,6 +258,12 @@ impl Demodulator for DrmDemod {
 
     fn set_drm_service(&mut self, service: u8) {
         self.select_service(service);
+    }
+
+    fn set_drm_constellation(&mut self, channel: Option<DrmChannel>) {
+        if let Some(w) = self.worker.as_ref() {
+            w.set_constellation(channel);
+        }
     }
 
     fn take_drm(&mut self) -> Option<DrmStatus> {
