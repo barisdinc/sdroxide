@@ -153,6 +153,20 @@ pub struct DeviceCaps {
     /// The driver's own settings, as it describes them. See [`DeviceSetting`].
     #[serde(default)]
     pub settings: Vec<DeviceSetting>,
+    /// This front end's centre *is* the dial: a transceiver whose I/Q output
+    /// feeds a sound card, an Icom sending its 12 kHz IF. There is one
+    /// synthesiser behind both, so tuning already moves the captured window and
+    /// nothing may ask for a centre of its own — a second command to the same
+    /// place is a second CAT write per frame while the panadapter is dragged.
+    ///
+    /// False on an SDR, where the window is a resource the dial moves inside
+    /// and the centre can be commanded on its own. That is what lets a pan
+    /// which has run off the end of the window carry the window with it (issue
+    /// #133); see `IqSource::center_is_dial`, which the engine reports here.
+    ///
+    /// Appended last, for the same reason as `shared_lo_rx`.
+    #[serde(default)]
+    pub center_is_dial: bool,
 }
 
 impl DeviceCaps {

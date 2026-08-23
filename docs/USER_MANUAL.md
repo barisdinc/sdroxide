@@ -194,12 +194,22 @@ The smaller grey number below the readout is the *inactive* VFO's frequency.
   takes the spot's frequency, and in FT8/FT4/FT2 it still tunes rather than moving
   the transmit offset.
 - **Left-drag** grabs the spectrum and slides it (the tuning moves with the
-  content). Let go while the pointer is still moving and the dial keeps turning,
+  content). Drag past the end of the span the receiver is capturing — which,
+  zoomed all the way out, is from the first pixel — and the receiver itself
+  follows: the window slides across the band under your hand instead of stopping
+  at its own edge, so on a wideband receiver such as the RX-888, where retuning
+  costs nothing, you can drag from one end of HF to the other. The picture stops
+  where the front end runs out of range. A rig whose I/Q output is its own dial
+  (a transceiver on a sound card, an Icom sending its 12 kHz IF) has one
+  synthesiser for both, so there the drag moves the window by moving the dial,
+  as it always has.
+  Let go while the pointer is still moving and the dial keeps turning,
   coasting to a stop like a weighted VFO knob — the faster the flick, the further
   it runs. A slow, careful drag lands exactly where you release it, and pressing
   anywhere on the panadapter catches a coasting dial and stops it dead (that
   press does not tune). The sub-receiver's tuning drag has the same flywheel.
-- **Right-drag** pans the view only, without changing tuning.
+- **Right-drag** pans the view only, without changing tuning — and only inside
+  the captured span, since moving the window means moving the receiver.
 - **Shift+drag** measures bandwidth: a horizontal ruler with dotted vertical
   markers appears between where you pressed and the current pointer, showing the
   **start and end frequencies** at the markers and the **frequency span** (e.g. a

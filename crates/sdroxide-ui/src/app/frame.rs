@@ -481,6 +481,8 @@ impl eframe::App for SdroxideApp {
             let wf_tuning = self.wf_tick(live);
             if show_wf {
                 ui.allocate_ui(egui::vec2(width, wf_h), |ui| {
+                    let pan =
+                        spectrum_view::WindowPan::of(self.caps.as_ref(), self.state.center_hz);
                     spectrum_view::show_ext(
                         ui,
                         &mut self.view,
@@ -529,6 +531,7 @@ impl eframe::App for SdroxideApp {
                         &mut clicked_spot,
                         &ism_labels,
                         self.input.cfg.wheel,
+                        pan,
                         wf_tuning,
                         show_panel,
                         &mut cmds,
@@ -657,6 +660,8 @@ impl eframe::App for SdroxideApp {
             });
             if show_wf {
                 ui.allocate_ui(egui::vec2(width, wf_h), |ui| {
+                    let pan =
+                        spectrum_view::WindowPan::of(self.caps.as_ref(), self.state.center_hz);
                     spectrum_view::show_ext(
                         ui,
                         &mut self.view,
@@ -681,6 +686,7 @@ impl eframe::App for SdroxideApp {
                         &mut clicked_spot,
                         &ism_labels,
                         self.input.cfg.wheel,
+                        pan,
                         wf_tuning,
                         show_panel,
                         &mut cmds,

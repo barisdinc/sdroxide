@@ -78,6 +78,107 @@ struct Fling {
     vx: f32,
 }
 
+/// What a pan is allowed to do to the *captured* window once the view has run
+/// off the end of it — the case the operator meets the moment they are fully
+/// zoomed out, where the view is the window and has nowhere left to slide.
+///
+/// Built by [`WindowPan::of`] from the front end's capabilities. A drag that
+/// reaches the edge hands the rest of itself to the front end, which moves its
+/// centre and keeps the picture scrolling (issue #133).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowPan {
+    /// The centre is the front end's own and can be commanded while the dial
+    /// stays put — every SDR. False where the centre *is* the dial (a
+    /// transceiver whose I/Q output feeds a sound card, an Icom sending its
+    /// 12 kHz IF): there the drag already moves the window by moving the dial,
+    /// and asking for a centre as well would be a second CAT write per frame.
+    pub movable: bool,
+    /// How far the centre may be taken, `(lo, hi)`. The receive range the
+    /// centre is currently inside, so a pan slides the window along that range
+    /// and stops at its ends rather than hopping the gap to another one — an
+    /// RX-888's HF and VHF ranges are not one stretch of dial, and asking for
+    /// the gap between them is a refusal the engine would answer sixty times a
+    /// second.
+    pub limits: (f64, f64),
+}
+
+impl WindowPan {
+    /// What the front end at `center_hz` will take. Nothing at all until the
+    /// capabilities have arrived: a pan that guessed would be guessing about
+    /// the one thing that decides whether it may act.
+    pub fn of(caps: Option<&sdroxide_types::DeviceCaps>, center_hz: f64) -> Self {
+        let Some(caps) = caps else { return Self::default() };
+        // A device that publishes no ranges is taken at its word, the same way
+        // `DeviceCaps::may_rx_hz` takes it.
+        let limits = caps
+            .freq_ranges_rx
+            .iter()
+            .find(|&&(lo, hi)| (lo..=hi).contains(&center_hz))
+            .copied()
+            .unwrap_or((f64::MIN, f64::MAX));
+        Self { movable: !caps.audio_mode && !caps.center_is_dial, limits }
+    }
+}
+
+/// Slide the view by `dhz` and report what would not fit: how far the front
+/// end's own centre has to move for the rest of the gesture.
+///
+/// Zero while the view still has room inside the captured span, so panning
+/// within a zoomed-in view never disturbs the hardware. Fully zoomed out the
+/// view *is* the span and there is no room at all, so this is the whole of
+/// `dhz` from the first pixel — which is the case issue #133 reported, where
+/// the drag did nothing until the dial had crept 45% of the span away and the
+/// engine jumped the window after it.
+///
+/// The view is inside the window when this is called — [`ViewState::clamp_to`]
+/// at the end of every frame guarantees it — so the overshoot is exactly the
+/// part of this pan the window could not absorb.
+fn pan_view(view: &mut ViewState, dhz: f64, dev_center: f64, dev_span: f64) -> f64 {
+    view.view_lo_hz += dhz;
+    view.view_hi_hz += dhz;
+    let (lo, hi) = (dev_center - dev_span / 2.0, dev_center + dev_span / 2.0);
+    if view.view_lo_hz < lo {
+        view.view_lo_hz - lo
+    } else if view.view_hi_hz > hi {
+        view.view_hi_hz - hi
+    } else {
+        0.0
+    }
+}
+
+/// Hand the part of a pan the captured span could not absorb to the front end:
+/// move its centre by `over` so the picture carries on scrolling instead of
+/// stopping dead against the edge of the window.
+///
+/// `dev_center` is updated in step and `state` echoes it optimistically, both
+/// so that this frame's [`ViewState::clamp_to`] pins the view inside the window
+/// being *asked for* rather than the one being left — without that the view
+/// would be dragged back a frame at a time and the drag would fight itself.
+///
+/// The engine reports the centre it actually reached (an RX-888's downconverter
+/// clamps its own, at the ends of the half-spectrum), so the picture simply
+/// stops there.
+fn pan_center(
+    dev_center: &mut f64,
+    state: &mut RadioState,
+    over: f64,
+    pan: WindowPan,
+    cmds: &mut Vec<Command>,
+) {
+    if !pan.movable || over == 0.0 {
+        return;
+    }
+    let hz = (*dev_center + over).clamp(pan.limits.0, pan.limits.1);
+    // The same half-hertz the engine calls "already there": a retune costs a
+    // waterfall remap and, on some front ends, a skimmer restart.
+    if (hz - *dev_center).abs() < 0.5 {
+        return;
+    }
+    *dev_center = hz;
+    state.center_hz = hz;
+    cmds.push(Command::SetCenter(hz));
+}
+
 /// The sub receiver's colour, on the panadapter and on its control module.
 /// Deliberately nothing like the main receiver's red, the amber VFO/RTTY
 /// markers, or the cyan the digital modes use: two receivers on one waterfall
@@ -840,6 +941,9 @@ pub fn show_ext(
     // Operator's pointer preferences: what the wheel does (plain and with
     // Shift), whether left-drag tunes, and the click-tune rounding.
     wheel: WheelSettings,
+    // What the front end will let a pan that has run off the end of the
+    // captured window do to the window itself. See [`WindowPan`].
+    pan: WindowPan,
     wf: WfTuning,
     // The mode's operating panel is on screen under the panadapter, so the
     // waterfall is only part of the height. Keeps the bandplan strip from
@@ -869,8 +973,10 @@ pub fn show_ext(
     };
 
     // The pan/zoom bounds are the full device passband (frames may cover
-    // only the zoomed viewport).
-    let dev_center = state.center_hz;
+    // only the zoomed viewport). Mutable because a pan that reaches the edge of
+    // the window moves the window — everything below has to be bounded by the
+    // one being asked for, not the one being left.
+    let mut dev_center = state.center_hz;
     let dev_span = state.sample_rate;
     // Both receivers are DDCs on this one IQ stream, so nothing outside these
     // edges can be tuned — the sub gets clamped to them.
@@ -1190,19 +1296,29 @@ pub fn show_ext(
         state.sub_rx_hz = hz; // optimistic echo, as for the filter grips
         cmds.push(Command::SetSubRxFreq(hz));
     } else if sec_pan {
-        // Right-drag: pan only, grab-the-content semantics.
+        // Right-drag: pan only, grab-the-content semantics — and only inside
+        // the captured window. Moving the window is moving the receiver, which
+        // is what this gesture exists to promise it will not do; at the edge it
+        // stops.
         let dhz = -pointer_delta.x as f64 * view.span() / rect.width() as f64;
-        view.view_lo_hz += dhz;
-        view.view_hi_hz += dhz;
+        pan_view(view, dhz, dev_center, dev_span);
     } else if resp.dragged_by(egui::PointerButton::Primary) {
         // Left-drag: grab the spectrum and slide it — content follows the
         // mouse, and the tuning follows the content (dragging right tunes
         // down). The view pans along so the VFO marker keeps its place.
         // With `drag_tunes` off it pans only, like the right-drag.
+        //
+        // Whatever the view cannot take goes to the front end, which moves its
+        // centre and keeps the picture scrolling — but only when this drag is
+        // already turning the dial, because a window that moves takes the dial
+        // with it whether anyone asked or not (issue #133).
         let dhz = -resp.drag_delta().x as f64 * view.span() / rect.width() as f64;
-        view.view_lo_hz += dhz;
-        view.view_hi_hz += dhz;
+        let over = pan_view(view, dhz, dev_center, dev_span);
         if wheel.drag_tunes {
+            // Ahead of the dial: the two move by the same amount, so a window
+            // moved first leaves the dial exactly where it was inside it and
+            // the engine's own span guard has nothing to do.
+            pan_center(&mut dev_center, state, over, pan, cmds);
             let hz = (state.active_freq_hz() + dhz).max(0.0);
             match state.active_vfo {
                 Vfo::A => state.vfo_a_hz = hz, // optimistic echo
@@ -1426,9 +1542,10 @@ pub fn show_ext(
                 }
             } else {
                 // Grab-the-content sense, matching the left-drag: the view slides
-                // with the dial so the VFO marker keeps its place on screen.
-                view.view_lo_hz -= dhz;
-                view.view_hi_hz -= dhz;
+                // with the dial so the VFO marker keeps its place on screen, and
+                // the window follows once the view has run out of room.
+                let over = pan_view(view, -dhz, dev_center, dev_span);
+                pan_center(&mut dev_center, state, over, pan, cmds);
                 let hz = (state.active_freq_hz() - dhz).max(0.0);
                 match state.active_vfo {
                     Vfo::A => state.vfo_a_hz = hz,
@@ -2548,6 +2665,130 @@ mod tests {
             }
             assert_eq!(vx, 0.0, "a coast from {v0} px/s should have run out");
         }
+    }
+
+    /// A view with room to move takes the whole pan and leaves the front end
+    /// alone: zoomed in, the window is a resource and panning inside it is free.
+    #[test]
+    fn a_pan_inside_the_window_asks_the_front_end_for_nothing() {
+        let mut view = ViewState { view_lo_hz: 14_100_000.0, view_hi_hz: 14_200_000.0, ..def() };
+        let over = pan_view(&mut view, 30_000.0, 14_150_000.0, 2_000_000.0);
+        assert_eq!(over, 0.0, "a pan with room to move must not disturb the hardware");
+        assert_eq!((view.view_lo_hz, view.view_hi_hz), (14_130_000.0, 14_230_000.0));
+    }
+
+    /// Issue #133: fully zoomed out the view *is* the window, so every pixel of
+    /// the drag has to go to the front end — otherwise the picture stands still
+    /// however far the operator drags it.
+    #[test]
+    fn a_pan_at_full_zoom_out_goes_entirely_to_the_front_end() {
+        let (center, span) = (14_150_000.0, 2_000_000.0);
+        let mut view = ViewState { view_lo_hz: 13_150_000.0, view_hi_hz: 15_150_000.0, ..def() };
+        for dhz in [50_000.0, -50_000.0] {
+            let mut v = view.clone();
+            assert_eq!(pan_view(&mut v, dhz, center, span), dhz, "at dhz={dhz}");
+        }
+        // And the centre goes with it, so the window this frame is clamped to is
+        // the one being asked for.
+        let mut state = RadioState { center_hz: center, sample_rate: span, ..state() };
+        let mut dev_center = center;
+        let mut cmds = Vec::new();
+        let over = pan_view(&mut view, 50_000.0, dev_center, span);
+        pan_center(&mut dev_center, &mut state, over, movable(), &mut cmds);
+        assert_eq!(dev_center, 14_200_000.0);
+        assert_eq!(state.center_hz, 14_200_000.0, "the echo the clamp reads this frame");
+        assert_eq!(cmds, vec![Command::SetCenter(14_200_000.0)]);
+        view.clamp_to(dev_center, span);
+        assert_eq!(
+            (view.view_lo_hz, view.view_hi_hz),
+            (13_200_000.0, 15_200_000.0),
+            "the pan must survive the clamp, or the drag fights itself"
+        );
+    }
+
+    /// The transition frame: a zoomed-in view that runs into the edge mid-pan
+    /// spends what room it had and hands over only the rest.
+    #[test]
+    fn a_pan_that_reaches_the_edge_hands_over_only_the_overshoot() {
+        let (center, span) = (14_150_000.0, 2_000_000.0);
+        // 100 kHz wide, ending 20 kHz short of the top of the window.
+        let mut view = ViewState { view_lo_hz: 15_030_000.0, view_hi_hz: 15_130_000.0, ..def() };
+        assert_eq!(pan_view(&mut view, 50_000.0, center, span), 30_000.0);
+    }
+
+    /// A front end whose centre is its dial is never asked for a centre: the
+    /// drag is already turning that one knob, and a second command to the same
+    /// place is a second CAT write per frame.
+    #[test]
+    fn a_dial_centred_front_end_is_left_to_its_dial() {
+        let mut state = RadioState { center_hz: 14_150_000.0, ..state() };
+        let mut dev_center = 14_150_000.0;
+        let mut cmds = Vec::new();
+        let pan = WindowPan::of(
+            Some(&sdroxide_types::DeviceCaps {
+                center_is_dial: true,
+                freq_ranges_rx: vec![(30_000.0, 60_000_000.0)],
+                ..Default::default()
+            }),
+            14_150_000.0,
+        );
+        pan_center(&mut dev_center, &mut state, 50_000.0, pan, &mut cmds);
+        assert_eq!(dev_center, 14_150_000.0);
+        assert!(cmds.is_empty());
+        // And nothing at all is asked of a radio whose capabilities have not
+        // arrived yet — the one thing that decides whether a pan may act.
+        pan_center(&mut dev_center, &mut state, 50_000.0, WindowPan::of(None, 0.0), &mut cmds);
+        assert!(cmds.is_empty());
+    }
+
+    /// The pan stops at the end of the range the centre is in rather than
+    /// walking into the gap between two of them: an RX-888's HF and VHF ranges
+    /// are not one stretch of dial, and asking for the gap is a refusal the
+    /// engine would answer sixty times a second.
+    #[test]
+    fn a_pan_stops_at_the_end_of_its_own_receive_range() {
+        let caps = sdroxide_types::DeviceCaps {
+            freq_ranges_rx: vec![(0.0, 32_400_000.0), (36_000_000.0, 1_800_000_000.0)],
+            ..Default::default()
+        };
+        let pan = WindowPan::of(Some(&caps), 32_000_000.0);
+        assert_eq!(pan.limits, (0.0, 32_400_000.0));
+        let mut state = RadioState { center_hz: 32_000_000.0, ..state() };
+        let mut dev_center = 32_000_000.0;
+        let mut cmds = Vec::new();
+        pan_center(&mut dev_center, &mut state, 1_000_000.0, pan, &mut cmds);
+        assert_eq!(cmds, vec![Command::SetCenter(32_400_000.0)]);
+        // Already against the end: nothing more is asked for.
+        cmds.clear();
+        pan_center(&mut dev_center, &mut state, 1_000_000.0, pan, &mut cmds);
+        assert!(cmds.is_empty(), "a pan pressed against the end must stop asking");
+    }
+
+    /// A device that publishes no ranges is taken at its word, exactly as
+    /// `DeviceCaps::may_rx_hz` takes it — the SXceiver publishes none.
+    #[test]
+    fn a_front_end_that_publishes_no_ranges_may_still_be_panned() {
+        let caps = sdroxide_types::DeviceCaps::default();
+        let pan = WindowPan::of(Some(&caps), 14_150_000.0);
+        assert!(pan.movable);
+        let mut state = RadioState { center_hz: 14_150_000.0, ..state() };
+        let mut dev_center = 14_150_000.0;
+        let mut cmds = Vec::new();
+        pan_center(&mut dev_center, &mut state, -50_000.0, pan, &mut cmds);
+        assert_eq!(cmds, vec![Command::SetCenter(14_100_000.0)]);
+    }
+
+    fn def() -> ViewState {
+        ViewState::default()
+    }
+
+    fn state() -> RadioState {
+        RadioState::default()
+    }
+
+    /// An ordinary SDR: a centre of its own, and no published range in the way.
+    fn movable() -> WindowPan {
+        WindowPan::of(Some(&sdroxide_types::DeviceCaps::default()), 0.0)
     }
 
     /// A slow, careful drag must place the dial exactly where it is released —

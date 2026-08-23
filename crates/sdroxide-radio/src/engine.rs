@@ -1759,7 +1759,7 @@ fn decimation_for(want: u32, device_rate_hz: f64, audio_mode: bool) -> u32 {
 
 fn engine_thread(
     source: Box<dyn IqSource>,
-    caps: DeviceCaps,
+    mut caps: DeviceCaps,
     engine_cfg: EngineConfig,
     cmd_rx: Receiver<Command>,
     swap_rx: Receiver<EngineSwap>,
@@ -1767,6 +1767,10 @@ fn engine_thread(
     mut spec_in: triple_buffer::Input<SpectrumFrame>,
     mut wide_in: triple_buffer::Input<SpectrumFrame>,
 ) {
+    // Answered by the source rather than assembled with the rest of the
+    // capabilities, so every backend reports it without having to remember to:
+    // it is the trait's own answer, passed on.
+    caps.center_is_dial = source.center_is_dial();
     let audio_mode = caps.audio_mode;
     let radio_fs = source.sample_rate();
     let audio_bw = source.display_bandwidth().unwrap_or(radio_fs / 2.0);
@@ -4241,8 +4245,15 @@ impl Engine {
             }
             SetSplit(on) => self.state.split = on,
             SetCenter(hz) => {
-                self.retune(hz);
-                self.update_tuning();
+                // Asking for the centre the front end is already on costs a
+                // hardware retune, a skimmer restart and a waterfall remap for
+                // nothing — and a panadapter pan held against the end of a
+                // band asks for exactly that, once per frame. Same half-hertz
+                // as `follow_dial`.
+                if (self.state.center_hz - hz).abs() >= 0.5 {
+                    self.retune(hz);
+                    self.update_tuning();
+                }
             }
             SetSampleRate(_) => { /* needs stream re-open; deferred */ }
             SetDecimation(factor) => self.set_decimation(factor),
@@ -7963,6 +7974,7 @@ impl Engine {
         }
         self.source = source;
         self.caps = caps;
+        self.caps.center_is_dial = self.source.center_is_dial();
         self.audio_mode = self.caps.audio_mode;
         self.radio_fs = self.source.sample_rate();
         self.audio_bw = self.source.display_bandwidth().unwrap_or(self.radio_fs / 2.0);

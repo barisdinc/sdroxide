@@ -204,6 +204,10 @@ impl PanadapterSource {
             bandwidths: rx.bandwidths.clone(),
             bandwidth_ranges: rx.bandwidth_ranges.clone(),
             settings: rx.settings.clone(),
+            // The engine overwrites this from `Self::center_is_dial`, which is
+            // false here however the transceiver answers: the window belongs to
+            // the receiver and the dial moves inside it.
+            center_is_dial: false,
         }
     }
 

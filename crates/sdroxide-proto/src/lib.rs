@@ -502,7 +502,16 @@ use sdroxide_types::{
 ///
 /// The 345 MHz band itself is not on the wire: it is a row in a table both
 /// sides already have.
-pub const PROTO_VERSION: u16 = 78;
+///
+/// **79** — dragging the panadapter past the end of the captured window moves
+/// the window (issue #133). [`sdroxide_types::DeviceCaps`] carries
+/// `center_is_dial`, which says whether the front end has a centre that can be
+/// commanded on its own; a client needs it to know whether the pan may ask for
+/// one, or whether the dial it is already turning moves the window by itself.
+/// A field appended to a struct that rides in an event, so a v78 client would
+/// read the tail of the capabilities as garbage — the handshake's equality test
+/// is what stops it trying.
+pub const PROTO_VERSION: u16 = 79;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

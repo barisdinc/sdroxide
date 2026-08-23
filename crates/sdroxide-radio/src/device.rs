@@ -936,6 +936,9 @@ fn probe_caps(dev: &soapysdr::Device) -> Result<DeviceCaps> {
         bandwidths,
         bandwidth_ranges,
         settings,
+        // Filled in by the engine from the source's own answer, for every
+        // backend alike — see `engine_thread`.
+        center_is_dial: false,
     })
 }
 
