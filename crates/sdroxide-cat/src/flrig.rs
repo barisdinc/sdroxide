@@ -10,7 +10,8 @@
 //!
 //! What is reached: the frequency, the mode (by the rig's own mode *names*,
 //! learned from `rig.get_modes` at open), PTT both ways, the transmit power in
-//! whole watts against the maximum the rig reports, the receive bandwidth
+//! whole watts against the maximum the rig turns out to have (see
+//! [`Flrig::max_w`] — flrig will not simply say), the receive bandwidth
 //! (`rig.set_bandwidth` snaps to the nearest filter the driver has), the
 //! S-meter — which flrig hands over already in dBm — and the SWR and power-out
 //! faces while transmitting. CW goes through flrig's `cwio` keyer, a DTR/RTS
@@ -71,10 +72,30 @@ use crate::{CatUpdate, Protocol, interp};
 use sdroxide_types::Mode;
 use tracing::{debug, info, warn};
 
-/// Watts assumed at full scale until `rig.get_maxpwr` has answered. The common
-/// case, and wrong only for the moments before the open sequence's reply lands
-/// — the same assumption the ASCII families make for good.
+/// Watts assumed at full scale until the rig's own ceiling is known. The
+/// common case, and the same assumption the ASCII families make for good.
+///
+/// It is only ever a *floor* under the ceiling here, never the answer: see
+/// [`Flrig::max_w`] for why flrig's own `rig.get_maxpwr` cannot be one.
 const DEFAULT_MAX_W: f32 = 100.0;
+
+/// The step handed to `rig.mod_pwr` to walk the power control to the end of
+/// the rig's own range — bigger than any transceiver flrig drives can be asked
+/// for, so the clamp at the far end is what decides where it lands.
+///
+/// This is the whole of how the top of the Drive slider reaches the top of the
+/// radio. `rig.mod_pwr` is the one call in flrig's interface that bounds what
+/// it is given by `get_pc_min_max_step` — the per-model range flrig draws its
+/// *own* power slider with, and the only place the real maximum is written
+/// down. Asking for more than that and letting flrig clamp is therefore not a
+/// guess at the ceiling: it is the ceiling, whatever radio is behind the
+/// socket and whatever options are fitted to it.
+const TO_THE_END_W: i64 = 2000;
+
+/// Divisor for flrig's power-out face when the scale read says nothing —
+/// `rig.get_pwrmeter_scale` answers 0 on a driver with no power-out meter, and
+/// the KX3's own scale is 0 until its first reading has been taken.
+const DEFAULT_PO_SCALE: f32 = 1.0;
 
 /// The lowest dial a reply to `rig.get_vfo` may claim and still be believed.
 ///
@@ -118,6 +139,7 @@ enum Sent {
     GetDbm,
     GetSwr,
     GetPo,
+    GetPoScale,
     GetPtt,
     Other,
 }
@@ -134,6 +156,7 @@ fn label(s: Sent) -> &'static str {
         Sent::GetDbm => "S-meter read",
         Sent::GetSwr => "SWR read",
         Sent::GetPo => "power-out read",
+        Sent::GetPoScale => "power-out scale read",
         Sent::GetPtt => "PTT read",
         Sent::Other => "command",
     }
@@ -161,9 +184,37 @@ pub struct Flrig {
     /// until the open sequence's answer lands, where the first candidate
     /// serves.
     modes: Vec<String>,
-    /// Watts at the top of the rig's scale (`rig.get_maxpwr`), or the
-    /// assumption until it answers.
+    /// Watts at the top of the rig's scale — what the Drive slider's 100 %
+    /// means on this particular radio.
+    ///
+    /// flrig has a call that ought to answer this outright and does not.
+    /// `rig.get_maxpwr` returns `rigbase::power_max()`, which returns a member
+    /// (`pmax`) that only `get_pc_min_max_step` ever assigns — and of the sixty
+    /// drivers that override that method to give their model's real range, only
+    /// twenty-six write `pmax` while they are there. The Elecrafts are among the
+    /// thirty-four that do not, so a KX3 with a KXPA100 on it answers `0` where
+    /// its range is 0–110 W, and every slider position built on that answer is
+    /// short by the amplifier (issue #139). It is still asked, because where a
+    /// driver does keep it the answer is exact and free.
+    ///
+    /// So this is the best of what can be had: `rig.get_maxpwr` where the
+    /// driver keeps it, and otherwise [`Flrig::proven_w`] — never less than a
+    /// level the rig has actually been seen on.
     max_w: f32,
+    /// The highest level flrig has ever reported the rig set to.
+    ///
+    /// flrig holds its own power slider inside the driver's range, so a level
+    /// it reports is a level the rig can be on and this ceiling can never be
+    /// below it — whether the operator put it there on the radio's own knob,
+    /// or the walk to the end of the scale in [`Protocol::set_power`] did.
+    /// That walk is what makes this the whole answer on the thirty-four
+    /// drivers that answer `rig.get_maxpwr` with nothing.
+    proven_w: f32,
+    /// What flrig's power-out face is drawn with (`rig.get_pwrmeter_scale`):
+    /// `rig.get_pwrmeter` divided by this is watts, exactly as flrig's own
+    /// `updateFwdPwr` divides it. One on nearly every driver; ten on a KX3
+    /// reading tenths of a watt in QRP, and a hundred on an FDM-DUO.
+    po_scale: f32,
     /// The transceiver flrig says it is driving (`rig.get_xcvr`), once known —
     /// for the log, and for [`Protocol::mode_moves_dial`]: an Elecraft shifts
     /// its dial by the CW pitch on mode changes behind flrig exactly as on a
@@ -192,6 +243,8 @@ impl Flrig {
             pending: VecDeque::new(),
             modes: Vec::new(),
             max_w: DEFAULT_MAX_W,
+            proven_w: 0.0,
+            po_scale: DEFAULT_PO_SCALE,
             xcvr: None,
             failed: false,
             lost_step: false,
@@ -295,18 +348,38 @@ impl Flrig {
                     && self.xcvr.as_deref() != Some(name.as_str())
                 {
                     info!("flrig is driving a {name}");
+                    // Another radio entirely — everything learned about the
+                    // last one's transmitter describes a rig that is no longer
+                    // there, and a ceiling that only ever rises would otherwise
+                    // carry a 200 W scale onto a 15 W radio. This is the one
+                    // thing that unlearns it; a reconnect to the same rig does
+                    // not, because the rig has not changed.
+                    if self.xcvr.is_some() {
+                        self.max_w = DEFAULT_MAX_W;
+                        self.proven_w = 0.0;
+                        self.po_scale = DEFAULT_PO_SCALE;
+                    }
                     self.xcvr = Some(name);
                 }
             }
             Sent::GetMaxPwr => {
+                // Zero is the usual answer and means nothing at all — see
+                // [`Flrig::max_w`]. Anything else is the driver's own number
+                // and settles the scale outright, downwards as well as up: a
+                // rig that says 15 W is a 15 W rig, and a slider measured
+                // against 100 would spend its top half against the stop.
                 if let Some(w) = scalar(&doc).and_then(|v| v.parse::<f32>().ok())
                     && w > 0.0
                 {
-                    self.max_w = w;
+                    self.set_ceiling(w);
                 }
             }
             Sent::GetPower => {
                 if let Some(w) = scalar(&doc).and_then(|v| v.parse::<f32>().ok()) {
+                    // Ahead of the fraction: a level flrig reports above the
+                    // ceiling *is* a higher ceiling, and reading it against
+                    // the old one would report 100 % of the wrong scale.
+                    self.proves(w);
                     out.push(CatUpdate::Power((w / self.max_w).clamp(0.0, 1.0)));
                 }
             }
@@ -329,12 +402,23 @@ impl Flrig {
                     out.push(CatUpdate::Swr(interp(&SWR_CAL, raw)));
                 }
             }
-            Sent::GetPo => {
-                // What the driver's `get_power_out` reads — watts on most of
-                // them, scaled here against the rig's own maximum.
-                if let Some(w) = scalar(&doc).and_then(|v| v.parse::<f32>().ok())
-                    && w >= 0.0
+            Sent::GetPoScale => {
+                // Zero is a driver with no power-out meter, and a KX3 that has
+                // not taken a reading yet — neither is a divisor.
+                if let Some(k) = scalar(&doc).and_then(|v| v.parse::<f32>().ok())
+                    && k > 0.0
                 {
+                    self.po_scale = k;
+                }
+            }
+            Sent::GetPo => {
+                // What the driver's `get_power_out` reads, on the driver's own
+                // scale: watts once divided by `power_scale`, which is how
+                // flrig draws the same number on its own forward-power face.
+                if let Some(raw) = scalar(&doc).and_then(|v| v.parse::<f32>().ok())
+                    && raw >= 0.0
+                {
+                    let w = raw / self.po_scale;
                     out.push(CatUpdate::Po((w / self.max_w).clamp(0.0, 1.0)));
                 }
             }
@@ -357,6 +441,26 @@ impl Flrig {
                 }
             }
             Sent::Other => {}
+        }
+    }
+
+    /// Take `w` watts as proof that the rig's scale reaches at least that far
+    /// — see [`Flrig::proven_w`]. A rig sitting at 5 W is not a 5 W rig; a rig
+    /// flrig has let reach 110 W is one that reaches 110 W.
+    fn proves(&mut self, w: f32) {
+        if w.is_finite() && w > self.proven_w {
+            self.proven_w = w;
+            self.set_ceiling(self.max_w.max(w));
+        }
+    }
+
+    /// Put the top of the Drive slider at `w` watts, which no proven level may
+    /// stand above.
+    fn set_ceiling(&mut self, w: f32) {
+        let w = w.max(self.proven_w);
+        if w != self.max_w {
+            info!(watts = w, was = self.max_w, "flrig: full drive on this rig is");
+            self.max_w = w;
         }
     }
 
@@ -542,7 +646,16 @@ impl Protocol for Flrig {
     }
 
     fn tx_telemetry_requests(&self) -> Vec<Vec<u8>> {
-        vec![self.call("rig.get_swrmeter", &[]), self.call("rig.get_pwrmeter", &[])]
+        // The scale rides along with the face it divides: it costs flrig no
+        // rig traffic (it hands back a number its driver already holds), and
+        // on a KX3 it is not a constant — the driver writes it as it reads the
+        // meter, one while the KXPA100 is running and ten while the rig is on
+        // its own tenths of a watt.
+        vec![
+            self.call("rig.get_swrmeter", &[]),
+            self.call("rig.get_pwrmeter", &[]),
+            self.call("rig.get_pwrmeter_scale", &[]),
+        ]
     }
 
     fn rx_telemetry_requests(&self) -> Vec<Vec<u8>> {
@@ -608,8 +721,31 @@ impl Protocol for Flrig {
         // family has is 1 W and nothing below it can be asked for. A KX3's
         // 0.1 W settings are out of reach here; the native Elecraft profile
         // has them.
-        let w = (frac.clamp(0.0, 1.0) * self.max_w).round().max(1.0) as i64;
-        vec![self.call("rig.set_power", &[Param::Int(w)])]
+        let frac = frac.clamp(0.0, 1.0);
+        let w = (frac * self.max_w).round().max(1.0) as i64;
+        let mut out = vec![self.call("rig.set_power", &[Param::Int(w)])];
+        // At either end of the slider, follow that with a walk off the end of
+        // the scale. Only flrig knows where the scale ends — `rig.mod_pwr` is
+        // bounded by the driver's own `get_pc_min_max_step` and nothing else
+        // in the interface reports it (see [`Flrig::max_w`]) — so the way to
+        // put the transmitter on the radio's real maximum is to ask for more
+        // than it has and let flrig stop at it. The watts above went first so
+        // that a flrig too old to have `rig.mod_pwr` still lands where it
+        // always did; its fault costs the reading and nothing else.
+        //
+        // The end of the scale is the one place an operator is asking for
+        // something they cannot name: 100 % means *everything this radio has*,
+        // which on a KX3 is 15 W alone and 110 W with the KXPA100 behind it.
+        // Mid-scale needs no such walk — there the fraction is the answer.
+        if frac >= 1.0 || frac <= 0.0 {
+            let step = if frac >= 1.0 { TO_THE_END_W } else { -TO_THE_END_W };
+            out.push(self.call("rig.mod_pwr", &[Param::Int(step)]));
+            // And read back where it stopped: at the top that is the ceiling
+            // itself, which every slider position under it is then measured
+            // against.
+            out.push(self.call("rig.get_power", &[]));
+        }
+        out
     }
     fn read_power(&self) -> Vec<Vec<u8>> {
         vec![self.call("rig.get_power", &[])]
@@ -701,6 +837,7 @@ impl Protocol for Flrig {
             "rig.get_DBM" => Sent::GetDbm,
             "rig.get_swrmeter" => Sent::GetSwr,
             "rig.get_pwrmeter" => Sent::GetPo,
+            "rig.get_pwrmeter_scale" => Sent::GetPoScale,
             "rig.get_ptt" => Sent::GetPtt,
             _ => Sent::Other,
         });
@@ -902,6 +1039,69 @@ mod tests {
         assert!(text(f.set_power(0.5).remove(0)).contains("<i4>8</i4>"));
     }
 
+    /// Issue #139. flrig's `rig.get_maxpwr` answers `0` on the thirty-four
+    /// drivers that give their model's real range without writing `pmax` on
+    /// the way past — the Elecrafts among them. The top of the slider has to
+    /// reach the top of the radio anyway, so it walks off the end of the scale
+    /// and lets flrig's own clamp say where that is.
+    #[test]
+    fn the_top_of_the_slider_walks_to_the_top_of_a_rig_flrig_will_not_measure() {
+        let mut f = flrig();
+        // A KX3 with a KXPA100 on it: flrig's slider spans 110 W and its
+        // interface reports none of it.
+        ask(&mut f, "rig.get_maxpwr");
+        respond(&mut f, &ok("<i4>0</i4>"));
+        assert_eq!(f.max_w, DEFAULT_MAX_W, "nothing said is not a 0 W transmitter");
+        // Full drive: the watts we can name, then the walk past them, then the
+        // read that finds out where it stopped.
+        let frames: Vec<String> = f.set_power(1.0).into_iter().map(text).collect();
+        assert!(frames[0].contains("rig.set_power") && frames[0].contains("<i4>100</i4>"));
+        assert!(frames[1].contains("rig.mod_pwr") && frames[1].contains("<i4>2000</i4>"));
+        assert!(frames[2].contains("rig.get_power"));
+        // flrig clamped to the driver's own maximum, and that is the scale.
+        ask(&mut f, "rig.get_power");
+        assert_eq!(respond(&mut f, &ok("<i4>110</i4>")), vec![CatUpdate::Power(1.0)]);
+        assert_eq!(f.max_w, 110.0);
+        // Every position under it is now measured against the whole radio.
+        assert!(text(f.set_power(0.5).remove(0)).contains("<i4>55</i4>"));
+        // The bottom walks the other way, onto whatever least the rig has.
+        let frames: Vec<String> = f.set_power(0.0).into_iter().map(text).collect();
+        assert!(frames[1].contains("rig.mod_pwr") && frames[1].contains("<i4>-2000</i4>"));
+        // Mid-scale asks for watts and nothing else — no walk, no read.
+        assert_eq!(f.set_power(0.25).len(), 1);
+    }
+
+    /// The operator setting the radio's own knob past our idea of its scale
+    /// says the same thing the walk does.
+    #[test]
+    fn a_level_the_rig_is_on_is_a_scale_it_reaches() {
+        let mut f = flrig();
+        ask(&mut f, "rig.get_power");
+        assert_eq!(respond(&mut f, &ok("<i4>110</i4>")), vec![CatUpdate::Power(1.0)]);
+        assert_eq!(f.max_w, 110.0);
+        // And a driver that *does* keep its maximum cannot pull the scale back
+        // under a level the rig has been seen on.
+        ask(&mut f, "rig.get_maxpwr");
+        respond(&mut f, &ok("<i4>100</i4>"));
+        assert_eq!(f.max_w, 110.0);
+    }
+
+    /// flrig pointed at another radio: what was learned about the last one's
+    /// transmitter describes a rig that is no longer there.
+    #[test]
+    fn another_transceiver_unlearns_the_scale() {
+        let mut f = flrig();
+        ask(&mut f, "rig.get_xcvr");
+        respond(&mut f, &ok("<string>KX3</string>"));
+        ask(&mut f, "rig.get_power");
+        respond(&mut f, &ok("<i4>110</i4>"));
+        assert_eq!(f.max_w, 110.0);
+        ask(&mut f, "rig.get_xcvr");
+        respond(&mut f, &ok("<string>IC-7300</string>"));
+        assert_eq!(f.max_w, DEFAULT_MAX_W);
+        assert_eq!(f.proven_w, 0.0);
+    }
+
     #[test]
     fn the_meters_read_on_their_own_scales() {
         let mut f = flrig();
@@ -919,6 +1119,16 @@ mod tests {
         respond(&mut f, &ok("<i4>100</i4>"));
         ask(&mut f, "rig.get_pwrmeter");
         assert_eq!(respond(&mut f, &ok("25")), vec![CatUpdate::Po(0.25)]);
+        // The face is not always in watts: a KX3 off its amplifier reads
+        // tenths, and says so through the scale flrig divides by itself.
+        ask(&mut f, "rig.get_pwrmeter_scale");
+        respond(&mut f, &ok("<i4>10</i4>"));
+        ask(&mut f, "rig.get_pwrmeter");
+        assert_eq!(respond(&mut f, &ok("25")), vec![CatUpdate::Po(0.025)]);
+        // Zero is a driver with no power-out meter at all, not a divisor.
+        ask(&mut f, "rig.get_pwrmeter_scale");
+        respond(&mut f, &ok("<i4>0</i4>"));
+        assert_eq!(f.po_scale, 10.0);
     }
 
     #[test]

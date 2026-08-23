@@ -3969,11 +3969,13 @@ is recording at all. Raising the rate raises that ceiling with it.
   flrig's handling of the transmit power and the filter is the more faithful
   of the two. It reaches the frequency, mode (by the rig's own mode names,
   learned from flrig at connect), PTT both ways, transmit power — in whole
-  watts, scaled by the maximum the rig reports, so the **Drive** slider spans
-  the right range automatically — the receive bandwidth (flrig snaps a dragged
-  filter to the nearest one the rig has), the S-meter, and the SWR and
-  power-out meters while transmitting. It also shares the rig: flrig's own
-  panel and every other program pointed at flrig stay live alongside sdroxide.
+  watts, scaled so the **Drive** slider spans the rig's own range: 100 % is
+  everything the radio has, whatever that is (a KX3 with a KXPA100 behind it
+  goes to its full 110 W, not to 100), and 0 % is the least it will do — the
+  receive bandwidth (flrig snaps a dragged filter to the nearest one the rig
+  has), the S-meter, and the SWR and power-out meters while transmitting. It
+  also shares the rig: flrig's own panel and every other program pointed at
+  flrig stay live alongside sdroxide.
 
   What it does not reach: flrig's interface has no RIT/XIT clear (only split),
   so unlike the native profiles a rig left with RIT on offsets the dial

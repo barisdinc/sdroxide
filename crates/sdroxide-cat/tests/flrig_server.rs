@@ -3,8 +3,11 @@
 //! stack runs: the driver thread, the write-fed correlation queue, the open
 //! sequence, the polls.
 //!
-//! What the fake serves is a KX3 as flrig presents one: 15 W of maximum power,
-//! the Elecraft driver's mode names, a dial adopted rather than imposed.
+//! What the fake serves is a KX3 with a KXPA100 on it as flrig presents one:
+//! the Elecraft driver's mode names, a dial adopted rather than imposed, and a
+//! transmitter that spans 110 W while `rig.get_maxpwr` answers `0` — because
+//! that is what flrig answers there (issue #139), the driver's real range
+//! living only in the clamp `rig.mod_pwr` applies.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -21,7 +24,14 @@ use sdroxide_types::{CatConfig, CatFamily, Mode};
 struct RigState {
     freq: String,
     mode: String,
+    /// The power control, in watts, as flrig would hold it.
+    power_w: i64,
 }
+
+/// The top of this rig's power control — flrig's KX3 driver reports 0–110 W
+/// with a KXPA100 fitted. Nothing in flrig's interface hands this over: it is
+/// only ever applied, as the clamp on `rig.mod_pwr`.
+const RIG_MAX_W: i64 = 110;
 
 struct FakeFlrig {
     addr: String,
@@ -46,8 +56,11 @@ fn fake_flrig() -> FakeFlrig {
 fn fake_flrig_that_is_busy_for(busy: Duration) -> FakeFlrig {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let state =
-        Arc::new(Mutex::new(RigState { freq: "14074000".to_string(), mode: "DATA".to_string() }));
+    let state = Arc::new(Mutex::new(RigState {
+        freq: "14074000".to_string(),
+        mode: "DATA".to_string(),
+        power_w: 10,
+    }));
     let (tx, calls) = channel();
     let server_state = Arc::clone(&state);
     let connections = Arc::new(AtomicUsize::new(0));
@@ -116,13 +129,26 @@ fn serve_connection(
             std::thread::sleep(busy * 5);
         }
         let value = {
-            let state = state.lock().unwrap();
+            let mut state = state.lock().unwrap();
             match method.as_str() {
                 "rig.get_vfo" => format!("<string>{}</string>", state.freq),
                 "rig.get_mode" => format!("<string>{}</string>", state.mode),
                 "rig.get_xcvr" => "<string>KX3</string>".to_string(),
-                "rig.get_maxpwr" => "<i4>15</i4>".to_string(),
-                "rig.get_power" => "<i4>10</i4>".to_string(),
+                // `power_max()` reads a member the Elecraft driver never
+                // writes. Zero, on a radio that does 110 W.
+                "rig.get_maxpwr" => "<i4>0</i4>".to_string(),
+                // Whereas `rig.mod_pwr` bounds what it is given by the range
+                // the driver really has — the one place the 110 W shows.
+                "rig.set_power" => {
+                    state.power_w = int_param(&request);
+                    "<i4>0</i4>".to_string()
+                }
+                "rig.mod_pwr" => {
+                    state.power_w = (state.power_w + int_param(&request)).clamp(0, RIG_MAX_W);
+                    "<i4>0</i4>".to_string()
+                }
+                "rig.get_power" => format!("<i4>{}</i4>", state.power_w),
+                "rig.get_pwrmeter_scale" => "<i4>1</i4>".to_string(),
                 "rig.get_DBM" => "<i4>-73</i4>".to_string(),
                 "rig.get_ptt" => "<i4>0</i4>".to_string(),
                 // The two faces that fit on a dial: a small number that is a
@@ -157,6 +183,11 @@ fn between(s: &str, open: &str, close: &str) -> Option<String> {
     let start = s.find(open)? + open.len();
     let end = s[start..].find(close)? + start;
     Some(s[start..end].to_string())
+}
+
+/// The single `<i4>` a setter carries.
+fn int_param(request: &str) -> i64 {
+    between(request, "<i4>", "</i4>").and_then(|v| v.parse().ok()).unwrap_or_default()
 }
 
 fn config(addr: &str) -> CatConfig {
@@ -257,17 +288,15 @@ fn a_whole_session_against_a_fake_kx3() {
 
     // The dial, mode and power are all adopted from the rig — each reported
     // exactly once, so they are collected together rather than awaited one at
-    // a time (a drain waiting for one would swallow the others). The power
-    // fraction is the proof the open sequence learned the scale before the
-    // power read was interpreted: 10 W of 15 W, not of an assumed 100.
+    // a time (a drain waiting for one would swallow the others). flrig has
+    // said nothing about the scale, so the 10 W the rig is on is read against
+    // the assumed 100.
     let mut seen = Vec::new();
     let end = Instant::now() + wait;
     let adopted = |seen: &[CatUpdate]| {
         seen.contains(&CatUpdate::Freq(14_074_000.0))
             && seen.contains(&CatUpdate::Mode(Mode::Digu))
-            && seen
-                .iter()
-                .any(|u| matches!(u, CatUpdate::Power(frac) if (frac - 10.0 / 15.0).abs() < 1e-3))
+            && seen.iter().any(|u| matches!(u, CatUpdate::Power(frac) if (frac - 0.1).abs() < 1e-3))
     };
     while !adopted(&seen) {
         assert!(Instant::now() < end, "adoption incomplete within {wait:?}: {seen:?}");
@@ -275,11 +304,20 @@ fn a_whole_session_against_a_fake_kx3() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // The slider's fraction reaches flrig in the rig's own watts.
+    // Issue #139: full drive means the whole radio, and the only thing that
+    // knows how much that is is flrig's own clamp. The walk past the end of
+    // the scale finds the 110 W the interface will not report, the rig ends
+    // up on it, and the panel is told it is at the top.
     assert!(handle.commands_power());
+    handle.set_power(1.0);
+    await_call(&server.calls, "rig.mod_pwr", wait);
+    await_update(&handle, wait, "the top of the scale", |u| *u == CatUpdate::Power(1.0));
+    assert_eq!(server.state.lock().unwrap().power_w, 110, "the rig is on everything it has");
+
+    // And every position under it is now the rig's own watts.
     handle.set_power(0.5);
     let body = await_call(&server.calls, "rig.set_power", wait);
-    assert!(body.contains("<i4>8</i4>"), "0.5 of 15 W is 8 W, got: {body}");
+    assert!(body.contains("<i4>55</i4>"), "0.5 of 110 W is 55 W, got: {body}");
 
     // The filter goes out as a width for flrig to snap.
     handle.set_filter(Mode::Cw, 300.0, 800.0);
