@@ -87,8 +87,9 @@ impl LimeSource {
              {lo_offset:.0} Hz (0 = LO on the VFO), receiving on {}{}",
             // Which socket, always — a front end feeding one the radio is not
             // listening on is silent rather than faulty, and the log is where
-            // that gets diagnosed.
-            handle.antenna_rx(),
+            // that gets diagnosed. Named by the connector rather than the
+            // chip's port, because `LNAL` is the same word on both chains.
+            handle.rx_socket_label(),
             match &rfe {
                 Some(r) => format!(", {}", r.describe()),
                 None => String::new(),

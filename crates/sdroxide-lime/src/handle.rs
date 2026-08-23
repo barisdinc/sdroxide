@@ -131,8 +131,10 @@ impl LimeHandle {
         let n_rx = ctl.num_channels(false);
         if channel >= n_rx {
             return Err(Error::NotFound(format!(
-                "{} has {n_rx} receive channel(s); channel {channel} was asked for",
-                listed.label()
+                "{} has {n_rx} receive chain(s) — {}; chain {} was asked for",
+                listed.label(),
+                (0..n_rx).map(|c| format!("RX{}_*", c + 1)).collect::<Vec<_>>().join(" and "),
+                channel + 1
             )));
         }
         let want_tx = cfg.tx_enabled && ctl.num_channels(true) > channel;
@@ -268,11 +270,14 @@ impl LimeHandle {
 
         tracing::info!(
             "LimeSDR ready: {label} (firmware {}, gateware {}), {:.3} Msps, filter {:.2} MHz, \
-             centre {center_hz:.0} Hz, gain {rx_gain_db} dB{}",
+             centre {center_hz:.0} Hz, gain {rx_gain_db} dB, receiving on {}{}",
             info.firmware,
             info.gateware,
             rate / 1e6,
             analog_bw / 1e6,
+            // The socket, not the chip's port name: `LNAL` is the same word on
+            // both chains and the operator has one aerial in one connector.
+            LimeConfig::port_label(cfg.channel, &antenna_rx, false),
             if want_tx { ", transmitter armed" } else { "" }
         );
 
@@ -340,6 +345,17 @@ impl LimeHandle {
     }
     pub fn antenna_rx(&self) -> &str {
         &self.antenna_rx
+    }
+    /// Which of the board's receive chains this session is on, counted from
+    /// zero. The chain decides the socket a port name reaches — see
+    /// [`LimeConfig::port_label`].
+    pub fn channel(&self) -> u8 {
+        self.cfg.channel
+    }
+    /// The receive port with its board socket beside it, for a log line or a
+    /// status note: `LNAL — RX2_L`.
+    pub fn rx_socket_label(&self) -> String {
+        LimeConfig::port_label(self.cfg.channel, &self.antenna_rx, false)
     }
     pub fn antenna_tx(&self) -> &str {
         &self.antenna_tx

@@ -6100,6 +6100,16 @@ where the library is absent.
   LimeSuite again. Unlike the USB scans on the other tabs this one is not free:
   LimeSuite opens each candidate to read its identity, so it can disturb a board
   another program is using.
+- **Receive chain** — which of the board's front ends to use, on a board that
+  has two (the LimeSDR-USB and the PCIe boards; a Mini has one, and then this
+  picker is not shown). *Chain 1* is the `RX1_H` / `RX1_L` / `RX1_W` sockets and
+  *Chain 2* is `RX2_H` / `RX2_L` / `RX2_W`. The two share the LMS7002M's receive
+  synthesiser, so they cannot be tuned apart — but they are otherwise separate
+  front ends on separate connectors, which is what makes the choice worth
+  having: if you have done the HF matching modification to one chain's low-band
+  input and left the other stock, this is where you say which one your aerial
+  is on. Takes effect on **Apply**: a LimeSuite stream is bound to its channel
+  when it is created.
 - **Sample rate** — 1 to 40 Msps. The board's real limits are read from it when
   it opens; this list is the useful subset.
 - **Receive gain** — one combined figure, 0–73 dB, which LimeSuite distributes
@@ -6107,7 +6117,10 @@ where the library is absent.
   slider left between two of them is a radio at the lower one, and the panel
   shows what the chip actually got rather than what it was asked for.
 - **Receive port** — `LNAL` (low band), `LNAH` (high band), `LNAW` (both, at the
-  cost of a couple of dB), or **Automatic**. Automatic follows the frequency on a
+  cost of a couple of dB), or **Automatic**. Each is shown with the socket it
+  reaches on the chain you picked above — `LNAL — RX2_L` — because the chip's
+  three port names are the same words on both chains and the connector is the
+  end an aerial goes into. Automatic follows the frequency on a
   bare board — `LNAL` low, `LNAH` high — and **stops following it as soon as a
   LimeRFE is connected**, because the front end is one coaxial cable into one
   socket and no amount of retuning moves it. With one attached, Automatic is

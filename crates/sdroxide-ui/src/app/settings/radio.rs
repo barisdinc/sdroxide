@@ -5526,6 +5526,43 @@ pub(in crate::app) fn settings_lime_tab(
         });
         ui.end_row();
 
+        // Which of the board's two front ends. Only worth a control on a board
+        // that has two: on a Mini there is one chain and one set of sockets,
+        // and a picker with a single entry is furniture.
+        let chains = devices
+            .iter()
+            .find(|d| d.matches(&cfg.lime.device))
+            .map(|d| d.rx_channels())
+            .unwrap_or(if cfg.lime.channel > 0 { 2 } else { 1 });
+        if chains > 1 || cfg.lime.channel > 0 {
+            ui.label("Receive chain");
+            ui.horizontal(|ui| {
+                let text = format!("Chain {} (RX{}_*)", cfg.lime.channel + 1, cfg.lime.channel + 1);
+                egui::ComboBox::from_id_salt("lime-chain").selected_text(text).show_styled(
+                    ui,
+                    |ui| {
+                        for c in 0..chains.max(usize::from(cfg.lime.channel) + 1) as u8 {
+                            ui.selectable_value(
+                                &mut cfg.lime.channel,
+                                c,
+                                format!("Chain {} (RX{}_* / TX{}_*)", c + 1, c + 1, c + 1),
+                            );
+                        }
+                    },
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Both chains tune together — they share one synthesiser — but they are \
+                         separate front ends on separate sockets. Pick the one your aerial is \
+                         on, which is the setting to reach for when one chain has had the HF \
+                         matching modification and the other is stock.",
+                    )
+                    .weak(),
+                );
+            });
+            ui.end_row();
+        }
+
         ui.label("Sample rate");
         ui.horizontal(|ui| {
             let text = format!("{:.3} Msps", cfg.lime.sample_rate_hz / 1e6);
@@ -5566,13 +5603,21 @@ pub(in crate::app) fn settings_lime_tab(
             let text = if cfg.lime.antenna_rx.is_empty() {
                 "Automatic".to_string()
             } else {
-                cfg.lime.antenna_rx.clone()
+                LimeConfig::port_label(cfg.lime.channel, &cfg.lime.antenna_rx, false)
             };
             let before_rx = cfg.lime.antenna_rx.clone();
+            let chan = cfg.lime.channel;
             egui::ComboBox::from_id_salt("lime-antrx").selected_text(text).show_styled(ui, |ui| {
                 ui.selectable_value(&mut cfg.lime.antenna_rx, String::new(), "Automatic");
                 for a in ["LNAH", "LNAL", "LNAW"] {
-                    ui.selectable_value(&mut cfg.lime.antenna_rx, a.to_string(), a);
+                    // Named by the socket as well as the chip's port: `LNAL`
+                    // is the same word on both chains, and the connector is
+                    // the end the aerial goes into.
+                    ui.selectable_value(
+                        &mut cfg.lime.antenna_rx,
+                        a.to_string(),
+                        LimeConfig::port_label(chan, a, false),
+                    );
                 }
             });
             // Move the socket now rather than at the next start. Which socket
@@ -5596,7 +5641,7 @@ pub(in crate::app) fn settings_lime_tab(
                     "Automatic follows the frequency: LNAL low, LNAH high — unless a LimeRFE \
                      is connected below, which is one cable into one socket, and then it is \
                      LNAW at every frequency. Name the socket yours is wired to if it is not \
-                     that one.",
+                     that one. Which chain the socket belongs to is the picker above.",
                 )
                 .weak(),
             );
@@ -5687,13 +5732,18 @@ pub(in crate::app) fn settings_lime_tab(
             let text = if cfg.lime.antenna_tx.is_empty() {
                 "Automatic".to_string()
             } else {
-                cfg.lime.antenna_tx.clone()
+                LimeConfig::port_label(cfg.lime.channel, &cfg.lime.antenna_tx, true)
             };
             let before_tx = cfg.lime.antenna_tx.clone();
+            let chan = cfg.lime.channel;
             egui::ComboBox::from_id_salt("lime-anttx").selected_text(text).show_styled(ui, |ui| {
                 ui.selectable_value(&mut cfg.lime.antenna_tx, String::new(), "Automatic");
                 for a in ["BAND1", "BAND2"] {
-                    ui.selectable_value(&mut cfg.lime.antenna_tx, a.to_string(), a);
+                    ui.selectable_value(
+                        &mut cfg.lime.antenna_tx,
+                        a.to_string(),
+                        LimeConfig::port_label(chan, a, true),
+                    );
                 }
             });
             // Immediately, for the same reason the receive socket is.
@@ -5957,8 +6007,8 @@ pub(in crate::app) fn settings_lime_tab(
     ui.label(
         egui::RichText::new(
             "Gains, filters, corrections, the antenna sockets and every LimeRFE control apply \
-             immediately. The board, the sample rate, arming transmit and the LimeRFE's \
-             connection take effect on Apply.",
+             immediately. The board, the receive chain, the sample rate, arming transmit and \
+             the LimeRFE's connection take effect on Apply.",
         )
         .weak(),
     );

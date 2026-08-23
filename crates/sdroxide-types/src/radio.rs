@@ -2705,6 +2705,25 @@ impl LimeDevice {
         s
     }
 
+    /// How many receive chains this board has, from its name.
+    ///
+    /// Derived rather than read, because the enumeration never opens a device:
+    /// `LMS_GetDeviceList` is the only call made against a board that may
+    /// belong to another program, and `LMS_GetNumChannels` needs an open one.
+    /// The answer only decides what the picker offers — [`LimeConfig::channel`]
+    /// is checked against the real count when the board opens, and a board that
+    /// turns out to have fewer chains than this says refuses with the number it
+    /// actually has.
+    ///
+    /// Two on the boards that bring out a second SMA pair (`RX2_H`, `RX2_L`,
+    /// `RX2_W`), one everywhere else. The Mini has a single chain; the
+    /// LimeNET-Micro's LMS7002M has two but only one is wired to a connector.
+    pub fn rx_channels(&self) -> usize {
+        let name = self.name.trim().to_ascii_lowercase();
+        let two = ["limesdr-usb", "limesdr-pcie", "limesdr-qpcie", "limesdr-core", "limesdr_core"];
+        if two.iter().any(|b| name.starts_with(b)) { 2 } else { 1 }
+    }
+
     /// Parse one `key=value, key=value` device string.
     ///
     /// The leading element carries no `=` and is the board name; everything
@@ -2747,9 +2766,19 @@ pub struct LimeConfig {
     /// Pin a board by its serial suffix, or carry a whole device string; empty
     /// means "the first Lime board found".
     pub device: String,
-    /// Which RX/TX channel pair to use. A LimeSDR-USB has two of each and a
-    /// Mini has one; the second chain shares the synthesiser, which is why only
-    /// one is opened per radio for now.
+    /// Which RX/TX chain to receive and transmit on, counted from zero.
+    ///
+    /// A LimeSDR-USB has two of each and brings both out to their own SMA
+    /// pairs; a Mini has one. The two receive chains share the SXR
+    /// synthesiser, so they cannot be tuned apart — but they are otherwise
+    /// separate front ends on separate sockets, and that is what choosing
+    /// between them is for: the `LNAL` on chain 0 is the socket the silkscreen
+    /// calls `RX1_L` and the one on chain 1 is `RX2_L`, so an operator who has
+    /// done the HF matching modification to one of them can name which
+    /// (issue #98).
+    ///
+    /// Changing this rebuilds the session: a LimeSuite stream is bound to its
+    /// channel at `LMS_SetupStream` and cannot be moved.
     pub channel: u8,
     /// Complex sample rate in Hz. See [`Self::SAMPLE_RATES`].
     pub sample_rate_hz: f64,
@@ -2865,6 +2894,49 @@ impl LimeConfig {
     pub const RFE_ATTEN_ELEMENT: &'static str = "RFEATT";
     pub const RFE_NOTCH_ELEMENT: &'static str = "RFENOTCH";
     pub const RFE_FAN_ELEMENT: &'static str = "RFEFAN";
+
+    /// The board socket a receive port name reaches on a given chain.
+    ///
+    /// LimeSuite's port names (`LNAH`, `LNAL`, `LNAW`) are the chip's, and are
+    /// the same on every chain — which is exactly what makes them useless for
+    /// saying *which connector*. The board silkscreen numbers the chain, so
+    /// chain 0's low-band input is `RX1_L` and chain 1's is `RX2_L`. Both the
+    /// picker and the logs say the socket, because that is the end an aerial
+    /// goes into.
+    ///
+    /// `None` for a name that is not one of the three, so a board reporting
+    /// something unexpected is shown LimeSuite's name unadorned rather than a
+    /// guess.
+    pub fn rx_socket(channel: u8, port: &str) -> Option<String> {
+        let suffix = match port.trim().to_ascii_uppercase().as_str() {
+            "LNAH" => "H",
+            "LNAL" => "L",
+            "LNAW" => "W",
+            _ => return None,
+        };
+        Some(format!("RX{}_{suffix}", channel + 1))
+    }
+
+    /// The same for a transmit port: `BAND1` on chain 0 is `TX1_1`.
+    pub fn tx_socket(channel: u8, port: &str) -> Option<String> {
+        let suffix = match port.trim().to_ascii_uppercase().as_str() {
+            "BAND1" => "1",
+            "BAND2" => "2",
+            _ => return None,
+        };
+        Some(format!("TX{}_{suffix}", channel + 1))
+    }
+
+    /// A port name with its socket beside it, for a combo row or a log line:
+    /// `LNAL — RX2_L`. Just the name where the socket is not known.
+    pub fn port_label(channel: u8, port: &str, tx: bool) -> String {
+        let socket =
+            if tx { Self::tx_socket(channel, port) } else { Self::rx_socket(channel, port) };
+        match socket {
+            Some(s) => format!("{port} — {s}"),
+            None => port.to_string(),
+        }
+    }
 
     /// The rates offered in the settings combo.
     ///
@@ -5648,5 +5720,31 @@ mod tests {
         // +1 ppm at 14 MHz is +14 Hz.
         assert!((HpsdrConfig::apply_ppm(14_000_000.0, 1.0) - 14_000_014.0).abs() < 1e-6);
         assert!((HpsdrConfig::apply_ppm(14_000_000.0, -1.0) - 13_999_986.0).abs() < 1e-6);
+    }
+
+    /// The whole point of issue #98's first half: `LNAL` names the same chip
+    /// port on both chains, and only the socket says which connector.
+    #[test]
+    fn a_port_name_resolves_to_the_chains_own_socket() {
+        assert_eq!(LimeConfig::rx_socket(0, "LNAL").as_deref(), Some("RX1_L"));
+        assert_eq!(LimeConfig::rx_socket(1, "LNAL").as_deref(), Some("RX2_L"));
+        assert_eq!(LimeConfig::rx_socket(1, "lnaw").as_deref(), Some("RX2_W"));
+        assert_eq!(LimeConfig::tx_socket(1, "BAND2").as_deref(), Some("TX2_2"));
+        assert_eq!(LimeConfig::port_label(1, "LNAL", false), "LNAL — RX2_L");
+        // A name the board reported that is not one of the three is shown as
+        // it came rather than decorated with a guess.
+        assert_eq!(LimeConfig::rx_socket(0, "AUTO"), None);
+        assert_eq!(LimeConfig::port_label(0, "AUTO", false), "AUTO");
+    }
+
+    /// Which boards have a second front end to choose, from the name alone —
+    /// the enumeration never opens one.
+    #[test]
+    fn only_the_two_chain_boards_offer_a_second_chain() {
+        let chains = |name: &str| LimeDevice::parse(name).rx_channels();
+        assert_eq!(chains("LimeSDR-USB, media=USB 3.0, serial=1234"), 2);
+        assert_eq!(chains("LimeSDR-PCIe, media=PCIe"), 2);
+        assert_eq!(chains("LimeSDR-Mini_v2, media=USB 3.0"), 1);
+        assert_eq!(chains("LimeNET-Micro, media=USB 2.0"), 1);
     }
 }
