@@ -540,7 +540,17 @@ use sdroxide_types::{
 /// handshake's equality test is what stops it trying. The new `Backend` variant
 /// on its own would have been harmless (an older peer is simply never sent
 /// one); the config block is not.
-pub const PROTO_VERSION: u16 = 81;
+///
+/// **82** — a LimeSDR's second receive chain can carry a second aerial, and
+/// the two are combined (issue #98). [`sdroxide_types::LimeConfig`] gained an
+/// `aux` block — [`sdroxide_types::LimeAuxConfig`] — carrying what the chain is
+/// for, its socket and gain, and the adaptive filter's mode, length, rate and
+/// hold.
+///
+/// A field appended to the radio configuration, which rides in both a command
+/// and an event, so a v81 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying.
+pub const PROTO_VERSION: u16 = 82;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1462,6 +1472,17 @@ mod tests {
                     notch: true,
                     atten_steps: 5,
                     fan: true,
+                },
+                // The second receive chain, likewise nothing at its default:
+                // this block decides whether a whole extra stream exists.
+                aux: sdroxide_types::LimeAuxConfig {
+                    role: sdroxide_types::LimeAuxRole::Diversity,
+                    antenna: "LNAW".into(),
+                    gain_db: 33.0,
+                    mode: sdroxide_types::LimeDiversityMode::Combine,
+                    taps: 24,
+                    rate: 0.35,
+                    frozen: true,
                 },
             },
             ..RadioConfig::default()

@@ -2755,6 +2755,155 @@ impl LimeDevice {
     }
 }
 
+/// What the board's **second** receive chain is for.
+///
+/// A LimeSDR-USB has two, they share one synthesiser — so they cannot be tuned
+/// apart — and they sample from one clock, which makes the pair *coherent*.
+/// That is the property everything here is built on: two streams of the same
+/// span whose relative phase is fixed by the aerials and the feedlines rather
+/// than by chance. What the second one is worth depends entirely on what is
+/// plugged into it, which is why this is a choice and not a switch.
+///
+/// Appended-to rather than reordered: this is serde-serialised into
+/// `radio.json` by name, but it also rides the wire, where the variant *index*
+/// is what is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LimeAuxRole {
+    /// Nothing. The chain is left disabled and no second stream is created,
+    /// which is the only setting that costs nothing at all.
+    #[default]
+    Off,
+    /// A second aerial, combined with the first — either to null a local noise
+    /// source or to ride out fading. See [`LimeDiversityMode`].
+    Diversity,
+}
+
+impl LimeAuxRole {
+    pub const ALL: [LimeAuxRole; 2] = [LimeAuxRole::Off, LimeAuxRole::Diversity];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LimeAuxRole::Off => "Not used",
+            LimeAuxRole::Diversity => "A second aerial (diversity / QRM suppression)",
+        }
+    }
+}
+
+/// What to do with two coherent receive channels.
+///
+/// The mirror of `sdroxide_dsp::DiversityMode`, kept here because this crate is
+/// the one the configuration and the wire format live in and it must not depend
+/// on the DSP crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LimeDiversityMode {
+    /// Subtract what the second aerial hears from what the first does: the DSP
+    /// form of a noise-cancelling phaser, and the answer to a local QRM source.
+    /// The second aerial wants to hear the interference and as little of the
+    /// band as possible.
+    #[default]
+    Cancel,
+    /// Add the two in the phase and proportion that maximise signal to noise:
+    /// diversity reception, which fills in fades. Both aerials want to hear the
+    /// same station, and their noise floors want to be set to about the same
+    /// level.
+    Combine,
+}
+
+impl LimeDiversityMode {
+    pub const ALL: [LimeDiversityMode; 2] = [LimeDiversityMode::Cancel, LimeDiversityMode::Combine];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LimeDiversityMode::Cancel => "Cancel — null a noise source",
+            LimeDiversityMode::Combine => "Combine — diversity reception",
+        }
+    }
+}
+
+/// The second receive chain, and what is done with it.
+///
+/// Which chain it is is not a setting: there are two, and this is the one
+/// [`LimeConfig::channel`] is not. What socket on it is
+/// [`Self::antenna`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LimeAuxConfig {
+    /// What the chain is for. [`LimeAuxRole::Off`] creates no second stream.
+    ///
+    /// Changing this rebuilds the session, because a LimeSuite stream is bound
+    /// to its channel when it is created.
+    pub role: LimeAuxRole,
+    /// The port on the second chain: `LNAH`, `LNAL`, `LNAW`, or empty to
+    /// follow the main chain's choice. `LNAL` on chain 1 is the socket the
+    /// silkscreen calls `RX2_L` — the one issue #98 asks for by name.
+    pub antenna: String,
+    /// Combined receive gain for the second chain, in dB.
+    ///
+    /// A real setting, not a convenience. In [`LimeDiversityMode::Combine`]
+    /// the branch weighting assumes the two noise floors are comparable; in
+    /// [`LimeDiversityMode::Cancel`] a second chain running into compression
+    /// hands the canceller a distorted copy of the interference, and a
+    /// distorted copy cannot be subtracted from an undistorted one.
+    pub gain_db: f64,
+    /// Cancel or combine.
+    pub mode: LimeDiversityMode,
+    /// How many taps the adaptive filter has, 1 to 64.
+    ///
+    /// One tap is a gain and a phase — a null at one frequency that gets worse
+    /// either side of it, which is all an analogue phaser can do. Each further
+    /// tap buys one sample period of path difference the filter can equalise,
+    /// which is what turns the notch into a band that is quiet all the way
+    /// across. They cost arithmetic on the sample path at the full device
+    /// rate; see the note in the settings panel.
+    pub taps: u8,
+    /// How fast the filter adapts, 0 to 1 — slow and steady at the bottom,
+    /// converging in a fraction of a second and visibly hunting at the top.
+    pub rate: f32,
+    /// Hold the filter where it is. The control to reach for the moment a null
+    /// has appeared: a converged filter left adapting will re-aim itself at
+    /// whatever becomes loudest.
+    pub frozen: bool,
+}
+
+impl LimeAuxConfig {
+    /// The longest adaptive filter the settings panel offers, matching
+    /// `sdroxide_dsp::Diversity::MAX_TAPS`.
+    pub const MAX_TAPS: u8 = 64;
+
+    /// What a filter of this length costs on the sample path, for a panel that
+    /// would otherwise let someone ask for 64 taps at 40 Msps and wonder why
+    /// the waterfall stopped.
+    ///
+    /// Three complex multiply-accumulates per tap per sample: the output sum,
+    /// the weight update, and the conjugate product inside it. It runs at the
+    /// **device** rate, before any decimation, because that is what makes the
+    /// interference disappear from the whole panadapter rather than only from
+    /// the channel being demodulated.
+    pub fn cost_note(taps: u8, rate_hz: f64) -> String {
+        let mmac = 3.0 * f64::from(taps) * rate_hz / 1e6;
+        format!("about {mmac:.0} million complex multiply-accumulates a second")
+    }
+}
+
+impl Default for LimeAuxConfig {
+    fn default() -> Self {
+        LimeAuxConfig {
+            role: LimeAuxRole::Off,
+            antenna: String::new(),
+            gain_db: 40.0,
+            mode: LimeDiversityMode::Cancel,
+            // Enough to equalise a couple of microseconds of path difference,
+            // which covers two aerials on one site, without asking for a
+            // hundred million multiplies a second at the rates people use.
+            taps: 8,
+            // Fast enough to watch converge, which is what an operator does
+            // with it the first time.
+            rate: 0.7,
+            frozen: false,
+        }
+    }
+}
+
 /// LimeSDR family (LimeSuite) backend configuration.
 ///
 /// The LimeRFE in front of the radio is [`Self::rfe`]; it is part of this block
@@ -2831,6 +2980,8 @@ pub struct LimeConfig {
     pub throughput_vs_latency: f32,
     /// The LimeRFE front end, if one is attached.
     pub rfe: LimeRfeConfig,
+    /// The board's second receive chain, and what it is for (issue #98).
+    pub aux: LimeAuxConfig,
 }
 
 impl Default for LimeConfig {
@@ -2856,6 +3007,7 @@ impl Default for LimeConfig {
             fifo_ksamples: 256,
             throughput_vs_latency: 0.5,
             rfe: LimeRfeConfig::default(),
+            aux: LimeAuxConfig::default(),
         }
     }
 }
@@ -2894,6 +3046,25 @@ impl LimeConfig {
     pub const RFE_ATTEN_ELEMENT: &'static str = "RFEATT";
     pub const RFE_NOTCH_ELEMENT: &'static str = "RFENOTCH";
     pub const RFE_FAN_ELEMENT: &'static str = "RFEFAN";
+    /// The second chain and the diversity filter, through the same door.
+    /// `DIVMODE` is [`LimeDiversityMode`]'s index; `DIVRESET` is momentary.
+    pub const AUX_GAIN_ELEMENT: &'static str = "AUXGAIN";
+    pub const DIV_MODE_ELEMENT: &'static str = "DIVMODE";
+    pub const DIV_RATE_ELEMENT: &'static str = "DIVRATE";
+    pub const DIV_TAPS_ELEMENT: &'static str = "DIVTAPS";
+    pub const DIV_FREEZE_ELEMENT: &'static str = "DIVFREEZE";
+    pub const DIV_RESET_ELEMENT: &'static str = "DIVRESET";
+
+    /// The device setting that names the second chain's port. A name rather
+    /// than a number, so it goes through `SetDeviceSetting` rather than riding
+    /// a pseudo-gain like everything else here.
+    pub const AUX_ANTENNA_SETTING: &'static str = "aux_antenna";
+
+    /// The chain the auxiliary stream runs on: the one the main stream is not.
+    /// There are two, so this is arithmetic rather than a setting.
+    pub fn aux_channel(&self) -> u8 {
+        1 - self.channel.min(1)
+    }
 
     /// The board socket a receive port name reaches on a given chain.
     ///

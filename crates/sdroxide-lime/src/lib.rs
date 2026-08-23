@@ -22,7 +22,8 @@
 //! SoapyLMS7 is itself a thin wrapper over this same library — so the I/Q path
 //! is not the point. The **LimeRFE** is: SoapySDR exposes none of it, so the
 //! band filters, the LNA, the power amplifier and the transmit/receive relay
-//! are unreachable from that side. Driving the library directly also means the
+//! are unreachable from that side. So is the board's **second receive chain**,
+//! opened here as a coherent second stream for diversity and QRM suppression. Driving the library directly also means the
 //! settings panel can offer what the hardware actually has rather than what
 //! SoapySDR's vocabulary can express.
 //!
@@ -32,7 +33,10 @@
 //! one process-global library handle. [`device::DevCtl`] is the only place a
 //! device pointer is dereferenced. [`handle::LimeHandle`] is an open radio.
 //! [`rfe`] implements `sdroxide-limerfe`'s transport over the board's GPIO,
-//! which is the one LimeRFE path that needs LimeSuite at all.
+//! which is the one LimeRFE path that needs LimeSuite at all. `aux` is the
+//! board's *second* receive chain and the timestamp arithmetic that pairs its
+//! samples with the first's, which is what a second aerial needs to be worth
+//! anything (issue #98).
 //!
 //! There is no stream thread and no ring buffer: LimeSuite has both already,
 //! and `LMS_RecvStream` is a bounded blocking read out of its FIFO. See
@@ -41,6 +45,7 @@
 //! Must never be a dependency of any wasm-targeted crate.
 
 pub mod api;
+pub(crate) mod aux;
 pub mod device;
 pub mod error;
 pub mod ffi;

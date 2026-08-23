@@ -29,14 +29,22 @@
 //! receive frequency is `centre + if_offset`, and `set_if_offset` is what
 //! carries the second term.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use sdroxide_dsp::IqCorrect;
+use sdroxide_dsp::{Diversity, DiversityMode, IqCorrect};
 use sdroxide_lime::LimeHandle;
 use sdroxide_lime::handle::RX_TIMEOUT_MS;
 use sdroxide_limerfe::LimeRfeHandle;
 use sdroxide_radio::{Complex32, DC_BLOCK_HZ, IqSource, RadioError, Result, lo_offset_for};
-use sdroxide_types::{LimeConfig, RfeLink, RfeModeControl};
+use sdroxide_types::{LimeAuxRole, LimeConfig, LimeDiversityMode, RfeLink, RfeModeControl};
+
+/// How often the diversity filter's achieved null depth reaches the log.
+///
+/// It is the number that says whether any of this is working, and there is
+/// nowhere else to put it: a backend has one chance to talk to the operator
+/// (`open_status`, at open) and no channel for a live reading. So it goes to
+/// the log, slowly enough not to fill it.
+const DEPTH_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct LimeSource {
     handle: LimeHandle,
@@ -48,6 +56,16 @@ pub struct LimeSource {
     /// quarter span and corrected on the first tuning update.
     if_offset: f64,
     iq_correct: Option<IqCorrect>,
+    /// The second chain's samples for the block being read, and its own
+    /// correction: it is a separate zero-IF front end with a DC offset and an
+    /// imbalance of its own, and handing those to the canceller would have it
+    /// spend taps subtracting one radio's artefacts from the other's.
+    aux_buf: Vec<Complex32>,
+    aux_correct: Option<IqCorrect>,
+    /// The adaptive combiner, present exactly when the second chain is doing
+    /// diversity (issue #98).
+    diversity: Option<Diversity>,
+    last_depth_log: Instant,
     rfe: Option<LimeRfeHandle>,
     /// Set when the LimeRFE could not be opened. Reported through
     /// `open_status` rather than refusing the radio: a front end that failed to
@@ -65,6 +83,15 @@ impl LimeSource {
         // it — see `sdroxide_radio::lo_offset_for`.
         let lo_offset = lo_offset_for(rate, handle.analog_bw());
         let iq_correct = cfg.iq_correction.then(|| IqCorrect::new(DC_BLOCK_HZ, rate));
+        // Only where the chain actually came up: `LimeHandle::open` degrades a
+        // second chain that would not start to a note, and a combiner with
+        // nothing to combine would sit there reporting no null.
+        let diversity =
+            (cfg.aux.role == LimeAuxRole::Diversity && handle.aux_active()).then(|| {
+                Diversity::new(div_mode(cfg.aux.mode), usize::from(cfg.aux.taps), cfg.aux.rate)
+            });
+        let aux_correct =
+            (diversity.is_some() && cfg.iq_correction).then(|| IqCorrect::new(DC_BLOCK_HZ, rate));
 
         // The LimeRFE. Its own USB cable is opened here; the path through the
         // board's GPIO needs the device handle and so is built in the crate
@@ -95,6 +122,22 @@ impl LimeSource {
                 None => String::new(),
             }
         );
+        if let Some(socket) = handle.aux_socket_label() {
+            tracing::info!(
+                "diversity is on: second aerial on {socket}, {} filter, {} taps{}",
+                match cfg.aux.mode {
+                    LimeDiversityMode::Cancel => "cancelling",
+                    LimeDiversityMode::Combine => "combining",
+                },
+                cfg.aux.taps,
+                if handle.aux_timestamped() {
+                    ""
+                } else {
+                    " (this LimeSuite does not stamp receive blocks, so the two chains are \
+                     paired by arrival order)"
+                }
+            );
+        }
 
         Ok(LimeSource {
             handle,
@@ -103,6 +146,10 @@ impl LimeSource {
             lo_offset,
             if_offset: 0.0,
             iq_correct,
+            aux_buf: Vec::new(),
+            aux_correct,
+            diversity,
+            last_depth_log: Instant::now(),
             rfe,
             rfe_note,
             label,
@@ -174,6 +221,89 @@ impl LimeSource {
             rfe.set_rx_hz(self.rx_dial_hz());
         }
     }
+
+    /// One block from the radio, corrected and — where a second aerial is
+    /// running — combined with it.
+    ///
+    /// The order matters. Each chain's own DC offset and image are removed
+    /// *before* the two meet, because they are artefacts of two separate
+    /// zero-IF front ends and have nothing in common; leaving them in would
+    /// have the adaptive filter spend its taps trying to explain one radio's
+    /// defects with the other's.
+    ///
+    /// A block the second chain could not be aligned to comes through
+    /// uncombined rather than combined against the wrong samples — see
+    /// `LimeHandle::read_pair`.
+    fn read_within(&mut self, buf: &mut [Complex32], timeout_ms: u32) -> Result<usize> {
+        let want_aux = self.diversity.is_some() && self.handle.aux_active();
+        if want_aux && self.aux_buf.len() < buf.len() {
+            self.aux_buf.resize(buf.len(), Complex32::new(0.0, 0.0));
+        }
+        // Disjoint fields, so the second chain's landing buffer can be handed
+        // to the handle while the handle borrows itself.
+        let aux: &mut [Complex32] = if want_aux { &mut self.aux_buf[..buf.len()] } else { &mut [] };
+        let (n, got) = self
+            .handle
+            .read_pair(buf, aux, timeout_ms)
+            .map_err(|e| RadioError::Msg(e.to_string()))?;
+        if n == 0 {
+            return Ok(0);
+        }
+        if let Some(iq) = self.iq_correct.as_mut() {
+            iq.process(&mut buf[..n]);
+        }
+        if got == n {
+            if let Some(iq) = self.aux_correct.as_mut() {
+                iq.process(&mut self.aux_buf[..got]);
+            }
+            if let Some(d) = self.diversity.as_mut() {
+                d.process(&mut buf[..n], &self.aux_buf[..got]);
+            }
+        }
+        if want_aux {
+            self.log_depth();
+        }
+        Ok(n)
+    }
+
+    /// Say how the filter is doing, occasionally.
+    ///
+    /// The null depth is the one number that separates "the second aerial
+    /// hears the noise" from "the second aerial hears nothing the first one
+    /// does", and no amount of adjusting the filter fixes the second case.
+    fn log_depth(&mut self) {
+        if self.last_depth_log.elapsed() < DEPTH_LOG_INTERVAL {
+            return;
+        }
+        self.last_depth_log = Instant::now();
+        let Some(d) = self.diversity.as_ref() else { return };
+        let slips = self.handle.aux_slips();
+        match d.depth_db() {
+            Some(db) => tracing::info!(
+                "diversity: {db:.1} dB of the main aerial's signal is being cancelled{}{}",
+                if d.frozen() { ", filter held" } else { "" },
+                if slips > 0 { format!(", {slips} pairing restart(s))") } else { String::new() }
+            ),
+            None if slips > 0 => {
+                tracing::debug!("diversity: combining, {slips} pairing restart(s)");
+            }
+            None => {}
+        }
+        if self.handle.aux_stalled() {
+            tracing::warn!(
+                "the second receive chain is not keeping up, so blocks are going through \
+                 uncombined — try a lower sample rate"
+            );
+        }
+    }
+}
+
+/// The configuration's mode, as the DSP crate spells it.
+fn div_mode(mode: LimeDiversityMode) -> DiversityMode {
+    match mode {
+        LimeDiversityMode::Cancel => DiversityMode::Cancel,
+        LimeDiversityMode::Combine => DiversityMode::Combine,
+    }
 }
 
 impl IqSource for LimeSource {
@@ -197,16 +327,7 @@ impl IqSource for LimeSource {
     }
 
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
-        let n = self
-            .handle
-            .read_within(buf, RX_TIMEOUT_MS)
-            .map_err(|e| RadioError::Msg(e.to_string()))?;
-        if n > 0
-            && let Some(iq) = self.iq_correct.as_mut()
-        {
-            iq.process(&mut buf[..n]);
-        }
-        Ok(n)
+        self.read_within(buf, RX_TIMEOUT_MS)
     }
 
     /// Take only what is already waiting.
@@ -216,13 +337,7 @@ impl IqSource for LimeSource {
     /// samples that have not arrived would come out of the transmitter's
     /// budget.
     fn read_available(&mut self, buf: &mut [Complex32]) -> Result<usize> {
-        let n = self.handle.read_within(buf, 0).map_err(|e| RadioError::Msg(e.to_string()))?;
-        if n > 0
-            && let Some(iq) = self.iq_correct.as_mut()
-        {
-            iq.process(&mut buf[..n]);
-        }
-        Ok(n)
+        self.read_within(buf, 0)
     }
 
     fn describe(&self) -> String {
@@ -249,16 +364,66 @@ impl IqSource for LimeSource {
                 self.handle.calibrate().map_err(|e| RadioError::Msg(e.to_string()))?;
             }
             LimeConfig::IQ_CORRECTION_ELEMENT => {
+                let rate = self.handle.sample_rate();
                 if db >= 0.5 {
                     match self.iq_correct.as_mut() {
                         Some(iq) => iq.reset(),
-                        None => {
-                            self.iq_correct =
-                                Some(IqCorrect::new(DC_BLOCK_HZ, self.handle.sample_rate()));
+                        None => self.iq_correct = Some(IqCorrect::new(DC_BLOCK_HZ, rate)),
+                    }
+                    // Both chains or neither: correcting one of a pair would
+                    // manufacture exactly the difference the canceller is
+                    // trying to remove.
+                    if self.diversity.is_some() {
+                        match self.aux_correct.as_mut() {
+                            Some(iq) => iq.reset(),
+                            None => self.aux_correct = Some(IqCorrect::new(DC_BLOCK_HZ, rate)),
                         }
                     }
                 } else {
                     self.iq_correct = None;
+                    self.aux_correct = None;
+                }
+            }
+            // The second chain and its filter. Pseudo-elements for the same
+            // reason the LimeRFE's are: settings only this backend has, and no
+            // new `Command` variant for them.
+            LimeConfig::AUX_GAIN_ELEMENT => {
+                self.handle.set_aux_gain_db(db).map_err(|e| RadioError::Msg(e.to_string()))?;
+                self.cfg.aux.gain_db = db;
+            }
+            LimeConfig::DIV_MODE_ELEMENT => {
+                let mode =
+                    if db >= 0.5 { LimeDiversityMode::Combine } else { LimeDiversityMode::Cancel };
+                self.cfg.aux.mode = mode;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_mode(div_mode(mode));
+                }
+            }
+            LimeConfig::DIV_RATE_ELEMENT => {
+                self.cfg.aux.rate = db as f32;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_rate(db as f32);
+                }
+            }
+            LimeConfig::DIV_TAPS_ELEMENT => {
+                let taps =
+                    db.round().clamp(1.0, f64::from(sdroxide_types::LimeAuxConfig::MAX_TAPS)) as u8;
+                self.cfg.aux.taps = taps;
+                if let Some(d) = self.diversity.as_mut() {
+                    // Necessarily starts the filter again: the taps mean
+                    // different delays now.
+                    d.set_taps(usize::from(taps));
+                }
+            }
+            LimeConfig::DIV_FREEZE_ELEMENT => {
+                self.cfg.aux.frozen = db >= 0.5;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_frozen(db >= 0.5);
+                }
+            }
+            LimeConfig::DIV_RESET_ELEMENT if db >= 0.5 => {
+                if let Some(d) = self.diversity.as_mut() {
+                    d.reset();
                 }
             }
             // The LimeRFE controls. Carried through here for the usual reason:
@@ -305,6 +470,16 @@ impl IqSource for LimeSource {
 
     fn current_antenna(&self) -> String {
         self.handle.antenna_rx().to_string()
+    }
+
+    /// The second chain's socket. A name rather than a number, which is why it
+    /// comes through here and not on a pseudo-gain with everything else.
+    fn set_device_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        if key == LimeConfig::AUX_ANTENNA_SETTING && !value.trim().is_empty() {
+            self.handle.set_aux_antenna(value).map_err(|e| RadioError::Msg(e.to_string()))?;
+            self.cfg.aux.antenna = value.to_string();
+        }
+        Ok(())
     }
 
     /// With a LimeRFE in front, the socket is the cabling's answer rather than
@@ -446,6 +621,30 @@ impl IqSource for LimeSource {
             && let Some(n) = self.cfg.rfe.switching_note()
         {
             notes.push(n);
+        }
+        // What the second chain is doing, when it is meant to be doing
+        // something: an operator who turned diversity on and hears no
+        // difference needs to know which half of that is true.
+        if self.cfg.aux.role != LimeAuxRole::Off {
+            match self.handle.aux_socket_label() {
+                Some(socket) => {
+                    let mut line = format!(
+                        "diversity is running on {socket} — watch the log for the depth it is \
+                         achieving, and set the second chain's gain so both aerials show about \
+                         the same noise floor"
+                    );
+                    if !self.handle.aux_timestamped() {
+                        line.push_str(
+                            ". This LimeSuite does not stamp its receive blocks, so the two \
+                             chains are paired by arrival order",
+                        );
+                    }
+                    notes.push(line);
+                }
+                None => notes.push(
+                    "the second receive chain is not running, so there is no diversity".to_string(),
+                ),
+            }
         }
         if self.cfg.rfe.link != RfeLink::Off && self.cfg.rfe.mode == RfeModeControl::Rx {
             notes.push(

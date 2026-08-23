@@ -5465,8 +5465,8 @@ pub(in crate::app) fn settings_lime_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        LimeConfig, RFE_ATTEN_MAX_STEPS, RFE_ATTEN_STEP_DB, RfeChannel, RfeLink, RfeModeControl,
-        RfePort,
+        LimeAuxConfig, LimeAuxRole, LimeConfig, LimeDiversityMode, RFE_ATTEN_MAX_STEPS,
+        RFE_ATTEN_STEP_DB, RfeChannel, RfeLink, RfeModeControl, RfePort,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -5483,7 +5483,19 @@ pub(in crate::app) fn settings_lime_tab(
         cfg.lime.fifo_ksamples,
         cfg.lime.rfe.link,
         cfg.lime.rfe.serial.path.clone(),
+        // The second chain's stream is created at open and bound to its
+        // channel, so turning it on or off is a rebuild. Everything else about
+        // it is live.
+        cfg.lime.aux.role,
     );
+
+    // How many receive chains the chosen board has. From the name: the
+    // enumeration never opens a device, so there is nothing to ask.
+    let chains = devices
+        .iter()
+        .find(|d| d.matches(&cfg.lime.device))
+        .map(|d| d.rx_channels())
+        .unwrap_or(if cfg.lime.channel > 0 { 2 } else { 1 });
 
     egui::Grid::new("lime-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Board");
@@ -5529,11 +5541,6 @@ pub(in crate::app) fn settings_lime_tab(
         // Which of the board's two front ends. Only worth a control on a board
         // that has two: on a Mini there is one chain and one set of sockets,
         // and a picker with a single entry is furniture.
-        let chains = devices
-            .iter()
-            .find(|d| d.matches(&cfg.lime.device))
-            .map(|d| d.rx_channels())
-            .unwrap_or(if cfg.lime.channel > 0 { 2 } else { 1 });
         if chains > 1 || cfg.lime.channel > 0 {
             ui.label("Receive chain");
             ui.horizontal(|ui| {
@@ -5698,6 +5705,201 @@ pub(in crate::app) fn settings_lime_tab(
         });
         ui.end_row();
     });
+
+    // ---- the second receive chain (issue #98) ------------------------------
+    if chains > 1 || cfg.lime.aux.role != LimeAuxRole::Off {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Second aerial").strong());
+        ui.label(
+            egui::RichText::new(format!(
+                "The board's other receive chain, on the {} sockets. It shares the \
+                 synthesiser, so it hears the same span at the same instant as the first — \
+                 which is what lets the two be combined.",
+                format_args!("RX{}_*", cfg.lime.aux_channel() + 1)
+            ))
+            .weak(),
+        );
+        let aux_chan = cfg.lime.aux_channel();
+        egui::Grid::new("lime-aux-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Used for");
+            egui::ComboBox::from_id_salt("lime-aux-role")
+                .selected_text(cfg.lime.aux.role.label())
+                .show_styled(ui, |ui| {
+                    for r in LimeAuxRole::ALL {
+                        ui.selectable_value(&mut cfg.lime.aux.role, r, r.label());
+                    }
+                });
+            ui.end_row();
+
+            if cfg.lime.aux.role == LimeAuxRole::Diversity {
+                ui.label("Its socket");
+                ui.horizontal(|ui| {
+                    let text = if cfg.lime.aux.antenna.is_empty() {
+                        "Same as the first".to_string()
+                    } else {
+                        LimeConfig::port_label(aux_chan, &cfg.lime.aux.antenna, false)
+                    };
+                    let before_aux = cfg.lime.aux.antenna.clone();
+                    egui::ComboBox::from_id_salt("lime-aux-ant").selected_text(text).show_styled(
+                        ui,
+                        |ui| {
+                            ui.selectable_value(
+                                &mut cfg.lime.aux.antenna,
+                                String::new(),
+                                "Same as the first",
+                            );
+                            for a in ["LNAH", "LNAL", "LNAW"] {
+                                ui.selectable_value(
+                                    &mut cfg.lime.aux.antenna,
+                                    a.to_string(),
+                                    LimeConfig::port_label(aux_chan, a, false),
+                                );
+                            }
+                        },
+                    );
+                    // Immediately, like the main chain's: finding out which
+                    // socket the noise aerial should be in is done by trying
+                    // one and listening.
+                    if cfg.lime.aux.antenna != before_aux {
+                        if cfg.lime.aux.antenna.is_empty() {
+                            *apply = true;
+                        } else {
+                            cmds.push(Command::SetDeviceSetting {
+                                key: LimeConfig::AUX_ANTENNA_SETTING.to_string(),
+                                value: cfg.lime.aux.antenna.clone(),
+                            });
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Its gain");
+                if crate::chrome::slider(
+                    ui,
+                    egui::Slider::new(
+                        &mut cfg.lime.aux.gain_db,
+                        LimeConfig::GAIN_MIN_DB..=LimeConfig::GAIN_MAX_DB,
+                    )
+                    .suffix(" dB")
+                    .step_by(1.0),
+                )
+                .on_hover_text(
+                    "Set so both aerials show about the same noise floor. This is the \
+                     adjustment the whole thing rests on: combining weights the two branches \
+                     by their noise, and a second chain driven into compression hands the \
+                     filter a distorted copy of the interference — which cannot be subtracted \
+                     from an undistorted one.",
+                )
+                .changed()
+                {
+                    push_gain(cmds, LimeConfig::AUX_GAIN_ELEMENT, cfg.lime.aux.gain_db);
+                }
+                ui.end_row();
+
+                ui.label("What to do with it");
+                egui::ComboBox::from_id_salt("lime-div-mode")
+                    .selected_text(cfg.lime.aux.mode.label())
+                    .show_styled(ui, |ui| {
+                        for m in LimeDiversityMode::ALL {
+                            if ui.selectable_label(cfg.lime.aux.mode == m, m.label()).clicked() {
+                                cfg.lime.aux.mode = m;
+                                push_gain(
+                                    cmds,
+                                    LimeConfig::DIV_MODE_ELEMENT,
+                                    f64::from(u8::from(m == LimeDiversityMode::Combine)),
+                                );
+                            }
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Filter length");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut cfg.lime.aux.taps)
+                                .speed(1.0)
+                                .range(1..=LimeAuxConfig::MAX_TAPS)
+                                .suffix(" taps"),
+                        )
+                        .on_hover_text(
+                            "One tap is a gain and a phase — a null at one frequency that gets \
+                             worse either side of it, which is all an analogue phaser can do. \
+                             Each further tap buys one sample period of the path difference \
+                             between the two aerials that the filter can equalise, which is \
+                             what turns that notch into a band quiet all the way across.",
+                        )
+                        .changed()
+                    {
+                        push_gain(cmds, LimeConfig::DIV_TAPS_ELEMENT, f64::from(cfg.lime.aux.taps));
+                    }
+                    ui.label(
+                        egui::RichText::new(LimeAuxConfig::cost_note(
+                            cfg.lime.aux.taps,
+                            cfg.lime.sample_rate_hz,
+                        ))
+                        .weak(),
+                    );
+                });
+                ui.end_row();
+
+                ui.label("Adaptation");
+                ui.horizontal(|ui| {
+                    if crate::chrome::slider(
+                        ui,
+                        egui::Slider::new(&mut cfg.lime.aux.rate, 0.0..=1.0).show_value(false),
+                    )
+                    .on_hover_text(
+                        "Slow and steady at the left, converging inside a fraction of a second \
+                         and visibly hunting at the right. Start fast to find the null, then \
+                         hold it.",
+                    )
+                    .changed()
+                    {
+                        push_gain(cmds, LimeConfig::DIV_RATE_ELEMENT, f64::from(cfg.lime.aux.rate));
+                    }
+                    if ui
+                        .checkbox(&mut cfg.lime.aux.frozen, "Hold")
+                        .on_hover_text(
+                            "Stop the filter moving. Reach for this the moment a null appears: \
+                             a filter left adapting will re-aim itself at whatever becomes \
+                             loudest, which on a quiet band is the station you are listening \
+                             to.",
+                        )
+                        .changed()
+                    {
+                        push_gain(
+                            cmds,
+                            LimeConfig::DIV_FREEZE_ELEMENT,
+                            f64::from(u8::from(cfg.lime.aux.frozen)),
+                        );
+                    }
+                    if ui
+                        .button("Restart")
+                        .on_hover_text("Zero the filter and find the null again.")
+                        .clicked()
+                    {
+                        push_gain(cmds, LimeConfig::DIV_RESET_ELEMENT, 1.0);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        if cfg.lime.aux.role == LimeAuxRole::Diversity {
+            ui.label(
+                egui::RichText::new(
+                    "Nothing here can tell a wanted signal from an unwanted one — the filter \
+                     only knows what the two aerials have in common. In Cancel, the second \
+                     aerial wants to hear the noise source and as little of the band as \
+                     possible, or it will dutifully cancel the station too. In Combine, both \
+                     want to hear the same station. How deep the null is going runs to the \
+                     log every few seconds.",
+                )
+                .weak(),
+            );
+        }
+    }
 
     ui.add_space(6.0);
     ui.separator();
@@ -5998,6 +6200,10 @@ pub(in crate::app) fn settings_lime_tab(
         cfg.lime.fifo_ksamples,
         cfg.lime.rfe.link,
         cfg.lime.rfe.serial.path.clone(),
+        // The second chain's stream is created at open and bound to its
+        // channel, so turning it on or off is a rebuild. Everything else about
+        // it is live.
+        cfg.lime.aux.role,
     );
     if after != before {
         *apply = true;

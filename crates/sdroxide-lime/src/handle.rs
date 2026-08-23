@@ -25,8 +25,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use num_complex::Complex32;
-use sdroxide_types::LimeConfig;
+use sdroxide_types::{LimeAuxRole, LimeConfig};
 
+use crate::aux::AuxRx;
 use crate::device::{self, DevCtl, DevInfo};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -60,6 +61,10 @@ pub struct LimeHandle {
     api: Arc<ffi::Api>,
     rx: ffi::StreamT,
     tx: Option<ffi::StreamT>,
+    /// The board's other receive chain, when it has been given a job — see
+    /// [`crate::aux`]. `None` on a one-chain board, and on a two-chain board
+    /// whose second chain is set to do nothing, which is the default.
+    aux: Option<AuxRx>,
     rx_running: bool,
     tx_running: bool,
 
@@ -240,6 +245,35 @@ impl LimeHandle {
         if rc != ffi::OK {
             return Err(Error::api("LMS_SetupStream", api.err_text()));
         }
+        // The second chain, if it has been given a job. Best-effort throughout:
+        // an operator who came to listen must not lose their receiver because
+        // the diversity aerial's chain would not start, so every failure here
+        // is a note and a `None`.
+        let mut aux_note = None;
+        let aux = if cfg.aux.role == LimeAuxRole::Off {
+            None
+        } else {
+            match Self::open_aux(
+                &api,
+                dev,
+                &mut ctl,
+                cfg,
+                n_rx,
+                center_hz,
+                analog_bw,
+                lpf_rx_want,
+                &rx,
+            ) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    tracing::warn!("the LimeSDR's second receive chain was not opened: {e}");
+                    aux_note = Some(format!(
+                        "the second receive chain was not opened, so there is no diversity: {e}"
+                    ));
+                    None
+                }
+            }
+        };
         let mut tx = None;
         if want_tx {
             let mut s = ffi::StreamT { is_tx: true, ..rx };
@@ -260,7 +294,27 @@ impl LimeHandle {
             if let Some(mut s) = tx {
                 unsafe { (api.destroy_stream)(dev, &mut s) };
             }
+            if let Some(mut a) = aux {
+                unsafe { (api.destroy_stream)(dev, &mut a.stream) };
+            }
             return Err(Error::api("LMS_StartStream", text));
+        }
+        let mut aux = aux;
+        if let Some(a) = aux.as_mut() {
+            let rc = unsafe { (api.start_stream)(&mut a.stream) };
+            if rc == ffi::OK {
+                a.running = true;
+            } else {
+                // Same rule as opening it: the main receiver stands.
+                let text = api.err_text();
+                tracing::warn!("the LimeSDR's second receive chain would not start: {text}");
+                aux_note = Some(format!(
+                    "the second receive chain would not start, so there is no \
+                                  diversity: {text}"
+                ));
+                unsafe { (api.destroy_stream)(dev, &mut a.stream) };
+                aux = None;
+            }
         }
 
         let info = ctl.info();
@@ -286,6 +340,7 @@ impl LimeHandle {
             api: Arc::clone(&api),
             rx,
             tx,
+            aux,
             rx_running: true,
             tx_running: false,
             info,
@@ -310,9 +365,79 @@ impl LimeHandle {
             overruns: 0,
             underruns: 0,
             restarts: 0,
-            note: None,
+            note: aux_note,
             closed: false,
         })
+    }
+
+    /// Configure the board's other receive chain and create its stream.
+    ///
+    /// The chain is set up to be **as much like the first as possible** — same
+    /// analog filter, same calibration width, and by default the same kind of
+    /// port — because everything the two chains do differently is something the
+    /// adaptive filter has to equalise before it can cancel anything. The gain
+    /// is the exception, and is deliberately the operator's: the two aerials
+    /// are not the same aerial, and matching the noise floors is the whole
+    /// setup procedure.
+    ///
+    /// The stream mirrors the main one's FIFO depth and formats, so the two
+    /// FIFOs drain at the same rate and neither runs away from the other.
+    #[allow(clippy::too_many_arguments)]
+    fn open_aux(
+        api: &Arc<ffi::Api>,
+        dev: ffi::Device,
+        ctl: &mut DevCtl,
+        cfg: &LimeConfig,
+        n_rx: usize,
+        center_hz: f64,
+        analog_bw: f64,
+        cal_bw: f64,
+        main_rx: &ffi::StreamT,
+    ) -> Result<AuxRx> {
+        let ch = usize::from(cfg.aux_channel());
+        if ch >= n_rx {
+            return Err(Error::NotFound(format!(
+                "this board has {n_rx} receive chain(s), so there is no second one to put an \
+                 aerial on"
+            )));
+        }
+        ctl.enable_channel_on(false, ch, true)?;
+        // Same passband as the main chain: a different filter width is a
+        // different phase response, and a phase response the adaptive filter
+        // has to undo is taps spent on the radio rather than on the aerials.
+        ctl.set_lpf_bw_on(false, ch, analog_bw)?;
+        let ports = ctl.antennas_on(false, ch);
+        let want = if cfg.aux.antenna.trim().is_empty() {
+            // The same rule the main chain follows, which on a bare board
+            // lands on the same kind of socket: `LNAL` on chain 0 is `RX1_L`
+            // and on chain 1 is `RX2_L`, the pair issue #98 names.
+            device::auto_antenna_rx(center_hz, &ports, false).unwrap_or_default()
+        } else {
+            cfg.aux.antenna.clone()
+        };
+        if !want.is_empty() {
+            ctl.set_antenna_named_on(false, ch, &want)?;
+        }
+        ctl.set_gain_db_on(false, ch, cfg.aux.gain_db)?;
+        if cfg.calibrate {
+            // Best-effort, exactly as the main chain's is: an uncalibrated
+            // second chain still cancels, it merely leaves a DC offset of its
+            // own for the filter to account for.
+            if let Err(e) = ctl.calibrate_on(false, ch, cal_bw) {
+                tracing::warn!("the second receive chain would not calibrate, continuing: {e}");
+            }
+        }
+        let mut stream = ffi::StreamT { channel: ch as u32, handle: 0, ..*main_rx };
+        let rc = unsafe { (api.setup_stream)(dev, &mut stream) };
+        if rc != ffi::OK {
+            return Err(Error::api("LMS_SetupStream (aux)", api.err_text()));
+        }
+        tracing::info!(
+            "the LimeSDR's second receive chain is on {}, gain {} dB",
+            LimeConfig::port_label(cfg.aux_channel(), &want, false),
+            cfg.aux.gain_db
+        );
+        Ok(AuxRx::new(stream, ch, want, cfg.aux.gain_db))
     }
 
     /// Refuse a control call on a handle [`Self::close`] has already been
@@ -467,6 +592,70 @@ impl LimeHandle {
         Ok(())
     }
 
+    /// Whether the second receive chain is running and pairing.
+    pub fn aux_active(&self) -> bool {
+        self.aux.as_ref().is_some_and(|a| a.running)
+    }
+
+    /// The second chain's port with its socket beside it, for a log line.
+    pub fn aux_socket_label(&self) -> Option<String> {
+        self.aux.as_ref().map(|a| LimeConfig::port_label(self.cfg.aux_channel(), &a.antenna, false))
+    }
+
+    /// How many times the pairing has had to be abandoned and restarted.
+    /// Steadily climbing means the host is not keeping up with two chains at
+    /// this sample rate.
+    pub fn aux_slips(&self) -> u64 {
+        self.aux.as_ref().map_or(0, |a| a.slips())
+    }
+
+    /// Whether the second chain went a whole block without a pairable sample.
+    pub fn aux_stalled(&self) -> bool {
+        self.aux.as_ref().is_some_and(|a| a.stalled)
+    }
+
+    /// Whether this LimeSuite stamps its receive blocks with the hardware
+    /// sample counter. Where it does not, the two chains are paired by arrival
+    /// order alone — which works, but has nothing to notice a dropped packet
+    /// with, so it is worth saying once.
+    pub fn aux_timestamped(&self) -> bool {
+        self.aux.as_ref().is_none_or(|a| a.stamped())
+    }
+
+    pub fn aux_gain_db(&self) -> f64 {
+        self.aux.as_ref().map_or(0.0, |a| a.gain_db)
+    }
+
+    /// Move the second chain's gain. The setting that matches the two noise
+    /// floors, which is what both diversity modes are built on.
+    pub fn set_aux_gain_db(&mut self, db: f64) -> Result<()> {
+        self.ensure_open()?;
+        let Some(ch) = self.aux.as_ref().map(|a| a.channel) else { return Ok(()) };
+        self.ctl().set_gain_db_on(false, ch, db)?;
+        // Read back from the chain that was set — LimeSuite takes whole
+        // decibels, so what the chip got is not always what was asked for.
+        let applied = self.ctl().gain_db_on(false, ch).unwrap_or(db);
+        if let Some(a) = self.aux.as_mut() {
+            a.gain_db = applied;
+        }
+        self.cfg.aux.gain_db = applied;
+        Ok(())
+    }
+
+    /// Move the second chain to a named port, immediately — the same reasoning
+    /// as the main chain's: which socket the aerial is in is exactly what an
+    /// operator changes while listening.
+    pub fn set_aux_antenna(&mut self, name: &str) -> Result<()> {
+        self.ensure_open()?;
+        let Some(ch) = self.aux.as_ref().map(|a| a.channel) else { return Ok(()) };
+        self.ctl().set_antenna_named_on(false, ch, name)?;
+        if let Some(a) = self.aux.as_mut() {
+            a.antenna = name.to_string();
+        }
+        self.cfg.aux.antenna = name.to_string();
+        Ok(())
+    }
+
     pub fn set_lpf_bw(&mut self, tx: bool, hz: f64) -> Result<()> {
         self.ensure_open()?;
         let range = if tx { self.lpf_range_tx } else { self.lpf_range_rx };
@@ -517,9 +706,35 @@ impl LimeHandle {
     ///
     /// `Ok(0)` on a timeout, which is the trait's contract: the caller retries.
     pub fn read_within(&mut self, buf: &mut [Complex32], timeout_ms: u32) -> Result<usize> {
+        Ok(self.read_pair(buf, &mut [], timeout_ms)?.0)
+    }
+
+    /// Read the main chain, and the same samples of the second one beside it.
+    ///
+    /// Returns `(main, aux)`. `aux` is either `main` — the two blocks are the
+    /// same span of time, sample for sample — or **zero**, which is not a
+    /// failure: it means the pair could not be aligned this block (or there is
+    /// no second chain), and combining is skipped rather than done against the
+    /// wrong samples. See [`crate::aux`] for what the alignment is up against.
+    ///
+    /// `aux_out` may be empty, which asks for the main chain alone and costs
+    /// nothing extra.
+    pub fn read_pair(
+        &mut self,
+        buf: &mut [Complex32],
+        aux_out: &mut [Complex32],
+        timeout_ms: u32,
+    ) -> Result<(usize, usize)> {
         if !self.rx_running || buf.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
+        // The timestamp is only wanted when there is a second chain to line up
+        // against it, so the ordinary single-chain read makes exactly the call
+        // it always made.
+        let mut meta = ffi::StreamMetaT::default();
+        let want_aux = self.aux.is_some() && !aux_out.is_empty();
+        let meta_ptr =
+            if want_aux { &raw mut meta } else { std::ptr::null_mut::<ffi::StreamMetaT>() };
         // `Complex<f32>` is `#[repr(C)]`, so interleaved f32 I/Q *is* this
         // slice's memory — no conversion and no scratch buffer. Pinned by the
         // assert below.
@@ -528,15 +743,28 @@ impl LimeHandle {
                 &mut self.rx,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                std::ptr::null_mut(),
+                meta_ptr,
                 timeout_ms,
             )
         };
         if n < 0 {
             return Err(Error::api("LMS_RecvStream", self.api.err_text()));
         }
+        let n = n as usize;
+        let mut got_aux = 0;
+        if want_aux && n > 0 {
+            // Disjoint fields: the library is read while the second chain is
+            // written, which is why this is not one method call on `self`.
+            let api: &ffi::Api = &self.api;
+            if let Some(a) = self.aux.as_mut() {
+                let take = n.min(aux_out.len());
+                // The main read's own timeout says whether this caller may
+                // block: zero is `read_available` during an over.
+                got_aux = a.read_aligned(api, meta.timestamp, &mut aux_out[..take], timeout_ms > 0);
+            }
+        }
         self.poll_status();
-        Ok(n as usize)
+        Ok((n, got_aux))
     }
 
     /// Ask LimeSuite how the stream is doing, occasionally.
@@ -635,6 +863,13 @@ impl LimeHandle {
         }
         self.tx = None;
         self.tx_running = false;
+        if let Some(a) = self.aux.as_mut() {
+            if a.running {
+                unsafe { (api.stop_stream)(&mut a.stream) };
+            }
+            unsafe { (api.destroy_stream)(dev, &mut a.stream) };
+        }
+        self.aux = None;
         if self.rx_running {
             unsafe { (api.stop_stream)(&mut self.rx) };
         }

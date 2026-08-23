@@ -69,7 +69,15 @@ impl DevCtl {
     }
 
     pub fn enable_channel(&mut self, tx: bool, on: bool) -> Result<()> {
-        let rc = unsafe { (self.api.enable_channel)(self.dev, tx, self.channel, on) };
+        self.enable_channel_on(tx, self.channel, on)
+    }
+
+    /// The same on a channel that is not this session's own — the board's
+    /// second receive chain, which issue #98 puts a second aerial on. Every
+    /// `_on` method here exists for that one caller; the plain forms are the
+    /// same call against [`Self::channel`].
+    pub fn enable_channel_on(&mut self, tx: bool, channel: usize, on: bool) -> Result<()> {
+        let rc = unsafe { (self.api.enable_channel)(self.dev, tx, channel, on) };
         self.check("LMS_EnableChannel", rc)
     }
 
@@ -136,15 +144,16 @@ impl DevCtl {
     /// in LimeSuite's list and means "disconnected", not a choice anyone makes
     /// from a combo.
     pub fn antennas(&self, tx: bool) -> Vec<String> {
-        let n = unsafe {
-            (self.api.get_antenna_list)(self.dev, tx, self.channel, std::ptr::null_mut())
-        };
+        self.antennas_on(tx, self.channel)
+    }
+
+    pub fn antennas_on(&self, tx: bool, channel: usize) -> Vec<String> {
+        let n = unsafe { (self.api.get_antenna_list)(self.dev, tx, channel, std::ptr::null_mut()) };
         if n <= 0 {
             return Vec::new();
         }
         let mut buf = vec![[0 as c_char; ffi::NAME_LEN]; n as usize];
-        let n =
-            unsafe { (self.api.get_antenna_list)(self.dev, tx, self.channel, buf.as_mut_ptr()) };
+        let n = unsafe { (self.api.get_antenna_list)(self.dev, tx, channel, buf.as_mut_ptr()) };
         if n <= 0 {
             return Vec::new();
         }
@@ -159,15 +168,16 @@ impl DevCtl {
     /// list, `NONE` included, so the lookup is done against the unfiltered list
     /// rather than the one shown to the operator.
     pub fn set_antenna_named(&mut self, tx: bool, name: &str) -> Result<()> {
-        let n = unsafe {
-            (self.api.get_antenna_list)(self.dev, tx, self.channel, std::ptr::null_mut())
-        };
+        self.set_antenna_named_on(tx, self.channel, name)
+    }
+
+    pub fn set_antenna_named_on(&mut self, tx: bool, channel: usize, name: &str) -> Result<()> {
+        let n = unsafe { (self.api.get_antenna_list)(self.dev, tx, channel, std::ptr::null_mut()) };
         if n <= 0 {
             return Err(Error::api("LMS_GetAntennaList", self.api.err_text()));
         }
         let mut buf = vec![[0 as c_char; ffi::NAME_LEN]; n as usize];
-        let n =
-            unsafe { (self.api.get_antenna_list)(self.dev, tx, self.channel, buf.as_mut_ptr()) };
+        let n = unsafe { (self.api.get_antenna_list)(self.dev, tx, channel, buf.as_mut_ptr()) };
         let idx = buf
             .iter()
             .take(n.max(0) as usize)
@@ -175,7 +185,7 @@ impl DevCtl {
             .ok_or_else(|| {
                 Error::api("LMS_SetAntenna", format!("this board has no port called {name:?}"))
             })?;
-        let rc = unsafe { (self.api.set_antenna)(self.dev, tx, self.channel, idx) };
+        let rc = unsafe { (self.api.set_antenna)(self.dev, tx, channel, idx) };
         self.check("LMS_SetAntenna", rc)
     }
 
@@ -200,22 +210,34 @@ impl DevCtl {
     /// — and [`Self::gain_db`] reads back what the chip actually got, which is
     /// what the settings panel shows.
     pub fn set_gain_db(&mut self, tx: bool, db: f64) -> Result<()> {
+        self.set_gain_db_on(tx, self.channel, db)
+    }
+
+    pub fn set_gain_db_on(&mut self, tx: bool, channel: usize, db: f64) -> Result<()> {
         let g = db
             .round()
             .clamp(sdroxide_types::LimeConfig::GAIN_MIN_DB, sdroxide_types::LimeConfig::GAIN_MAX_DB)
             as u32;
-        let rc = unsafe { (self.api.set_gain_db)(self.dev, tx, self.channel, g) };
+        let rc = unsafe { (self.api.set_gain_db)(self.dev, tx, channel, g) };
         self.check("LMS_SetGaindB", rc)
     }
 
     pub fn gain_db(&self, tx: bool) -> Option<f64> {
+        self.gain_db_on(tx, self.channel)
+    }
+
+    pub fn gain_db_on(&self, tx: bool, channel: usize) -> Option<f64> {
         let mut g = 0u32;
-        let rc = unsafe { (self.api.get_gain_db)(self.dev, tx, self.channel, &mut g) };
+        let rc = unsafe { (self.api.get_gain_db)(self.dev, tx, channel, &mut g) };
         (rc == ffi::OK).then_some(f64::from(g))
     }
 
     pub fn set_lpf_bw(&mut self, tx: bool, hz: f64) -> Result<()> {
-        let rc = unsafe { (self.api.set_lpf_bw)(self.dev, tx, self.channel, hz) };
+        self.set_lpf_bw_on(tx, self.channel, hz)
+    }
+
+    pub fn set_lpf_bw_on(&mut self, tx: bool, channel: usize, hz: f64) -> Result<()> {
+        let rc = unsafe { (self.api.set_lpf_bw)(self.dev, tx, channel, hz) };
         self.check("LMS_SetLPFBW", rc)
     }
 
@@ -229,8 +251,11 @@ impl DevCtl {
     /// LimeSuite's own DC-offset and IQ-imbalance calibration. Hundreds of
     /// milliseconds, so never in a tuning path.
     pub fn calibrate(&mut self, tx: bool, bw_hz: f64) -> Result<()> {
-        let rc =
-            unsafe { (self.api.calibrate)(self.dev, tx, self.channel, bw_hz, ffi::CAL_FLAGS_NONE) };
+        self.calibrate_on(tx, self.channel, bw_hz)
+    }
+
+    pub fn calibrate_on(&mut self, tx: bool, channel: usize, bw_hz: f64) -> Result<()> {
+        let rc = unsafe { (self.api.calibrate)(self.dev, tx, channel, bw_hz, ffi::CAL_FLAGS_NONE) };
         self.check("LMS_Calibrate", rc)
     }
 

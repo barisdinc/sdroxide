@@ -3625,6 +3625,8 @@ radio. Everything below the selector changes to match the choice:
 - **LimeSDR + LimeRFE (LimeSuite)** — the LimeSDR family through LimeSuite,
   full duplex both ways, and the LimeRFE front end that no other path can reach:
   its band filters, LNA, amplifier and transmit/receive relay follow the dial.
+  On a two-chain board the second receiver can carry a second aerial, nulling a
+  local noise source or filling in fades.
   See [6.2.17](#6217-limesdr-family--limerfe-limesuite).
 
 There is no auto-detect: you pick the interface, and an interface that cannot be
@@ -6084,6 +6086,9 @@ downlink.
 A LimeSDR has always been reachable through the SoapySDR interface, and
 SoapyLMS7 is itself a thin wrapper over this same library, so the I/Q path is
 not what this interface adds. The **LimeRFE** is: SoapySDR exposes none of it.
+So is the board's **second receive chain**, which can carry a second aerial for
+diversity reception or for nulling a local noise source — see *The second
+aerial* below.
 
 **Why a library rather than a driver.** Every other USB interface here speaks
 its radio's wire protocol directly. This one does not, because driving the
@@ -6143,6 +6148,63 @@ where the library is absent.
   calibration, whether to calibrate when the radio opens (about a second), and
   **Calibrate now**. Turning the host correction off is the one-click way to
   tell a driver problem from a DSP one.
+
+##### The second aerial: diversity and QRM suppression
+
+On a board with two receive chains, the one you are not listening on can carry a
+second aerial — and because both chains share one synthesiser and one sample
+clock, the two streams are *coherent*: the same span, at the same instant, with
+a relative phase set by the aerials and the feedlines rather than by chance.
+That is what makes it possible to combine them. Set **Used for** to *A second
+aerial* and the chain comes up alongside the first; it takes effect on
+**Apply**, because its stream is bound to its channel when it is created.
+
+There are two things worth doing with it, and **What to do with it** picks:
+
+- **Cancel — null a noise source.** The DSP form of a noise-cancelling phaser.
+  What the second aerial hears is subtracted from what the first one hears, in
+  the gain, phase and delay that make the two versions of the noise line up, and
+  what is left is the band without it. This is the answer to a local switched-
+  mode supply, a plasma television, or a neighbour's solar inverter. The second
+  aerial wants to hear **the noise and as little of the band as possible** — a
+  short whip next to the offender, a loop pointed at it, or simply the noisier
+  of two aerials.
+- **Combine — diversity reception.** Two aerials on the same signal, added in
+  the phase that makes them reinforce and weighted so the one with the better
+  signal counts for more. On HF the two fade independently, so this fills in the
+  fades: 3 dB on two equal aerials, and much more when one of them is
+  momentarily in a null.
+
+The rest of the controls:
+
+- **Its socket** — which port on the second chain, named by its connector
+  (`LNAL — RX2_L`). *Same as the first* follows the same automatic rule the main
+  chain does. Takes effect at once, so you can move the aerial and listen.
+- **Its gain** — set so **both aerials show about the same noise floor**. This
+  is the adjustment everything else rests on: combining weights the two branches
+  by their noise, and a second chain driven into compression hands the filter a
+  distorted copy of the interference, which cannot be subtracted from an
+  undistorted one.
+- **Filter length** — one tap is a gain and a phase, which is a null at one
+  frequency that gets worse either side of it (all an analogue phaser can do).
+  Each further tap buys one sample period of the path difference between the two
+  aerials that the filter can equalise, which is what turns that notch into a
+  band quiet all the way across. They cost arithmetic on the sample path at the
+  full device rate — the panel says how much — because the point is to make the
+  interference disappear from the whole panadapter, not only from the channel
+  being demodulated.
+- **Adaptation**, **Hold** and **Restart** — how fast the filter chases,
+  whether it chases at all, and starting it again. The workflow is: adaptation
+  well to the right, watch the waterfall until the noise drops away, then
+  **Hold**. A filter left adapting will re-aim itself at whatever becomes
+  loudest, which on a quiet band is the station you are listening to.
+
+> **Nothing here can tell a wanted signal from an unwanted one.** The filter
+> only knows what the two aerials have in common, so pointing both at the same
+> thing in *Cancel* will dutifully cancel the station. How deep a null it is
+> achieving goes to the log every ten seconds — a converged canceller on a real
+> noise source reads 15–30 dB, and one reading a fraction of a decibel is one
+> whose second aerial cannot hear what it is being asked to subtract.
 
 **Transmit** is off until armed, and with it off the interface publishes no
 transmit channel at all — so nothing can key the radio, not merely the paths
@@ -9530,6 +9592,12 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   directions**; leave the connector setting on `Automatic`. Turn the fan on
   for sustained transmitting. Nothing sdroxide does keys an external
   amplifier.
+- **A noise canceller that does nothing** is nearly always the second
+  aerial rather than the settings: watch the null depth in the log, and if it
+  reads a fraction of a decibel, the second aerial is not hearing the noise.
+  Move it, or turn the second chain's gain up until both show the same noise
+  floor. If it *is* nulling but takes the wanted station with it, the two
+  aerials are hearing the same thing — that is what *Combine* is for.
 - **Rescan is not free** — LimeSuite opens each candidate board, which can
   disturb one another program is using.
 

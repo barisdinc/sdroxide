@@ -614,6 +614,20 @@ starting sdroxide before the rig is fine:
   and the right filter is in circuit before any RF appears, while tuning *within*
   a band puts nothing at all on the control link.
 
+  **The board's second receiver is the other thing SoapySDR cannot reach.** On
+  a LimeSDR-USB or PCIe the two receive chains share one synthesiser and one
+  sample clock, so they hear the same span at the same instant — which is what
+  lets a second aerial be combined with the first. Two things worth doing with
+  that: *cancel*, the DSP form of a noise-cancelling phaser, which finds the
+  gain, phase and delay that make a local noise source line up on both aerials
+  and subtracts it; and *combine*, diversity reception, which adds the two in
+  the phase that reinforces and weights each by how well it hears, filling in
+  HF fades. The filter is adaptive and multi-tap, so the null holds across the
+  whole span rather than at one frequency, and it can be held once it has
+  converged. Which chain you listen on is a setting too, so a board with the HF
+  matching modification on one of its low-band inputs can name which socket the
+  aerial is in.
+
   The LimeRFE is reached either way the hardware allows. Over **its own
   micro-USB port** it is a serial device, driven by pure Rust that needs no
   LimeSuite at all — so that link works whatever is driving the radio. Through
