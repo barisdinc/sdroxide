@@ -4038,6 +4038,11 @@ fn band_mode_menu(
             Mode::Sam,
             Mode::Nfm,
             Mode::Wfm,
+            // DRM belongs with the analog modes rather than under "Digital"
+            // below: that heading is the modes the digi engine decodes and
+            // transmits, and DRM is a broadcast to listen to — a demodulator,
+            // like WFM beside it.
+            Mode::Drm,
             Mode::Digu,
             Mode::Digl,
             Mode::Dsb,
@@ -4074,7 +4079,10 @@ fn vfo_ab_chips(ui: &mut egui::Ui, active: Vfo, cmds: &mut Vec<Command>) {
 ///
 /// Audio modes only. The digital modes are wired to the main receiver alone
 /// (one decoder, one TX), and SPEC produces no audio at all — a sub receiver
-/// you cannot hear is a trap, not a setting.
+/// you cannot hear is a trap, not a setting. DRM is left out for the first of
+/// those reasons: it would decode, but its status, its service picker and its
+/// constellation are all read off the main receiver, so a sub receiver in DRM
+/// would cost a whole second decoder and show nothing.
 ///
 /// A combo where a fixed-width row has to hold ten of them; a wrapped row of
 /// chips in a menu, where a combo would open a second popup layer and clicking
