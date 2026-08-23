@@ -912,6 +912,48 @@ pub struct CatConfig {
     /// unchanged and comes up exactly as it did.
     #[serde(default = "default_iq_rate_hz")]
     pub iq_rate_hz: u32,
+    /// Correct the sound card's quadrature: cancel the **mirror image** every
+    /// signal casts on the other side of the centre, and remove the DC offset
+    /// that piles a permanent spike on it. Only read for [`SoundFormat::Iq`];
+    /// demod audio is a real signal, with neither defect to fix.
+    ///
+    /// A rig's I/Q output is two analogue paths — the receiver's own quadrature
+    /// mixer, then two channels of a sound card — and they are never quite
+    /// equal in gain, nor exactly 90° apart. What that leaves is a copy of
+    /// every signal reflected about the tuned frequency, typically 30–40 dB
+    /// down: strong enough to look like a station that is not there, and to
+    /// decode as one on a waterfall full of FT8. Some radios have a pair of
+    /// front-panel trimmers for it; the ones that do not are why this exists.
+    /// The correction is adaptive and needs no adjustment — see
+    /// `sdroxide_dsp::IqCorrect` for what it can and cannot measure.
+    ///
+    /// **On by default**, and defaulted so a config written before this existed
+    /// gets it: it is what every other quadrature front end here already does,
+    /// and an image left in place is not something an operator can be expected
+    /// to recognise for what it is.
+    ///
+    /// Receive only, like the two settings above.
+    #[serde(default = "default_cat_iq_correction")]
+    pub iq_correction: bool,
+    /// How much of the middle of the span to high-pass away, in Hz — 0 for the
+    /// ordinary DC blocker alone. Only read for [`SoundFormat::Iq`].
+    ///
+    /// The spike in the centre of the waterfall is DC: the mixer's own offset
+    /// and its LO leaking back into itself, sitting on the sound card's zero
+    /// hertz. [`Self::iq_correction`] removes the offset, which is a corner of
+    /// a few tens of hertz — enough for the level, not always enough for the
+    /// look of it, because what is left is the *near*-DC noise either side.
+    /// This widens that corner, so an operator who wants the bottom couple of
+    /// hundred hertz gone can have it.
+    ///
+    /// It costs what it says: a first-order high-pass centred on the rig's I/Q
+    /// centre, −3 dB at the figure set and falling further in, which is the
+    /// dial itself unless [`Self::iq_offset_hz`] has moved it. Anything tuned
+    /// there goes with the spike — a CW note at 600 Hz is inside a 600 Hz
+    /// setting, and an AM carrier on the dial is DC by definition. Hence 0 by
+    /// default, and [`CAT_IQ_DC_BLOCK_MAX_HZ`] as far as it goes.
+    #[serde(default)]
+    pub iq_dc_block_hz: f64,
     /// Displayed panadapter bandwidth for demod-audio mode (Hz).
     pub audio_bw_hz: f64,
     /// Stream the rig's own spectrum scope over the serial CI-V link and draw
@@ -953,6 +995,21 @@ pub const CAT_IQ_RATES: [u32; 4] = [48_000, 96_000, 192_000, 384_000];
 fn default_iq_rate_hz() -> u32 {
     48_000
 }
+
+/// Whether a rig's I/Q is corrected unless the operator says otherwise. On:
+/// see [`CatConfig::iq_correction`].
+fn default_cat_iq_correction() -> bool {
+    true
+}
+
+/// How far [`CatConfig::iq_dc_block_hz`] may be wound up, in Hz.
+///
+/// Half a kilohertz, which covers the "first two or three hundred hertz" an
+/// operator actually asks for with room to spare, and stops short of a setting
+/// that would swallow a CW note. Past this the answer is not a wider notch but
+/// a shifted I.F. ([`CatConfig::iq_offset_hz`]), which moves the signal away
+/// from the spike instead of digging a hole around it.
+pub const CAT_IQ_DC_BLOCK_MAX_HZ: f64 = 500.0;
 
 /// How far either way [`CatConfig::iq_offset_hz`] may be set for a card running
 /// at `iq_rate_hz`, in Hz.
@@ -998,6 +1055,8 @@ impl Default for CatConfig {
             invert_spectrum: false,
             iq_offset_hz: 0.0,
             iq_rate_hz: default_iq_rate_hz(),
+            iq_correction: default_cat_iq_correction(),
+            iq_dc_block_hz: 0.0,
             audio_bw_hz: 4000.0,
             scope: false,
             scope_span: IcomScopeSpan::default(),
@@ -5608,6 +5667,29 @@ mod tests {
         let back: CatConfig =
             serde_json::from_str(&serde_json::to_string(&on).expect("serialises")).expect("parses");
         assert_eq!(back, on);
+    }
+
+    /// Correction goes on for everyone, including the configs written before
+    /// it existed: an operator cannot be expected to recognise a mirror image
+    /// for what it is, and the notch stays at zero because that one *is* an
+    /// operator's choice — it takes signal with it (issue #147).
+    #[test]
+    fn a_cat_rigs_iq_is_corrected_unless_turned_off() {
+        for json in [r#"{"format": "Iq"}"#, r#"{}"#] {
+            let cfg: CatConfig = serde_json::from_str(json).expect("parses");
+            assert!(cfg.iq_correction, "correction after loading {json}");
+            assert_eq!(cfg.iq_dc_block_hz, 0.0, "notch after loading {json}");
+        }
+        assert!(CatConfig::default().iq_correction);
+        let off: CatConfig =
+            serde_json::from_str(r#"{"iq_correction": false, "iq_dc_block_hz": 300.0}"#)
+                .expect("parses");
+        assert!(!off.iq_correction);
+        assert_eq!(off.iq_dc_block_hz, 300.0);
+        let back: CatConfig =
+            serde_json::from_str(&serde_json::to_string(&off).expect("serialises"))
+                .expect("parses");
+        assert_eq!(back, off);
     }
 
     /// Every `radio.json` written before the converter existed has to keep

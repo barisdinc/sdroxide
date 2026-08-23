@@ -37,12 +37,18 @@
 //! signals that does not happen to be a mirror image of itself — I and Q are
 //! uncorrelated and carry equal power. Both are properties of the *output*, so
 //! every [`BLOCK`] samples the loop measures how far its own output misses them
-//! and steps the two coefficients a fraction [`MU`] of the way towards closing
-//! the gap: `alpha` until `E[i·q']` is zero, `gain` until `E[q'²]` matches
-//! `E[i²]`. Convergence is deliberately unhurried — around a third of a second
-//! at 2.4 Msps — so the estimate settles on the front end rather than chasing a
-//! fading signal, and the residual jitter stays far below the image it is
-//! there to remove.
+//! and steps the two coefficients a fraction of the way towards closing the
+//! gap: `alpha` until `E[i·q']` is zero, `gain` until `E[q'²]` matches `E[i²]`.
+//! Convergence is deliberately unhurried — [`TAU_S`] — so the estimate settles
+//! on the front end rather than chasing a fading signal, and the residual
+//! jitter stays far below the image it is there to remove.
+//!
+//! That fraction is derived from the sample rate rather than fixed, because a
+//! block is a *count of samples* and the loop is trying to hold a time
+//! constant. A sound card's quadrature output — a rig's I/Q on a 48 kHz stereo
+//! input — runs fifty times slower than a dongle, so a step sized for the
+//! dongle would take the better part of a minute to converge there, which an
+//! operator reads as the correction not working at all.
 //!
 //! The estimator needs no knowledge of what is being received, but there is one
 //! input it cannot read: a baseband that is genuinely symmetric about the
@@ -67,13 +73,24 @@ use crate::demod::ComplexDcBlock;
 
 /// Samples per estimator update. At 2.4 Msps this is ~7 ms, and 16 k samples
 /// measure a correlation to about 1 % — an order of magnitude finer than the
-/// imbalance being corrected, before [`MU`] smooths it further.
+/// imbalance being corrected, before the loop's step smooths it further.
 const BLOCK: usize = 16_384;
 
-/// Fraction of each block's measured error folded into the estimate. A time
-/// constant of roughly 50 blocks: ~0.35 s at 2.4 Msps, a few seconds at the
-/// 250 kHz rate.
-const MU: f64 = 0.02;
+/// How long the estimate takes to close the bulk of the gap, in seconds. The
+/// step taken per block follows from it and the sample rate — one block is
+/// `BLOCK / rate` seconds of signal, and taking that fraction of the error each
+/// time makes the loop an exponential with this time constant.
+const TAU_S: f64 = 0.35;
+
+/// Bounds on that step. The floor keeps a very fast front end from crawling;
+/// the ceiling is what a slow one runs into — at 48 kHz a block is 341 ms, so
+/// the time constant [`TAU_S`] asks for is shorter than a single measurement
+/// and the loop can do no better than take a quarter of each. That still
+/// settles in about a second and a half, and a quarter of a block's measurement
+/// noise (~1 % over [`BLOCK`] samples) leaves the residual image far below what
+/// the front end started with.
+const MU_MIN: f64 = 0.005;
+const MU_MAX: f64 = 0.25;
 
 /// Largest phase skew the loop may apply, in radians of quadrature error
 /// (0.2 ≈ 11°). Hardware needing more than this is broken, so a larger
@@ -102,6 +119,13 @@ const IMPLAUSIBLE_RATIO: f64 = 3.0;
 /// raw device stream before anything else sees it.
 pub struct IqCorrect {
     dc: ComplexDcBlock,
+    /// Whether the imbalance loop runs at all, or this is a DC blocker wearing
+    /// the same coat — see [`IqCorrect::dc_only`].
+    balance: bool,
+    /// Fraction of each block's measured error folded into the estimate,
+    /// derived from the sample rate so the loop's time constant is [`TAU_S`]
+    /// whatever the front end's rate is.
+    mu: f64,
     /// How much I to subtract from Q to square up the quadrature.
     alpha: f64,
     /// Q-branch gain that equalises the two paths' power.
@@ -114,10 +138,34 @@ pub struct IqCorrect {
 }
 
 impl IqCorrect {
-    /// `corner_hz` is the DC blocker's corner — see [`ComplexDcBlock`].
+    /// DC removal and imbalance correction both. `corner_hz` is the DC
+    /// blocker's corner — see [`ComplexDcBlock`].
     pub fn new(corner_hz: f64, sample_rate: f64) -> Self {
+        Self::build(corner_hz, sample_rate, true)
+    }
+
+    /// DC removal alone, at whatever corner is asked for.
+    ///
+    /// For the operator who wants the spike in the middle of the waterfall gone
+    /// and nothing else touched — the imbalance loop is the half that can be
+    /// fooled by a mirror-symmetric band, so leaving it off has to stay
+    /// possible. The reverse pairing does not: an uncorrected offset multiplies
+    /// into `E[i·q]` as a constant bias, so the imbalance loop always removes
+    /// DC first whether it was asked to or not.
+    pub fn dc_only(corner_hz: f64, sample_rate: f64) -> Self {
+        Self::build(corner_hz, sample_rate, false)
+    }
+
+    fn build(corner_hz: f64, sample_rate: f64, balance: bool) -> Self {
+        let mu = if sample_rate > 0.0 {
+            (BLOCK as f64 / sample_rate / TAU_S).clamp(MU_MIN, MU_MAX)
+        } else {
+            MU_MAX
+        };
         IqCorrect {
             dc: ComplexDcBlock::new(corner_hz, sample_rate),
+            balance,
+            mu,
             alpha: 0.0,
             gain: 1.0,
             n: 0,
@@ -130,6 +178,9 @@ impl IqCorrect {
     /// Correct a block in place.
     pub fn process(&mut self, buf: &mut [Complex32]) {
         self.dc.process(buf);
+        if !self.balance {
+            return;
+        }
         for s in buf {
             let (alpha, gain) = (self.alpha as f32, self.gain as f32);
             let i = s.re;
@@ -178,15 +229,15 @@ impl IqCorrect {
         }
         // Residual correlation, in units of Q per I. Subtracting `rho·i` from
         // the output would zero it outright; `alpha` reaches the output through
-        // `gain`, and only a fraction MU of the step is taken.
+        // `gain`, and only a fraction `mu` of the step is taken.
         let rho = iq / ii;
         if rho.abs() <= IMPLAUSIBLE_ALPHA {
-            self.alpha = (self.alpha + MU * rho / self.gain).clamp(-MAX_ALPHA, MAX_ALPHA);
+            self.alpha = (self.alpha + self.mu * rho / self.gain).clamp(-MAX_ALPHA, MAX_ALPHA);
         }
         // Same idea for the power ratio: the full correction is sqrt(ii/qq).
         let ratio = (ii / qq).sqrt();
         if (1.0 / IMPLAUSIBLE_RATIO..=IMPLAUSIBLE_RATIO).contains(&ratio) {
-            self.gain = (self.gain * ratio.powf(MU)).clamp(1.0 / MAX_GAIN, MAX_GAIN);
+            self.gain = (self.gain * ratio.powf(self.mu)).clamp(1.0 / MAX_GAIN, MAX_GAIN);
         }
     }
 }
@@ -304,6 +355,74 @@ mod tests {
             alpha.abs() < 0.01 && (gain - 1.0).abs() < 0.01,
             "pulled to ({alpha:.4}, {gain:.4}) by a signal it cannot measure"
         );
+    }
+
+    /// The same front-end defect on a rig's sound card rather than a dongle.
+    /// The loop counts *samples*, so a step sized for 2.4 Msps takes fifty
+    /// times as long here — most of a minute, which is indistinguishable from
+    /// the correction not working. Five seconds of a 48 kHz card has to be
+    /// enough, and is what makes the step a function of the rate.
+    #[test]
+    fn a_sound_card_rate_converges_in_seconds() {
+        let rate = 48_000.0;
+        let f = 0.25_f64;
+        let n = 5 * rate as usize;
+        let mut buf: Vec<Complex32> = (0..n)
+            .map(|k| {
+                let ph = (std::f64::consts::TAU * f * k as f64) as f32;
+                Complex32::new(0.2 * ph.cos(), 0.2 * ph.sin())
+            })
+            .collect();
+        spoil(&mut buf, 1.05, 3.0_f32.to_radians(), Complex32::new(0.05, -0.03));
+
+        let window = 1 << 14;
+        let (tone_before, image_before) = tone_and_image_db(&buf[..window], f);
+        let before = tone_before - image_before;
+
+        let mut corr = IqCorrect::new(20.0, rate);
+        corr.process(&mut buf);
+        let (tone_after, image_after) = tone_and_image_db(&buf[n - window..], f);
+        assert!(
+            tone_after - image_after > before + 30.0,
+            "image rejection {before:.1} dB -> {:.1} dB after 5 s at 48 kHz",
+            tone_after - image_after
+        );
+    }
+
+    /// DC removal without the imbalance loop: the half an operator can ask for
+    /// on its own, because it is the other half that a band which mirrors
+    /// itself can mislead.
+    #[test]
+    fn dc_only_leaves_the_imbalance_alone() {
+        let f = 0.25_f64;
+        let n = 400_000;
+        let mut buf: Vec<Complex32> = (0..n)
+            .map(|k| {
+                let ph = (std::f64::consts::TAU * f * k as f64) as f32;
+                Complex32::new(0.2 * ph.cos(), 0.2 * ph.sin())
+            })
+            .collect();
+        spoil(&mut buf, 1.05, 3.0_f32.to_radians(), Complex32::new(0.05, -0.03));
+
+        let window = 1 << 14;
+        let (tone_before, image_before) = tone_and_image_db(&buf[..window], f);
+
+        let mut corr = IqCorrect::dc_only(20.0, 48_000.0);
+        corr.process(&mut buf);
+
+        let tail = &buf[n - window..];
+        let mean: Complex32 =
+            tail.iter().sum::<Complex32>() / Complex32::new(tail.len() as f32, 0.0);
+        assert!(mean.norm() < 1e-3, "residual DC {mean:?}");
+
+        let (tone_after, image_after) = tone_and_image_db(tail, f);
+        assert!(
+            ((tone_after - image_after) - (tone_before - image_before)).abs() < 3.0,
+            "the image moved: {:.1} dB -> {:.1} dB",
+            tone_before - image_before,
+            tone_after - image_after
+        );
+        assert_eq!(corr.estimate(), (0.0, 1.0), "the loop must not have run");
     }
 
     #[test]

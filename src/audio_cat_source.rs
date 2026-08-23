@@ -5,9 +5,9 @@
 //! stereo **IQ** (complex baseband → normal engine path) and mono **demod
 //! audio** (real → the engine's audio-band bypass, `DeviceCaps.audio_mode`).
 
-use sdroxide_dsp::{MonoResampler, Nco};
+use sdroxide_dsp::{IqCorrect, MonoResampler, Nco};
 use sdroxide_radio::rtrb;
-use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
+use sdroxide_radio::{Complex32, ControlUpdate, DC_BLOCK_HZ, IqSource, Result};
 use sdroxide_types::{CatConfig, Mode, SoundFormat, TxTelemetry};
 
 use crate::dial::Dial;
@@ -36,6 +36,13 @@ pub struct AudioCatSource {
     /// when the rig's LO is on its dial, which is the ordinary case and the one
     /// that must cost nothing.
     iq_shift: Option<Nco>,
+    /// Undoes what the rig's quadrature mixer and the sound card's two channels
+    /// did to the stream: the DC spike in the middle of the span, and the
+    /// mirror image of every signal reflected about it
+    /// (`CatConfig::iq_correction`, `CatConfig::iq_dc_block_hz`). `None` when
+    /// the operator has both off, and on demod audio, which is one real signal
+    /// with neither defect to have.
+    iq_correct: Option<IqCorrect>,
     audio_bw: f64,
 
     // TX audio to the rig (interleaved stereo playback ring).
@@ -195,6 +202,21 @@ impl AudioCatSource {
             );
         }
         let iq_shift = shift.map(|hz| Nco::new(hz, in_rate));
+        let iq_correct = build_correction(&cfg, format, in_rate);
+        // Said out loud beside the rest of what was assumed at open: an image
+        // 35 dB down is a plausible station, and an operator hunting one that
+        // vanishes when this is switched on deserves to find the reason in the
+        // log rather than in the settings dialog.
+        if iq_correct.is_some() {
+            tracing::info!(
+                "radio I/Q corrected: {}{}",
+                if cfg.iq_correction { "mirror image cancelled" } else { "DC only" },
+                match cfg.iq_dc_block_hz {
+                    hz if hz > 0.0 => format!(", centre high-passed at {hz:.0} Hz"),
+                    _ => String::new(),
+                }
+            );
+        }
         // Said out loud with the rest of what was assumed at open, and with the
         // same reasoning: on a quadrature rig the card's rate is the panadapter
         // width, so it belongs in the log beside which way round I and Q are.
@@ -245,6 +267,7 @@ impl AudioCatSource {
             format,
             q_sign,
             iq_shift,
+            iq_correct,
             audio_bw,
             out,
             tx_resampler,
@@ -373,24 +396,59 @@ impl DropWatch {
 /// than a period: nothing looks at all while the source is not being read.
 const DROP_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The corrector a given configuration asks for, or `None` when it asks for
+/// nothing — see [`sdroxide_types::CatConfig::iq_correction`] and
+/// [`sdroxide_types::CatConfig::iq_dc_block_hz`].
+///
+/// The two settings are not independent in one direction: an uncorrected DC
+/// offset multiplies straight into the correlation the imbalance loop measures,
+/// so a rig being corrected always has its DC removed as well — at the operator's
+/// corner if they set one, and at the ordinary front-end corner if they did not.
+/// The reverse pairing is a real choice and is honoured: DC alone, with the
+/// loop that a mirror-symmetric band can mislead left out of circuit.
+fn build_correction(
+    cfg: &sdroxide_types::CatConfig,
+    format: SoundFormat,
+    rate: f64,
+) -> Option<IqCorrect> {
+    // Demod audio is a real signal inside the rig's own filter: no quadrature,
+    // so no image, and its DC is the demodulator's business.
+    if !matches!(format, SoundFormat::Iq) {
+        return None;
+    }
+    let notch = cfg.iq_dc_block_hz.clamp(0.0, sdroxide_types::CAT_IQ_DC_BLOCK_MAX_HZ);
+    match (cfg.iq_correction, notch > 0.0) {
+        (false, false) => None,
+        (false, true) => Some(IqCorrect::dc_only(notch, rate)),
+        (true, _) => Some(IqCorrect::new(notch.max(DC_BLOCK_HZ), rate)),
+    }
+}
+
 /// Drain interleaved (I, Q) pairs from the capture ring into `buf`, with the
 /// right channel scaled by `q_sign` — `-1.0` conjugates the stream, mirroring
 /// the spectrum about the dial (see [`sdroxide_types::CatConfig::invert_spectrum`])
-/// — and the result mixed by `shift` when the rig's I.F. is not on its dial
+/// — the result run through `correct` to take out the front end's DC and mirror
+/// image, and then mixed by `shift` when the rig's I.F. is not on its dial
 /// (see [`sdroxide_types::CatConfig::iq_offset_hz`]).
 ///
-/// The two are in that order because they undo the radio in the order the radio
-/// applied it: which wire carries Q decides what the stream *means*, and only a
-/// stream that means the right thing can be moved the right way. Conjugating
-/// afterwards would mirror the shift along with everything else and land the
-/// dial twice the offset away.
+/// The three are in that order because they undo the radio in the order the
+/// radio applied it. Which wire carries Q decides what the stream *means*, and
+/// only a stream that means the right thing can be moved the right way —
+/// conjugating after the shift would mirror the shift along with everything
+/// else and land the dial twice the offset away. The correction has to come
+/// before the shift for a plainer reason: both of the defects it removes are
+/// anchored to the *card's* centre, and the shift is what stops that being the
+/// centre of what comes out. Correcting afterwards would look for the spike and
+/// the mirror axis at the dial, where on a rig with `RX SHFT` set neither of
+/// them is.
 ///
-/// A free function rather than a method so both can be exercised without a
+/// A free function rather than a method so all three can be exercised without a
 /// sound card and a serial port behind them.
 fn fill_iq(
     src: &mut rtrb::Consumer<f32>,
     buf: &mut [Complex32],
     q_sign: f32,
+    correct: Option<&mut IqCorrect>,
     shift: Option<&mut Nco>,
 ) -> usize {
     let mut n = 0;
@@ -400,6 +458,13 @@ fn fill_iq(
         let q = src.pop().unwrap_or(0.0);
         buf[n] = Complex32::new(i, q * q_sign);
         n += 1;
+    }
+    // Ahead of the shift, and after the conjugation — which the estimator does
+    // not mind either way, because a conjugated stream has its DC and its
+    // mirror axis in the same place and the loop simply converges on the
+    // mirrored coefficient.
+    if let Some(iq) = correct {
+        iq.process(&mut buf[..n]);
     }
     // Phase-continuous across blocks, which is the whole reason the oscillator
     // outlives the call: restarting it at every read would put a step in the
@@ -484,7 +549,13 @@ impl IqSource for AudioCatSource {
                 Ok(n)
             }
             SoundFormat::Iq => {
-                let n = fill_iq(&mut self.in_consumer, buf, self.q_sign, self.iq_shift.as_mut());
+                let n = fill_iq(
+                    &mut self.in_consumer,
+                    buf,
+                    self.q_sign,
+                    self.iq_correct.as_mut(),
+                    self.iq_shift.as_mut(),
+                );
                 if n == 0 {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
@@ -518,9 +589,13 @@ impl IqSource for AudioCatSource {
                 }
                 n
             }
-            SoundFormat::Iq => {
-                fill_iq(&mut self.in_consumer, buf, self.q_sign, self.iq_shift.as_mut())
-            }
+            SoundFormat::Iq => fill_iq(
+                &mut self.in_consumer,
+                buf,
+                self.q_sign,
+                self.iq_correct.as_mut(),
+                self.iq_shift.as_mut(),
+            ),
         })
     }
 
@@ -921,11 +996,11 @@ mod tests {
     fn inverting_iq_mirrors_the_signal_about_the_dial() {
         let mut buf = [Complex32::new(0.0, 0.0); 512];
 
-        let n = fill_iq(&mut tone_ring(1000.0, 512), &mut buf, 1.0, None);
+        let n = fill_iq(&mut tone_ring(1000.0, 512), &mut buf, 1.0, None, None);
         assert_eq!(n, 512, "every pair consumed");
         assert!((mean_freq_hz(&buf[..n]) - 1000.0).abs() < 1.0, "above the dial, unchanged");
 
-        let n = fill_iq(&mut tone_ring(1000.0, 512), &mut buf, -1.0, None);
+        let n = fill_iq(&mut tone_ring(1000.0, 512), &mut buf, -1.0, None, None);
         assert_eq!(n, 512);
         assert!((mean_freq_hz(&buf[..n]) + 1000.0).abs() < 1.0, "below the dial once inverted");
     }
@@ -941,14 +1016,14 @@ mod tests {
 
         // The rig's centre is 8 kHz above the dial, so the station on the dial
         // arrives 8 kHz below centre — and has to read as being on it.
-        let n = fill_iq(&mut tone_ring(-8_000.0, 512), &mut buf, 1.0, Some(&mut nco));
+        let n = fill_iq(&mut tone_ring(-8_000.0, 512), &mut buf, 1.0, None, Some(&mut nco));
         assert_eq!(n, 512);
         assert!(mean_freq_hz(&buf[..n]).abs() < 1.0, "the dial is the dial again");
 
         // Everything else keeps its distance from it: a station 1 kHz up the
         // band is 1 kHz up the band, not 9.
         let mut nco = Nco::new(8_000.0, RATE as f64);
-        let n = fill_iq(&mut tone_ring(-7_000.0, 512), &mut buf, 1.0, Some(&mut nco));
+        let n = fill_iq(&mut tone_ring(-7_000.0, 512), &mut buf, 1.0, None, Some(&mut nco));
         assert!((mean_freq_hz(&buf[..n]) - 1000.0).abs() < 1.0, "1 kHz above the dial");
     }
 
@@ -963,8 +1038,91 @@ mod tests {
 
         // Miswired, so the card delivers the conjugate: the station that sits
         // 8 kHz below the rig's centre arrives looking like +8 kHz.
-        let n = fill_iq(&mut tone_ring(8_000.0, 512), &mut buf, -1.0, Some(&mut nco));
+        let n = fill_iq(&mut tone_ring(8_000.0, 512), &mut buf, -1.0, None, Some(&mut nco));
         assert!(mean_freq_hz(&buf[..n]).abs() < 1.0, "on the dial, both corrections applied");
+    }
+
+    /// The correction is anchored to the *card's* centre, which is why it runs
+    /// before the shift. On a rig with `RX SHFT` set to 8.0 the mixer's offset
+    /// sits on the centre of what the card records and the station the operator
+    /// is tuned to sits 8 kHz below it; undo the two the other way round and
+    /// the DC blocker eats the station — which the shift has just put on zero —
+    /// while the spike survives as a tone 8 kHz up (issue #147).
+    #[test]
+    fn the_correction_runs_on_the_cards_centre_not_the_dial() {
+        const N: usize = 32_768;
+        let (mut p, mut c) = rtrb::RingBuffer::<f32>::new(2 * N);
+        for k in 0..N {
+            let phase = std::f32::consts::TAU * -8_000.0 * k as f32 / RATE;
+            // The station on the dial, with the mixer's own offset on the
+            // centre of the card alongside it.
+            p.push(0.2 * phase.cos() + 0.5).unwrap();
+            p.push(0.2 * phase.sin() - 0.3).unwrap();
+        }
+
+        let mut buf = vec![Complex32::new(0.0, 0.0); N];
+        let mut corr = IqCorrect::new(DC_BLOCK_HZ, RATE as f64);
+        let mut nco = Nco::new(8_000.0, RATE as f64);
+        let n = fill_iq(&mut c, &mut buf, 1.0, Some(&mut corr), Some(&mut nco));
+        assert_eq!(n, N);
+
+        // Judged on the settled tail: the blocker charges over a few hundred
+        // samples at this corner.
+        let tail = &buf[N - 8192..];
+        assert!(
+            mean_freq_hz(tail).abs() < 1.0,
+            "the station should be on the dial, not {:.0} Hz from it",
+            mean_freq_hz(tail)
+        );
+        // And it is still the station, not what is left of it: the shift has
+        // put it on zero, so its amplitude is the mean of the output.
+        let mean: Complex32 =
+            tail.iter().sum::<Complex32>() / Complex32::new(tail.len() as f32, 0.0);
+        assert!((mean.norm() - 0.2).abs() < 0.01, "the station came out at {:.3}", mean.norm());
+    }
+
+    /// Which corrector each combination of the two settings asks for. The one
+    /// pairing that is not free: an uncorrected offset biases the correlation
+    /// the imbalance loop measures, so a corrected rig always has DC removed —
+    /// at the operator's corner where they set one, and at the front end's
+    /// where they did not.
+    #[test]
+    fn the_two_settings_pick_the_corrector() {
+        let cat = |correction: bool, notch: f64| sdroxide_types::CatConfig {
+            iq_correction: correction,
+            iq_dc_block_hz: notch,
+            ..Default::default()
+        };
+        let build = |correction, notch, format| {
+            build_correction(&cat(correction, notch), format, RATE as f64)
+        };
+
+        // Demod audio is one real signal: no quadrature, no image, nothing to do.
+        assert!(build(true, 300.0, SoundFormat::DemodAudio).is_none());
+        // Both off is genuinely off — no per-sample work at all.
+        assert!(build(false, 0.0, SoundFormat::Iq).is_none());
+        // Notch alone: DC, and the loop that a mirrored band can mislead left out.
+        let mut dc = build(false, 300.0, SoundFormat::Iq).expect("a blocker");
+        let mut spoiled = [Complex32::new(1.0, 0.5); 512];
+        dc.process(&mut spoiled);
+        assert_eq!(dc.estimate(), (0.0, 1.0), "the loop must not have run");
+        // Correction alone still blocks DC, because the loop needs it gone.
+        assert!(build(true, 0.0, SoundFormat::Iq).is_some());
+        assert!(build(true, 300.0, SoundFormat::Iq).is_some());
+
+        // A notch wound past the ceiling is clamped rather than honoured, which
+        // is what keeps it a blocker: a corner at or above the sample rate
+        // makes the running mean the sample itself and every output zero.
+        let mut absurd = build(false, 1e9, SoundFormat::Iq).expect("a blocker");
+        let mut tone: Vec<Complex32> = (0..4096)
+            .map(|k| {
+                let ph = std::f32::consts::TAU * 6_000.0 * k as f32 / RATE;
+                Complex32::new(0.5 * ph.cos(), 0.5 * ph.sin())
+            })
+            .collect();
+        absurd.process(&mut tone);
+        let worst = tone[2048..].iter().map(|s| s.norm()).fold(f32::MAX, f32::min);
+        assert!(worst > 0.4, "a 6 kHz tone came out at {worst:.3} — the notch swallowed the band");
     }
 
     /// The oscillator carries its phase from one block to the next: a sound
@@ -979,12 +1137,12 @@ mod tests {
 
         // Same input, drained in two halves through the same oscillator.
         let mut halves = [Complex32::new(0.0, 0.0); 512];
-        let a = fill_iq(&mut ring, &mut halves[..256], 1.0, Some(&mut nco));
-        let b = fill_iq(&mut ring, &mut halves[256..], 1.0, Some(&mut nco));
+        let a = fill_iq(&mut ring, &mut halves[..256], 1.0, None, Some(&mut nco));
+        let b = fill_iq(&mut ring, &mut halves[256..], 1.0, None, Some(&mut nco));
         assert_eq!((a, b), (256, 256));
 
         let mut nco = Nco::new(8_000.0, RATE as f64);
-        let n = fill_iq(&mut tone_ring(-8_000.0, 512), &mut whole, 1.0, Some(&mut nco));
+        let n = fill_iq(&mut tone_ring(-8_000.0, 512), &mut whole, 1.0, None, Some(&mut nco));
         assert_eq!(n, 512);
         for (k, (x, y)) in whole.iter().zip(halves.iter()).enumerate() {
             assert!((x - y).norm() < 1e-4, "sample {k} differs across the block boundary");
@@ -1001,11 +1159,11 @@ mod tests {
             p.push(v).unwrap();
         }
         let mut buf = [Complex32::new(0.0, 0.0); 4];
-        assert_eq!(fill_iq(&mut c, &mut buf, 1.0, None), 1);
+        assert_eq!(fill_iq(&mut c, &mut buf, 1.0, None, None), 1);
         assert_eq!(buf[0], Complex32::new(1.0, 2.0));
         // The odd `3.0` is still waiting, and pairs with what arrives next.
         p.push(4.0).unwrap();
-        assert_eq!(fill_iq(&mut c, &mut buf, -1.0, None), 1);
+        assert_eq!(fill_iq(&mut c, &mut buf, -1.0, None, None), 1);
         assert_eq!(buf[0], Complex32::new(3.0, -4.0));
     }
 

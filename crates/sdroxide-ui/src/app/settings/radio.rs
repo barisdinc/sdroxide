@@ -129,6 +129,47 @@ pub(in crate::app) fn settings_cat_tab(
                     .suffix(" Hz"),
             );
             ui.end_row();
+
+            ui.label("IQ correction").on_hover_text(
+                "Cancel the mirror image of every signal, and the DC spike in \
+                 the middle of the waterfall.\n\n\
+                 A radio's I/Q output is two analogue paths that are never \
+                 quite equal in gain nor exactly 90° apart, and what that \
+                 leaves is a copy of every signal reflected about the tuned \
+                 frequency, usually 30-40 dB down — strong enough to look like \
+                 a station that is not there, and to be decoded as one. Radios \
+                 with front-panel balance trimmers are adjusting exactly this; \
+                 here it is measured off the received noise and needs no \
+                 setting.\n\n\
+                 Leave it on. Turn it off if you are listening to AM tuned \
+                 dead on the carrier — the carrier is DC, so it goes with the \
+                 spike — or to check whether a signal is real by watching \
+                 whether it survives.",
+            );
+            crate::chrome::checkbox(ui, &mut cfg.cat.iq_correction, "Cancel mirror images");
+            ui.end_row();
+
+            ui.label("DC notch").on_hover_text(
+                "Widen the hole taken out of the middle of the span, for a \
+                 radio whose centre spike is broader than the offset \
+                 underneath it.\n\n\
+                 0 leaves the ordinary blocker, which is a few tens of hertz \
+                 wide and removes the offset without touching anything else. \
+                 Wind it up and the bottom of the span goes with it: a \
+                 first-order high-pass, 3 dB down at the figure set here and \
+                 further in below it.\n\n\
+                 It is centred where the radio's I/Q is centred, which is the \
+                 dial unless the offset above has moved it — so anything tuned \
+                 there goes too. A CW note at 600 Hz is inside a 600 Hz \
+                 setting.",
+            );
+            ui.add(
+                DragValue::new(&mut cfg.cat.iq_dc_block_hz)
+                    .speed(10.0)
+                    .range(0.0..=sdroxide_types::CAT_IQ_DC_BLOCK_MAX_HZ)
+                    .suffix(" Hz"),
+            );
+            ui.end_row();
         }
 
         if matches!(cfg.cat.format, SoundFormat::DemodAudio) {

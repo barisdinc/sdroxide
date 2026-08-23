@@ -573,7 +573,17 @@ use sdroxide_types::{
 /// v85: DRM (Digital Radio Mondiale) — `Mode::Drm`, `ServerMsg::Drm` carrying
 /// `DrmStatus`, and `Command::SetDrmService` / `SetDrmConstellation`. All are
 /// appended, so no existing discriminant moves.
-pub const PROTO_VERSION: u16 = 85;
+///
+/// **86** — a rig's I/Q sound card gets the front-end correction every other
+/// quadrature interface here already had (issue #147).
+/// [`sdroxide_types::CatConfig`] gained `iq_correction` and `iq_dc_block_hz`:
+/// whether the mirror image and the DC spike are cancelled, and how wide a
+/// notch to take out of the centre.
+///
+/// Fields in the radio configuration, which rides in both a command and an
+/// event, so a v85 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying.
+pub const PROTO_VERSION: u16 = 86;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

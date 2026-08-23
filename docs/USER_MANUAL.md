@@ -4161,6 +4161,57 @@ The offset can be set up to half the **I/Q sample rate** either way, which is as
 far as the digitised window reaches: past that the dial is outside what the card
 is recording at all. Raising the rate raises that ceiling with it.
 
+**IQ correction (Cancel mirror images)** (IQ format only) — cancels the copy of
+every signal that appears on the *other* side of the tuned frequency, and the
+permanent spike in the middle of the waterfall. On by default; leave it on.
+
+A radio's I/Q output is two analogue paths — the receiver's quadrature mixer,
+then two channels of a sound card — and they are never quite equal in gain, nor
+exactly 90° apart. What that leaves is a mirror: a signal 8 kHz above the dial
+appears again 8 kHz below it, typically 30 to 40 dB down. That is weak enough to
+overlook on a quiet band and strong enough to be a problem on a busy one — it
+looks like a station, it decodes like one on FT8, and it moves when you tune,
+which is exactly what a real signal does. Radios with a pair of front-panel
+balance trimmers are adjusting this by hand; radios without them are why
+sdroxide does it in software.
+
+Nothing needs setting. The correction measures the imbalance off whatever the
+receiver is hearing — noise will do — and converges in a second or two, then
+tracks it. It cannot measure one case, and does not try: a band that is a mirror
+image of itself, which is two equally strong carriers either side of the dial or
+an AM/DSB signal centred exactly on it, looks identical to an imbalance. Blocks
+like that are discarded rather than learned from, so the correction goes quiet
+instead of going wrong.
+
+Turn it off when you are listening to **AM tuned dead on the carrier**: that
+carrier *is* DC, so it goes with the spike and the envelope detector distorts
+without it. Tuning a kilohertz off is the other answer, and the better one. It
+is also worth switching off for a moment to settle an argument about a weak
+signal — one that disappears with the correction on was the mirror of something
+else.
+
+**DC notch** (IQ format only) — how much of the middle of the span to high-pass
+away, in hertz. 0 by default, which is not "no DC blocking": the correction
+above already removes the offset with a corner a few tens of hertz wide, and
+that is enough for almost everyone.
+
+Raise it for a radio whose centre spike is *broader* than the offset underneath
+it — some sound cards put mains hum and converter noise in the first couple of
+hundred hertz, and no amount of DC removal touches that. What this does is
+widen the corner: a first-order high-pass, 3 dB down at the figure set and
+falling further in below it, up to 500 Hz.
+
+It costs signal, and it is worth knowing where. The notch is centred where the
+radio's I/Q is centred, which is the dial itself unless **I/Q centre offset**
+has moved it — so whatever you are tuned to goes into the hole with the spike.
+A CW note at 600 Hz is inside a 600 Hz setting. If the middle of the span is
+unusable rather than merely untidy, the real fix is the offset above: shifting
+the radio's I.F. moves the signal away from the spike instead of digging a
+crater around it.
+
+Both settings take effect on **Apply**, without restarting, and both are receive
+only.
+
 **Serial (CAT) settings**, in the order they appear:
 
 - **Serial port** — the radio's CAT serial port. On Linux, USB-style ports
