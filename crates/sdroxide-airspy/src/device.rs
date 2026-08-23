@@ -80,7 +80,7 @@ impl Device {
         // endpoint is how a receiver ends up streaming a configuration nobody
         // asked for.
         dev.set_mode(ReceiverMode::Off)?;
-        dev.identify();
+        dev.identify()?;
         dev.read_rates();
         dev.apply_packing();
         dev.choose_rate(cfg.sample_rate_hz)?;
@@ -91,15 +91,34 @@ impl Device {
         Ok(dev)
     }
 
-    /// Read what the receiver says about itself. Best-effort: one that will not
-    /// name itself still receives, so none of this is fatal.
-    fn identify(&mut self) {
+    /// Read what the receiver says about itself.
+    ///
+    /// Best-effort with one exception: a receiver that will not name itself
+    /// still receives, so nothing here is fatal *unless* it names itself as
+    /// something else. HydraSDR's prototype RFOne boards were flashed with this
+    /// USB id, and the two firmwares are not interchangeable — their `SET_FREQ`
+    /// carries eight bytes where this one carries four, so an RFOne driven from
+    /// here would tune somewhere the operator did not ask for and say nothing
+    /// about it. `looks_like_hydrasdr` catches the ones whose descriptors say
+    /// so; this catches the rest.
+    fn identify(&mut self) -> Result<()> {
         if let Ok(b) = self.usb.control_in(Request::VersionStringRead, 0, 0, 255) {
             self.firmware = parse_ascii(&b);
             // Always shorter than the buffer it is asked for, so the SHORT
             // marker beside it means nothing. Saying so keeps the marker
             // meaningful everywhere else in this trace.
             self.usb.trace().note("(the short version-string reply above is expected)");
+            if self.firmware.trim_start().starts_with("HydraSDR") {
+                return Err(Error::WrongRadio(format!(
+                    "{} answered {:?} — that is a HydraSDR RFOne prototype, which shares \
+                     this USB id with the Airspy R2 and Mini. Choose \"HydraSDR RFOne \
+                     (USB)\" in Settings → Radio instead: the two receivers program their \
+                     tuners differently and neither driver will tune the other's hardware \
+                     correctly.",
+                    self.usb.label(),
+                    self.firmware,
+                )));
+            }
         }
         if let Ok(b) = self.usb.control_in(Request::BoardPartidSerialnoRead, 0, 0, 24) {
             self.part_serial = PartIdSerial::parse(&b);
@@ -112,6 +131,7 @@ impl Device {
             if serial.is_empty() { "unknown".into() } else { serial },
             self.usb.speed_name(),
         ));
+        Ok(())
     }
 
     /// Ask the receiver which rates it has.

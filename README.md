@@ -45,6 +45,7 @@ One binary, three ways to run it:
   SmartSDR (FlexRadio - experimental!), PlutoSDR (native support, experimental!),
   Icom LAN / RS-BA1 protocol, HackRF (native support, RX
   verified / TX unmeasured), Airspy R2/Mini (native support, experimental!),
+  HydraSDR RFOne (native support, experimental!),
   ELAD FDM-DUO / FDM-S1 / FDM-S2 (native support, experimental!),
   LimeSDR family + LimeRFE front end (via LimeSuite, experimental!)
 - **Panadapter** — GPU (wgpu) waterfall + spectrum line, wheel-zoom around the
@@ -485,6 +486,36 @@ starting sdroxide before the rig is fine:
   **Not yet verified against real hardware** — the Radio tab has a **Copy
   diagnostic report** button, and that report is what makes a fix possible.
 
+- **HydraSDR RFOne (USB)** — a HydraSDR RFOne, driven directly over USB by a
+  native pure-Rust driver. **No SoapySDR, no libusb and no libhydrasdr needed**,
+  so it works in every build including the standard `.msi` and `.dmg`.
+  24–1800 MHz, up to 12 Msps. Receive only. See "HydraSDR RFOne permissions"
+  under Building for the Linux udev rule.
+
+  A **fork of the Airspy R2** rather than a relative of it — libhydrasdr still
+  carries libairspy's copyright header, vendor requests 0–26 line up number for
+  number, and the gain curves are byte-for-byte the same — but its own interface
+  all the same, because the two cannot drive each other's hardware: the RFOne
+  takes an eight-byte tuning command where the Airspy takes four. Everything
+  said above about the rate you pick being half the rate the ADC runs at applies
+  here too, for the same reason.
+
+  Three things this radio has that the Airspy does not. **Three RF sockets** —
+  `ANT`, `CABLE1` and `CABLE2` — selectable on the Radio tab, with the bias tee
+  on the antenna port alone (the panel greys the switch out on the others rather
+  than letting it claim DC that is not there). **Seven sample rates** — 12, 10,
+  8, 6, 5, 4.096 and 2.5 Msps — of which the receiver only reports three: the
+  other four live in the firmware's alternate table, are marked as such in the
+  menu, and fall back to a listed rate with a note if a particular firmware
+  turns out not to carry them. And **two USB ids**: production boards are
+  `38af:0001`, while prototypes came up on `1d50:60a1`, which is the Airspy R2
+  and Mini's own. sdroxide separates the two by the USB descriptors before
+  opening and by the firmware version string after, so picking the wrong
+  interface for either radio is answered with the name of the right one.
+
+  **Not yet verified against real hardware** — the Radio tab has a **Copy
+  diagnostic report** button, and that report is what makes a fix possible.
+
 - **HackRF One / Pro (USB)** — a HackRF One or HackRF Pro (or a Jawbreaker or
   rad1o), driven directly over USB by a native pure-Rust driver. **No SoapySDR,
   no libusb and no libhackrf needed**, so it works in every build including the
@@ -671,11 +702,12 @@ starting sdroxide before the rig is fine:
   which is this backend's widest span.
 
 The wideband-IQ backends (RTL-SDR over USB or rtl_tcp, RX-888, Airspy HF+,
-Airspy R2/Mini, SDRplay, HackRF, ELAD, SoapySDR, HPSDR, TCI, SmartSDR, PlutoSDR)
+Airspy R2/Mini, HydraSDR RFOne, SDRplay, HackRF, ELAD, SoapySDR, HPSDR, TCI,
+SmartSDR, PlutoSDR)
 drive the full panadapter, the CW/PSK/RTTY skimmers, and internal demodulation;
 a CAT rig feeding demodulated audio shows only a narrow audio-band slice.
-RTL-SDR, RX-888, Airspy HF+, Airspy R2/Mini, SDRplay and the ELAD FDM-S are
-receive-only; the others can transmit — the HackRF half duplex, the PlutoSDR either way (half
+RTL-SDR, RX-888, Airspy HF+, Airspy R2/Mini, HydraSDR RFOne, SDRplay and the
+ELAD FDM-S are receive-only; the others can transmit — the HackRF half duplex, the PlutoSDR either way (half
 duplex by default, full duplex on a board with real Ethernet behind it), the
 rest while still receiving.
 
@@ -1062,6 +1094,31 @@ Both models share the id `1d50:60a1` *and* the same USB product string, so a
 device list cannot say whether an R2 or a Mini is plugged in — the only thing
 that separates them is the set of sample rates they offer, which sdroxide reads
 once the receiver is open.
+
+### HydraSDR RFOne permissions
+
+Same situation again — direct USB access, no vendor package.
+
+**Linux.** Install the packaged udev rule and replug the receiver:
+
+```sh
+sudo cp packaging/linux/60-sdroxide-hydrasdr.rules /usr/lib/udev/rules.d/
+sudo udevadm control --reload
+```
+
+The `.deb` installs this for you. If HydraSDR's own `51-hydrasdr.rules` is
+already installed it covers the same ids and there is nothing to do.
+
+The rule covers **both** ids an RFOne can appear on: `38af:0001` for production
+boards and `1d50:60a1` for the prototypes, which share the Airspy R2 and Mini's
+pair. The second line duplicates `60-sdroxide-airspy.rules`, deliberately — two
+udev rules granting the same access to the same device is a no-op, and it means
+installing either file alone is enough.
+
+**Windows.** Bind the device to WinUSB with [Zadig](https://zadig.akeo.ie/), or
+install HydraSDR's own package, which does the same thing.
+
+**macOS.** Nothing to do.
 
 ### HackRF permissions
 

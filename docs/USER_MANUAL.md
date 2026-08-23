@@ -107,7 +107,8 @@ or connects to a remote sdroxide server.
 - **Many radio backends:** SoapySDR devices, OpenHPSDR (Hermes/Metis) Ethernet
   SDRs, a TCI server (ExpertSDR3/Thetis), a SmartSDR radio (FlexRadio
   FLEX-6000/8000), RTL-SDR, RX-888, Airspy HF+ and SDRplay RSP receivers over
-  USB, an Airspy R2 or Mini over USB, a HackRF transceiver over USB, an RTL-SDR
+  USB, an Airspy R2 or Mini over USB, a HydraSDR RFOne over USB, a HackRF
+  transceiver over USB, an RTL-SDR
   published over the network by
   `rtl_tcp`, a PlutoSDR, or a CAT-controlled radio with audio over a USB sound
   card (demodulated audio or stereo IQ).
@@ -3603,6 +3604,11 @@ radio. Everything below the selector changes to match the choice:
 - **Airspy R2 / Mini (USB)** — an Airspy R2 or Mini, driven by sdroxide's own
   USB driver. A different receiver from the Airspy HF+ above, with its own
   interface. See [6.2.13](#6213-airspy-r2--mini-usb).
+- **HydraSDR RFOne (USB)** — a HydraSDR RFOne, driven by sdroxide's own USB
+  driver with no SoapySDR and no libhydrasdr involved. A fork of the Airspy R2
+  above rather than a relative of it, and its own interface for that reason:
+  the two cannot drive each other's hardware. Three RF sockets and seven sample
+  rates. See [6.2.18](#6218-hydrasdr-rfone-usb).
 - **HackRF One / Pro (USB)** — a HackRF One, HackRF Pro, Jawbreaker or rad1o,
   driven by sdroxide's own USB driver with no SoapySDR and no libhackrf
   involved. The one USB interface here that transmits, and half duplex. See
@@ -6215,6 +6221,111 @@ board's own; the fan is worth having on for any sustained transmitting.
 > the LimeSDR itself needs nothing from this project, because LimeSuite ships
 > its own rules.
 
+#### 6.2.18 HydraSDR RFOne (USB)
+
+A HydraSDR RFOne, driven directly over USB by sdroxide's own pure-Rust driver.
+No SoapySDR, no libusb and no libhydrasdr, so this interface is in every build
+variant on every platform. 24 MHz to 1800 MHz, receive only.
+
+**A fork of the Airspy R2, not a relative of it.** libhydrasdr still carries
+libairspy's 2014 copyright header: vendor requests 0–26 line up number for
+number, the gain curves are byte-for-byte identical, and the receiver is built
+the same way — a real ADC whose wanted signal sits at a quarter of the sample
+rate, with the host doing the downconversion.
+
+It has its own interface all the same, because **the two drivers cannot drive
+each other's hardware**. The RFOne takes an eight-byte tuning command where the
+Airspy takes four, and a receiver programmed by the wrong one tunes somewhere
+nobody asked for without saying so. sdroxide checks: pick the wrong interface
+for either radio and you are told the name of the right one.
+
+**Permissions.** Linux needs the packaged udev rule — see "HydraSDR RFOne
+permissions" in the README. Windows wants WinUSB via Zadig or HydraSDR's own
+package. macOS needs nothing.
+
+**Receiver, and the shared USB id.** Rescan lists what is on the bus. Production
+boards enumerate as `38af:0001`; the prototypes came up on `1d50:60a1`, which is
+the **Airspy R2 and Mini's own pair**. sdroxide separates them twice — by the
+USB descriptors during the scan, which opens nothing, and by the firmware
+version string after opening, which is the check HydraSDR's own library makes.
+A board on the legacy id is marked as such in the list. The serial is matched on
+its suffix, so the last eight digits are enough; the `HYDRASDR SN:` prefix the
+descriptor carries may be left on or taken off.
+
+**Sample rate, and the four the receiver will not admit to.** Seven rates: 12,
+10, 8, 6, 5, 4.096 and 2.5 Msps. The receiver *reports* three of them — 10, 5
+and 2.5 — and says nothing about the other four, which live in a second table in
+its firmware and are reached by naming the ADC rate directly. The menu marks
+which is which. If a particular firmware turns out not to carry an alternate it
+answers with a refusal, and sdroxide falls back to the nearest listed rate and
+says so on the status line rather than leaving the span quietly wrong.
+
+Underneath, the receiver runs at **twice** the rate shown, for the same reason
+as the Airspy R2 above: its ADC is real rather than complex, and sdroxide makes
+complex baseband from it on the host with a quarter-rate translate and a
+half-band decimator. The same two consequences follow — the receiver's own DC
+offset lands at the **edge** of the span rather than its centre, and image
+rejection is full across the inner 80 % of the span and progressively less at
+the edges.
+
+Changing the rate reopens the receiver: the rate moves the tuner's IF and the
+clock dividers together, so it cannot be changed under a running stream.
+
+**RF input.** The RFOne brings out three sockets, and this is where you pick
+between them:
+
+| Socket | Notes |
+| --- | --- |
+| **ANT** | The antenna SMA. The only one with a bias tee behind it. |
+| **CABLE1** | A plain input. |
+| **CABLE2** | A plain input. |
+
+The bias-tee switch is greyed out on the two cable ports, and moving to one
+turns it off. That is the hardware's arrangement, not a caution: the DC is on
+the antenna port alone, so a switch that stayed on elsewhere would be claiming
+power that is not there.
+
+**Gain is a step along a curve, not three sliders.** The R828D has an LNA, a
+mixer and a VGA, and setting them independently is a good way to build a
+receiver that either overloads or hisses. Two curated curves run all three
+together — the same two the Airspy R2 publishes, and the same numbers:
+
+| Curve | Use |
+| --- | --- |
+| **Linearity** | Least intermodulation for a given sensitivity. The right default on an antenna with broadcast stations nearby. |
+| **Sensitivity** | More gain for weak signals, less overload margin. |
+
+The **Gain** slider is a step from 0 (quiet) to 21 along whichever curve is
+selected. It is not a dB figure — how much a step is worth depends on the curve
+and the band.
+
+**Tuner AGC.** The tuner has its own loops for the LNA and the mixer. They are
+off by default, and for a reason: with one running, the gain slider no longer
+sets the stage that loop owns — the loop overwrites it a moment later. Use one
+or the other, not both.
+
+**12-bit packing.** On by default, and worth leaving on. The receiver can pack
+its 12-bit samples three-to-a-word instead of padding each to 16 bits, which is
+a third less USB traffic — and this is a USB 2.0 device carrying up to 36 MB/s
+packed against 48 unpacked at the top rate. Firmware too old to have the request
+streams unpacked and sdroxide says so. Applies on reconnect, because it changes
+how every transfer is decoded.
+
+**Bias tee.** DC on the antenna port for an active antenna or preamp. Off by
+default, and only available on **ANT**.
+
+**DC removal.** On by default. Turn it off to see raw hardware output, which is
+the quick way to tell a driver problem from a DSP one — but see above for where
+the spur goes when you do.
+
+> **Not yet verified against real hardware.** If it misbehaves, the Radio tab's
+> **Copy diagnostic report** button records every command exchanged with the
+> receiver, which firmware and which board answered, the sample-rate arithmetic
+> (which is where a span that is half or double what it should be would show, and
+> which of the two rate tables a rate came from), and the first samples both as
+> raw 12-bit values and decoded as I/Q pairs.
+> `cargo run -p sdroxide-hydrasdr --example probe` does the same from a terminal.
+
 ### 6.3 UI: display preferences and voice announcements
 
 ![The UI tab: frame rate, scroll/spectrum speed, palette, and spectrum background](images/settings-ui.jpg)
@@ -8798,6 +8909,7 @@ to its default, and a partial file is normal rather than a special case.
 | `"SdrPlay"` | SDRplay RSP | `"sdrplay"` |
 | `"Elad"` | ELAD FDM-DUO / FDM-S1 / FDM-S2 | `"elad"` |
 | `"Lime"` | LimeSDR family + LimeRFE, via LimeSuite | `"lime"` |
+| `"HydraSdr"` | HydraSDR RFOne | `"hydrasdr"` |
 
 The per-interface object is only read when `backend` names it, so leaving the
 others out — or leaving them configured for a radio you have unplugged — changes
@@ -9316,12 +9428,13 @@ All in [§6.2.8](#628-sdrplay-rsp-usb):
 - Above 6.048 Msps the ADC trades bit depth for speed — worth knowing before
   picking 10 Msps for weak-signal work.
 
-### 15.15 Airspy HF+ and Airspy R2 / Mini
+### 15.15 Airspy HF+, Airspy R2 / Mini and HydraSDR RFOne
 
-Two different receivers: different silicon, USB ids, protocols, and udev
-rules — [§6.2.9](#629-airspy-hf-usb) and
-[§6.2.13](#6213-airspy-r2--mini-usb) respectively; neither interface
-substitutes for the other.
+Two different receivers, plus a fork of the second: different silicon, USB ids,
+protocols, and udev rules — [§6.2.9](#629-airspy-hf-usb),
+[§6.2.13](#6213-airspy-r2--mini-usb) and
+[§6.2.18](#6218-hydrasdr-rfone-usb) respectively; no interface here
+substitutes for another.
 
 - **HF+ (Dual/Discovery/Ranger):** calibration is in parts per *billion*, and
   nothing is ever written to the receiver's flash. The synthesiser tunes in
@@ -9332,6 +9445,16 @@ substitutes for the other.
   the span, not the centre. Gain is a step (0–21) along the Linearity or
   Sensitivity curve, not a dB figure. An R2 offers 10 and 2.5 Msps, a Mini 6
   and 3 — the same USB id otherwise.
+- **HydraSDR RFOne:** the same real-ADC arrangement and the same two gain
+  curves — it is a fork of the R2's firmware — but **not interchangeable with
+  it**: the RFOne takes an eight-byte tuning command where the Airspy takes
+  four. Pick the wrong interface and sdroxide names the right one rather than
+  tuning somewhere you did not ask for. Three RF sockets (**ANT**, with the bias
+  tee, plus **CABLE1** and **CABLE2** without), and seven sample rates of which
+  the receiver only reports three — the other four are in its firmware's
+  alternate table, marked as such in the menu, and fall back to a listed rate if
+  a build turns out not to carry them. Production boards are `38af:0001`;
+  prototypes share the Airspy's `1d50:60a1`.
 
 ### 15.16 HackRF One / Pro
 

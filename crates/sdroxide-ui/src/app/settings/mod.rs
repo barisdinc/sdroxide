@@ -36,10 +36,10 @@ use self::net::{
 };
 use self::radio::{
     settings_airspy_tab, settings_airspyhf_tab, settings_cat_tab, settings_elad_tab,
-    settings_hackrf_tab, settings_hpsdr_tab, settings_icomnet_tab, settings_lime_tab,
-    settings_pluto_tab, settings_rtlsdr_tab, settings_rtltcp_tab, settings_rx888_tab,
-    settings_sdrplay_tab, settings_smartsdr_tab, settings_soapy_devices, settings_soapy_tab,
-    settings_spyserver_tab, settings_tci_tab,
+    settings_hackrf_tab, settings_hpsdr_tab, settings_hydrasdr_tab, settings_icomnet_tab,
+    settings_lime_tab, settings_pluto_tab, settings_rtlsdr_tab, settings_rtltcp_tab,
+    settings_rx888_tab, settings_sdrplay_tab, settings_smartsdr_tab, settings_soapy_devices,
+    settings_soapy_tab, settings_spyserver_tab, settings_tci_tab,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use self::remote::settings_remote_tab;
@@ -165,6 +165,10 @@ pub(in crate::app) struct SettingsIo<'a> {
     hackrf_copy_report: &'a mut bool,
     airspy_rescan: &'a mut bool,
     airspy_copy_report: &'a mut bool,
+    /// Re-enumerate the USB bus for HydraSDR RFOne receivers. Opens nothing.
+    hydrasdr_rescan: &'a mut bool,
+    /// Copy the last HydraSDR session's trace to the clipboard.
+    hydrasdr_copy_report: &'a mut bool,
     /// Re-enumerate the USB bus for ELAD devices. Opens nothing.
     elad_rescan: &'a mut bool,
     /// Copy the last ELAD session's trace to the clipboard.
@@ -423,6 +427,7 @@ impl SdroxideApp {
             A::Rx888(d) => self.rx888_devices = d,
             A::AirspyHf(d) => self.airspyhf_devices = d,
             A::Airspy(d) => self.airspy_devices = d,
+            A::HydraSdr(d) => self.hydrasdr_devices = d,
             A::HackRf(d) => self.hackrf_devices = d,
             A::SdrPlay(d) => self.sdrplay_devices = d,
             A::Elad(d) => self.elad_devices = d,
@@ -538,6 +543,13 @@ impl SdroxideApp {
             {
                 self.ask_device(ctx, sdroxide_types::DeviceProbe::Airspy);
             }
+            if self
+                .radio_cfg
+                .as_ref()
+                .is_some_and(|c| c.backend == sdroxide_types::Backend::HydraSdr)
+            {
+                self.ask_device(ctx, sdroxide_types::DeviceProbe::HydraSdr);
+            }
             if self.radio_cfg.as_ref().is_some_and(|c| c.backend == sdroxide_types::Backend::Elad) {
                 self.ask_device(ctx, sdroxide_types::DeviceProbe::Elad);
                 // An FDM-DUO's control link is a serial port like any other
@@ -581,6 +593,8 @@ impl SdroxideApp {
         let mut hackrf_copy_report = false;
         let mut airspy_rescan = false;
         let mut airspy_copy_report = false;
+        let mut hydrasdr_rescan = false;
+        let mut hydrasdr_copy_report = false;
         let mut sdrplay_rescan = false;
         let mut soapy_rescan = false;
         let mut tci_test = false;
@@ -673,6 +687,10 @@ impl SdroxideApp {
         // Same again, and a different radio from the HF+ above despite the
         // name: an R2/Mini is other silicon behind another protocol.
         iface_opts.push(sdroxide_types::Backend::Airspy);
+        // A fork of the Airspy R2 rather than a relative of it, and its own
+        // interface for the same reason the two crates are separate: neither
+        // driver tunes the other's hardware correctly.
+        iface_opts.push(sdroxide_types::Backend::HydraSdr);
         // And again — pure Rust over `nusb`, no libhackrf. The only one of
         // these USB backends that transmits, which is why it is the only one
         // whose settings tab has a switch to arm before it will.
@@ -794,6 +812,8 @@ impl SdroxideApp {
                             hackrf_copy_report: &mut hackrf_copy_report,
                             airspy_rescan: &mut airspy_rescan,
                             airspy_copy_report: &mut airspy_copy_report,
+                            hydrasdr_rescan: &mut hydrasdr_rescan,
+                            hydrasdr_copy_report: &mut hydrasdr_copy_report,
                             sdrplay_rescan: &mut sdrplay_rescan,
                             soapy_rescan: &mut soapy_rescan,
                             tci_test: &mut tci_test,
@@ -996,6 +1016,12 @@ impl SdroxideApp {
         }
         if airspy_copy_report {
             self.ask_device(ctx, P::Report(R::Airspy));
+        }
+        if hydrasdr_rescan {
+            self.ask_device(ctx, P::HydraSdr);
+        }
+        if hydrasdr_copy_report {
+            self.ask_device(ctx, P::Report(R::HydraSdr));
         }
         if elad_rescan {
             self.ask_device(ctx, P::Elad);
@@ -1930,6 +1956,17 @@ impl SdroxideApp {
                         io.radio_edit,
                         io.airspy_rescan,
                         io.airspy_copy_report,
+                        io.apply_iface,
+                        io.can_probe,
+                        cmds,
+                    ),
+                    Backend::HydraSdr => settings_hydrasdr_tab(
+                        ui,
+                        &self.hydrasdr_devices,
+                        self.caps.as_ref(),
+                        io.radio_edit,
+                        io.hydrasdr_rescan,
+                        io.hydrasdr_copy_report,
                         io.apply_iface,
                         io.can_probe,
                         cmds,

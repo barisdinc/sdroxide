@@ -23,8 +23,31 @@
 /// USB vendor and product id. One pair for **both** models — an R2 and a Mini
 /// are indistinguishable until [`Request::BoardPartidSerialnoRead`] is asked,
 /// and even then only by the rates they offer.
+///
+/// **And not only for both models.** HydraSDR's prototype RFOne boards were
+/// flashed with this same pair, before that vendor got an id of its own, so a
+/// device here is not necessarily an Airspy at all — see [`looks_like_hydrasdr`].
 pub const VID: u16 = 0x1d50;
 pub const PID: u16 = 0x60a1;
+
+/// Whether a device on [`VID`]/[`PID`] is really a HydraSDR RFOne prototype
+/// rather than an Airspy.
+///
+/// HydraSDR forked libairspy, and its early boards kept Airspy's USB id;
+/// `hydrasdr-host`'s device registry still lists `1d50:60a1` beside its own
+/// `38af:0001`. The two firmwares are *not* interchangeable — HydraSDR's
+/// `SET_FREQ` carries a `uint64_t` where this one carries a `uint32_t` — so a
+/// board that says HydraSDR in its descriptors is left to `sdroxide-hydrasdr`,
+/// and its owner is pointed at the interface that will actually tune it.
+///
+/// The strings come from the OS's cached descriptors, so this costs nothing and
+/// opens nothing. A prototype that carries neither string is still claimed
+/// here; that case is caught after opening, where the firmware version string
+/// says `HydraSDR RF` rather than `AirSpy NOS`.
+pub fn looks_like_hydrasdr(product: Option<&str>, serial: Option<&str>) -> bool {
+    product.is_some_and(|p| p.trim().to_ascii_lowercase().contains("hydrasdr"))
+        || serial.is_some_and(|s| s.trim().to_ascii_uppercase().starts_with("HYDRASDR"))
+}
 
 /// The configuration and interface the sample endpoint lives in.
 pub const CONFIGURATION: u8 = 1;
@@ -597,6 +620,20 @@ mod tests {
         assert_eq!(Request::SetFreq.code(), 13);
         assert_eq!(Request::GetSamplerates.code(), 25);
         assert_eq!(Request::SetPacking.code(), 26);
+    }
+
+    /// The USB id this receiver answers on is not exclusively its own: HydraSDR
+    /// shipped prototype RFOne boards with it, and that radio needs the other
+    /// driver — an eight-byte `SET_FREQ` where this one sends four.
+    #[test]
+    fn a_hydrasdr_prototype_on_this_usb_id_is_recognised_and_left_alone() {
+        assert!(looks_like_hydrasdr(Some("HydraSDR RFOne"), None));
+        assert!(looks_like_hydrasdr(Some("hydrasdr rfone"), None), "case is the firmware's choice");
+        assert!(looks_like_hydrasdr(None, Some("HYDRASDR SN:0011223344556677")));
+        // A real Airspy must still be claimed, whatever it does or does not
+        // publish about itself.
+        assert!(!looks_like_hydrasdr(Some("AirSpy"), Some("644064DC3238C33F")));
+        assert!(!looks_like_hydrasdr(None, None));
     }
 
     #[test]

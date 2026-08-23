@@ -4296,6 +4296,341 @@ pub(in crate::app) fn settings_airspy_tab(
     );
 }
 
+/// HydraSDR RFOne interface: receiver, rate, the RF socket, and the tuner's
+/// gain curves.
+///
+/// Two things here that the Airspy panel next door does not have, and both are
+/// this radio's own. **Three RF sockets**, only one of which has the bias tee
+/// behind it — so the two controls are tied together rather than left to
+/// contradict each other. And **a rate list with a catch**: the receiver
+/// reports three of its seven rates and says nothing about the four in the
+/// firmware's alternate table, so the menu covers both and marks which is
+/// which. An alternate an older firmware turns out not to have falls back to a
+/// listed rate at open, and the panel says so once a receiver is connected.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn settings_hydrasdr_tab(
+    ui: &mut egui::Ui,
+    devices: &[sdroxide_types::HydraSdrDevice],
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    radio_edit: &mut Option<sdroxide_types::RadioConfig>,
+    rescan: &mut bool,
+    copy_report: &mut bool,
+    apply: &mut bool,
+    can_probe: bool,
+    cmds: &mut Vec<Command>,
+) {
+    use sdroxide_types::{HydraSdrConfig, HydraSdrGain, HydraSdrPort};
+    let Some(cfg) = radio_edit.as_mut() else {
+        ui.label("Waiting for the configuration of the machine the radio is attached to.");
+        return;
+    };
+
+    // What cannot change under a running stream. The rate stops and restarts
+    // the receiver, and packing decides how every completion is decoded.
+    let before = (cfg.hydrasdr.serial.clone(), cfg.hydrasdr.sample_rate_hz, cfg.hydrasdr.packing);
+
+    // The rates this particular board turned out to have once one is connected,
+    // the full seven before that.
+    let rates: Vec<f64> = match caps {
+        Some(c) if c.driver == "hydrasdr" && !c.sample_rates.is_empty() => c.sample_rates.clone(),
+        _ => HydraSdrConfig::SAMPLE_RATES.to_vec(),
+    };
+    let from_device = caps.is_some_and(|c| c.driver == "hydrasdr" && !c.sample_rates.is_empty());
+
+    egui::Grid::new("hydrasdr-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("Receiver");
+        probe_only(ui, can_probe, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Rescan")
+                    .on_hover_text(
+                        "Re-list the USB bus. No device is opened, so this is safe \
+                         to press while receiving.",
+                    )
+                    .clicked()
+                {
+                    *rescan = true;
+                }
+                let shown = if cfg.hydrasdr.serial.is_empty() {
+                    "— first one found —".to_string()
+                } else {
+                    cfg.hydrasdr.serial.clone()
+                };
+                ComboBox::from_id_salt("hydrasdr_dev")
+                    .width(340.0)
+                    .selected_text(shown)
+                    .show_styled(ui, |ui| {
+                        if devices.is_empty() {
+                            ui.label("No HydraSDR RFOne found — press Rescan");
+                        }
+                        ui.selectable_value(
+                            &mut cfg.hydrasdr.serial,
+                            String::new(),
+                            "— first one found —",
+                        );
+                        for d in devices {
+                            let serial = d.serial.clone().unwrap_or_default();
+                            ui.selectable_value(&mut cfg.hydrasdr.serial, serial, d.label());
+                        }
+                    });
+            });
+        });
+        ui.end_row();
+
+        ui.label("Sample rate");
+        ui.horizontal(|ui| {
+            ComboBox::from_id_salt("hydrasdr_rate")
+                .width(180.0)
+                .selected_text(format!("{:.3} Msps", cfg.hydrasdr.sample_rate_hz / 1e6))
+                .show_styled(ui, |ui| {
+                    for r in &rates {
+                        let note = HydraSdrConfig::rate_note(*r);
+                        let text = if note.is_empty() {
+                            format!("{:.3} Msps", r / 1e6)
+                        } else {
+                            format!("{:.3} Msps — {note}", r / 1e6)
+                        };
+                        ui.selectable_value(&mut cfg.hydrasdr.sample_rate_hz, *r, text);
+                    }
+                });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(if from_device {
+                        "these are the rates this receiver turned out to have".to_string()
+                    } else {
+                        "the receiver only reports three of these; the rest are in the \
+                         firmware's alternate table and an older build may not carry them"
+                            .to_string()
+                    })
+                    .weak(),
+                )
+                .wrap(),
+            );
+        });
+        ui.end_row();
+        ui.label("");
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "This is the rate you get. The receiver's ADC runs at twice it — \
+                     it digitises a real signal and sdroxide makes complex baseband \
+                     from it on the host.",
+                )
+                .weak(),
+            )
+            .wrap(),
+        );
+        ui.end_row();
+
+        ui.label("RF input");
+        ui.horizontal(|ui| {
+            for p in HydraSdrPort::ALL {
+                let hover = if p.has_bias_tee() {
+                    "The antenna SMA — the only socket with the bias tee behind it."
+                } else {
+                    "A cable socket. No bias tee here; the hardware puts it on ANT alone."
+                };
+                if ui
+                    .selectable_label(cfg.hydrasdr.rf_port == p, p.name())
+                    .on_hover_text(hover)
+                    .clicked()
+                    && cfg.hydrasdr.rf_port != p
+                {
+                    cfg.hydrasdr.rf_port = p;
+                    push_gain(cmds, HydraSdrConfig::RF_PORT_ELEMENT, p.code() as f64);
+                    // The bias tee belongs to ANT alone, and the driver drops
+                    // it on the way to a cable port. Following that here keeps
+                    // the switch from claiming DC is on a socket that has none.
+                    if !p.has_bias_tee() && cfg.hydrasdr.bias_tee {
+                        cfg.hydrasdr.bias_tee = false;
+                        push_gain(cmds, HydraSdrConfig::BIAS_TEE_ELEMENT, 0.0);
+                    }
+                }
+            }
+        });
+        ui.end_row();
+
+        ui.label("Gain curve");
+        ui.horizontal(|ui| {
+            for c in HydraSdrGain::ALL {
+                if ui.selectable_label(cfg.hydrasdr.gain_curve == c, c.label()).clicked()
+                    && cfg.hydrasdr.gain_curve != c
+                {
+                    cfg.hydrasdr.gain_curve = c;
+                    push_gain(cmds, HydraSdrConfig::CURVE_ELEMENT, c.code() as f64);
+                }
+            }
+        });
+        ui.end_row();
+
+        ui.label("Gain");
+        if crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.hydrasdr.gain_step, 0..=(HydraSdrConfig::GAIN_STEPS - 1))
+                .text("step"),
+        )
+        .on_hover_text(
+            "A step along the curve above, not a dB figure — the tuner's LNA, \
+             mixer and VGA move together, and how much each step is worth \
+             depends on the curve and the band. 0 is the quiet end.",
+        )
+        .changed()
+        {
+            push_gain(cmds, HydraSdrConfig::GAIN_ELEMENT, cfg.hydrasdr.gain_step as f64);
+        }
+        ui.end_row();
+
+        ui.label("Tuner AGC");
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut cfg.hydrasdr.lna_agc, "LNA")
+                .on_hover_text("Hands the LNA to the tuner's own loop, overriding the curve.")
+                .changed()
+            {
+                push_gain(cmds, HydraSdrConfig::LNA_AGC_ELEMENT, cfg.hydrasdr.lna_agc as u8 as f64);
+            }
+            if ui
+                .checkbox(&mut cfg.hydrasdr.mixer_agc, "Mixer")
+                .on_hover_text("The same for the mixer stage.")
+                .changed()
+            {
+                push_gain(
+                    cmds,
+                    HydraSdrConfig::MIXER_AGC_ELEMENT,
+                    cfg.hydrasdr.mixer_agc as u8 as f64,
+                );
+            }
+        });
+        ui.end_row();
+        if cfg.hydrasdr.lna_agc || cfg.hydrasdr.mixer_agc {
+            ui.label("");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "With a loop running, the gain slider no longer sets the stage \
+                         it owns — the loop overwrites it.",
+                    )
+                    .weak(),
+                )
+                .wrap(),
+            );
+            ui.end_row();
+        }
+
+        ui.label("Bias tee");
+        ui.add_enabled_ui(cfg.hydrasdr.rf_port.has_bias_tee(), |ui| {
+            if ui
+                .checkbox(&mut cfg.hydrasdr.bias_tee, "DC on the antenna port")
+                .on_hover_text(
+                    "Powers an active antenna or preamp down the coax. Only the ANT \
+                     socket has one — the two cable ports are plain inputs.",
+                )
+                .changed()
+            {
+                push_gain(
+                    cmds,
+                    HydraSdrConfig::BIAS_TEE_ELEMENT,
+                    cfg.hydrasdr.bias_tee as u8 as f64,
+                );
+            }
+        });
+        ui.end_row();
+
+        ui.label("12-bit packing");
+        ui.horizontal(|ui| {
+            crate::chrome::checkbox(ui, &mut cfg.hydrasdr.packing, "Enable");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "A third less USB traffic. Leave it on: this is a USB 2.0 \
+                         device and the top rate is 36 MB/s packed against 48 \
+                         unpacked. Applies on reconnect.",
+                    )
+                    .weak(),
+                )
+                .wrap(),
+            );
+        });
+        ui.end_row();
+
+        ui.label("DC removal");
+        if ui
+            .checkbox(&mut cfg.hydrasdr.dc_block, "Remove the ADC's offset")
+            .on_hover_text(
+                "Turn it off to see raw hardware output. Worth knowing where the \
+                 spur goes: the offset lands at the edge of the span, not its \
+                 centre, because the signal is translated by a quarter of the \
+                 sample rate on the way through.",
+            )
+            .changed()
+        {
+            push_gain(cmds, HydraSdrConfig::DC_BLOCK_ELEMENT, cfg.hydrasdr.dc_block as u8 as f64);
+        }
+        ui.end_row();
+    });
+
+    if cfg.hydrasdr.bias_tee && cfg.hydrasdr.rf_port.has_bias_tee() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Bias tee is ON. Never connect a transceiver, a grounded antenna, \
+                 or a preamp powered from elsewhere while this is enabled — the DC \
+                 goes straight down the feedline.",
+            )
+            .color(crate::theme::YELLOW()),
+        );
+    }
+
+    if devices.iter().any(|d| d.legacy_usb_id) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "One of these boards is on 1d50:60a1, the USB id HydraSDR's prototypes \
+                 share with the Airspy R2 and Mini. sdroxide checks the firmware after \
+                 opening and will say so if the wrong interface has been picked, in \
+                 either direction.",
+            )
+            .weak(),
+        );
+    }
+
+    if (cfg.hydrasdr.serial.clone(), cfg.hydrasdr.sample_rate_hz, cfg.hydrasdr.packing) != before {
+        *apply = true;
+    }
+
+    ui.add_space(6.0);
+    probe_only(ui, can_probe, |ui| {
+        if ui
+            .button("Copy diagnostic report")
+            .on_hover_text(
+                "Every command exchanged with the receiver, the sample-rate \
+                 arithmetic, and the first samples decoded as I/Q.",
+            )
+            .clicked()
+        {
+            *copy_report = true;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Receive only, 24–1800 MHz. No SoapySDR and no libhydrasdr needed. The \
+             receiver, sample rate and packing take effect on Apply; everything \
+             else applies as you change it.",
+        )
+        .weak(),
+    );
+    ui.label(
+        RichText::new(
+            "Not yet verified against real hardware. If it misbehaves, please send the \
+             diagnostic report — it contains every command exchanged with the receiver, \
+             the rate arithmetic, and the first samples decoded as I/Q pairs.",
+        )
+        .color(crate::theme::YELLOW()),
+    );
+}
+
 /// HackRF interface: radio, rate, the front end, and — behind its own switch —
 /// the transmitter.
 ///

@@ -128,10 +128,22 @@ pub enum Backend {
     /// unreachable from that side. Appended last, for the same reason as
     /// `SmartSdr` above.
     Lime,
+    /// HydraSDR RFOne, driven directly over USB by the native pure-Rust driver
+    /// — no libhydrasdr, no SoapySDR.
+    ///
+    /// A *fork* of the Airspy R2 rather than a relative: vendor requests 0–26
+    /// line up number for number, the gain curves are byte-for-byte the same,
+    /// and libhydrasdr still carries libairspy's copyright header. Its own
+    /// interface all the same, because the two cannot drive each other's
+    /// hardware — `SET_FREQ` is eight bytes wide here and four there, this
+    /// radio has three RF sockets and seven sample rates, and a prototype board
+    /// shares the Airspy's USB id. Appended last, for the same reason as
+    /// `SmartSdr` above.
+    HydraSdr,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 19] = [
+    pub const ALL: [Backend; 20] = [
         Backend::Auto,
         Backend::Soapy,
         Backend::Cat,
@@ -151,6 +163,7 @@ impl Backend {
         Backend::SdrPlay,
         Backend::Elad,
         Backend::Lime,
+        Backend::HydraSdr,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -173,6 +186,7 @@ impl Backend {
             Backend::SdrPlay => "SDRplay RSP (USB)",
             Backend::Elad => "ELAD FDM-DUO / FDM-S (USB)",
             Backend::Lime => "LimeSDR + LimeRFE (LimeSuite)",
+            Backend::HydraSdr => "HydraSDR RFOne (USB)",
             Backend::None => "Not configured",
         }
     }
@@ -227,6 +241,10 @@ impl SoapyDeviceInfo {
             // against the wrong silicon.
             "airspyhf" => Some(Backend::AirspyHf),
             "airspy" => Some(Backend::Airspy),
+            // SoapyHydraSDR is HydraSDR's own module and reaches the same
+            // receiver, but it cannot select the RF port and it stops at the
+            // three sample rates the firmware admits to.
+            "hydrasdr" => Some(Backend::HydraSdr),
             // Worth steering even harder than the rest: SoapyHackRF drops the
             // receive amp on the first transmit and never applies the transmit
             // one at all, which the native driver does not do.
@@ -3447,6 +3465,259 @@ impl AirspyConfig {
     pub const FREQ_RANGE: (f64, f64) = (24.0e6, 1_800.0e6);
 }
 
+/// Which of the R828D's two curated gain curves to drive the front end from.
+///
+/// The same two curves the Airspy R2 publishes, and the same numbers: HydraSDR
+/// forked libairspy's tables unchanged, because the tuner change from R820T2 to
+/// R828D left the three stages' ranges alone. Its own type rather than a shared
+/// one all the same — these are HydraSDR's tables now, and a firmware that
+/// retunes them should not have to move the Airspy's with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HydraSdrGain {
+    /// Least intermodulation for a given sensitivity — the right default on an
+    /// antenna with broadcast nearby.
+    #[default]
+    Linearity,
+    /// More sensitivity, less overload margin.
+    Sensitivity,
+}
+
+impl HydraSdrGain {
+    pub fn code(self) -> u8 {
+        match self {
+            HydraSdrGain::Linearity => 0,
+            HydraSdrGain::Sensitivity => 1,
+        }
+    }
+
+    pub fn from_code(code: u8) -> HydraSdrGain {
+        match code {
+            1 => HydraSdrGain::Sensitivity,
+            _ => HydraSdrGain::Linearity,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HydraSdrGain::Linearity => "Linearity (best strong-signal handling)",
+            HydraSdrGain::Sensitivity => "Sensitivity (best weak-signal)",
+        }
+    }
+
+    pub const ALL: [HydraSdrGain; 2] = [HydraSdrGain::Linearity, HydraSdrGain::Sensitivity];
+}
+
+/// Which of the RFOne's three RF input sockets the tuner is connected to.
+///
+/// Nothing the Airspy this driver was forked from has. The firmware names them
+/// `ANT`, `CABLE1` and `CABLE2`, and publishes the bias tee on the first alone
+/// — so the port and the bias tee are one decision, not two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HydraSdrPort {
+    /// The antenna SMA, and the only socket with a bias tee behind it.
+    #[default]
+    Ant,
+    Cable1,
+    Cable2,
+}
+
+impl HydraSdrPort {
+    pub fn code(self) -> u8 {
+        match self {
+            HydraSdrPort::Ant => 0,
+            HydraSdrPort::Cable1 => 1,
+            HydraSdrPort::Cable2 => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> HydraSdrPort {
+        match code {
+            1 => HydraSdrPort::Cable1,
+            2 => HydraSdrPort::Cable2,
+            _ => HydraSdrPort::Ant,
+        }
+    }
+
+    /// The name silk-screened on the board, which is also what the firmware
+    /// calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            HydraSdrPort::Ant => "ANT",
+            HydraSdrPort::Cable1 => "CABLE1",
+            HydraSdrPort::Cable2 => "CABLE2",
+        }
+    }
+
+    /// Whether this socket can carry the bias tee. Only `ANT` can — asking for
+    /// DC on either cable port is a request the firmware takes and the hardware
+    /// ignores, which is worse than a control that says no.
+    pub fn has_bias_tee(self) -> bool {
+        matches!(self, HydraSdrPort::Ant)
+    }
+
+    pub const ALL: [HydraSdrPort; 3] =
+        [HydraSdrPort::Ant, HydraSdrPort::Cable1, HydraSdrPort::Cable2];
+}
+
+/// A HydraSDR RFOne seen on the USB bus. Wasm-safe so it can cross the
+/// `RadioController` trait to the settings UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydraSdrDevice {
+    /// The USB serial descriptor with its `HYDRASDR SN:` prefix stripped, when
+    /// it has one — which is what is printed on the board and what an operator
+    /// would type.
+    pub serial: Option<String>,
+    /// The USB product string, else a generic name.
+    pub name: String,
+    /// Whether this board came up on `1d50:60a1`, the pair it shares with the
+    /// Airspy R2 and Mini.
+    ///
+    /// Only the prototypes do — production boards have HydraSDR's own
+    /// `38af:0001`. Worth saying out loud in the device list all the same: it
+    /// is the one fact about this receiver that can send somebody to the wrong
+    /// interface, in either direction.
+    pub legacy_usb_id: bool,
+}
+
+impl HydraSdrDevice {
+    /// One-line label for the selection UI.
+    pub fn label(&self) -> String {
+        let legacy =
+            if self.legacy_usb_id { "  [legacy USB id, shared with Airspy R2]" } else { "" };
+        match &self.serial {
+            Some(s) => {
+                let tail = &s[s.len().saturating_sub(8)..];
+                format!("{}  (serial …{tail}){legacy}", self.name)
+            }
+            // Without a serial we can only ever open "the first one", so say so
+            // rather than implying this entry can be pinned.
+            None => format!("{}  [no serial — first match only]{legacy}", self.name),
+        }
+    }
+}
+
+/// HydraSDR RFOne (USB) backend configuration. Receive only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HydraSdrConfig {
+    /// Pin a receiver by its USB serial; empty means "the first one found".
+    /// Matched on the **suffix**, so the last eight digits are enough — and the
+    /// `HYDRASDR SN:` prefix may be left on or taken off either way.
+    pub serial: String,
+    /// **Complex** sample rate in Hz — what you get, not what the ADC runs at.
+    /// The receiver is programmed at twice this, because its ADC is real and
+    /// the host makes complex baseband from it. Snapped to a rate the receiver
+    /// actually has at open; see [`Self::SAMPLE_RATES`].
+    pub sample_rate_hz: f64,
+    /// Which curated gain curve the three tuner stages follow.
+    pub gain_curve: HydraSdrGain,
+    /// Step along that curve, 0 (least gain) to 21 (most).
+    pub gain_step: u8,
+    /// The tuner's own AGC loops, one for the LNA and one for the mixer. Off by
+    /// default: they fight a manual gain step, and the curves are what this
+    /// receiver is usually driven by.
+    pub lna_agc: bool,
+    pub mixer_agc: bool,
+    /// Which of the three RF sockets the tuner sees.
+    pub rf_port: HydraSdrPort,
+    /// Bias tee on the antenna port. Off by default: putting phantom power on
+    /// someone's feedline uninvited is not a good default. Has no effect while
+    /// the tuner is on a cable port, which is where the hardware puts it.
+    pub bias_tee: bool,
+    /// 12-bit packing on the USB link.
+    ///
+    /// On by default, and it matters here: at the top rate the ADC produces 24
+    /// Msps of real samples, which is 48 MB/s unpacked against 36 MB/s packed —
+    /// and this is a USB 2.0 device, so the link has no headroom to spare.
+    /// Firmware too old to have the request falls back to unpacked and says so.
+    pub packing: bool,
+    /// Remove the ADC's DC offset on the host.
+    ///
+    /// On by default. Worth knowing where the spur goes if you turn it off: the
+    /// offset lands at the *edge* of the output span rather than its centre,
+    /// because the signal is translated by a quarter of the sample rate on the
+    /// way through. Turn it off to see raw hardware output.
+    pub dc_block: bool,
+    /// Bulk transfers in flight, and the size of each in KiB.
+    pub transfers: u8,
+    pub transfer_kib: u16,
+}
+
+impl Default for HydraSdrConfig {
+    fn default() -> Self {
+        HydraSdrConfig {
+            serial: String::new(),
+            // The middle of the three rates every RFOne lists: a real 10 MHz of
+            // span without asking the USB link or the host for everything they
+            // have on a first plug-in.
+            sample_rate_hz: 5_000_000.0,
+            gain_curve: HydraSdrGain::Linearity,
+            // `rfone_gain_defs`' own starting point.
+            gain_step: 10,
+            lna_agc: false,
+            mixer_agc: false,
+            rf_port: HydraSdrPort::Ant,
+            bias_tee: false,
+            packing: true,
+            dc_block: true,
+            transfers: 16,
+            transfer_kib: 128,
+        }
+    }
+}
+
+impl HydraSdrConfig {
+    /// The one real gain element: a step along the selected curve. It is a
+    /// *step*, not a dB figure — how much each one is worth depends on the
+    /// curve and the band — so the settings tab shows it as a step control and
+    /// this is what carries it.
+    pub const GAIN_ELEMENT: &'static str = "GAIN";
+
+    /// Pseudo-elements carrying settings that are not gains at all. They ride
+    /// the existing `SetGain` command so this backend needs no new `Command`
+    /// variant, no `DeviceCaps` field and no engine change; they are
+    /// deliberately absent from `DeviceCaps::gains`, so nothing renders them as
+    /// sliders.
+    pub const CURVE_ELEMENT: &'static str = "CURVE";
+    pub const LNA_AGC_ELEMENT: &'static str = "LNAAGC";
+    pub const MIXER_AGC_ELEMENT: &'static str = "MIXAGC";
+    pub const RF_PORT_ELEMENT: &'static str = "RFPORT";
+    pub const BIAS_TEE_ELEMENT: &'static str = "BIASTEE";
+    pub const PACKING_ELEMENT: &'static str = "PACKING";
+    pub const DC_BLOCK_ELEMENT: &'static str = "DCBLOCK";
+
+    /// Steps along a gain curve (`RFONE_GAIN_TABLE_SIZE`).
+    pub const GAIN_STEPS: u8 = 22;
+
+    /// The **complex** rates an RFOne has, widest first — the list the settings
+    /// combo shows *before* a receiver has been opened.
+    ///
+    /// Only three of these are ones the receiver will admit to. `GET_SAMPLERATES`
+    /// reports the firmware's primary configurations — 10, 5 and 2.5 Msps — and
+    /// says nothing about the alternate table behind them, which carries 12, 8,
+    /// 6 and 4.096. Those are reached by naming the ADC rate in kilohertz, and
+    /// a driver that offered only what was listed would leave the top of this
+    /// radio's range unreachable.
+    pub const SAMPLE_RATES: [f64; 7] = [12.0e6, 10.0e6, 8.0e6, 6.0e6, 5.0e6, 4.096e6, 2.5e6];
+
+    /// What a rate costs on the USB link, and whether the receiver lists it.
+    pub fn rate_note(rate_hz: f64) -> &'static str {
+        match rate_hz as u32 {
+            12_000_000 => "alternate — 48 MB/s over USB, 36 packed",
+            10_000_000 => "listed — 40 MB/s, 30 packed",
+            8_000_000 => "alternate — 32 MB/s, 24 packed",
+            6_000_000 => "alternate — 24 MB/s, 18 packed",
+            5_000_000 => "listed — 20 MB/s, 15 packed",
+            4_096_000 => "alternate — 16.4 MB/s, 12.3 packed",
+            2_500_000 => "listed — 10 MB/s, 7.5 packed",
+            _ => "",
+        }
+    }
+
+    /// Tuning range, in Hz: `RFONE_MIN_FREQ_HZ`..`RFONE_MAX_FREQ_HZ`.
+    pub const FREQ_RANGE: (f64, f64) = (24.0e6, 1_800.0e6);
+}
+
 /// AD9361 receive AGC mode. The names are the IIO `gain_control_mode` values,
 /// which is what actually goes on the wire.
 ///
@@ -4550,6 +4821,9 @@ pub struct RadioConfig {
     /// The SoapySDR interface's own block. Appended after `lime`, for the same
     /// reason as every field above it: the layout is positional.
     pub soapy: SoapyConfig,
+    /// HydraSDR RFOne. Appended after `soapy`, for the same reason as every
+    /// field above it.
+    pub hydrasdr: HydraSdrConfig,
 }
 
 #[cfg(test)]
@@ -5009,6 +5283,79 @@ mod tests {
         }
     }
 
+    /// Every `radio.json` written before this backend existed has to keep
+    /// working, and has to land on a HydraSDR configuration that would actually
+    /// open and hear something.
+    #[test]
+    fn hydrasdr_settings_default_for_every_older_config() {
+        for json in [r#"{}"#, r#"{"backend": "Airspy"}"#, r#"{"rx888": {"ppm": 1.5}}"#] {
+            let cfg: RadioConfig = serde_json::from_str(json).expect("parses");
+            // One of the three rates the receiver itself lists, so a fresh
+            // install cannot land on an alternate configuration an older
+            // firmware might not carry.
+            assert_eq!(cfg.hydrasdr.sample_rate_hz, 5_000_000.0, "after loading {json}");
+            assert!(
+                HydraSdrConfig::rate_note(cfg.hydrasdr.sample_rate_hz).starts_with("listed"),
+                "the default rate must be one the receiver reports, after {json}"
+            );
+            assert_eq!(cfg.hydrasdr.rf_port, HydraSdrPort::Ant, "after loading {json}");
+            assert!(!cfg.hydrasdr.bias_tee, "no uninvited DC on the antenna after {json}");
+            assert!(cfg.hydrasdr.packing, "a USB 2.0 link needs it after {json}");
+            assert!(cfg.hydrasdr.gain_step < HydraSdrConfig::GAIN_STEPS, "after {json}");
+        }
+        let h: RadioConfig = serde_json::from_str(r#"{"backend": "HydraSdr"}"#).expect("parses");
+        assert_eq!(h.backend, Backend::HydraSdr);
+        assert!(Backend::ALL.contains(&Backend::HydraSdr), "the picker has to offer it");
+    }
+
+    /// The bias tee lives on one socket, so the port and the switch are one
+    /// decision. A UI that let them disagree would claim DC on a socket that
+    /// has none.
+    #[test]
+    fn only_the_hydrasdr_antenna_socket_has_a_bias_tee() {
+        assert!(HydraSdrPort::Ant.has_bias_tee());
+        assert!(!HydraSdrPort::Cable1.has_bias_tee());
+        assert!(!HydraSdrPort::Cable2.has_bias_tee());
+        assert_eq!(HydraSdrPort::ALL.iter().filter(|p| p.has_bias_tee()).count(), 1);
+        // The wire codes are the firmware's `HYDRASDR_RF_PORT_RX*`, and the
+        // names are what it publishes for them.
+        assert_eq!(HydraSdrPort::Ant.code(), 0);
+        assert_eq!(HydraSdrPort::Cable2.name(), "CABLE2");
+        for p in HydraSdrPort::ALL {
+            assert_eq!(HydraSdrPort::from_code(p.code()), p);
+            let json = serde_json::to_string(&p).expect("serialises");
+            assert_eq!(serde_json::from_str::<HydraSdrPort>(&json).expect("round trip"), p);
+        }
+        for g in HydraSdrGain::ALL {
+            assert_eq!(HydraSdrGain::from_code(g.code()), g);
+        }
+    }
+
+    /// Three of this radio's seven rates are ones the receiver reports and four
+    /// are not, and the menu has to say which is which — an operator who picks
+    /// an alternate on an older firmware gets snapped to a listed rate, and
+    /// wants to know that was possible before it happens.
+    #[test]
+    fn the_hydrasdr_rate_menu_marks_the_ones_the_receiver_does_not_report() {
+        let listed: Vec<f64> = HydraSdrConfig::SAMPLE_RATES
+            .iter()
+            .copied()
+            .filter(|r| HydraSdrConfig::rate_note(*r).starts_with("listed"))
+            .collect();
+        assert_eq!(listed, vec![10.0e6, 5.0e6, 2.5e6], "the firmware's primary configurations");
+        let alternate: Vec<f64> = HydraSdrConfig::SAMPLE_RATES
+            .iter()
+            .copied()
+            .filter(|r| HydraSdrConfig::rate_note(*r).starts_with("alternate"))
+            .collect();
+        assert_eq!(alternate, vec![12.0e6, 8.0e6, 6.0e6, 4.096e6], "the alternate table");
+        // Every rate on the menu is annotated, and the menu is widest first.
+        for r in HydraSdrConfig::SAMPLE_RATES {
+            assert!(!HydraSdrConfig::rate_note(r).is_empty(), "{r} is unannotated");
+        }
+        assert!(HydraSdrConfig::SAMPLE_RATES.windows(2).all(|w| w[0] > w[1]));
+    }
+
     /// The `part_id` word is the only thing that says which HF+ is on the other
     /// end — every model enumerates as the same `03eb:800c`.
     #[test]
@@ -5120,6 +5467,18 @@ mod tests {
             SoapyDeviceInfo::native_backend_for("airspy"),
             SoapyDeviceInfo::native_backend_for("airspyhf"),
             "two different radios must not share a backend"
+        );
+        // And SoapyHydraSDR is a third module for a third radio. It reaches the
+        // RFOne, but it cannot select the RF port and it stops at the three
+        // sample rates the firmware admits to — and steering it at the Airspy
+        // driver would be worse than either, because the two program their
+        // tuners differently.
+        assert_eq!(SoapyDeviceInfo::native_backend_for("hydrasdr"), Some(Backend::HydraSdr));
+        assert_eq!(SoapyDeviceInfo::native_backend_for("HydraSDR"), Some(Backend::HydraSdr));
+        assert_ne!(
+            SoapyDeviceInfo::native_backend_for("hydrasdr"),
+            SoapyDeviceInfo::native_backend_for("airspy"),
+            "a fork is not the same radio"
         );
         // A HackRF, on the other hand, has a native backend now, and steering
         // one there matters more than for the receivers: SoapyHackRF loses the

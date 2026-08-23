@@ -1,0 +1,28 @@
+# HydraSDR RFOne, for sdroxide's native USB driver.
+#
+# sdroxide talks to this directly with nusb rather than through libusb,
+# libhydrasdr or libSoapySDR, but the kernel-level requirement is the same: the
+# invoking user needs write access to the usbfs node.
+#
+# TAG+="uaccess" hands an ACL to whoever is logged in at the active seat. That
+# is better than the older GROUP="plugdev" recipe, which needs a group to exist,
+# the user to be added to it, and a full re-login before it takes effect.
+#
+# Install:
+#   sudo cp 60-sdroxide-hydrasdr.rules /usr/lib/udev/rules.d/
+#   sudo udevadm control --reload
+# then unplug and replug the receiver.
+#
+# HydraSDR's own 51-hydrasdr.rules covers the same ids. If it is already
+# installed this file is harmless duplication, not a conflict.
+
+# Production boards: HydraSDR's own usb.org vendor id.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="38af", ATTRS{idProduct}=="0001", MODE="0660", TAG+="uaccess"
+
+# Prototype boards, flashed before that vendor id existed. This is the Airspy R2
+# and Mini's own id, and 60-sdroxide-airspy.rules already covers it — the line
+# is repeated here so that installing only this file is still enough for a
+# prototype, and so that removing the Airspy rule does not silently break one.
+# Two udev rules granting the same access to the same device is a no-op, not a
+# conflict.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0660", TAG+="uaccess"

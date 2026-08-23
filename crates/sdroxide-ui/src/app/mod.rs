@@ -237,6 +237,8 @@ pub struct SdroxideApp {
     elad_devices: Vec<sdroxide_types::EladDevice>,
     lime_devices: Vec<sdroxide_types::LimeDevice>,
     airspy_devices: Vec<sdroxide_types::AirspyDevice>,
+    /// HydraSDR RFOne receivers found on the last Rescan.
+    hydrasdr_devices: Vec<sdroxide_types::HydraSdrDevice>,
     hackrf_devices: Vec<sdroxide_types::HackRfDevice>,
     /// RSPs the SDRplay API service reported on the last Rescan.
     sdrplay_devices: Vec<sdroxide_types::SdrPlayDevice>,
@@ -931,6 +933,7 @@ impl SdroxideApp {
             elad_devices: Vec::new(),
             lime_devices: Vec::new(),
             airspy_devices: Vec::new(),
+            hydrasdr_devices: Vec::new(),
             hackrf_devices: Vec::new(),
             sdrplay_devices: Vec::new(),
             soapy_devices: None,

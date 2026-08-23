@@ -22,8 +22,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AirspyDevice, AirspyHfDevice, EladDevice, HackRfDevice, HpsdrDevice, IcomNetConfig, LimeDevice,
-    PlutoDevice, RtlSdrDevice, Rx888Device, SdrPlayDevice, SmartSdrDevice, SoapyDeviceInfo,
+    AirspyDevice, AirspyHfDevice, EladDevice, HackRfDevice, HpsdrDevice, HydraSdrDevice,
+    IcomNetConfig, LimeDevice, PlutoDevice, RtlSdrDevice, Rx888Device, SdrPlayDevice,
+    SmartSdrDevice, SoapyDeviceInfo,
 };
 
 /// A question about the machine the radio is attached to.
@@ -60,6 +61,12 @@ pub enum DeviceProbe {
     /// HackRFs on the USB bus, same contract as [`DeviceProbe::RtlSdr`]. The
     /// board revision needs a control transfer and so is not known here.
     HackRf,
+    /// HydraSDR RFOne receivers on the USB bus, same contract as
+    /// [`DeviceProbe::RtlSdr`]. A prototype board shares its USB id with the
+    /// Airspy R2, so the answer includes only the ones whose descriptors say
+    /// HydraSDR — being told to use the other interface is a far better outcome
+    /// than a receiver programmed by the wrong driver.
+    HydraSdr,
     /// The RSPs the SDRplay API service reports. Brief — the service answers
     /// from its own device table — and safe while one is streaming.
     SdrPlay,
@@ -157,6 +164,7 @@ pub enum ReportKind {
     Pluto,
     Elad,
     Lime,
+    HydraSdr,
 }
 
 /// What the machine with the radio on it answered.
@@ -176,6 +184,7 @@ pub enum ProbeAnswer {
     AirspyHf(Vec<AirspyHfDevice>),
     Airspy(Vec<AirspyDevice>),
     HackRf(Vec<HackRfDevice>),
+    HydraSdr(Vec<HydraSdrDevice>),
     SdrPlay(Vec<SdrPlayDevice>),
     Elad(Vec<EladDevice>),
     Lime(Vec<LimeDevice>),

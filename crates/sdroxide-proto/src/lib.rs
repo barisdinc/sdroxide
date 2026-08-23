@@ -528,7 +528,19 @@ use sdroxide_types::{
 /// Fields added to a struct that rides in both a command and an event, so a
 /// v79 peer would read the tail of either as garbage; the handshake's equality
 /// test is what stops it trying.
-pub const PROTO_VERSION: u16 = 80;
+///
+/// **81** — the HydraSDR RFOne is an interface of its own (issue #144).
+/// [`sdroxide_types::Backend`] gained `HydraSdr` and
+/// [`sdroxide_types::RadioConfig`] a `hydrasdr` block, with `DeviceProbe`,
+/// `ProbeAnswer` and `ReportKind` gaining the variants that enumerate one and
+/// fetch its session trace.
+///
+/// A field appended to the radio configuration, which rides in both a command
+/// and an event, so a v80 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying. The new `Backend` variant
+/// on its own would have been harmless (an older peer is simply never sent
+/// one); the config block is not.
+pub const PROTO_VERSION: u16 = 81;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

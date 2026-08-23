@@ -29,6 +29,7 @@ pub fn probe(req: DeviceProbe) -> ProbeAnswer {
         DeviceProbe::AirspyHf => ProbeAnswer::AirspyHf(sdroxide_airspyhf::list()),
         DeviceProbe::Airspy => ProbeAnswer::Airspy(sdroxide_airspy::list()),
         DeviceProbe::HackRf => ProbeAnswer::HackRf(sdroxide_hackrf::list()),
+        DeviceProbe::HydraSdr => ProbeAnswer::HydraSdr(sdroxide_hydrasdr::list()),
         DeviceProbe::SdrPlay => ProbeAnswer::SdrPlay(sdroxide_sdrplay::list()),
         DeviceProbe::Elad => ProbeAnswer::Elad(sdroxide_elad::list()),
         DeviceProbe::Lime => ProbeAnswer::Lime(sdroxide_lime::list()),
@@ -123,6 +124,11 @@ fn report(kind: ReportKind) -> String {
         }),
         ReportKind::HackRf => sdroxide_hackrf::diagnostics().unwrap_or_else(|| {
             "No HackRF session has run yet — press Apply / reconnect first.".to_string()
+        }),
+        ReportKind::HydraSdr => sdroxide_hydrasdr::diagnostics().unwrap_or_else(|| {
+            "No HydraSDR RFOne session has run yet — press Apply / reconnect \
+             first, or run `cargo run -p sdroxide-hydrasdr --example probe`."
+                .to_string()
         }),
         ReportKind::Elad => sdroxide_elad::diagnostics().unwrap_or_else(|| {
             "No ELAD session has run yet — press Apply / reconnect first, or \

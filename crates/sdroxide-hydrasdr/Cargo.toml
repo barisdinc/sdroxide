@@ -1,0 +1,37 @@
+[package]
+name = "sdroxide-hydrasdr"
+version.workspace = true
+edition.workspace = true
+
+# Native-only HydraSDR RFOne support over USB. Pure Rust via `nusb` — no
+# libusb, no libhydrasdr, no libSoapySDR, no C dependency at all. Must never be
+# a dependency of any wasm-targeted crate.
+#
+# The RFOne is a *fork* of the Airspy R2 rather than a relative of it:
+# `hydrasdr-host`'s `hydrasdr.c` still carries Youssef Touil's 2014 libairspy
+# copyright header, vendor requests 0–26 line up number for number, and the two
+# gain tables are byte-for-byte identical. What differs is the USB id, an
+# eight-byte SET_FREQ where the Airspy takes four, three RF input ports, and a
+# richer sample-rate ladder — enough that the two cannot drive each other, which
+# is why this is its own crate and its own `Backend`.
+[dependencies]
+# `HydraSdrConfig` — including the offered sample-rate list, which lives there
+# rather than here because the settings UI is shared with the wasm client.
+sdroxide-types.workspace = true
+# `Complex32` for the baseband the workspace passes around.
+sdroxide-dsp.workspace = true
+# The one thing genuinely shared with the Airspy R2 driver next door: the
+# real-to-complex conversion, and the 12-bit unpacking it is fed from. Both are
+# fixed by hardware the two receivers have in common — a real ADC whose wanted
+# signal sits at fs/4, and a firmware packing format inherited unchanged — so
+# they cannot diverge, and a second copy could only ever drift from the one that
+# has a measured half-band behind it. Everything else here is this radio's own.
+sdroxide-airspy.workspace = true
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+nusb.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

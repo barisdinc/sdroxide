@@ -2,7 +2,7 @@
 //! act on.
 //!
 //! Everything here ends up in front of a user: [`crate::Error`] is what
-//! `AirspySource::open` returns and what `IqSource::open_status` puts on
+//! `HydraSdrSource::open` returns and what `IqSource::open_status` puts on
 //! screen. "permission denied (os error 13)" tells nobody what to do; "install
 //! the udev rule and re-plug the receiver" does.
 
@@ -22,14 +22,14 @@ pub enum Error {
     #[error("{0}")]
     Access(String),
 
-    /// What answered is not an Airspy.
+    /// What answered is not a HydraSDR.
     ///
     /// Its own variant because it has its own remedy, and because it is the one
-    /// failure this backend can hit that is nobody's fault: HydraSDR's
-    /// prototype RFOne boards were flashed with Airspy's USB id, so a device
-    /// that looked right during enumeration can turn out to be the other radio
-    /// once its firmware has been asked. The answer is to pick the HydraSDR
-    /// interface, not to debug anything.
+    /// failure this backend can hit that is nobody's fault: a prototype RFOne
+    /// and an Airspy R2 share `1d50:60a1`, so a device that looked right during
+    /// enumeration can turn out to be the other radio once its firmware has
+    /// been asked. The answer is to pick the Airspy interface, not to debug
+    /// anything.
     #[error("{0}")]
     WrongRadio(String),
 
@@ -60,9 +60,9 @@ impl Error {
     ///
     /// These cases are the entire support burden of this backend, so they are
     /// worth naming precisely. `EBUSY` is nearly always another SDR program
-    /// still holding the receiver rather than a broken install — and as with
-    /// the HF+ there is no kernel driver to blame, because nothing in-tree
-    /// claims `1d50:60a1`.
+    /// still holding the receiver rather than a broken install — there is no
+    /// kernel driver to blame, because nothing in-tree claims either of the two
+    /// USB ids an RFOne can appear on.
     pub fn from_open(e: nusb::Error, what: &dyn fmt::Display) -> Error {
         use nusb::ErrorKind;
         match e.kind() {
@@ -72,7 +72,7 @@ impl Error {
             )),
             ErrorKind::Busy => Error::Access(format!(
                 "{what} is held by another program (SDR#, SDR++, SDRangel, \
-                 airspy_rx, gqrx, a SoapySDR client)"
+                 hydrasdr_rx, gqrx, a SoapySDR client)"
             )),
             // On Windows the receiver must be bound to WinUSB before anything
             // can claim it; unbound, the open fails as unsupported or
@@ -80,8 +80,8 @@ impl Error {
             ErrorKind::Unsupported | ErrorKind::NotFound if cfg!(windows) => {
                 Error::Access(format!(
                     "{what} is not bound to WinUSB — run Zadig and select the \
-                 WinUSB driver for this device, or install Airspy's own package \
-                 which does the same thing"
+                     WinUSB driver for this device, or install HydraSDR's own \
+                     package which does the same thing"
                 ))
             }
             ErrorKind::Disconnected => {

@@ -9,6 +9,7 @@ mod elad_source;
 mod gui_main;
 mod hackrf_source;
 mod hpsdr_source;
+mod hydrasdr_source;
 mod icomnet_source;
 mod lime_source;
 mod local_controller;
@@ -831,6 +832,7 @@ fn probe(cli: &Cli, settings: &Settings) -> anyhow::Result<()> {
     probe_rx888();
     probe_airspyhf();
     probe_airspy();
+    probe_hydrasdr();
     probe_hackrf();
     probe_sdrplay();
     probe_elad();
@@ -950,6 +952,25 @@ fn probe_airspy() {
             // An R2 and a Mini share 1d50:60a1 and the same product string;
             // only the rate list separates them, and that needs the device
             // open. The list does not pretend to know.
+            println!("  {}: {}", i, d.label());
+        }
+    }
+    println!();
+}
+
+/// The HydraSDR list, and the one thing it has to be careful about.
+///
+/// A prototype RFOne enumerates on the Airspy R2's own USB id, so the
+/// enumeration only claims such a board when its descriptors say HydraSDR — see
+/// `sdroxide_hydrasdr::usb`. Anything on that id that does *not* is left to the
+/// Airspy list above, which is why running both probes is worth it.
+fn probe_hydrasdr() {
+    let devices = sdroxide_hydrasdr::list();
+    if devices.is_empty() {
+        println!("No HydraSDR RFOne receivers found on USB.");
+    } else {
+        println!("=== HydraSDR RFOne (native USB driver) ===");
+        for (i, d) in devices.iter().enumerate() {
             println!("  {}: {}", i, d.label());
         }
     }
@@ -1354,6 +1375,7 @@ fn open_configured_source(
         Backend::Rx888 => open_rx888_source(radio, cli.center_hz()),
         Backend::AirspyHf => open_airspyhf_source(radio, cli.center_hz()),
         Backend::Airspy => open_airspy_source(radio, cli.center_hz()),
+        Backend::HydraSdr => open_hydrasdr_source(radio, cli.center_hz()),
         Backend::HackRf => open_hackrf_source(radio, cli.center_hz()),
         Backend::SdrPlay => open_sdrplay_source(radio, cli.center_hz()),
         Backend::Elad => open_elad_source(radio, cli.center_hz()),
@@ -1830,6 +1852,56 @@ fn airspy_caps(src: &airspy_source::AirspySource) -> DeviceCaps {
             direction: Direction::Rx,
             min_db: 0.0,
             max_db: (AirspyConfig::GAIN_STEPS - 1) as f64,
+            step_db: 1.0,
+        }],
+        ..DeviceCaps::default()
+    }
+}
+
+/// Build the HydraSDR RFOne source from radio.json. The receiver is picked by
+/// the suffix of its USB serial, or the first one found when none is configured.
+fn open_hydrasdr_source(
+    radio: &RadioConfig,
+    center_hz: f64,
+) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
+    let src = hydrasdr_source::HydraSdrSource::open(&radio.hydrasdr, center_hz)
+        .context("opening HydraSDR RFOne")?;
+    let caps = hydrasdr_caps(&src);
+    Ok((Box::new(src), caps))
+}
+
+/// Capabilities for a HydraSDR RFOne: wideband IQ, receive only, VHF/UHF.
+///
+/// The **sample rates come off the device**, not from a table — and here that
+/// is not only good manners. Three of the seven this radio has are the ones its
+/// firmware lists; the other four live in an alternate table that no
+/// enumeration mentions, and an older build may not carry them. The driver
+/// tries each and drops the ones that are refused, so what reaches here is what
+/// this particular board will actually do.
+///
+/// The tuning range is the R828D's and is fixed, so that one is a constant.
+///
+/// One gain element: a step along the selected curve, 0 to 21. It is not a dB
+/// figure — how much each step is worth depends on the curve and the band — so
+/// `step_db` is 1 and the settings tab says what it means. The switches (the
+/// curve itself, the two AGC loops, the RF port, the bias tee, packing and the
+/// DC blocker) ride pseudo-elements that are deliberately not listed here, so
+/// only the HydraSDR panel renders them.
+fn hydrasdr_caps(src: &hydrasdr_source::HydraSdrSource) -> DeviceCaps {
+    use sdroxide_types::{Direction, GainElement, HydraSdrConfig};
+    DeviceCaps {
+        driver: "hydrasdr".into(),
+        label: src.describe(),
+        rx_channels: 1,
+        tx_channels: 0,
+        audio_mode: false,
+        freq_ranges_rx: vec![HydraSdrConfig::FREQ_RANGE],
+        sample_rates: src.available_rates().to_vec(),
+        gains: vec![GainElement {
+            name: HydraSdrConfig::GAIN_ELEMENT.into(),
+            direction: Direction::Rx,
+            min_db: 0.0,
+            max_db: (HydraSdrConfig::GAIN_STEPS - 1) as f64,
             step_db: 1.0,
         }],
         ..DeviceCaps::default()
