@@ -55,6 +55,11 @@ opt-level = 2
 [profile.dev.package.sdroxide-rade]
 opt-level = 2
 
+# The DRM worker shuffles buffers between two always-optimized C libraries on
+# every block, for the same reason RADE's does.
+[profile.dev.package.sdroxide-drm]
+opt-level = 2
+
 # DeepCW's STFT runs ahead of every inference; unoptimized it costs more than
 # the network it feeds.
 [profile.dev.package.sdroxide-deepcw]
@@ -65,6 +70,7 @@ sdroxide-types = { path = "crates/sdroxide-types" }
 sdroxide-proto = { path = "crates/sdroxide-proto" }
 sdroxide-dsp = { path = "crates/sdroxide-dsp" }
 sdroxide-rade = { path = "crates/sdroxide-rade" }
+sdroxide-drm = { path = "crates/sdroxide-drm" }
 sdroxide-audio = { path = "crates/sdroxide-audio" }
 sdroxide-server = { path = "crates/sdroxide-server" }
 sdroxide-config = { path = "crates/sdroxide-config" }

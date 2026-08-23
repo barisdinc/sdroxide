@@ -98,6 +98,17 @@ pub enum Mode {
     /// tree — filter, CAT mode, hamlib name, band plan — needs a different
     /// answer for it. Appended for the same reason as [`Mode::Hell`].
     PacketHf,
+    /// Digital Radio Mondiale — the digital shortwave broadcast system. A few
+    /// hundred OFDM carriers filling 9 or 10 kHz, carrying AAC audio plus a
+    /// station label, a scrolling text message and the broadcaster's clock.
+    ///
+    /// A broadcast mode, not an amateur one: like [`Mode::Wfm`] it is something
+    /// to listen to, so it is a *demodulator* rather than one of the digital
+    /// modes above — no transmit, no QSO, no transcript. Like [`Mode::Rifp`]
+    /// its carrier sits on the dial rather than on a sideband, because the 9
+    /// and 10 kHz occupancies are symmetric about the channel's reference
+    /// frequency. Appended for the same reason as [`Mode::Hell`].
+    Drm,
 }
 
 /// The bands on which analog SSTV rides the lower sideband, as (low, high) Hz.
@@ -112,7 +123,7 @@ const SSTV_LSB_BANDS: [(f64, f64); 3] =
 impl Mode {
     /// Every mode, in the order they cycle and appear in the picker — which is
     /// deliberately *not* the enum's declaration order (see [`Mode::Hell`]).
-    pub const ALL: [Mode; 29] = [
+    pub const ALL: [Mode; 30] = [
         Mode::Lsb,
         Mode::Usb,
         Mode::Cw,
@@ -120,6 +131,7 @@ impl Mode {
         Mode::Sam,
         Mode::Nfm,
         Mode::Wfm,
+        Mode::Drm,
         Mode::Digu,
         Mode::Digl,
         Mode::Dsb,
@@ -396,6 +408,7 @@ impl Mode {
             Mode::Wefax => "WEFAX",
             Mode::Js8 => "JS8",
             Mode::Wspr => "WSPR",
+            Mode::Drm => "DRM",
         }
     }
 
@@ -408,6 +421,12 @@ impl Mode {
             // CW passband is centered on the sidetone pitch (default 700 Hz).
             Mode::Cw => (450.0, 950.0),
             Mode::Am | Mode::Sam => (-5000.0, 5000.0),
+            // DRM's carrier set is symmetric about the dial and 10 kHz
+            // wide in the occupancy almost every broadcast uses. This
+            // does not gate the decode — the transmission says how wide
+            // it is and the decoder reads that — only what the
+            // panadapter shades and what the S-meter measures.
+            Mode::Drm => (-5000.0, 5000.0),
             Mode::Nfm => (-8000.0, 8000.0),
             Mode::Wfm => (-96_000.0, 96_000.0),
             Mode::Digu => (200.0, 3200.0),
@@ -564,7 +583,9 @@ impl Mode {
             Mode::Lsb => C::Lsb,
             Mode::Usb | Mode::Spec => C::Usb,
             Mode::Cw => C::Cw,
-            Mode::Am | Mode::Sam | Mode::Dsb => C::Am,
+            // DRM sits on the dial like AM does, and a receiver with an
+            // I.F. output offers no separate DRM setting to differ from.
+            Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => C::Am,
             // WFM is FM's carrier position too; a rig with an I.F. output has
             // no such mode, so nothing here is lost by grouping them.
             Mode::Nfm | Mode::Wfm => C::Fm,
@@ -600,7 +621,11 @@ impl Mode {
     /// overs and breathe with the modulation. FM chains pass audio at unity
     /// gain instead, and the UI draws no AGC control for them.
     pub fn audio_agc(self) -> bool {
-        !matches!(self, Mode::Nfm | Mode::Wfm)
+        // DRM joins FM in bypassing the AGC, for the same reason: what comes
+        // out is not a demodulated signal whose level follows the carrier's,
+        // but the audio codec's own output, already at the level the
+        // broadcaster mixed it to. Levelling it again would ride the programme.
+        !matches!(self, Mode::Nfm | Mode::Wfm | Mode::Drm)
     }
 
     /// Furthest a filter edge may be dragged from the carrier — bounded by
@@ -643,6 +668,18 @@ impl Mode {
             // operator wants the narrower one when running 1200 on a busy
             // channel. Labelled by occupied bandwidth, like NFM's.
             Mode::Packet => &[("12k", -6000.0, 6000.0), ("20k", -10_000.0, 10_000.0)],
+            // The six spectrum occupancies of the DRM standard, as the
+            // carrier tables actually place them: the two half-channel
+            // modes sit entirely above the reference, 9 and 10 kHz are
+            // symmetric about it, and the two wide ones are neither.
+            Mode::Drm => &[
+                ("4.5k", 0.0, 4300.0),
+                ("5k", 0.0, 4900.0),
+                ("9k", -4300.0, 4300.0),
+                ("10k", -4900.0, 4900.0),
+                ("18k", -4100.0, 13_100.0),
+                ("20k", -4700.0, 14_600.0),
+            ],
             // Digital modes have a fixed wide passband; no presets.
             Mode::Wfm
             | Mode::Spec
@@ -1111,6 +1148,7 @@ mod tests {
             (Mode::Ft2, 26),
             (Mode::Packet, 27),
             (Mode::PacketHf, 28),
+            (Mode::Drm, 29),
         ];
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
@@ -1155,7 +1193,7 @@ mod tests {
         // `Mode::ALL`'s length is checked by the array type; what needs
         // checking is that it is a permutation of the enum, with nothing
         // dropped and nothing listed twice.
-        let last = Mode::PacketHf as u8;
+        let last = Mode::Drm as u8;
         for i in 0..=last {
             let present = Mode::ALL.iter().filter(|m| **m as u8 == i).count();
             assert_eq!(present, 1, "discriminant {i} appears {present} times in Mode::ALL");

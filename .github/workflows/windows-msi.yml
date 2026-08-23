@@ -54,7 +54,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # `submodules` pulls vendor/rade_c, which the RADE codec is built from.
+      # `submodules` pulls vendor/rade_c (the RADE codec), vendor/faad2 (the AAC
+      # decoder the DRM receiver is built with) and vendor/rtl_433.
       - uses: actions/checkout@v4
         with:
           submodules: recursive

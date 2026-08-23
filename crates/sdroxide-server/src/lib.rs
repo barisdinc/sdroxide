@@ -238,6 +238,12 @@ pub(crate) struct Latest {
     /// to tell that from a decoder that is not running.
     pub ism_reports: Vec<sdroxide_types::IsmReport>,
     pub ism_status: Option<sdroxide_types::IsmStatus>,
+    /// What the DRM decoder has made of the broadcast currently tuned. Replayed
+    /// on connect for the same reason as `rds`: a station's label and the
+    /// transmission's parameters are standing conditions, and a client that
+    /// attaches after the decoder locked would otherwise show an empty panel
+    /// in front of a perfectly good decode.
+    pub drm: Option<sdroxide_types::DrmStatus>,
 }
 
 /// Everything the routes are served out of: the station's radios and the
@@ -945,6 +951,10 @@ fn handle_event(shared: &Shared, ev: RadioEvent) {
                 // event.
                 latest.rds = Some(RdsData { groups: Vec::new(), ..d.clone() });
                 Some(ServerMsg::Rds(d))
+            }
+            RadioEvent::Drm(d) => {
+                latest.drm = Some(d.clone());
+                Some(ServerMsg::Drm(d))
             }
             RadioEvent::SkimmerSpots(s) => Some(ServerMsg::SkimmerSpots(s)),
             RadioEvent::IsmReports(r) => {

@@ -5084,6 +5084,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdroxide-drm"
+version = "1.5.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "hound",
+ "num-complex",
+ "rustfft",
+ "sdroxide-dsp",
+ "sdroxide-types",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "sdroxide-dsp"
 version = "1.5.0"
 dependencies = [
@@ -5302,6 +5317,7 @@ dependencies = [
  "sdroxide-ax25",
  "sdroxide-config",
  "sdroxide-digi",
+ "sdroxide-drm",
  "sdroxide-dsp",
  "sdroxide-ism",
  "sdroxide-kiss",

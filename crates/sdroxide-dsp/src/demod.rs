@@ -3,7 +3,7 @@
 //! The wanted signal's carrier sits at DC; the passband filter edges are in
 //! Hz relative to that carrier (negative = lower sideband).
 
-use sdroxide_types::{Mode, RdsData, SubTone};
+use sdroxide_types::{DrmStatus, Mode, RdsData, SubTone};
 
 use crate::Complex32;
 use crate::decim::RealFirDecim;
@@ -75,6 +75,27 @@ pub trait Demodulator: Send {
     /// Forget the station the RDS decoder was reading. The demod cannot see a
     /// retune — the DDC ahead of it absorbs that — so the engine has to say.
     fn reset_rds(&mut self) {}
+
+    /// What the DRM decoder has made of the multiplex since this was last
+    /// called, or `None` from a demod that is not decoding DRM — and from the
+    /// DRM one whenever nothing has moved.
+    ///
+    /// The DRM demodulator itself lives in `sdroxide-drm`, not here: it links a
+    /// vendored C++ receiver, and this crate has to keep building for wasm.
+    /// Only the snapshot type is shared, which is why this is a trait method
+    /// with a default rather than another arm of [`make_demod`].
+    fn take_drm(&mut self) -> Option<DrmStatus> {
+        None
+    }
+
+    /// Re-acquire the DRM transmission from scratch. Like [`Self::reset_rds`],
+    /// the demod cannot see a retune for itself.
+    fn reset_drm(&mut self) {}
+
+    /// Decode a different service of the DRM multiplex, 0-based. Most
+    /// broadcasts carry one; a few carry a second programme or a data service
+    /// alongside it.
+    fn set_drm_service(&mut self, _service: u8) {}
 }
 
 /// The channel rate a mode's demodulator wants from the DDC.
@@ -128,6 +149,11 @@ pub fn make_demod(mode: Mode, channel_rate: f64) -> Option<Box<dyn Demodulator>>
         Mode::Sam => Some(Box::new(SamDemod::new(channel_rate, lo, hi))),
         Mode::Nfm => Some(Box::new(FmDemod::new(channel_rate, lo, hi))),
         Mode::Wfm => Some(Box::new(WfmDemod::new(channel_rate))),
+        // DRM's decoder is a vendored C++ receiver, which cannot be linked from
+        // this crate — see `Demodulator::take_drm`. The engine builds
+        // `sdroxide_drm::DrmDemod` itself; reaching here means it forgot to,
+        // and the mode is silent rather than wrong.
+        Mode::Drm => None,
         Mode::Spec => None,
     }
 }

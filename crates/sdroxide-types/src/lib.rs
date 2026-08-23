@@ -15,6 +15,7 @@ mod command;
 mod contacts;
 mod controller;
 mod digi;
+mod drm;
 mod entity;
 mod entity_flags;
 mod geo;
@@ -87,6 +88,9 @@ pub use digi::{
     RadeStatus, ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health,
     cq_is_for_us, fmt_report, qso_log_to_adif, qso_log_to_text, utc_ymd_hms, worked_before,
     ymd_hms_to_unix,
+};
+pub use drm::{
+    DrmCodec, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime, spectrum_occupancy_khz,
 };
 pub use entity::{
     EntityInfo, EntityPlace, all_entities, resolve_callsign, resolve_place, resolve_prefix,

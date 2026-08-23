@@ -668,4 +668,17 @@ pub enum Command {
     /// button. Every transmit rail applies: this is an ordinary key-down and it
     /// is refused for the same reasons any other one would be.
     ToneBurst,
+
+    /// Decode a different service of the DRM multiplex, 0-based.
+    ///
+    /// Most broadcasts carry one audio service and this never comes up. A few
+    /// carry two programmes, or a programme alongside a data service, and
+    /// without this the receiver is stuck on whichever the transmission lists
+    /// first. Out-of-range values are ignored rather than clamped: the number
+    /// of services is a property of the transmission, and a stale click from a
+    /// client that has not seen the multiplex change should do nothing rather
+    /// than land somewhere else.
+    SetDrmService {
+        service: u8,
+    },
 }

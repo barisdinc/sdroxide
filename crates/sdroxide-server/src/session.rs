@@ -178,6 +178,7 @@ async fn run_session(
         rds,
         ism_reports,
         ism_status,
+        drm,
     ) = {
         let latest = shared.latest.lock().unwrap();
         (
@@ -197,6 +198,7 @@ async fn run_session(
             latest.rds.clone(),
             latest.ism_reports.clone(),
             latest.ism_status.clone(),
+            latest.drm.clone(),
         )
     };
     let ack = ServerMsg::HelloAck { proto: PROTO_VERSION, caps, state, rx_codec, tx_codec };
@@ -231,6 +233,11 @@ async fn run_session(
     // have arrived minutes ago and will not be sent again until they change.
     if let Some(d) = rds {
         let _ = socket.send(msg(&ServerMsg::Rds(d))).await;
+    }
+    // The DRM broadcast being decoded, for the same reason as the RDS station
+    // above: sync and a service label are conditions, not events.
+    if let Some(d) = drm {
+        let _ = socket.send(msg(&ServerMsg::Drm(d))).await;
     }
     // The ISM device table and where the decoder is listening. Both are slow
     // conditions — see `Latest::ism_reports`.

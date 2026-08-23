@@ -101,6 +101,9 @@ jobs:
         if: matrix.container
         run: |
           apt-get update
+          # build-essential also carries the C++ compiler the vendored DRM
+          # receiver needs; nothing about DRM is a *system* dependency, because
+          # Dream, faad2 and the FFT are all built from source in-tree.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git ca-certificates curl wget zstd build-essential \
             libasound2-dev pkg-config cmake autoconf automake libtool libclang-dev
@@ -108,7 +111,8 @@ jobs:
             apt-get install -y --no-install-recommends libsoapysdr-dev
           fi
 
-      # `submodules` pulls vendor/rade_c, which the RADE codec is built from.
+      # `submodules` pulls vendor/rade_c (the RADE codec), vendor/faad2 (the AAC
+      # decoder the DRM receiver is built with) and vendor/rtl_433.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -138,7 +142,10 @@ jobs:
           sudo apt-get update
           # ALSA + pkg-config are needed by both variants; SoapySDR only by `soapy`.
           # RADE builds a FARGAN-enabled Opus from source with autotools, and
-          # bindgen needs libclang.
+          # bindgen needs libclang — which the DRM receiver's bindings need too.
+          # DRM adds no system package of its own: Dream, faad2 and the FFT it
+          # would otherwise take from fftw3 are all built from the vendored
+          # sources, in both variants.
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev pkg-config cmake autoconf automake libtool libclang-dev
           if [[ "${{ matrix.variant }}" == "soapy" ]]; then
@@ -150,7 +157,10 @@ jobs:
       # RADE's Opus dependency is built with autotools, which MSVC cannot drive
       # and whose static library MSVC cannot link. Windows therefore builds the
       # `x86_64-pc-windows-gnu` target inside MSYS2/MinGW — the same way
-      # upstream FreeDV ships its Windows binaries.
+      # upstream FreeDV ships its Windows binaries. The DRM receiver is
+      # compiled by `cc` directly rather than through its own build system, so
+      # it never generates a makefile and cannot hit the MSYS `make` trap that
+      # an absolute path in a rule line sets off.
       - name: Set up MSYS2 (Windows)
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2

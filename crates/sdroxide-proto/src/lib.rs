@@ -570,7 +570,10 @@ use sdroxide_types::{
 /// Fields appended to the radio configuration, which rides in both a command
 /// and an event, so a v83 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying.
-pub const PROTO_VERSION: u16 = 84;
+/// v85: DRM (Digital Radio Mondiale) — `Mode::Drm`, `ServerMsg::Drm` carrying
+/// `DrmStatus`, and `Command::SetDrmService`. Both are appended, so no existing
+/// discriminant moves.
+pub const PROTO_VERSION: u16 = 85;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -959,6 +962,9 @@ pub enum ServerMsg {
     IsmReports(Vec<sdroxide_types::IsmReport>),
     /// Which ISM channels are live, and what the burst gate is seeing.
     IsmStatus(sdroxide_types::IsmStatus),
+    /// What the DRM decoder has made of the broadcast on the main receiver.
+    /// A snapshot — see [`sdroxide_types::DrmStatus`].
+    Drm(sdroxide_types::DrmStatus),
 }
 
 /// One radio in a station's roster, as a client sees it.

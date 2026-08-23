@@ -300,7 +300,9 @@ pub fn mode_to_tci(mode: Mode) -> &'static str {
         Mode::Lsb => "lsb",
         Mode::Usb | Mode::Sstv | Mode::Wefax | Mode::RfPaint => "usb",
         Mode::Cw => "cw",
-        Mode::Am => "am",
+        // TCI has no DRM modulation; AM is the nearest, for the same
+        // reason as the hamlib mapping.
+        Mode::Am | Mode::Drm => "am",
         Mode::Sam => "sam",
         // RIFP centres on the dial and swings ±4 kHz, and VHF packet
         // frequency-modulates it too: FM, not a sideband.

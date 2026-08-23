@@ -69,7 +69,10 @@ pub fn make_modulator(mode: Mode, rate: f64, passband: (f32, f32)) -> Option<Box
         // would put speech on the air in a CW segment. The panel's keyer needs
         // single-sideband all the same, and asks for it by name
         // (`Engine::tx_block_digi`).
-        Mode::Cw | Mode::Wfm | Mode::Spec => None,
+        // DRM joins them for a plainer reason than CW's: it is a broadcast
+        // system. There is no amateur DRM transmission to make, and a
+        // receiver that could key one has no business doing so.
+        Mode::Cw | Mode::Wfm | Mode::Spec | Mode::Drm => None,
     }
 }
 

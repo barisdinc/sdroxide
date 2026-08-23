@@ -41,7 +41,7 @@ or connects to a remote sdroxide server.
   selectable waterfall colour schemes (including an Icom-style palette).
 - **Dual VFO (A/B)** with split operation, VFO swap/copy, and an independently
   tunable sub-receiver with its own mode and filter.
-- **All the common modes:** LSB, USB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, a
+- **All the common modes:** LSB, USB, CW, AM, SAM, NFM, WFM, DRM, DIGU, DIGL, DSB, a
   spectrum-only mode (SPEC), the automatic digital modes **FT8**, **FT4** and
   **FT2**, the
   keyboard modes **PSK31**, **RTTY**, **Olivia**, **THOR** and **FSQ**, the image
@@ -270,7 +270,7 @@ popup with three rows:
   [§2.15](#215-band-conditions). In a digital mode, the bands where that mode
   has a standard calling frequency carry a cyan underline; see
   [§3.1](#31-general-considerations).
-- **MODE:** `LSB USB CW AM SAM NFM WFM DIGU DIGL DSB SPEC`.
+- **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB SPEC`.
 - **DIGITAL:** `FT8 FT4 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP RFPAINT RADE` (see
   [Digital modes](#3-digital-modes)).
 
@@ -510,6 +510,12 @@ moves the transmit frequency, and what has to ride under it. See
   character table above plain ASCII, which this build does not reproduce, and a
   wrong letter in a station's name is indistinguishable from a bad decode in a
   way that a dot is not.
+- **DRM** (DRM only) — how the **Digital Radio Mondiale** decoder is getting on.
+  The button lights only when audio is actually being decoded, not merely when a
+  carrier is present, so it answers "is this station coming through?" at a
+  glance. Click it for the window, which is where to look when the answer is no:
+  it shows how far up the chain the decode got. Full detail is in
+  [2.19](#219-drm-digital-radio-mondiale).
 - **Tone** (NFM only) — the **CTCSS tone or DCS code** under the signal. Analog
   FM systems carry a sub-audible tone below the voice so a receiver can ignore
   traffic that is not theirs, and the button shows what is arriving: `88.5` for a
@@ -1497,6 +1503,96 @@ they simply take effect when you are in FM.
 > of the 104 codes a signal carries ([2.7](#27-receiver-controls)). If a machine
 > will not open on DCS, try the other polarity, and then CTCSS, which has no
 > such ambiguity.
+
+### 2.19 DRM (Digital Radio Mondiale)
+
+**DRM** is digital shortwave broadcasting: a few hundred OFDM carriers filling
+9 or 10 kHz, carrying AAC-coded audio together with the station's name, a
+scrolling text message and the broadcaster's clock. Where a shortwave AM signal
+fades into mush, DRM either arrives as clean audio or does not arrive at all.
+
+It is a **broadcast** mode, so it works like WFM rather than like the digital
+modes in section 3: there is nothing to transmit, no QSO to sequence and no
+transcript. Select `DRM` on the **MODE** button and listen.
+
+**Tuning.** Put the dial on the **channel centre**, not on one edge and not on a
+sideband. DRM's carriers sit symmetrically around the frequency the broadcaster
+publishes, so the published figure is the number to dial. The passband shading
+shows the default 10 kHz channel; the filter presets offer the six widths the
+standard allows (4.5, 5, 9, 10, 18 and 20 kHz), which affect what the display
+shades and what the S-meter reads — the decoder reads the real width out of the
+transmission itself and does not need to be told.
+
+**It is not instant.** DRM spreads each frame over 400 ms or two full seconds
+before transmitting it, and the receiver has to collect all of that before it
+can decode any of it. Expect a few seconds between landing on a signal and
+hearing anything, and a second or two of standing delay after that. Nothing here
+reacts the way an AM signal does, and that is the transmission rather than the
+radio.
+
+**The DRM window** (the **DRM** button, [2.7](#27-receiver-controls)) is what to
+read while tuning one in. Across the top is a row of indicators for the stages
+of the decode, in the order they lock:
+
+| Stage | What it means |
+| --- | --- |
+| **IO** | Samples are reaching the decoder. |
+| **TIME** | Symbol timing has been recovered. |
+| **FRAME** | Transmission frames have been found. |
+| **FAC** | The Fast Access Channel decoded — the transmission has said what it is. |
+| **SDC** | The Service Description Channel decoded — it has said what its services are. |
+| **AUDIO** | Audio frames are decoding. |
+
+They fill in left to right, and **where they stop is the diagnosis**. Nothing lit
+at all means no signal on this frequency. `TIME` and `FRAME` lit with `FAC` dark
+usually means the signal is there but too weak or too distorted to read — DRM
+needs a genuinely clean channel, and about 15 dB SNR for a reliable 10 kHz
+decode. Everything lit except `AUDIO` means the multiplex is being read but its
+audio is not decoding, which on a working install means the broadcaster is using
+**xHE-AAC**, a later codec than the AAC this build decodes.
+
+Below the indicators, once the signal is locked:
+
+- **SNR** and **MER** — how good the channel is. MER is the honest one for a
+  digital signal: it measures how tightly the received constellation sits on
+  its ideal points.
+- **MODE** — the robustness mode (A to D) and the channel width. A is for a
+  ground-wave path and carries the most data; D is for a badly scattered
+  sky-wave one and carries the least. Most international broadcasts are B.
+- **INTERLEAVE** — 400 ms or 2 s, the trade the broadcaster made between riding
+  out deep fades and being quick to acquire.
+- **PROTECTION** — the error-protection levels of the multiplex's two parts.
+- **OFFSET** — residual sample-clock error against the transmitter. A large,
+  steady figure means your receiver's reference is off rather than anything
+  being wrong with the broadcast.
+- **DOPPLER / DELAY** — how fast the path is moving and how far apart its echoes
+  arrive, when the channel estimator has enough to say. High Doppler on a
+  long-haul path is what robustness modes C and D exist for.
+
+Then the service itself: the station's name, its country and language codes, the
+codec, the bit rate — typically 8 to 25 kbit/s, which is why DRM sounds like
+speech radio rather than like FM — and whether it is mono or stereo. Underneath
+is the **text message** the audio stream carries, which broadcasters use for the
+programme name, a website or a contact address, and the broadcaster's own clock
+where the multiplex carries one.
+
+**More than one service.** A few multiplexes carry two programmes, or a
+programme alongside a data service. When they do, a row of numbered buttons
+appears; click one to decode that service instead. Most broadcasts carry one and
+the row does not appear.
+
+**Audio.** The decoder's output goes to the speaker in place of the demodulated
+signal, and the AGC is bypassed — what you hear is the level the broadcaster
+mixed, not a level the receiver invented. If a station is stereo, it is played
+in stereo.
+
+**What is not here.** Transmit: DRM is a broadcast system and there is no
+amateur DRM to send. **xHE-AAC** and the withdrawn CELP and HVXC speech codecs
+are not decoded — only AAC, which is what the surviving DRM30 shortwave
+broadcasts use. Journaline, MOT slideshows and the electronic programme guide
+are carried by the standard but not shown.
+
+---
 
 ---
 
@@ -8994,7 +9090,7 @@ sends them.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left, or 14,200,000 on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC or a moderate value). |
-| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE). Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM). Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (LNAH, TX/RX — `--probe` lists them). Default: the port the last session was left on, and failing that whatever the driver selects. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (BAND1, BAND2). |
 | `--server` | Run as a server (web client + WebSocket streaming backend). |
@@ -9890,6 +9986,7 @@ using. Bind them under **Speech** on the Controls tab:
 | NFM / WFM | Narrow / wide FM. WFM decodes broadcast stereo and RDS/RBDS automatically. |
 | DIGU / DIGL | Data over USB / LSB (general digital). |
 | DSB | Double sideband. |
+| DRM | Digital Radio Mondiale — digital shortwave broadcasting. Receive only; decodes the programme audio, the station label and its scrolling text. See [2.19](#219-drm-digital-radio-mondiale). |
 | SPEC | Spectrum only (no demodulation). |
 | FT8 / FT4 | Automatic digital modes with decoding, QSO sequencing, and logging. |
 | JS8 | JS8 — conversational messaging on FT8's waveform. Four speeds (Normal 15 s / Fast 10 s / Turbo 6 s / Slow 30 s); directed queries, heartbeats and multi-frame free text. |

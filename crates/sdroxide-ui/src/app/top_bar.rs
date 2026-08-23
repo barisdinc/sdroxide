@@ -2466,6 +2466,25 @@ impl SdroxideApp {
                     self.show_rds = !self.show_rds;
                 }
             }
+            // DRM: lit once the decoder is actually producing audio, not merely
+            // holding sync on a carrier, so the chip answers "is this station
+            // being decoded?" at a glance. The window behind it says where the
+            // chain stopped when the answer is no.
+            if self.state.rx[0].mode == Mode::Drm {
+                let d = self.drm.as_ref();
+                let decoding = d.is_some_and(|d| d.decoding());
+                let hover = match d {
+                    Some(d) if decoding && !d.service.label.is_empty() => {
+                        format!("DRM: {}. Click for the broadcast's details", d.service.label)
+                    }
+                    Some(d) if decoding => "DRM is decoding — click for the details".to_string(),
+                    Some(d) => format!("DRM: {} — click for the decoder's state", d.summary()),
+                    None => "DRM — click for the decoder's state".to_string(),
+                };
+                if crate::chrome::chip(ui, decoding, "DRM").on_hover_text(hover).clicked() {
+                    self.show_drm = !self.show_drm;
+                }
+            }
             // CTCSS/DCS: what is coming in, and optionally what has to be
             // present before the audio opens. Only NFM carries either.
             if self.state.rx[0].mode == Mode::Nfm {

@@ -56,7 +56,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Lsb => "LSB",
         Mode::Usb | Mode::Spec | Mode::Sstv | Mode::Wefax | Mode::RfPaint => "USB",
         Mode::Cw => "CW",
-        Mode::Am | Mode::Sam => "AM",
+        Mode::Am | Mode::Sam | Mode::Drm => "AM",
         Mode::Dsb => "DSB",
         Mode::Nfm => "FM",
         Mode::Wfm => "WFM",

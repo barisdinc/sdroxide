@@ -553,7 +553,7 @@ fn candidates(m: Mode) -> &'static [&'static str] {
         Mode::Lsb => &["LSB"],
         Mode::Usb | Mode::Spec | Mode::Sstv | Mode::Wefax | Mode::RfPaint => &["USB"],
         Mode::Cw => &["CW"],
-        Mode::Am | Mode::Sam => &["AM"],
+        Mode::Am | Mode::Sam | Mode::Drm => &["AM"],
         Mode::Dsb => &["DSB"],
         Mode::Nfm => &["FM", "FM-N", "NFM"],
         // No plain-FM fallback here, unlike the data lists below: a rig with

@@ -21,6 +21,7 @@
 
 pub(in crate::app) mod awards;
 pub(in crate::app) mod bands;
+pub(in crate::app) mod drm;
 pub(in crate::app) mod frame;
 pub(in crate::app) mod ism;
 pub(in crate::app) mod logbook;
@@ -265,6 +266,10 @@ pub struct SdroxideApp {
     /// The RDS window. Opened from the RDS chip in the receive menu, which only
     /// appears on WFM.
     show_rds: bool,
+    /// The DRM window's open state, and the latest snapshot from the decoder.
+    /// A whole snapshot each time — unlike RDS there is no delta inside it.
+    show_drm: bool,
+    drm: Option<sdroxide_types::DrmStatus>,
     /// Which half of the RDS window is showing.
     rds_tab: rds::RdsTab,
     /// The station picture from the engine's RDS decoder, minus the group log —
@@ -947,6 +952,8 @@ impl SdroxideApp {
             seen_first_state: false,
             show_memories: false,
             show_rds: false,
+            show_drm: false,
+            drm: None,
             rds_tab: rds::RdsTab::default(),
             rds: None,
             rds_log: std::collections::VecDeque::new(),

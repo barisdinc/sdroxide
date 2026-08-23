@@ -14,6 +14,9 @@ rtl433 = ["sdroxide-ism/rtl433"]
 [dependencies]
 sdroxide-types.workspace = true
 sdroxide-dsp.workspace = true
+# DRM reception. Links a vendored C++ receiver, so it is native-only — which
+# this crate already is.
+sdroxide-drm.workspace = true
 num-complex.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

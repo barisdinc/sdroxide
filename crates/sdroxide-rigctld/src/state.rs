@@ -108,7 +108,11 @@ pub fn to_hamlib_mode(m: Mode) -> &'static str {
         Mode::Lsb => "LSB",
         Mode::Usb => "USB",
         Mode::Cw => "CW",
-        Mode::Am => "AM",
+        // Hamlib has no DRM mode, and the nearest true statement is AM:
+        // the carrier is on the dial and the channel is about as wide.
+        // It is also how the signal would reach an outboard decoder — off
+        // a receiver set to AM.
+        Mode::Am | Mode::Drm => "AM",
         Mode::Sam => "SAM",
         Mode::Nfm => "FM",
         // RIFP and VHF packet are data on an FM carrier, not on a sideband.

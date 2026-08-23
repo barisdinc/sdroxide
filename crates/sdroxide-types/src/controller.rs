@@ -279,6 +279,10 @@ pub enum RadioEvent {
     /// Which ISM channels are being listened to, and what the gate is seeing.
     /// Sent alongside the reports so an empty table can explain itself.
     IsmStatus(crate::IsmStatus),
+    /// What the DRM decoder has made of the broadcast on the main receiver.
+    /// A whole snapshot, emitted a few times a second while anything moves —
+    /// the sync lights and the scrolling text both change on their own.
+    Drm(crate::DrmStatus),
 }
 
 /// Snapshot of the frontend's switchable sound devices (native clients).

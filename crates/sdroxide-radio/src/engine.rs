@@ -18,6 +18,7 @@ use sdroxide_digi::{
     Js8Controller, PacketController, RadeController, RfPaintController, RifpController,
     SstvController, TextModemController, WefaxController, WsprController,
 };
+use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
     Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
     MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
@@ -133,6 +134,16 @@ fn swr_rails(tuning: bool, limit: f32) -> (f32, u16) {
 /// continuously is the diagnostics log, which is a delta and so costs the same
 /// whatever the cadence.
 const RDS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How often the DRM status is polled. Faster than RDS because the sync
+/// indicators are what an operator watches while tuning one in, and a
+/// half-second lag on those reads as a decoder that is not working.
+const DRM_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How far the dial has to move before the DRM decoder is told to re-acquire.
+/// A tenth of what RDS uses: broadcasts sit on a 5 kHz raster on shortwave, so
+/// anything past a couple of kHz is a different transmission, not drift.
+const DRM_RETUNE_HZ: f64 = 2_000.0;
 
 /// How far the dial has to move before the RDS decoder is told to forget the
 /// station.
@@ -475,7 +486,15 @@ impl RxChain {
             self.ddc = Ddc::new(self.in_rate, target);
             self.ddc.set_offset_hz(self.offset_hz);
         }
-        self.demod = make_demod(rx.mode, self.ddc.out_rate());
+        // Every mode but this one comes from `make_demod`. DRM's decoder links
+        // a vendored C++ receiver, which `sdroxide-dsp` cannot depend on and
+        // still build for the browser, so it is constructed here instead — see
+        // `Demodulator::take_drm`.
+        self.demod = if rx.mode == Mode::Drm {
+            Some(Box::new(DrmDemod::new(self.ddc.out_rate())) as Box<dyn Demodulator>)
+        } else {
+            make_demod(rx.mode, self.ddc.out_rate())
+        };
         if let Some(d) = self.demod.as_mut() {
             d.set_filter(rx.filter_lo, rx.filter_hi);
             d.set_stereo_enabled(stereo_allowed(rx));
@@ -762,6 +781,26 @@ impl RxChain {
     fn reset_rds(&mut self) {
         if let Some(d) = self.demod.as_mut() {
             d.reset_rds();
+        }
+    }
+
+    /// What the DRM decoder has made of the broadcast since the last poll, or
+    /// `None` when nothing has moved. Only DRM ever answers.
+    fn take_drm(&mut self) -> Option<sdroxide_types::DrmStatus> {
+        self.demod.as_mut().and_then(|d| d.take_drm())
+    }
+
+    /// Re-acquire, for the same reason as [`RxChain::reset_rds`].
+    fn reset_drm(&mut self) {
+        if let Some(d) = self.demod.as_mut() {
+            d.reset_drm();
+        }
+    }
+
+    /// Decode a different service of the DRM multiplex.
+    fn set_drm_service(&mut self, service: u8) {
+        if let Some(d) = self.demod.as_mut() {
+            d.set_drm_service(service);
         }
     }
 }
@@ -1517,6 +1556,8 @@ struct Engine {
     /// endless small offset changes this engine makes for its own reasons
     /// (centre moves, satellite Doppler). See [`RDS_RETUNE_HZ`].
     rds_dial_hz: f64,
+    /// The same, for the DRM decoder — see [`DRM_RETUNE_HZ`].
+    drm_dial_hz: f64,
     /// WSJT-X UDP broadcast: decodes, status and logged QSOs sent out for
     /// GridTracker, JTAlert, N1MM+ and Log4OM. Present while enabled.
     wsjtx: Option<sdroxide_wsjtx::WsjtxUdp>,
@@ -2062,6 +2103,7 @@ fn engine_thread(
         rigctld_seen: None,
         last_s_dbm: -127.0,
         rds_dial_hz: 0.0,
+        drm_dial_hz: 0.0,
         tci_srv: None,
         tci_cfg: TciServerConfig::default(),
         tci_srv_err: None,
@@ -2223,6 +2265,7 @@ fn engine_thread(
     let mut next_frame = Instant::now();
     let mut next_meters = Instant::now();
     let mut next_rds = Instant::now();
+    let mut next_drm = Instant::now();
     let mut next_session = Instant::now() + SESSION_SAVE_INTERVAL;
 
     loop {
@@ -2529,6 +2572,14 @@ fn engine_thread(
             // broadcast would have nowhere to show it.
             if let Some(rds) = engine.main.as_mut().and_then(|c| c.take_rds()) {
                 let _ = engine.event_tx.send(RadioEvent::Rds(rds));
+            }
+        }
+        if now >= next_drm {
+            next_drm = now + DRM_INTERVAL;
+            // Main receiver only, like RDS: the broadcast being listened to is
+            // the one whose label and text belong on the panel.
+            if let Some(drm) = engine.main.as_mut().and_then(|c| c.take_drm()) {
+                let _ = engine.event_tx.send(RadioEvent::Drm(drm));
             }
         }
         if now >= next_session {
@@ -4343,6 +4394,13 @@ impl Engine {
             }
             SetAutoNotch { rx, on } => self.state.rx[rx.index()].auto_notch = on,
             SetWfmStereo { rx, on } => self.state.rx[rx.index()].wfm_stereo = on,
+            // Main receiver only, like the status it answers: the DRM panel
+            // shows the broadcast being listened to.
+            SetDrmService { service } => {
+                if let Some(c) = self.main.as_mut() {
+                    c.set_drm_service(service);
+                }
+            }
             SetToneSquelch { rx, tone } => self.state.rx[rx.index()].tone_sql = tone,
             SetScannerConfig(mut cfg) => {
                 let restart = self.state.scan.running && cfg.kind != self.scan_cfg.kind;
@@ -8233,6 +8291,12 @@ impl Engine {
                 c.reset_rds();
             }
         }
+        if (dial - self.drm_dial_hz).abs() > DRM_RETUNE_HZ {
+            self.drm_dial_hz = dial;
+            if let Some(c) = self.main.as_mut() {
+                c.reset_drm();
+            }
+        }
         if let Some(c) = self.main.as_mut() {
             c.set_offset_hz(main_offset);
         }
@@ -9655,7 +9719,9 @@ fn rig_mode_class(m: Mode) -> u8 {
         | Mode::Rade
         | Mode::PacketHf
         | Mode::Spec => 1,
-        Mode::Am | Mode::Sam | Mode::Dsb => 2,
+        // DRM sits on the dial in a channel about as wide as AM's, and a
+        // rig has no DRM setting to report back — see `to_hamlib_mode`.
+        Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => 2,
         Mode::Cw => 3,
         // RIFP and VHF packet are data on an FM carrier, so a rig reporting
         // plain FM is still where we left it.

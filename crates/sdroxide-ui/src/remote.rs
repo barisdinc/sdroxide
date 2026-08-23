@@ -292,6 +292,7 @@ impl RemoteController {
             }
             ServerMsg::WefaxStatus(s) => self.pending.push_back(RadioEvent::WefaxStatus(s)),
             ServerMsg::Rds(d) => self.pending.push_back(RadioEvent::Rds(d)),
+            ServerMsg::Drm(d) => self.pending.push_back(RadioEvent::Drm(d)),
             ServerMsg::IsmReports(r) => self.pending.push_back(RadioEvent::IsmReports(r)),
             ServerMsg::IsmStatus(s) => self.pending.push_back(RadioEvent::IsmStatus(s)),
             ServerMsg::RifpRows { image_id, y, w, h, rows } => {

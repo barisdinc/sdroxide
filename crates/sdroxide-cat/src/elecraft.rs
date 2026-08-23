@@ -206,7 +206,7 @@ fn mode_digit(m: Mode) -> char {
         // input it transmits is then the rig's MIC/LINE menu rather than
         // anything CAT can say.
         Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet => '4',
-        Mode::Am | Mode::Sam | Mode::Dsb => '5',
+        Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => '5',
         Mode::Digl => '9',
         Mode::Digu
         | Mode::Ft8
