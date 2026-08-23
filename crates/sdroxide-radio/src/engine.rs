@@ -43,6 +43,33 @@ use crate::{Complex32, ControlUpdate, IqSource};
 /// Number of bins in emitted display frames (matches the waterfall texture width).
 pub const DISPLAY_BINS: usize = 2048;
 
+/// Bins of the device-wide analyser a viewport has to keep before the
+/// panadapter is served from a zoom lane instead (see [`ZoomLane`]).
+///
+/// One per column of the emitted frame. Below that the pooling in
+/// `SpectrumAnalyzer::make_frame` has fewer measurements than it has columns to
+/// fill and the trace stair-steps: an RX-888 streaming 8.1 MHz through a
+/// 32768-point FFT is 247 Hz a bin, so a 68 kHz window on screen is drawn from
+/// 275 numbers.
+const ZOOM_LANE_MIN_BINS: f64 = DISPLAY_BINS as f64;
+
+/// How much wider than the viewport the zoom lane's output has to be, so the
+/// decimator's transition band stays off the edge of the display.
+const ZOOM_LANE_MARGIN: f64 = 1.4;
+
+/// The zoom lane's FFT size. The decimation ladder is powers of two, so the
+/// lane's output lands between [`ZOOM_LANE_MARGIN`] and twice that times the
+/// viewport, which puts at least 1400 of these bins inside it — about one per
+/// column of any display anyone owns, at any zoom.
+const ZOOM_LANE_FFT: usize = 4096;
+
+/// The zoom lane's overlap, as the divisor of its FFT size. An eighth rather
+/// than the usual half: the finer the zoom the longer one transform takes to
+/// fill — resolving a hertz needs a second of signal, on any analyser ever
+/// built — and at the deep end a half-window hop would leave the waterfall
+/// crawling. See [`sdroxide_dsp::SpectrumAnalyzer::with_hop_div`].
+const ZOOM_LANE_HOP_DIV: usize = 8;
+
 /// How long the main panadapter keeps drawing a front end's own spectrum after
 /// the last sweep landed.
 ///
@@ -1301,6 +1328,99 @@ const SAT_SLOW_INTERVAL_S: f64 = 300.0;
 /// API, [`RadioState::gains`] and `session.json` all use.
 type GainSet = Vec<(String, f64)>;
 
+/// The panadapter's zoom lane: the window the operator is actually looking at,
+/// mixed down to baseband and decimated to its own width, so the FFT over it
+/// resolves the *view* rather than the whole of what the front end streams.
+///
+/// The device-wide analyser is a fixed number of bins across whatever is
+/// arriving, so the further in the operator zooms the fewer of them land on
+/// screen — and a wide front end runs out of them long before they have
+/// finished zooming. An RX-888 asked for 8.1 MHz gives 247 Hz a bin through the
+/// largest FFT the display will ask for, which draws a 68 kHz window out of 275
+/// numbers and stair-steps visibly. Front-end decimation was the only cure, and
+/// it buys the resolution by throwing the rest of the band away.
+///
+/// So this lane costs the band nothing: the raw stream is still analysed whole
+/// for the zoomed-out view, the skimmers and every other lane, and this is one
+/// more decimation off the same samples — the arrangement the CW skimmer and
+/// the digital channel analyser already use.
+struct ZoomLane {
+    ddc: Ddc,
+    analyzer: SpectrumAnalyzer,
+    /// The lane's own axis: where the DDC is pointed and the width it produces.
+    /// Also what the frame built from it is described by.
+    center_hz: f64,
+    rate_hz: f64,
+    /// What this lane was built for. All three are its identity: a zoom that
+    /// changes the decimation needs new filters, and a front end that changes
+    /// rate invalidates the whole ladder — where a pan that moves neither only
+    /// needs the NCO re-pointed.
+    in_rate_hz: f64,
+    decim: u32,
+    /// Where the NCO is pointed now, as an offset from the front end's centre.
+    /// A retune moves the front end out from under the lane, and this has to
+    /// follow or the window would slide across the band with it.
+    offset_hz: f64,
+    buf: Vec<Complex32>,
+}
+
+impl ZoomLane {
+    /// A lane covering `in_rate / decim` centred on `center_hz`, with the front
+    /// end currently on `dev_center_hz`.
+    fn new(in_rate_hz: f64, decim: u32, center_hz: f64, dev_center_hz: f64, avg_tc: f32) -> Self {
+        // The ladder is powers of two, so `Ddc` reaches this rate exactly and
+        // `out_rate` is a formality — read back rather than assumed, because
+        // the frame's axis has to be the width actually produced.
+        let mut ddc = Ddc::new(in_rate_hz, in_rate_hz / f64::from(decim));
+        let offset_hz = center_hz - dev_center_hz;
+        ddc.set_offset_hz(offset_hz);
+        let rate_hz = ddc.out_rate();
+        let mut analyzer =
+            SpectrumAnalyzer::with_hop_div(ZOOM_LANE_FFT, rate_hz, avg_tc, ZOOM_LANE_HOP_DIV);
+        // DC here is the middle of the operator's window, not the front end's
+        // LO leakage, so the usual spike suppression would punch a hole through
+        // whatever they had centred.
+        analyzer.set_dc_suppress(false);
+        ZoomLane {
+            ddc,
+            analyzer,
+            center_hz,
+            rate_hz,
+            in_rate_hz,
+            decim,
+            offset_hz,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Whether this lane is the one `want` asks for, on a front end streaming
+    /// `in_rate_hz`. A lane that is keeps its filters and its averaging — and
+    /// so keeps the waterfall running — across everything except a real change
+    /// of window.
+    fn serves(&self, want: (f64, u32), in_rate_hz: f64) -> bool {
+        self.decim == want.1
+            && (self.center_hz - want.0).abs() < 0.5
+            && (self.in_rate_hz - in_rate_hz).abs() < 0.5
+    }
+
+    /// Re-point the NCO after the front end moved out from under the lane —
+    /// which, since the panadapter's own pan can now move it, happens under an
+    /// operator's hand rather than only at a band change.
+    fn point_at(&mut self, dev_center_hz: f64) {
+        let want = self.center_hz - dev_center_hz;
+        if (want - self.offset_hz).abs() >= 0.5 {
+            self.offset_hz = want;
+            self.ddc.set_offset_hz(want);
+        }
+    }
+
+    fn process(&mut self, iq: &[Complex32]) {
+        self.buf.clear();
+        self.ddc.process(iq, &mut self.buf);
+        self.analyzer.process(&self.buf);
+    }
+}
+
 struct Engine {
     source: Box<dyn IqSource>,
     caps: DeviceCaps,
@@ -1496,6 +1616,11 @@ struct Engine {
     /// High-resolution spectrum over the VFO channel (digital modes only):
     /// fed the decimated channel IQ so an FFT gives ~3 Hz/bin resolution.
     channel_analyzer: Option<SpectrumAnalyzer>,
+    /// The panadapter's zoomed window at its own resolution — see [`ZoomLane`].
+    /// `None` while the device-wide analyser still has a bin for every column
+    /// of the display, which is most of the time on a narrow front end and
+    /// almost never on a wide one.
+    zoom: Option<ZoomLane>,
     /// CW skimmer: a dedicated wideband decimator off the raw IQ plus a
     /// worker-thread decoder, present only while the skimmer is enabled.
     skim_ddc: Option<Ddc>,
@@ -2084,6 +2209,7 @@ fn engine_thread(
         voice_tick: None,
         tx_pace: None,
         channel_analyzer: None,
+        zoom: None,
         skim_ddc: None,
         skimmer: None,
         skim_buf: Vec::new(),
@@ -2394,6 +2520,7 @@ fn engine_thread(
                     }
                     let iq = decimate(engine.decim.as_mut(), &buf[..n], &mut dbuf);
                     engine.analyzer.process(iq);
+                    engine.feed_zoom(iq);
                     engine.run_audio(iq);
                 }
                 Err(e) => {
@@ -2885,6 +3012,84 @@ impl Engine {
                 }
                 srv.on_rx_iq(&self.tci_iq_ilv, ddc.out_rate() as u32);
             }
+        }
+    }
+
+    /// What the zoom lane should be, if the display has anything to gain from
+    /// one: the centre of the window the client asked for, and the
+    /// power-of-two decimation whose output still covers it with margin.
+    ///
+    /// `None` where there is nothing to gain — no viewport at all (the operator
+    /// is looking at the whole window, which is what the device-wide analyser
+    /// *is*), a lane that already owns the frame (audio mode, or a digital
+    /// mode's channel analyser), or a device-wide FFT that still has a bin for
+    /// every column of the display.
+    fn wanted_zoom(&self) -> Option<(f64, u32)> {
+        if self.audio_mode || self.channel_analyzer.is_some() {
+            return None;
+        }
+        let full = self.state.sample_rate;
+        let (lo, hi) = self.cfg.viewport?;
+        let span = hi - lo;
+        if !span.is_finite() || span <= 0.0 || full <= 0.0 || span >= full {
+            return None;
+        }
+        // Hysteresis: a lane already up is held until the device-wide analyser
+        // has comfortably enough bins again. The two draw the same signal at
+        // different bin widths, so they put the noise floor at different levels
+        // — a zoom parked on the threshold would otherwise flip the picture
+        // between them every time the client resent its window.
+        let need = ZOOM_LANE_MIN_BINS * if self.zoom.is_some() { 1.5 } else { 1.0 };
+        if self.analyzer.fft_size() as f64 * span / full >= need {
+            return None;
+        }
+        // The narrowest output on the ladder that still spans the viewport with
+        // room for the decimator's skirt.
+        let want = span * ZOOM_LANE_MARGIN;
+        let mut decim = 1u32;
+        while decim < 1 << 14 && full / f64::from(decim * 2) >= want {
+            decim *= 2;
+        }
+        (decim > 1).then_some(((lo + hi) / 2.0, decim))
+    }
+
+    /// Keep the zoom lane in step with the window the display is asking for,
+    /// and feed it this block.
+    ///
+    /// Synced here rather than at each of the half-dozen places a viewport, a
+    /// centre or a rate can move: it is a handful of comparisons when nothing
+    /// has changed, and a lane that quietly stopped matching its window would
+    /// show the operator a picture of somewhere else.
+    fn feed_zoom(&mut self, iq: &[Complex32]) {
+        let in_rate = self.state.sample_rate;
+        match self.wanted_zoom() {
+            None => {
+                self.zoom = None;
+                return;
+            }
+            Some(want) => match self.zoom.as_mut() {
+                // The same window: only the front end may have moved under it.
+                Some(z) if z.serves(want, in_rate) => z.point_at(self.state.center_hz),
+                _ => {
+                    let lane = ZoomLane::new(
+                        in_rate,
+                        want.1,
+                        want.0,
+                        self.state.center_hz,
+                        self.cfg.avg_tc,
+                    );
+                    debug!(
+                        center = lane.center_hz,
+                        rate = lane.rate_hz,
+                        decim = lane.decim,
+                        "panadapter zoom lane built"
+                    );
+                    self.zoom = Some(lane);
+                }
+            },
+        }
+        if let Some(z) = self.zoom.as_mut() {
+            z.process(iq);
         }
     }
 
@@ -4195,6 +4400,18 @@ impl Engine {
                     Some((vp_lo, vp_hi)),
                 );
             }
+        }
+        // The zoomed window at its own resolution, where the device-wide
+        // analyser has run out of bins to give it.
+        if let Some(z) = self.zoom.as_mut() {
+            return z.analyzer.make_frame(
+                z.center_hz,
+                z.rate_hz,
+                self.cfg.db_floor,
+                self.cfg.db_ceil,
+                DISPLAY_BINS,
+                self.cfg.viewport,
+            );
         }
         self.analyzer.make_frame(
             self.state.center_hz,
@@ -7292,6 +7509,7 @@ impl Engine {
         // The running average still holds the previous slice's samples, and
         // they are from a different part of the band entirely.
         self.analyzer.reset();
+        self.zoom = None;
         self.update_tuning();
         self.emit_state();
         Refill::Waiting
@@ -8757,8 +8975,12 @@ impl Engine {
             }
             self.tx_pace = None;
             // Drop the transmit residue so the first receive frames aren't a
-            // blend of TX samples and fresh RX.
+            // blend of TX samples and fresh RX. The zoom lane held its average
+            // through the over without being fed, so its residue is older
+            // still — and its decimator holds filter state from before the key
+            // went down. Dropped whole; the next block rebuilds it.
             self.analyzer.reset();
+            self.zoom = None;
         }
     }
 

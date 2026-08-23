@@ -378,9 +378,13 @@ moves the transmit frequency, and what has to ride under it. See
   stops being a band display.
 
   What you gain:
-  - **Resolution.** The same 4096-point FFT spread over an eighth of the
-    bandwidth is eight times finer. A crowded CW pile-up or an FT8 sub-band
-    resolves into separate signals instead of a smear.
+  - **Resolution**, everywhere at once. The same FFT spread over an eighth of
+    the bandwidth is eight times finer, across the whole span rather than only
+    the part you have zoomed into. (Zooming gets its own resolution without
+    this — see the **FFT** control in
+    [§2.8](#28-the-display-and-fft-controls) — so this is no longer the only
+    way to a detailed picture, but it is still the way to a detailed picture of
+    everything you can see.)
   - **A quieter noise floor.** Every halving throws away half the noise power
     with half the bandwidth: 3 dB per step, 9 dB at `/8`. The signal you are
     listening to is unchanged, so this is real processing gain, and weak signals
@@ -619,7 +623,22 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 **FFT module:**
 
 - **floor** / **ceil** — the waterfall's dB range.
-- **FFT** size — `2048`, `4096`, `8192`, `16384`, or `32768`.
+- **FFT** size — `2048`, `4096`, `8192`, `16384`, or `32768`. This is the FFT
+  over the *whole* of what the radio streams, and the panadapter grows it with
+  the zoom until it runs out. Past that, zooming in gets a window of its own:
+  the visible span is mixed down and decimated to its own width before it is
+  analysed, so the detail you see follows the window you are looking at rather
+  than how wide the front end happens to be. It matters most on a receiver that
+  streams a lot — an RX-888 asked for 8.1 MHz has 247 Hz to a bin even at
+  `32768`, which used to draw a 60 kHz window out of 240 numbers and step
+  visibly. Nothing to switch on, and nothing is given up: the rest of the band
+  is still there when you zoom back out.
+
+  Two side effects worth knowing. Narrower bins hold less noise, so the noise
+  floor drops as you zoom in — FIT keeps up with it, and with FIT off you may
+  want to re-set the floor. And a fine window takes longer to fill (resolving a
+  hertz needs a second of signal, on any receiver ever built), so a very deep
+  zoom scrolls more slowly than a wide one.
 - **FLIP** — scroll the waterfall *upwards* (keyboard shortcut **V**). The
   newest line is drawn at the bottom and history flows up off the top, the way
   several other SDR programs draw it. The minute gridlines, the skimmer / FT8

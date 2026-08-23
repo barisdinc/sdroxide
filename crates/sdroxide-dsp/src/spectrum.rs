@@ -35,10 +35,30 @@ pub struct SpectrumAnalyzer {
 
 impl SpectrumAnalyzer {
     pub fn new(fft_size: usize, sample_rate: f64, avg_tc_secs: f32) -> Self {
+        Self::with_hop_div(fft_size, sample_rate, avg_tc_secs, 2)
+    }
+
+    /// [`Self::new`] with the overlap named: the analyser steps
+    /// `fft_size / hop_div` samples between transforms, so `2` is `new`'s 50 %.
+    ///
+    /// Worth raising where one transform takes a long time to fill. Resolution
+    /// and update rate are the same trade on any analyser — a transform cannot
+    /// resolve finer than the reciprocal of the time it covers — but the rate
+    /// rows reach the waterfall need not be the rate whole windows arrive at.
+    /// A zoomed-in lane running at a few kilohertz fills a 4096-point window
+    /// only a couple of times a second; stepping an eighth of it instead of a
+    /// half puts four times as many rows on screen for the same resolution and
+    /// a few hundred extra microseconds of FFT a second.
+    pub fn with_hop_div(
+        fft_size: usize,
+        sample_rate: f64,
+        avg_tc_secs: f32,
+        hop_div: usize,
+    ) -> Self {
         let fft = FftPlanner::new().plan_fft_forward(fft_size);
         let window = blackman_harris(fft_size);
         let coherent_gain: f32 = window.iter().sum();
-        let hop = fft_size / 2;
+        let hop = (fft_size / hop_div.max(1)).max(1);
         let scratch = vec![Complex32::default(); fft.get_inplace_scratch_len()];
 
         let mut analyzer = SpectrumAnalyzer {
@@ -63,6 +83,17 @@ impl SpectrumAnalyzer {
 
     pub fn fft_size(&self) -> usize {
         self.fft_size
+    }
+
+    /// Whether the bins either side of DC are replaced by their neighbours.
+    ///
+    /// On by default, because on a front end feeding this directly DC is the
+    /// hardware's own LO leakage and a spike there is an artefact. Off for an
+    /// analyser looking at a *mixed-down* window, where DC is the middle of
+    /// whatever the operator is pointed at: blanking it would punch a hole
+    /// through the signal they are looking at.
+    pub fn set_dc_suppress(&mut self, on: bool) {
+        self.dc_suppress = on;
     }
 
     /// Clear the overlap/averaging state (e.g. across a TX→RX transition so
