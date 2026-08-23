@@ -11,12 +11,12 @@
 //! see the same look.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
 };
-use sdroxide_types::{ChromeStyle, FontSize, UiTheme};
+use sdroxide_types::{ChromeStyle, FontSize, SpotKind, UiTheme};
 
 /// Every colour role the chrome wears. A theme is one full assignment of
 /// these; the field names keep the historic constant names (`cyan` is "the
@@ -1084,6 +1084,36 @@ pub fn panadapter_font_scale() -> f32 {
 #[inline]
 pub fn ui_scale() -> f32 {
     [0.85, 1.0, 1.2][MENU_FONT.load(Ordering::Relaxed) as usize]
+}
+
+// The spot tints, packed 0x00RRGGBB, one per `SpotKind`. `UNSET` rather than a
+// baked-in table so the stock colours stay in one place — `SpotKind::default_color`
+// — and the first frame wears them even if nothing calls `set_spot_colors`.
+const SPOT_UNSET: u32 = u32::MAX;
+static SPOT_COLORS: [AtomicU32; SpotKind::COUNT] =
+    [const { AtomicU32::new(SPOT_UNSET) }; SpotKind::COUNT];
+
+/// Select the process-wide spot tints, as [`sdroxide_types::UiSettings::spot_colors`]
+/// holds them. Like [`set_font_sizes`], in atomics rather than the egui context and
+/// re-stored each frame: the three places a spot is painted — the panadapter labels,
+/// the SPOTS list and the world-map dots — sit in three different modules and all of
+/// them must agree.
+pub fn set_spot_colors(colors: &[[u8; 3]; SpotKind::COUNT]) {
+    for (slot, c) in SPOT_COLORS.iter().zip(colors) {
+        slot.store(u32::from_be_bytes([0, c[0], c[1], c[2]]), Ordering::Relaxed);
+    }
+}
+
+/// The tint a spot kind currently wears (r, g, b) — what the operator picked,
+/// or [`SpotKind::default_color`] until they pick anything.
+#[inline]
+pub fn spot_color(kind: SpotKind) -> (u8, u8, u8) {
+    let packed = SPOT_COLORS[kind.index()].load(Ordering::Relaxed);
+    if packed == SPOT_UNSET {
+        return kind.default_color();
+    }
+    let [_, r, g, b] = packed.to_be_bytes();
+    (r, g, b)
 }
 
 /// Put the current [`ui_scale`] into `ctx` as its zoom factor.

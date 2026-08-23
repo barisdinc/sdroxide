@@ -1999,6 +1999,58 @@ mod tests {
         assert!(!s.remote_access.is_enforced());
     }
 
+    /// A `config.toml` written before the spot label colours were settable
+    /// comes up on the stock tints, with the rest of its `[ui]` table intact.
+    #[test]
+    fn a_config_without_spot_colours_wears_the_stock_tints() {
+        use sdroxide_types::SpotKind;
+        let s: Settings = toml::from_str("[ui]\nframe_rate_fps = 30\n").unwrap();
+        assert_eq!(s.ui.frame_rate_fps, 30, "the rest of the table still applies");
+        for kind in SpotKind::ALL {
+            let (r, g, b) = kind.default_color();
+            assert_eq!(s.ui.spot_colors[kind.index()], [r, g, b]);
+        }
+    }
+
+    /// A colour list of the wrong width — one written by a build with fewer or
+    /// more spot kinds than this one — keeps the entries it does have and
+    /// leaves the rest stock. The whole `[ui]` table used to ride on that
+    /// length, and with it the operator's theme, fonts and layout.
+    #[test]
+    fn a_spot_colour_list_of_the_wrong_width_still_loads_the_ui_table() {
+        use sdroxide_types::SpotKind;
+        let short: Settings =
+            toml::from_str("[ui]\nframe_rate_fps = 30\nspot_colors = [[1, 2, 3], [4, 5, 6]]\n")
+                .unwrap();
+        assert_eq!(short.ui.frame_rate_fps, 30, "the rest of the table still applies");
+        assert_eq!(short.ui.spot_colors[0], [1, 2, 3]);
+        assert_eq!(short.ui.spot_colors[1], [4, 5, 6]);
+        let (r, g, b) = SpotKind::Broadcast.default_color();
+        assert_eq!(
+            short.ui.spot_colors[SpotKind::Broadcast.index()],
+            [r, g, b],
+            "a kind the list never reached stays on its stock tint"
+        );
+
+        let entries = ["[9, 9, 9]"; SpotKind::COUNT + 2].join(", ");
+        let long: Settings =
+            toml::from_str(&format!("[ui]\nframe_rate_fps = 30\nspot_colors = [{entries}]\n"))
+                .unwrap();
+        assert_eq!(long.ui.frame_rate_fps, 30);
+        assert_eq!(long.ui.spot_colors, [[9, 9, 9]; SpotKind::COUNT]);
+    }
+
+    /// The colours have to survive the round trip through `config.toml` — they
+    /// are the first nested array the file carries.
+    #[test]
+    fn spot_colours_round_trip_through_the_config_file() {
+        use sdroxide_types::SpotKind;
+        let mut s = Settings::default();
+        s.ui.spot_colors[SpotKind::Broadcast.index()] = [10, 20, 30];
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.ui.spot_colors, s.ui.spot_colors);
+    }
+
     #[test]
     fn network_config_loads_without_the_freedv_section() {
         // A net.json written before FreeDV Reporter existed.

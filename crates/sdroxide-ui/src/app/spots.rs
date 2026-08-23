@@ -16,20 +16,6 @@ use crate::app::logbook::LogEditForm;
 use crate::app::settings::SettingsTab;
 use crate::app::util::fmt_age;
 
-/// Index of a spot kind into the [`crate::view::ViewState::spot_kinds_shown`]
-/// filter array. Must stay in lockstep with the chip order in
-/// [`SdroxideApp::spots_window`], which indexes the array positionally.
-pub(in crate::app) fn spot_kind_index(kind: SpotKind) -> usize {
-    match kind {
-        SpotKind::DxCluster => 0,
-        SpotKind::Pota => 1,
-        SpotKind::Sota => 2,
-        SpotKind::PskReporter => 3,
-        SpotKind::FreeDv => 4,
-        SpotKind::Broadcast => 5,
-    }
-}
-
 /// Everything about a spot the search box should be able to find it by.
 ///
 /// The frequency goes in twice, as kHz and as MHz, because a shortwave listener
@@ -59,7 +45,7 @@ fn spot_haystack(s: &Spot) -> String {
 /// One clickable spot row for the spots window: kind badge, call, frequency,
 /// mode, age or schedule, and the park/summit/transmitter reference or comment.
 fn spot_row(ui: &mut egui::Ui, s: &Spot, now_utc: i64, needed: bool) -> egui::Response {
-    let kind_col = crate::theme::data_ink(s.kind.color());
+    let kind_col = crate::theme::data_ink(crate::theme::spot_color(s.kind));
     let gray = crate::theme::gray(150);
     let inner = egui::Frame::new()
         .fill(crate::theme::ROW_BG())
@@ -157,7 +143,7 @@ impl SdroxideApp {
     /// The search query is deliberately *not* part of this: it narrows the list
     /// in the SPOTS window only. See [`App::spot_search`].
     pub(in crate::app) fn spot_visible(&self, s: &Spot) -> bool {
-        if !self.view.spot_kinds_shown[spot_kind_index(s.kind)] {
+        if !self.view.spot_kinds_shown[s.kind.index()] {
             return false;
         }
         if self.spot_in_view_only
@@ -293,7 +279,7 @@ impl SdroxideApp {
         self.refresh_broadcast_spots(now);
         // Cloned out of `self` because the window closure needs `&mut self`.
         let spots = self.merged_spots();
-        // Chip order has to match `spot_kind_index`: the loop below indexes
+        // Chip order has to match `SpotKind::index`: the loop below indexes
         // `spot_kinds_shown` positionally.
         let labels = [
             (SpotKind::DxCluster, "DX"),

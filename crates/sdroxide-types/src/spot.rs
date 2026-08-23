@@ -32,6 +32,33 @@ pub enum SpotKind {
 }
 
 impl SpotKind {
+    /// Every kind, in the order the SPOTS window's filter chips, the settings
+    /// colour pickers and [`SpotKind::index`] all use. Anything indexed by kind
+    /// — the filter array, [`crate::UiSettings::spot_colors`] — is this wide.
+    pub const ALL: [SpotKind; 6] = [
+        SpotKind::DxCluster,
+        SpotKind::Pota,
+        SpotKind::Sota,
+        SpotKind::PskReporter,
+        SpotKind::FreeDv,
+        SpotKind::Broadcast,
+    ];
+
+    /// How many kinds there are, i.e. the width of every per-kind array.
+    pub const COUNT: usize = SpotKind::ALL.len();
+
+    /// This kind's position in [`SpotKind::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            SpotKind::DxCluster => 0,
+            SpotKind::Pota => 1,
+            SpotKind::Sota => 2,
+            SpotKind::PskReporter => 3,
+            SpotKind::FreeDv => 4,
+            SpotKind::Broadcast => 5,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             SpotKind::DxCluster => "DX",
@@ -43,17 +70,26 @@ impl SpotKind {
         }
     }
 
-    /// A stable per-kind RGB tint for the overlay/marker (r, g, b).
-    pub fn color(self) -> (u8, u8, u8) {
+    /// The stock per-kind RGB tint for the overlay/marker (r, g, b).
+    ///
+    /// Where a label starts, not where it has to stay: the operator can retint
+    /// any kind from the UI settings tab, and what they chose is kept in
+    /// [`crate::UiSettings::spot_colors`]. Clients read that, not this.
+    pub fn default_color(self) -> (u8, u8, u8) {
         match self {
             SpotKind::DxCluster => (120, 220, 255),   // cyan
             SpotKind::Pota => (120, 230, 140),        // green
             SpotKind::Sota => (255, 190, 90),         // amber
             SpotKind::PskReporter => (210, 150, 255), // violet
             SpotKind::FreeDv => (255, 130, 160),      // pink
-            // The same orange the band-plan overlay shades broadcast
-            // allocations with, so a label matches the band it sits in.
-            SpotKind::Broadcast => (232, 130, 46),
+            // Yellow-green. This used to be the same burnt orange the band-plan
+            // overlay shades broadcast allocations with, so that a label matched
+            // the band it sat in — but a broadcast box is *text*, and at that
+            // saturation on the near-black waterfall it read as brown and was
+            // hard to make out (issue #145). The band shading keeps the orange;
+            // the label takes the brightest hue the other five leave free, which
+            // is the gap between SOTA's amber and POTA's green.
+            SpotKind::Broadcast => (190, 240, 120),
         }
     }
 }

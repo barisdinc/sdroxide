@@ -6,7 +6,7 @@
 //! is read straight out of the settings each frame.
 
 use eframe::egui::{self, Color32, ComboBox, RichText};
-use sdroxide_types::{CallsignStyle, FreqStyle, SpeechSettings, Verbosity};
+use sdroxide_types::{CallsignStyle, FreqStyle, SpeechSettings, SpotKind, Verbosity};
 
 use crate::colormap;
 
@@ -89,6 +89,39 @@ pub(in crate::app) fn settings_ui_tab(
                 ui.label("bottom");
                 ui.color_edit_button_srgb(&mut cfg.gradient_bottom);
             });
+        });
+        ui.end_row();
+
+        ui.label("Spot label colours").on_hover_text(
+            "The tint each spot source wears: the boxes along the bottom of the \
+             waterfall, the badges in the SPOTS list and the dots on the world map.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            for kind in SpotKind::ALL {
+                ui.color_edit_button_srgb(&mut cfg.spot_colors[kind.index()])
+                    .on_hover_text(format!("Colour for {} spots", kind.label()));
+                let [r, g, b] = cfg.spot_colors[kind.index()];
+                // Tinted with what was just picked, so the row is its own
+                // preview — a colour that vanishes into the panel here would
+                // vanish into the waterfall too.
+                ui.label(
+                    RichText::new(kind.label())
+                        .size(11.0)
+                        .strong()
+                        .color(crate::theme::data_ink((r, g, b))),
+                );
+                ui.add_space(6.0);
+            }
+            if ui
+                .button("Reset")
+                .on_hover_text("Put every spot colour back to its default")
+                .clicked()
+            {
+                for kind in SpotKind::ALL {
+                    let (r, g, b) = kind.default_color();
+                    cfg.spot_colors[kind.index()] = [r, g, b];
+                }
+            }
         });
         ui.end_row();
 

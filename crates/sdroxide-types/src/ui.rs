@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::SpotKind;
+
 /// Coarse speed setting for the waterfall scroll and the spectrum line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Speed {
@@ -199,6 +201,15 @@ pub struct UiSettings {
     pub gradient_top: [u8; 3],
     /// Gradient colour at the bottom of the spectrum area (sRGB, 0–255).
     pub gradient_bottom: [u8; 3],
+    /// The tint each spot kind wears — on the panadapter labels, in the SPOTS
+    /// list and on the world map — indexed by [`SpotKind::index`]. Starts at
+    /// [`SpotKind::default_color`]; the UI tab retints any of them.
+    ///
+    /// This screen's preference, like the theme: the spots themselves are the
+    /// station's, but what colour they are painted is the operator's, and a
+    /// remote client picks its own.
+    #[serde(default = "default_spot_colors", deserialize_with = "spot_colors")]
+    pub spot_colors: [[u8; 3]; SpotKind::COUNT],
     /// Which layout the window wears, or `Auto` to pick from the viewport.
     pub layout: LayoutMode,
     /// Colour theme for the UI chrome.
@@ -233,6 +244,34 @@ pub struct UiSettings {
     pub memory_sort_desc: bool,
 }
 
+/// Default for [`UiSettings::spot_colors`] — every kind on its stock tint.
+fn default_spot_colors() -> [[u8; 3]; SpotKind::COUNT] {
+    let mut out = [[0u8; 3]; SpotKind::COUNT];
+    for kind in SpotKind::ALL {
+        let (r, g, b) = kind.default_color();
+        out[kind.index()] = [r, g, b];
+    }
+    out
+}
+
+/// Read [`UiSettings::spot_colors`] as a list of any length, so a config
+/// written before a spot kind was added — or by a newer build that has one
+/// more — still loads. A short list leaves the kinds it doesn't reach on their
+/// stock tint; a long one has its tail ignored. Without this the whole `[ui]`
+/// table would fail to parse over one extra entry, and the operator would lose
+/// their theme, their fonts and their layout along with the colours.
+fn spot_colors<'de, D>(d: D) -> Result<[[u8; 3]; SpotKind::COUNT], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let list = Vec::<[u8; 3]>::deserialize(d)?;
+    let mut out = default_spot_colors();
+    for (slot, c) in out.iter_mut().zip(list) {
+        *slot = c;
+    }
+    Ok(out)
+}
+
 impl Default for UiSettings {
     fn default() -> Self {
         UiSettings {
@@ -243,6 +282,7 @@ impl Default for UiSettings {
             spectrum_gradient: true,
             gradient_top: [64, 0, 0],   // dark red
             gradient_bottom: [0, 0, 0], // black
+            spot_colors: default_spot_colors(),
             layout: LayoutMode::Auto,
             theme: UiTheme::Default,
             button_style: ChromeStyle::Angled,

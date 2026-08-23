@@ -3261,7 +3261,7 @@ window opens the same dialog on its Spots tab). Eleven tabs run across the top:
 | --- | --- |
 | **General** | Which version this is, your callsign, grid and IARU region, the sound devices, and who may connect remotely. [6.1](#61-general-station-audio-and-remote-access) |
 | **Radio** | Which rig sdroxide talks to, and how. [6.2](#62-radio-choosing-and-configuring-the-rig) |
-| **UI** | Frame rate, waterfall palette, spectrum background, 3D cloud rendering, and the spoken announcements. [6.3](#63-ui-display-preferences-and-voice-announcements) |
+| **UI** | Frame rate, waterfall palette, spectrum background, spot label colours, 3D cloud rendering, and the spoken announcements. [6.3](#63-ui-display-preferences-and-voice-announcements) |
 | **Controls** | Keyboard, mouse and MIDI bindings. [6.4](#64-controls-keyboard-mouse-and-midi) |
 | **Spots** | DX cluster, POTA, SOTA and PSK Reporter feeds, and the broadcast station list. [6.5](#65-spots-spot-feeds) |
 | **FreeDV** | FreeDV Reporter (qso.freedv.org). [6.6](#66-freedv-freedv-reporter) |
@@ -6247,6 +6247,13 @@ spoken announcements below them under `[speech]`:
 - **Spectrum background** — a vertical gradient behind the spectrum line, filled
   from the **top** colour down to the **bottom** colour (default dark red →
   black). Untick **Gradient** for a plain background.
+- **Spot label colours** — the tint each spot source wears, everywhere it is
+  drawn at once: the boxes along the bottom of the waterfall, the badges in the
+  SPOTS list and the dots on the world map. Click a swatch to pick a colour;
+  the source's name beside it is written in what you picked, so the row is its
+  own preview, and **Reset** puts all six back to their defaults. The colours
+  are this screen's preference, like the theme — a remote client picks its own,
+  and the station is not touched.
 - **Skimmer font size** — how large the spot and decode boxes the skimmer paints
   on the waterfall are: **Small**, **Medium** or **Large**. Larger boxes are
   easier to read across the shack and cover more of the band while they sit
@@ -8191,9 +8198,11 @@ Spots then appear two ways:
 
 - **On the panadapter** — colour-coded, clickable boxes along the bottom of the
   waterfall (DX = cyan, POTA = green, SOTA = amber, PSK = violet, FREEDV = pink,
-  BC = orange), each with a leader line down to the spotted frequency. Located
-  spots (POTA parks, PSK reporters, FreeDV stations, broadcast transmitters) also
-  appear as dots on the FT8 world map.
+  BC = yellow-green — any of which you can retint under **Spot label colours**
+  on the UI tab, [§6.3](#63-ui-display-preferences-and-voice-announcements)),
+  each with a leader line down to the spotted frequency. Located spots (POTA
+  parks, PSK reporters, FreeDV stations, broadcast transmitters) also appear as
+  dots on the FT8 world map.
 - **In the SPOTS window** — a filterable list (toggle **DX / POTA / SOTA / PSK /
   FREEDV / BC**, or **IN VIEW** to show only spots inside the current panadapter
   span). Each row

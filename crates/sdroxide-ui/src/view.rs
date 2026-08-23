@@ -85,7 +85,7 @@ pub struct ViewState {
     #[serde(default = "prop_map_band_default")]
     pub prop_map_band: u8,
     /// Which spot kinds are shown in the SPOTS list, on the panadapter and on
-    /// the world map — indexed by `spot_kind_index`, so the chip order in the
+    /// the world map — indexed by `SpotKind::index`, so the chip order in the
     /// SPOTS window and this array have to stay in lockstep.
     #[serde(default = "spot_kinds_default")]
     pub spot_kinds_shown: [bool; SPOT_KINDS],
@@ -585,9 +585,10 @@ fn auto_fit_default() -> bool {
 }
 
 /// Number of spot-kind filter chips, i.e. the width of
-/// [`ViewState::spot_kinds_shown`]. Lives here rather than beside the chips
-/// because it fixes the shape of the persisted blob.
-pub const SPOT_KINDS: usize = 6;
+/// [`ViewState::spot_kinds_shown`]. Named here rather than beside the chips
+/// because it fixes the shape of the persisted blob, and taken from the kind
+/// list itself so the two cannot drift apart.
+pub const SPOT_KINDS: usize = sdroxide_types::SpotKind::COUNT;
 
 /// Default for [`ViewState::spot_kinds_shown`] — every kind shown, so enabling
 /// a feed is enough to see its spots.

@@ -139,6 +139,10 @@ impl eframe::App for SdroxideApp {
             self.ui_settings.waterfall_font_size,
             self.ui_settings.menu_font_size,
         );
+        // Same for the spot tints: the picker in the settings window writes
+        // straight into `ui_settings`, and a colour has to take on the frame
+        // it is chosen in or the picker feels dead.
+        crate::theme::set_spot_colors(&self.ui_settings.spot_colors);
         // The interface scale is egui's zoom factor, which egui also lets the
         // operator drive with ctrl+plus / ctrl+minus, so it is written only
         // when the setting itself moves — see `theme::apply_zoom`. It reads

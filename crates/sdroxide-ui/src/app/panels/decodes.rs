@@ -1083,7 +1083,9 @@ impl SdroxideApp {
                 .all_spots()
                 .filter(|s| is_ft8_or_ft4(&s.mode))
                 .filter(|s| self.spot_visible(s))
-                .filter_map(|s| s.loc.map(|(lat, lon)| (lat, lon, s.kind.color())))
+                .filter_map(|s| {
+                    s.loc.map(|(lat, lon)| (lat, lon, crate::theme::spot_color(s.kind)))
+                })
                 .collect();
             let heat = self.prop_texture(ui.ctx(), self.state.rx_freq_hz());
             self.prop_map_controls(ui);
