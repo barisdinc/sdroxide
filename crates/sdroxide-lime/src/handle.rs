@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use num_complex::Complex32;
 use sdroxide_types::{LimeAuxRole, LimeConfig};
 
-use crate::aux::AuxRx;
+use crate::auxrx::AuxRx;
 use crate::device::{self, DevCtl, DevInfo};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -621,7 +621,7 @@ impl LimeHandle {
     }
 
     /// Take whatever the second chain has, unpaired — see
-    /// [`crate::aux::AuxRx::read_raw`]. Never blocks.
+    /// [`crate::auxrx::AuxRx::read_raw`]. Never blocks.
     pub fn read_aux_raw(&mut self, out: &mut [Complex32]) -> usize {
         if self.closed {
             return 0;

@@ -34,7 +34,7 @@
 //! one process-global library handle. [`device::DevCtl`] is the only place a
 //! device pointer is dereferenced. [`handle::LimeHandle`] is an open radio.
 //! [`rfe`] implements `sdroxide-limerfe`'s transport over the board's GPIO,
-//! which is the one LimeRFE path that needs LimeSuite at all. `aux` is the
+//! which is the one LimeRFE path that needs LimeSuite at all. `auxrx` is the
 //! board's *second* receive chain and the timestamp arithmetic that pairs its
 //! samples with the first's, which is what a second aerial needs to be worth
 //! anything (issue #98). The DSP those streams feed is `sdroxide-dsp`'s
@@ -47,7 +47,10 @@
 //! Must never be a dependency of any wasm-targeted crate.
 
 pub mod api;
-pub(crate) mod aux;
+// `auxrx`, not `aux`: AUX is a reserved DOS device name, and a file called
+// `aux.rs` cannot be checked out on Windows at all — git refuses the path and
+// the whole clone fails, long before anything is compiled.
+pub(crate) mod auxrx;
 pub mod device;
 pub mod error;
 pub mod ffi;
