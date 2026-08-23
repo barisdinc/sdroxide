@@ -5715,7 +5715,8 @@ pub(in crate::app) fn settings_lime_tab(
             egui::RichText::new(format!(
                 "The board's other receive chain, on the {} sockets. It shares the \
                  synthesiser, so it hears the same span at the same instant as the first — \
-                 which is what lets the two be combined.",
+                 which is what lets it carry a second aerial, or a sample of your own \
+                 transmitter.",
                 format_args!("RX{}_*", cfg.lime.aux_channel() + 1)
             ))
             .weak(),
@@ -5732,7 +5733,7 @@ pub(in crate::app) fn settings_lime_tab(
                 });
             ui.end_row();
 
-            if cfg.lime.aux.role == LimeAuxRole::Diversity {
+            if cfg.lime.aux.role != LimeAuxRole::Off {
                 ui.label("Its socket");
                 ui.horizontal(|ui| {
                     let text = if cfg.lime.aux.antenna.is_empty() {
@@ -5784,19 +5785,26 @@ pub(in crate::app) fn settings_lime_tab(
                     .suffix(" dB")
                     .step_by(1.0),
                 )
-                .on_hover_text(
+                .on_hover_text(if cfg.lime.aux.role == LimeAuxRole::PureSignal {
+                    "Set this LOW. The coupled sample of your own transmitter is a strong \
+                     signal, and a feedback chain driven into compression measures the \
+                     amplifier's curve wrongly — it teaches the correction its own \
+                     distortion. Start at the bottom and use the coupler's attenuator."
+                } else {
                     "Set so both aerials show about the same noise floor. This is the \
                      adjustment the whole thing rests on: combining weights the two branches \
                      by their noise, and a second chain driven into compression hands the \
                      filter a distorted copy of the interference — which cannot be subtracted \
-                     from an undistorted one.",
-                )
+                     from an undistorted one."
+                })
                 .changed()
                 {
                     push_gain(cmds, LimeConfig::AUX_GAIN_ELEMENT, cfg.lime.aux.gain_db);
                 }
                 ui.end_row();
+            }
 
+            if cfg.lime.aux.role == LimeAuxRole::Diversity {
                 ui.label("What to do with it");
                 egui::ComboBox::from_id_salt("lime-div-mode")
                     .selected_text(cfg.lime.aux.mode.label())
@@ -5885,7 +5893,105 @@ pub(in crate::app) fn settings_lime_tab(
                 });
                 ui.end_row();
             }
+
+            if cfg.lime.aux.role == LimeAuxRole::PureSignal {
+                ui.label("Table steps");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut cfg.lime.aux.ps_bins)
+                                .speed(1.0)
+                                .range(LimeAuxConfig::PS_MIN_BINS..=LimeAuxConfig::PS_MAX_BINS),
+                        )
+                        .on_hover_text(
+                            "How finely the correction follows the amplifier's curve. More \
+                             steps track a sharper knee, but each one has to be learned from \
+                             the samples that landed in it — and the top of a speech \
+                             amplitude histogram is thin. Thirty-two is enough for the smooth \
+                             curve an HF amplifier actually has. Changing it starts the \
+                             correction again.",
+                        )
+                        .changed()
+                    {
+                        push_gain(
+                            cmds,
+                            LimeConfig::PS_BINS_ELEMENT,
+                            f64::from(cfg.lime.aux.ps_bins),
+                        );
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Adaptation");
+                ui.horizontal(|ui| {
+                    if crate::chrome::slider(
+                        ui,
+                        egui::Slider::new(&mut cfg.lime.aux.ps_rate, 0.0..=1.0).show_value(false),
+                    )
+                    .on_hover_text(
+                        "How hard each block of feedback moves the correction. An \
+                         amplifier's curve does not change, so there is no need to hurry — \
+                         the middle averages several overs' worth of noise out of it.",
+                    )
+                    .changed()
+                    {
+                        push_gain(
+                            cmds,
+                            LimeConfig::PS_RATE_ELEMENT,
+                            f64::from(cfg.lime.aux.ps_rate),
+                        );
+                    }
+                    if ui
+                        .checkbox(&mut cfg.lime.aux.ps_frozen, "Hold")
+                        .on_hover_text(
+                            "Keep the correction as it is. A curve learned on a clean over is \
+                             worth holding, and the amplifier will not have changed by the \
+                             next one.",
+                        )
+                        .changed()
+                    {
+                        push_gain(
+                            cmds,
+                            LimeConfig::PS_FREEZE_ELEMENT,
+                            f64::from(u8::from(cfg.lime.aux.ps_frozen)),
+                        );
+                    }
+                    if ui
+                        .button("Restart")
+                        .on_hover_text("Forget the correction and learn it again.")
+                        .clicked()
+                    {
+                        push_gain(cmds, LimeConfig::PS_RESET_ELEMENT, 1.0);
+                    }
+                });
+                ui.end_row();
+            }
         });
+        if cfg.lime.aux.role == LimeAuxRole::PureSignal {
+            ui.label(
+                egui::RichText::new(
+                    "A directional coupler on the amplifier's output goes into this chain, \
+                     and the transmitter compares what came back with what it meant to send \
+                     — then sends the inverse of the difference, so what leaves the amplifier \
+                     is straight. Twenty-odd decibels less intermodulation on other people's \
+                     QSOs, with the amplifier keeping its power. The correction stays at \
+                     unity until the feedback lines up with the transmission, so a coupler \
+                     that is not connected costs nothing; and it can never ask the converter \
+                     for more than full scale, so a feedback path reading nonsense cannot \
+                     over-drive anything. How it is getting on runs to the log while you \
+                     transmit.",
+                )
+                .weak(),
+            );
+            if !cfg.lime.tx_enabled {
+                ui.label(
+                    egui::RichText::new(
+                        "Transmit is not armed, so there is nothing here to correct.",
+                    )
+                    .color(egui::Color32::from_rgb(220, 170, 70)),
+                );
+            }
+        }
         if cfg.lime.aux.role == LimeAuxRole::Diversity {
             ui.label(
                 egui::RichText::new(

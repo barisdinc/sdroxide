@@ -628,6 +628,16 @@ starting sdroxide before the rig is fine:
   matching modification on one of its low-band inputs can name which socket the
   aerial is in.
 
+  That chain can instead take a **directional coupler on an amplifier's
+  output**, and linearise it — the technique openHPSDR calls **PureSignal**.
+  The transmitter compares what came back with what it meant to send and emits
+  the inverse of the difference, for around twenty decibels less
+  intermodulation without backing the amplifier off. The correction stays at
+  unity until the feedback lines up with the transmission, and is clamped so it
+  can never ask the converter for more than full scale — so an unconnected
+  coupler costs nothing and a feedback path reading nonsense cannot over-drive
+  anything.
+
   The LimeRFE is reached either way the hardware allows. Over **its own
   micro-USB port** it is a serial device, driven by pure Rust that needs no
   LimeSuite at all — so that link works whatever is driving the radio. Through

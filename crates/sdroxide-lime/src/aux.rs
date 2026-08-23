@@ -227,6 +227,32 @@ impl AuxRx {
         self.queue.believes_timestamps()
     }
 
+    /// Take whatever the second chain has, in order, without pairing it with
+    /// anything.
+    ///
+    /// What the transmit-feedback role wants: the predistortion loop finds its
+    /// own alignment by correlating envelopes, because the reference it is
+    /// aligning against is a block of samples handed to the transmitter and
+    /// carries no hardware timestamp at all. Also what a chain that is *not*
+    /// being used for anything wants, so its FIFO does not sit there
+    /// overflowing.
+    pub(crate) fn read_raw(&mut self, api: &ffi::Api, out: &mut [Complex32]) -> usize {
+        if !self.running || out.is_empty() {
+            return 0;
+        }
+        let mut meta = ffi::StreamMetaT::default();
+        let n = unsafe {
+            (api.recv_stream)(
+                &mut self.stream,
+                out.as_mut_ptr().cast(),
+                out.len(),
+                &mut meta,
+                AUX_TIMEOUT_QUICK_MS,
+            )
+        };
+        if n <= 0 { 0 } else { n as usize }
+    }
+
     /// Fill `out` with the second chain's samples for `[want_ts, want_ts +
     /// out.len())`.
     ///

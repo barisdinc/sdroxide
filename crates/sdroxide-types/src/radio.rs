@@ -2776,15 +2776,22 @@ pub enum LimeAuxRole {
     /// A second aerial, combined with the first — either to null a local noise
     /// source or to ride out fading. See [`LimeDiversityMode`].
     Diversity,
+    /// A directional coupler on the transmitter's output, so the amplifier can
+    /// be linearised from a sample of what it actually emitted — the technique
+    /// openHPSDR calls PureSignal. Nothing is received on it: it listens only
+    /// while transmitting, and what it hears never reaches the demodulator.
+    PureSignal,
 }
 
 impl LimeAuxRole {
-    pub const ALL: [LimeAuxRole; 2] = [LimeAuxRole::Off, LimeAuxRole::Diversity];
+    pub const ALL: [LimeAuxRole; 3] =
+        [LimeAuxRole::Off, LimeAuxRole::Diversity, LimeAuxRole::PureSignal];
 
     pub fn label(self) -> &'static str {
         match self {
             LimeAuxRole::Off => "Not used",
             LimeAuxRole::Diversity => "A second aerial (diversity / QRM suppression)",
+            LimeAuxRole::PureSignal => "Transmit feedback (PureSignal predistortion)",
         }
     }
 }
@@ -2863,12 +2870,32 @@ pub struct LimeAuxConfig {
     /// has appeared: a converged filter left adapting will re-aim itself at
     /// whatever becomes loudest.
     pub frozen: bool,
+
+    /// How many amplitude steps the predistortion table has, 4 to 256.
+    ///
+    /// The table is a complex gain against drive level: more entries follow a
+    /// sharper knee, but each has to be learned from the samples that landed
+    /// in it, and the top of a speech amplitude histogram is thin. Thirty-two
+    /// is enough for the smooth curve an HF amplifier actually has.
+    pub ps_bins: u8,
+    /// How fast the predistortion table adapts, 0 to 1. Separate from
+    /// [`Self::rate`] because it is a different loop with a different time
+    /// scale — this one only runs while transmitting.
+    pub ps_rate: f32,
+    /// Hold the predistortion table. A correction learned on a clean over is
+    /// worth keeping, and an amplifier's curve does not change between overs.
+    pub ps_frozen: bool,
 }
 
 impl LimeAuxConfig {
     /// The longest adaptive filter the settings panel offers, matching
     /// `sdroxide_dsp::Diversity::MAX_TAPS`.
     pub const MAX_TAPS: u8 = 64;
+
+    /// The predistortion table's bounds, matching what `sdroxide_dsp`'s
+    /// `PureSignal::new` clamps to.
+    pub const PS_MIN_BINS: u8 = 4;
+    pub const PS_MAX_BINS: u8 = 128;
 
     /// What a filter of this length costs on the sample path, for a panel that
     /// would otherwise let someone ask for 64 taps at 40 Msps and wonder why
@@ -2900,6 +2927,12 @@ impl Default for LimeAuxConfig {
             // with it the first time.
             rate: 0.7,
             frozen: false,
+            ps_bins: 32,
+            // Slower than the diversity filter's: this one is averaging an
+            // amplifier's curve, which does not move, out of a feedback path
+            // that has noise in it.
+            ps_rate: 0.5,
+            ps_frozen: false,
         }
     }
 }
@@ -3054,6 +3087,12 @@ impl LimeConfig {
     pub const DIV_TAPS_ELEMENT: &'static str = "DIVTAPS";
     pub const DIV_FREEZE_ELEMENT: &'static str = "DIVFREEZE";
     pub const DIV_RESET_ELEMENT: &'static str = "DIVRESET";
+    /// The predistortion loop, likewise. `PSRESET` is momentary and forgets
+    /// the table as well as the alignment.
+    pub const PS_BINS_ELEMENT: &'static str = "PSBINS";
+    pub const PS_RATE_ELEMENT: &'static str = "PSRATE";
+    pub const PS_FREEZE_ELEMENT: &'static str = "PSFREEZE";
+    pub const PS_RESET_ELEMENT: &'static str = "PSRESET";
 
     /// The device setting that names the second chain's port. A name rather
     /// than a number, so it goes through `SetDeviceSetting` rather than riding

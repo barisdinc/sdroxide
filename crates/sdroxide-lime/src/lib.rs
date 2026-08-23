@@ -23,7 +23,8 @@
 //! is not the point. The **LimeRFE** is: SoapySDR exposes none of it, so the
 //! band filters, the LNA, the power amplifier and the transmit/receive relay
 //! are unreachable from that side. So is the board's **second receive chain**,
-//! opened here as a coherent second stream for diversity and QRM suppression. Driving the library directly also means the
+//! opened here as a coherent second stream: a second aerial for diversity and
+//! QRM suppression, or a transmit coupler for PureSignal predistortion. Driving the library directly also means the
 //! settings panel can offer what the hardware actually has rather than what
 //! SoapySDR's vocabulary can express.
 //!
@@ -36,7 +37,8 @@
 //! which is the one LimeRFE path that needs LimeSuite at all. `aux` is the
 //! board's *second* receive chain and the timestamp arithmetic that pairs its
 //! samples with the first's, which is what a second aerial needs to be worth
-//! anything (issue #98).
+//! anything (issue #98). The DSP those streams feed is `sdroxide-dsp`'s
+//! `Diversity` and `PureSignal`; this crate only gets the samples out.
 //!
 //! There is no stream thread and no ring buffer: LimeSuite has both already,
 //! and `LMS_RecvStream` is a bounded blocking read out of its FIFO. See

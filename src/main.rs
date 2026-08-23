@@ -2030,8 +2030,9 @@ fn open_lime_source(
 /// number across the LNA, TIA and PGA itself, and reaching those stages
 /// individually needs a register-level call; three sliders that silently fought
 /// the combined one would be worse than the one that works. Everything else —
-/// the analog filters, the calibration trigger, the host-side IQ correction and
-/// every LimeRFE control — rides pseudo-elements that are deliberately absent
+/// the analog filters, the calibration trigger, the host-side IQ correction,
+/// every LimeRFE control, and the second receive chain's gain and its diversity
+/// or predistortion loop — rides pseudo-elements that are deliberately absent
 /// here, so only this backend's own settings panel renders them.
 fn lime_caps(src: &lime_source::LimeSource) -> DeviceCaps {
     use sdroxide_types::{Direction, GainElement, LimeConfig};

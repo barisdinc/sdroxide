@@ -550,7 +550,17 @@ use sdroxide_types::{
 /// A field appended to the radio configuration, which rides in both a command
 /// and an event, so a v81 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying.
-pub const PROTO_VERSION: u16 = 82;
+/// **83** — that second chain can instead carry a directional coupler, and
+/// linearise the transmitter from a sample of what it emitted — PureSignal
+/// (issue #98). [`sdroxide_types::LimeAuxRole`] gained a `PureSignal` variant
+/// and [`sdroxide_types::LimeAuxConfig`] the `ps_bins`, `ps_rate` and
+/// `ps_frozen` that drive the correction.
+///
+/// Fields appended to the radio configuration, which rides in both a command
+/// and an event, so a v82 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying. The new role variant
+/// would have been survivable on its own; the fields are not.
+pub const PROTO_VERSION: u16 = 83;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1483,6 +1493,9 @@ mod tests {
                     taps: 24,
                     rate: 0.35,
                     frozen: true,
+                    ps_bins: 48,
+                    ps_rate: 0.8,
+                    ps_frozen: false,
                 },
             },
             ..RadioConfig::default()

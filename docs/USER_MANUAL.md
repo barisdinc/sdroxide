@@ -6087,8 +6087,8 @@ A LimeSDR has always been reachable through the SoapySDR interface, and
 SoapyLMS7 is itself a thin wrapper over this same library, so the I/Q path is
 not what this interface adds. The **LimeRFE** is: SoapySDR exposes none of it.
 So is the board's **second receive chain**, which can carry a second aerial for
-diversity reception or for nulling a local noise source — see *The second
-aerial* below.
+diversity reception or for nulling a local noise source, or a directional
+coupler for linearising an amplifier — see *The second chain* below.
 
 **Why a library rather than a driver.** Every other USB interface here speaks
 its radio's wire protocol directly. This one does not, because driving the
@@ -6149,15 +6149,18 @@ where the library is absent.
   **Calibrate now**. Turning the host correction off is the one-click way to
   tell a driver problem from a DSP one.
 
-##### The second aerial: diversity and QRM suppression
+##### The second chain: diversity, QRM suppression and PureSignal
 
-On a board with two receive chains, the one you are not listening on can carry a
-second aerial — and because both chains share one synthesiser and one sample
-clock, the two streams are *coherent*: the same span, at the same instant, with
-a relative phase set by the aerials and the feedlines rather than by chance.
-That is what makes it possible to combine them. Set **Used for** to *A second
-aerial* and the chain comes up alongside the first; it takes effect on
-**Apply**, because its stream is bound to its channel when it is created.
+On a board with two receive chains, the one you are not listening on can be put
+to work — and because both chains share one synthesiser and one sample clock,
+the two streams are *coherent*: the same span, at the same instant, with a
+relative phase set by the cabling rather than by chance. That is what makes it
+possible to combine them. **Used for** picks the job: a second aerial, or a
+sample of your own transmitter. Either takes effect on **Apply**, because the
+chain's stream is bound to its channel when it is created.
+
+**Its socket** and **Its gain** apply to both jobs; the rest of the controls
+depend on which one you picked.
 
 There are two things worth doing with it, and **What to do with it** picks:
 
@@ -6205,6 +6208,66 @@ The rest of the controls:
 > achieving goes to the log every ten seconds — a converged canceller on a real
 > noise source reads 15–30 dB, and one reading a fraction of a decibel is one
 > whose second aerial cannot hear what it is being asked to subtract.
+
+##### PureSignal: linearising the amplifier
+
+Set **Used for** to *Transmit feedback* and the second chain listens to a
+**directional coupler on your amplifier's output** instead of to an aerial. The
+transmitter then compares what came back with what it meant to send, and sends
+the inverse of the difference — so what leaves the amplifier is straight. This
+is the technique openHPSDR calls PureSignal, and the payoff is the usual one:
+around twenty decibels less intermodulation, landing on other people's QSOs
+either side of you, with the amplifier keeping its power instead of being backed
+off.
+
+Every amplifier compresses near its ceiling, and compression on a multi-tone
+signal — which SSB and every digital mode are — *is* intermodulation. What is
+learned is a complex gain against drive level: how the gain sags as drive rises,
+and the phase shift that comes with it. It is applied to each outgoing sample
+before the converter sees it.
+
+- **Its gain** — set this **low**. The coupled sample of your own transmitter is
+  a strong signal, and a feedback chain driven into compression measures the
+  amplifier's curve wrongly: it teaches the correction its own distortion. Start
+  at the bottom of the slider and use the coupler's attenuator.
+- **Table steps** — how finely the correction follows the curve. More steps
+  track a sharper knee, but each has to be learned from the samples that landed
+  in it, and the top of a speech amplitude histogram is thin. Thirty-two suits
+  the smooth curve an HF amplifier actually has. Changing it starts the
+  correction again.
+- **Adaptation**, **Hold** and **Restart** — how hard each block of feedback
+  moves the correction, whether it moves at all, and forgetting it. An
+  amplifier's curve does not change, so there is no need to hurry: the middle of
+  the slider averages several overs' worth of feedback noise out of it, and
+  **Hold** keeps a curve learned on a clean over.
+
+Two things hold whatever the feedback says, because a correction loop fed
+rubbish must not become an over-driven amplifier. **The correction stays at
+unity until the feedback lines up with the transmission**, so a coupler that is
+not connected, a chain that is deaf, or an alignment that never locks all leave
+the transmitter exactly as it would have been. And the table is normalised at
+the top and clamped, so **it can never ask the converter for more than full
+scale** — a compressing amplifier is linearised by pulling the small-signal gain
+*down*, not by asking for more peak.
+
+The loop finds the delay between what was written to the transmit FIFO and what
+came back through the amplifier by correlating the two envelopes, once per over.
+It reports itself to the log every ten seconds while you are transmitting: how
+much compression it is correcting, and how well the feedback matched. A run of
+"has not found the transmission in the coupler's chain" is the coupler, the
+cabling or that gain setting — not the correction.
+
+> **Split and cross-band transmission are outside this.** The feedback arrives
+> at the *receiver's* centre frequency, and the receiver is where your dial is.
+> Transmit far enough away from it and the coupled signal falls outside the
+> captured span, where there is nothing to hear; the log says so once and the
+> over goes out uncorrected.
+
+> **Not tried on an amplifier.** The correction converges against a simulated
+> compressing amplifier with a delay, an oscillator offset and noise in the
+> feedback path — which says the arithmetic is right, not that a real coupler
+> and a real PA behave the way this expects. It is safe to try: with the
+> feedback disconnected, nothing changes.
 
 **Transmit** is off until armed, and with it off the interface publishes no
 transmit channel at all — so nothing can key the radio, not merely the paths
@@ -9592,6 +9655,11 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   directions**; leave the connector setting on `Automatic`. Turn the fan on
   for sustained transmitting. Nothing sdroxide does keys an external
   amplifier.
+- **PureSignal that never locks** is the coupler, the cabling, or the second
+  chain's gain — the log says how well the feedback matched every ten seconds
+  while you transmit. Turn that gain right down first: a feedback chain in
+  compression cannot measure anything. Nothing is at risk either way, because
+  the correction stays at unity until it locks.
 - **A noise canceller that does nothing** is nearly always the second
   aerial rather than the settings: watch the null depth in the log, and if it
   reads a fraction of a decibel, the second aerial is not hearing the noise.

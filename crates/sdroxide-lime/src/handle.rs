@@ -592,6 +592,27 @@ impl LimeHandle {
         Ok(())
     }
 
+    /// Take whatever the second chain has, unpaired — see
+    /// [`crate::aux::AuxRx::read_raw`]. Never blocks.
+    pub fn read_aux_raw(&mut self, out: &mut [Complex32]) -> usize {
+        if self.closed {
+            return 0;
+        }
+        let api: &ffi::Api = &self.api;
+        match self.aux.as_mut() {
+            Some(a) => a.read_raw(api, out),
+            None => 0,
+        }
+    }
+
+    /// The transmit synthesiser's frequency, as `tx_begin` last set it. The
+    /// predistortion loop needs it: the feedback arrives at the *receive*
+    /// centre, so the difference is how far off the middle of the span it
+    /// lands.
+    pub fn tx_center_hz(&self) -> f64 {
+        self.tx_center
+    }
+
     /// Whether the second receive chain is running and pairing.
     pub fn aux_active(&self) -> bool {
         self.aux.as_ref().is_some_and(|a| a.running)

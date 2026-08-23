@@ -31,7 +31,7 @@
 
 use std::time::{Duration, Instant};
 
-use sdroxide_dsp::{Diversity, DiversityMode, IqCorrect};
+use sdroxide_dsp::{Diversity, DiversityMode, IqCorrect, PureSignal};
 use sdroxide_lime::LimeHandle;
 use sdroxide_lime::handle::RX_TIMEOUT_MS;
 use sdroxide_limerfe::LimeRfeHandle;
@@ -65,6 +65,16 @@ pub struct LimeSource {
     /// The adaptive combiner, present exactly when the second chain is doing
     /// diversity (issue #98).
     diversity: Option<Diversity>,
+    /// The predistortion loop, present exactly when the second chain is on a
+    /// transmit coupler and the transmitter is armed (issue #98).
+    puresignal: Option<PureSignal>,
+    /// The transmit block, predistorted. `IqSource::tx_write` hands over a
+    /// shared slice, so bending it needs a copy.
+    tx_scratch: Vec<Complex32>,
+    /// Said once per over rather than per block: the feedback lands at the
+    /// difference between the two synthesisers, and past the edge of the span
+    /// there is nothing to hear.
+    warned_offset: bool,
     last_depth_log: Instant,
     rfe: Option<LimeRfeHandle>,
     /// Set when the LimeRFE could not be opened. Reported through
@@ -92,6 +102,11 @@ impl LimeSource {
             });
         let aux_correct =
             (diversity.is_some() && cfg.iq_correction).then(|| IqCorrect::new(DC_BLOCK_HZ, rate));
+        // Predistortion needs the coupler chain *and* a transmitter: a
+        // correction loop on a radio that cannot key has nothing to correct.
+        let puresignal =
+            (cfg.aux.role == LimeAuxRole::PureSignal && handle.aux_active() && handle.can_tx())
+                .then(|| PureSignal::new(usize::from(cfg.aux.ps_bins), cfg.aux.ps_rate, rate));
 
         // The LimeRFE. Its own USB cable is opened here; the path through the
         // board's GPIO needs the device handle and so is built in the crate
@@ -122,7 +137,14 @@ impl LimeSource {
                 None => String::new(),
             }
         );
-        if let Some(socket) = handle.aux_socket_label() {
+        if let Some(socket) = handle.aux_socket_label().filter(|_| puresignal.is_some()) {
+            tracing::info!(
+                "PureSignal is on: transmit feedback on {socket}, {} table steps — the \
+                 correction stays at unity until the feedback aligns with what was sent",
+                cfg.aux.ps_bins
+            );
+        }
+        if let Some(socket) = handle.aux_socket_label().filter(|_| diversity.is_some()) {
             tracing::info!(
                 "diversity is on: second aerial on {socket}, {} filter, {} taps{}",
                 match cfg.aux.mode {
@@ -149,6 +171,9 @@ impl LimeSource {
             aux_buf: Vec::new(),
             aux_correct,
             diversity,
+            puresignal,
+            tx_scratch: Vec::new(),
+            warned_offset: false,
             last_depth_log: Instant::now(),
             rfe,
             rfe_note,
@@ -235,6 +260,11 @@ impl LimeSource {
     /// uncombined rather than combined against the wrong samples — see
     /// `LimeHandle::read_pair`.
     fn read_within(&mut self, buf: &mut [Complex32], timeout_ms: u32) -> Result<usize> {
+        // The coupler chain is not part of what is being listened to: it is
+        // read separately, and only its own loop ever sees it.
+        if self.puresignal.is_some() {
+            self.pump_feedback(buf.len());
+        }
         let want_aux = self.diversity.is_some() && self.handle.aux_active();
         if want_aux && self.aux_buf.len() < buf.len() {
             self.aux_buf.resize(buf.len(), Complex32::new(0.0, 0.0));
@@ -263,7 +293,53 @@ impl LimeSource {
         if want_aux {
             self.log_depth();
         }
+        if self.puresignal.is_some() && self.handle.tx_active() {
+            self.log_puresignal();
+        }
         Ok(n)
+    }
+
+    /// Take what the transmit coupler heard and give it to the predistortion
+    /// loop.
+    ///
+    /// Called every time the engine asks for samples, transmitting or not, and
+    /// the "or not" half matters: a stream nobody reads overruns, and its
+    /// FIFO would be full of a previous over by the time the next one started.
+    /// Off the air the block is simply thrown away.
+    ///
+    /// The feedback does not arrive at the middle of the receiver's span. The
+    /// two synthesisers are commanded separately — the transmit one sits on
+    /// the carrier, the receive one a quarter of a span off the dial — so the
+    /// coupled signal lands at the difference, which is known exactly and
+    /// spun back out inside the loop.
+    fn pump_feedback(&mut self, block: usize) {
+        let want = block.max(4096);
+        if self.aux_buf.len() < want {
+            self.aux_buf.resize(want, Complex32::new(0.0, 0.0));
+        }
+        let n = self.handle.read_aux_raw(&mut self.aux_buf[..want]);
+        if n == 0 {
+            return;
+        }
+        if !self.handle.tx_active() {
+            return;
+        }
+        let rate = self.handle.sample_rate();
+        let offset = self.handle.tx_center_hz() - self.center;
+        if offset.abs() > rate * 0.45 {
+            if !self.warned_offset {
+                self.warned_offset = true;
+                tracing::warn!(
+                    "the transmit frequency is {:.3} MHz from the receiver's centre, which is \
+                     outside the captured span — the coupler's signal cannot be seen, so \
+                     PureSignal will not correct this over",
+                    offset / 1e6
+                );
+            }
+            return;
+        }
+        let Some(ps) = self.puresignal.as_mut() else { return };
+        ps.feed_back(&self.aux_buf[..n], offset, rate);
     }
 
     /// Say how the filter is doing, occasionally.
@@ -293,6 +369,31 @@ impl LimeSource {
             tracing::warn!(
                 "the second receive chain is not keeping up, so blocks are going through \
                  uncombined — try a lower sample rate"
+            );
+        }
+    }
+
+    /// The same for the predistortion loop, whose one number is whether it has
+    /// found the feedback at all.
+    fn log_puresignal(&mut self) {
+        if self.last_depth_log.elapsed() < DEPTH_LOG_INTERVAL {
+            return;
+        }
+        self.last_depth_log = Instant::now();
+        let Some(ps) = self.puresignal.as_ref() else { return };
+        if ps.locked() {
+            tracing::info!(
+                "PureSignal is correcting {:.1} dB of compression (feedback matched at {:.2}){}",
+                ps.correction_db(),
+                ps.score(),
+                if ps.frozen() { ", table held" } else { "" }
+            );
+        } else {
+            tracing::info!(
+                "PureSignal has not found the transmission in the coupler's chain (best match \
+                 {:.2}) — the transmitter is uncorrected. Check the coupler, and that the \
+                 second chain's gain is low enough not to be driven into compression by it",
+                ps.score()
             );
         }
     }
@@ -426,6 +527,42 @@ impl IqSource for LimeSource {
                     d.reset();
                 }
             }
+            // The predistortion loop. `PS_BINS_ELEMENT` rebuilds the table, so
+            // it necessarily starts the correction again.
+            LimeConfig::PS_RATE_ELEMENT => {
+                self.cfg.aux.ps_rate = db as f32;
+                if let Some(ps) = self.puresignal.as_mut() {
+                    ps.set_rate(db as f32);
+                }
+            }
+            LimeConfig::PS_FREEZE_ELEMENT => {
+                self.cfg.aux.ps_frozen = db >= 0.5;
+                if let Some(ps) = self.puresignal.as_mut() {
+                    ps.set_frozen(db >= 0.5);
+                }
+            }
+            LimeConfig::PS_RESET_ELEMENT if db >= 0.5 => {
+                if let Some(ps) = self.puresignal.as_mut() {
+                    ps.reset();
+                }
+            }
+            LimeConfig::PS_BINS_ELEMENT => {
+                let bins = db.round().clamp(
+                    f64::from(sdroxide_types::LimeAuxConfig::PS_MIN_BINS),
+                    f64::from(sdroxide_types::LimeAuxConfig::PS_MAX_BINS),
+                ) as u8;
+                self.cfg.aux.ps_bins = bins;
+                if self.puresignal.is_some() {
+                    self.puresignal = Some(PureSignal::new(
+                        usize::from(bins),
+                        self.cfg.aux.ps_rate,
+                        self.handle.sample_rate(),
+                    ));
+                    if let Some(ps) = self.puresignal.as_mut() {
+                        ps.set_frozen(self.cfg.aux.ps_frozen);
+                    }
+                }
+            }
             // The LimeRFE controls. Carried through here for the usual reason:
             // no new `Command` variant for settings only this backend has.
             LimeConfig::RFE_ATTEN_ELEMENT => {
@@ -512,6 +649,14 @@ impl IqSource for LimeSource {
                 std::thread::sleep(Duration::from_millis(60));
             }
         }
+        // A new over: the amplifier's curve has not changed since the last one,
+        // but where the coupler's samples sit relative to what was written to
+        // the transmit FIFO has — so the table is kept and the alignment is
+        // found again.
+        if let Some(ps) = self.puresignal.as_mut() {
+            ps.unlock();
+        }
+        self.warned_offset = false;
         let rate = self.handle.tx_begin(center_hz).map_err(|e| {
             // Do not leave the front end keyed if the radio refused.
             if let Some(rfe) = &self.rfe {
@@ -522,7 +667,25 @@ impl IqSource for LimeSource {
         Ok(rate)
     }
 
+    /// One block of modulated baseband, bent on the way out if the amplifier
+    /// is being linearised.
+    ///
+    /// The predistorter needs to *own* the samples — it multiplies each by a
+    /// gain read from its table — and the engine hands over a shared slice, so
+    /// this copies. It is a copy per block on the transmit path and buys the
+    /// twenty-odd decibels of intermodulation that predistortion is for; and
+    /// with no correction learned the table is unity, so the copy is the only
+    /// cost until the loop has found the feedback.
     fn tx_write(&mut self, samples: &[Complex32]) -> Result<()> {
+        if let Some(ps) = self.puresignal.as_mut() {
+            self.tx_scratch.clear();
+            self.tx_scratch.extend_from_slice(samples);
+            ps.predistort(&mut self.tx_scratch);
+            return self
+                .handle
+                .tx_write(&self.tx_scratch)
+                .map_err(|e| RadioError::Msg(e.to_string()));
+        }
         self.handle.tx_write(samples).map_err(|e| RadioError::Msg(e.to_string()))
     }
 
@@ -625,7 +788,27 @@ impl IqSource for LimeSource {
         // What the second chain is doing, when it is meant to be doing
         // something: an operator who turned diversity on and hears no
         // difference needs to know which half of that is true.
-        if self.cfg.aux.role != LimeAuxRole::Off {
+        if self.cfg.aux.role == LimeAuxRole::PureSignal {
+            match self.handle.aux_socket_label() {
+                Some(socket) if self.handle.can_tx() => notes.push(format!(
+                    "PureSignal is running on {socket} — the transmitter stays uncorrected \
+                     until the coupler's samples line up with what was sent, which the log \
+                     reports every few seconds. Set that chain's gain low: the coupled signal \
+                     is strong, and a feedback chain in compression teaches the amplifier's \
+                     curve wrongly"
+                )),
+                Some(_) => notes.push(
+                    "PureSignal is configured but the transmitter is not armed, so there is \
+                     nothing for it to correct"
+                        .to_string(),
+                ),
+                None => notes.push(
+                    "the second receive chain is not running, so there is no PureSignal \
+                     feedback"
+                        .to_string(),
+                ),
+            }
+        } else if self.cfg.aux.role != LimeAuxRole::Off {
             match self.handle.aux_socket_label() {
                 Some(socket) => {
                     let mut line = format!(
