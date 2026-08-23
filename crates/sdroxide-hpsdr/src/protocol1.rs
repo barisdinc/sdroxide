@@ -536,6 +536,9 @@ pub(crate) fn run(ctx: ThreadCtx) {
     let mut logged_versions = false;
     let mut warned_no_rx = false;
     let mut radio_ptt = false;
+    // See the `push_iq` call: the RX ring is still full for the moment
+    // between unkey and the engine draining it.
+    let mut tx_backlog = false;
     let mut tx_health = TxHealth::default();
     let mut overloads: u64 = 0;
     let mut last_overload_warn: Option<Instant> = None;
@@ -691,7 +694,16 @@ pub(crate) fn run(ctx: ThreadCtx) {
                         }
                     }
                     if let Some((ring, _)) = slot.as_mut() {
-                        push_iq(ring, &rx_scratch, &mut stats);
+                        // Protocol 1 has one receiver and it owns the
+                        // transmitter, so `regs.ptt` is exactly "the reader of
+                        // this ring is keyed". It stays true a moment longer
+                        // than MOX does: the ring is still full at unkey until
+                        // the engine drains it (`discard_pending_rx`), and
+                        // those last discards belong to the over that just
+                        // ended, not to a host that fell behind. A datagram
+                        // taken is the proof the reader is back.
+                        let keyed = regs.ptt || tx_backlog;
+                        tx_backlog = !push_iq(ring, &rx_scratch, &mut stats, keyed) && keyed;
                     }
                 } else {
                     stats.on_other();

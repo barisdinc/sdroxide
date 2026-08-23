@@ -134,10 +134,15 @@ pub(crate) struct RxStats {
     win_other: u64,
     win_lost: u64,
     win_dropped: u64,
+    /// Samples discarded while the receiver that owns this ring was keyed.
+    /// Counted apart from `win_dropped` because they are not a fault: see
+    /// [`RxStats::on_dropped_keyed`].
+    win_keyed: u64,
     total_datagrams: u64,
     total_samples: u64,
     total_lost: u64,
     total_dropped: u64,
+    total_keyed: u64,
 }
 
 impl RxStats {
@@ -152,10 +157,12 @@ impl RxStats {
             win_other: 0,
             win_lost: 0,
             win_dropped: 0,
+            win_keyed: 0,
             total_datagrams: 0,
             total_samples: 0,
             total_lost: 0,
             total_dropped: 0,
+            total_keyed: 0,
         }
     }
 
@@ -178,10 +185,27 @@ impl RxStats {
         self.total_lost += n;
     }
 
-    /// Record `pairs` complex samples discarded because the RX ring was full.
+    /// Record `pairs` complex samples discarded because the RX ring was full
+    /// while the receiver was being read — a genuine overrun.
     pub(crate) fn on_dropped(&mut self, pairs: usize) {
         self.win_dropped += pairs as u64;
         self.total_dropped += pairs as u64;
+    }
+
+    /// Record `pairs` complex samples discarded because the RX ring was full
+    /// while this receiver was keyed.
+    ///
+    /// The engine stops reading a keyed receiver for the length of the over and
+    /// throws the backlog away on unkey (`IqSource::discard_pending_rx`), while
+    /// the board keeps streaming RX regardless — neither protocol can pause it.
+    /// So the ring fills within its own depth of keying down and every datagram
+    /// after that is discarded: expected, at exactly the RX rate, for as long as
+    /// the operator transmits. Counting these as overruns turned a normal over
+    /// into a warning that blamed the DSP thread and advised a lower sample
+    /// rate, and left the running total reading as transmit time.
+    pub(crate) fn on_dropped_keyed(&mut self, pairs: usize) {
+        self.win_keyed += pairs as u64;
+        self.total_keyed += pairs as u64;
     }
 
     /// The board's sample clock measured against the host's, in ppm, once
@@ -203,9 +227,24 @@ impl RxStats {
         )
     }
 
+    /// What was discarded while keyed in this window, phrased so it cannot be
+    /// read as a fault. Empty when the operator did not transmit.
+    fn keyed_note(&self) -> String {
+        if self.win_keyed == 0 {
+            return String::new();
+        }
+        format!(
+            "; {} sample(s) discarded while keyed (expected — RX is not read during \
+             transmit); {} discarded while keyed in total",
+            self.win_keyed, self.total_keyed,
+        )
+    }
+
     /// Emit a throughput line if the reporting interval has elapsed. Lost or
     /// dropped samples raise it to `warn`: both corrupt the audio and the
-    /// waterfall, and neither is otherwise visible from the outside.
+    /// waterfall, and neither is otherwise visible from the outside. Samples
+    /// discarded while keyed do not (see [`RxStats::on_dropped_keyed`]) — they
+    /// ride along on whichever line is emitted.
     pub(crate) fn tick(&mut self) {
         let dt = self.since.elapsed();
         if dt < STATS_INTERVAL {
@@ -217,7 +256,7 @@ impl RxStats {
                 "HPSDR P{} RX: {} datagrams, {} samples ({:.1} ksps) over {:.2}s; \
                  {} datagram(s) LOST on the network, {} sample(s) DROPPED (RX ring full — \
                  the DSP thread is not keeping up; try a lower sample rate); \
-                 totals {} lost / {} dropped",
+                 totals {} lost / {} dropped{}",
                 self.proto,
                 self.win_datagrams,
                 self.win_samples,
@@ -227,11 +266,12 @@ impl RxStats {
                 self.win_dropped,
                 self.total_lost,
                 self.total_dropped,
+                self.keyed_note(),
             );
         } else {
             tracing::debug!(
                 "HPSDR P{} RX: {} datagrams, {} samples ({:.1} ksps) over {:.2}s; \
-                 {} unrecognized; totals {} datagrams / {} samples; {}",
+                 {} unrecognized; totals {} datagrams / {} samples; {}{}",
                 self.proto,
                 self.win_datagrams,
                 self.win_samples,
@@ -241,6 +281,7 @@ impl RxStats {
                 self.total_datagrams,
                 self.total_samples,
                 self.clock_error(),
+                self.keyed_note(),
             );
         }
         self.since = Instant::now();
@@ -249,6 +290,7 @@ impl RxStats {
         self.win_other = 0;
         self.win_lost = 0;
         self.win_dropped = 0;
+        self.win_keyed = 0;
     }
 }
 
@@ -287,17 +329,35 @@ impl SeqTracker {
 /// whole. Pushing what fits would leave the ring one float out of step, which
 /// swaps I with Q for the rest of the session — a mirrored, unusable spectrum
 /// that looks like a protocol bug rather than the buffer overrun it is.
-pub(crate) fn push_iq(rx: &mut Producer<f32>, iq: &[f32], stats: &mut RxStats) {
+///
+/// `keyed` says whether *this ring's* receiver is transmitting, which decides
+/// how a full ring is accounted for — a fault, or the normal cost of an over.
+/// It is deliberately not a reason to skip the push: the samples are still
+/// offered, and it is the reader's business whether it wants them.
+///
+/// Returns whether the datagram was taken, which is how a caller tells that the
+/// reader has come back and started draining again.
+pub(crate) fn push_iq(
+    rx: &mut Producer<f32>,
+    iq: &[f32],
+    stats: &mut RxStats,
+    keyed: bool,
+) -> bool {
     // A chunk write is all-or-nothing, so the ring can never end up holding a
     // partial datagram however the timing falls.
     let Ok(mut chunk) = rx.write_chunk(iq.len()) else {
-        stats.on_dropped(iq.len() / 2);
-        return;
+        if keyed {
+            stats.on_dropped_keyed(iq.len() / 2);
+        } else {
+            stats.on_dropped(iq.len() / 2);
+        }
+        return false;
     };
     let (head, tail) = chunk.as_mut_slices();
     head.copy_from_slice(&iq[..head.len()]);
     tail.copy_from_slice(&iq[head.len()..]);
     chunk.commit_all();
+    true
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -964,10 +1024,10 @@ mod tests {
         // A ring with room for exactly 4 floats (rtrb rounds up to the request).
         let (mut prod, mut cons) = RingBuffer::<f32>::new(4);
         let mut stats = RxStats::new(1, 384_000.0);
-        push_iq(&mut prod, &[1.0, 2.0], &mut stats);
-        push_iq(&mut prod, &[3.0, 4.0], &mut stats);
+        assert!(push_iq(&mut prod, &[1.0, 2.0], &mut stats, false));
+        assert!(push_iq(&mut prod, &[3.0, 4.0], &mut stats, false));
         // The third datagram cannot fit and is dropped whole, not truncated.
-        push_iq(&mut prod, &[5.0, 6.0], &mut stats);
+        assert!(!push_iq(&mut prod, &[5.0, 6.0], &mut stats, false));
         let got: Vec<f32> = std::iter::from_fn(|| cons.pop().ok()).collect();
         assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
         // Alignment survived: every I landed on an even index.
@@ -981,8 +1041,34 @@ mod tests {
         // out of step and swap I with Q for good.
         let (mut prod, mut cons) = RingBuffer::<f32>::new(4);
         let mut stats = RxStats::new(1, 384_000.0);
-        push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &mut stats);
+        assert!(!push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &mut stats, false));
         assert!(cons.pop().is_err(), "nothing was pushed");
+    }
+
+    #[test]
+    fn a_full_ring_while_keyed_is_not_counted_as_an_overrun() {
+        // The engine stops reading its receiver for the length of an over, so
+        // the ring fills and stays full until it unkeys. That is the normal
+        // cost of transmitting, not a host that cannot keep up: it must not
+        // reach the fault counters, which is what made a healthy station log a
+        // warning per two seconds of transmit and a running total that only
+        // measured how long the operator had been on the air.
+        let (mut prod, mut cons) = RingBuffer::<f32>::new(4);
+        let mut stats = RxStats::new(1, 384_000.0);
+        assert!(push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0], &mut stats, true));
+        assert!(!push_iq(&mut prod, &[5.0, 6.0], &mut stats, true));
+        assert_eq!(stats.total_dropped, 0, "a keyed receiver reports no overruns");
+        assert_eq!(stats.total_keyed, 1, "the discarded pair is accounted for as keyed");
+
+        // Unkeyed, the very same full ring is a genuine overrun again.
+        assert!(!push_iq(&mut prod, &[7.0, 8.0], &mut stats, false));
+        assert_eq!(stats.total_dropped, 1);
+        assert_eq!(stats.total_keyed, 1);
+
+        // And a drained ring takes the next datagram, which is the signal that
+        // the reader is back (see the callers' `tx_backlog`).
+        while cons.pop().is_ok() {}
+        assert!(push_iq(&mut prod, &[9.0, 10.0], &mut stats, false));
     }
 
     #[test]
