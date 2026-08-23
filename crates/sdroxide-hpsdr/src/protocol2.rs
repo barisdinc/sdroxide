@@ -275,6 +275,12 @@ struct P2Slot {
     last_rx_ms: crate::net::RxClock,
     freq_hz: f64,
     seq_in: SeqTracker,
+    /// Whether this DDC's ring is still holding the backlog of an over: the
+    /// engine stops reading its receiver while keyed and drains the ring on
+    /// unkey (`discard_pending_rx`), so the discards either side of that
+    /// moment belong to the over rather than to a host that fell behind. A
+    /// datagram taken is the proof the reader is back.
+    tx_backlog: bool,
 }
 
 struct P2Thread {
@@ -445,6 +451,7 @@ impl P2Thread {
                                 last_rx_ms,
                                 freq_hz: 7_100_000.0,
                                 seq_in: SeqTracker::new(),
+                                tx_backlog: false,
                             },
                         );
                         // The whole table, freshly stated — never an edit.
@@ -519,6 +526,11 @@ impl P2Thread {
                 Ok((n, src)) => {
                     let p = src.port();
                     let ddc = p.checked_sub(port::DDC_IQ_BASE).filter(|&d| d < MAX_DDCS as u16);
+                    // MOX is connection-wide but only DDC 0 owns the
+                    // transmitter, so only DDC 0's reader stops reading for the
+                    // over. A second radio tab on another DDC keeps receiving
+                    // through it, and a full ring there is a real overrun.
+                    let ptt = self.ptt && ddc == Some(0);
                     if let Some(slot) = ddc.and_then(|d| self.slots.get_mut(&(d as u8))) {
                         rx_scratch.clear();
                         if let Some(pairs) = decode_ddc_iq(&buf[..n], &mut rx_scratch) {
@@ -551,7 +563,9 @@ impl P2Thread {
                                 let seq = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
                                 stats.on_lost(slot.seq_in.observe(seq) as u64);
                             }
-                            push_iq(&mut slot.ring, &rx_scratch, &mut stats);
+                            let keyed = ptt || slot.tx_backlog;
+                            slot.tx_backlog =
+                                !push_iq(&mut slot.ring, &rx_scratch, &mut stats, keyed) && keyed;
                         } else {
                             stats.on_other();
                             tracing::trace!(
