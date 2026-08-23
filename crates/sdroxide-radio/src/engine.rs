@@ -5517,8 +5517,9 @@ impl Engine {
     /// Where the ISM window wants to sit, given which lanes are switched on.
     ///
     /// Not a constant any more: the native decoders are fixed on the European
-    /// 868 MHz channels, but the embedded rtl_433 can be pointed at 433, 915 or
-    /// 315 MHz, and a window aimed at 868 would never reach those.
+    /// 868 MHz channels, but the embedded rtl_433 can be pointed at 315, 345,
+    /// 433 or 915 MHz, and a window aimed at 868 would never reach those. Its
+    /// width is a choice too, not only the band's own default (issue #141).
     fn ism_window_plan(&self) -> Option<sdroxide_ism::WindowPlan> {
         sdroxide_ism::window_plan(&self.state.ism, self.state.center_hz, self.state.sample_rate)
     }

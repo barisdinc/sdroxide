@@ -169,7 +169,7 @@ pub struct WindowPlan {
 ///
 /// There is one window and two lanes that may want different parts of the
 /// spectrum — the native decoders are fixed on the European 868 MHz channels,
-/// while rtl_433 can be pointed at any of four bands hundreds of megahertz
+/// while rtl_433 can be pointed at any of five bands hundreds of megahertz
 /// apart. A window aimed at 868 would never reach a 433 MHz band, so the aim
 /// point cannot be a constant any more.
 ///
@@ -193,7 +193,8 @@ pub fn window_plan(
     if cfg.rtl433_enabled() {
         for b in crate::rtl433::bands::all() {
             if cfg.rtl433.band_enabled(b.bit) {
-                candidates.push((b.center_hz, b.rate_hz / USABLE_FRACTION));
+                let rate = crate::rtl433::bands::rate_for(b, &cfg.rtl433);
+                candidates.push((b.center_hz, rate / USABLE_FRACTION));
             }
         }
     }
@@ -217,7 +218,9 @@ pub fn window_plan(
         #[cfg(feature = "rtl433")]
         if cfg.rtl433_enabled() {
             for b in crate::rtl433::bands::all() {
-                if cfg.rtl433.band_enabled(b.bit) && crate::rtl433::bands::fits(b, center, rate) {
+                if cfg.rtl433.band_enabled(b.bit)
+                    && crate::rtl433::bands::fits(b, &cfg.rtl433, center, rate)
+                {
                     n += 1;
                 }
             }

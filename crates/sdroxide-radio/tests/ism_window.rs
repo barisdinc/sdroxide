@@ -29,6 +29,9 @@ use sdroxide_types::{Command, DeviceCaps, IsmSettings, IsmStatus, RadioEvent, Vf
 const BAND_433: u32 = 1 << 0;
 const BAND_868: u32 = 1 << 1;
 
+/// `Rtl433Settings::bandwidth_hz` meaning "whatever the band asks for".
+const AUTO: u32 = sdroxide_types::RTL433_BANDWIDTH_AUTO;
+
 const DIAL_433: f64 = 433_920_000.0;
 const DIAL_868: f64 = 868_650_000.0;
 
@@ -90,13 +93,13 @@ fn caps() -> DeviceCaps {
     }
 }
 
-fn ism_on(bands: u32) -> IsmSettings {
+fn ism_on(bands: u32, bandwidth_hz: u32) -> IsmSettings {
     IsmSettings {
         enabled: true,
         // The native decoders switched off: they listen on 868 MHz whatever the
         // dial says, and this is about the lane that follows it.
         families: 0,
-        rtl433: sdroxide_types::Rtl433Settings { bands },
+        rtl433: sdroxide_types::Rtl433Settings { bands, bandwidth_hz },
         ..IsmSettings::default()
     }
 }
@@ -153,7 +156,7 @@ fn a_band_change_re_sizes_the_window_without_a_restart() {
 
     // ---- Listening on 433.92 MHz, which is decimated by four ----
     send(Command::SetVfo { vfo: Vfo::A, hz: DIAL_433 });
-    send(Command::SetIsmConfig(ism_on(BAND_433)));
+    send(Command::SetIsmConfig(ism_on(BAND_433, AUTO)));
     let narrow = ism_status(&h, "the 433.92 MHz lane starting", lane_running_on("433.92 MHz"));
     assert!(
         narrow.window_rate_hz < 500_000.0,
@@ -164,7 +167,7 @@ fn a_band_change_re_sizes_the_window_without_a_restart() {
     // ---- The operator picks 868 MHz and tunes there ----
     // Nothing else happens: the decoder is never stopped, which is precisely the
     // workaround this test exists to make unnecessary.
-    send(Command::SetIsmConfig(ism_on(BAND_868)));
+    send(Command::SetIsmConfig(ism_on(BAND_868, AUTO)));
     send(Command::SetVfo { vfo: Vfo::A, hz: DIAL_868 });
     let wide = ism_status(&h, "the 868 MHz lane starting", lane_running_on("868 MHz EU"));
     assert!(
@@ -180,8 +183,33 @@ fn a_band_change_re_sizes_the_window_without_a_restart() {
     );
     assert_eq!(wide.unavailable, None, "the decoder called itself unavailable while running");
 
-    // ---- And back, so the shrink is covered as well as the stretch ----
-    send(Command::SetIsmConfig(ism_on(BAND_433)));
+    // ---- The operator narrows the window by hand (issue #141) ----
+    // Same band, same dial: only the chosen bandwidth moves, and it has to move
+    // the window with it exactly as a band change does.
+    send(Command::SetIsmConfig(ism_on(BAND_868, 250_000)));
+    let hand = ism_status(&h, "the 868 MHz lane on a 250 kHz window", |s| {
+        s.rtl433.as_ref().is_some_and(|r| r.running && r.band == "868 MHz EU" && r.rate_hz > 0.0)
+            && s.window_rate_hz < 500_000.0
+    });
+    let lane_rate = hand.rtl433.as_ref().unwrap().rate_hz;
+    assert!(
+        (250_000.0..=400_000.0).contains(&lane_rate),
+        "a 250 kHz request settled on {lane_rate:.0} Hz"
+    );
+
+    // ---- And back to AUTO, so the stretch is covered as well as the shrink ----
+    send(Command::SetIsmConfig(ism_on(BAND_868, AUTO)));
+    let back = ism_status(&h, "the 868 MHz lane back on its own width", |s| {
+        s.rtl433.as_ref().is_some_and(|r| r.running && r.band == "868 MHz EU")
+            && s.window_rate_hz > 1_024_000.0
+    });
+    assert!(
+        back.rtl433.as_ref().unwrap().rate_hz >= 1_024_000.0,
+        "AUTO should give 868 MHz its own megahertz back"
+    );
+
+    // ---- And back to the other band, which is the shrink the ticket was ----
+    send(Command::SetIsmConfig(ism_on(BAND_433, AUTO)));
     send(Command::SetVfo { vfo: Vfo::A, hz: DIAL_433 });
     ism_status(&h, "the 433.92 MHz lane starting again", lane_running_on("433.92 MHz"));
 

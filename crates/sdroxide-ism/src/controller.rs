@@ -35,6 +35,9 @@ use crate::proto::{self, Scratch};
 struct Rtl433Lane {
     inst: crate::rtl433::sys::Instance,
     band: &'static crate::rtl433::bands::Band,
+    /// The window it is actually decoding, which is the width asked for rounded
+    /// to what an integer decimation of the stream can give.
+    rate_hz: f64,
     ddc: Ddc,
     /// Window IQ decimated to the band rate.
     buf: Vec<C32>,
@@ -283,9 +286,7 @@ impl Worker {
     /// actually in a position to hear it.
     #[cfg(feature = "rtl433")]
     fn rtl433_covers(&self, freq_hz: f64) -> bool {
-        self.rtl433
-            .as_ref()
-            .is_some_and(|l| (freq_hz - l.band.center_hz).abs() <= l.band.rate_hz / 2.0)
+        self.rtl433.as_ref().is_some_and(|l| (freq_hz - l.band.center_hz).abs() <= l.rate_hz / 2.0)
     }
 
     #[cfg(not(feature = "rtl433"))]
@@ -409,15 +410,31 @@ impl Worker {
             return;
         }
 
-        let Some(band) =
-            bands::pick(self.cfg.rtl433.bands, self.window_center_hz, self.window_rate_hz)
+        let Some(band) = bands::pick(&self.cfg.rtl433, self.window_center_hz, self.window_rate_hz)
         else {
-            self.rtl433_unavailable =
-                Some("no enabled band is inside the receiver's window".to_string());
+            // Two ways to reach here and only one of them is about the dial: a
+            // band that would have fitted at its own width and does not at the
+            // one the operator chose is a bandwidth to turn down, not a
+            // frequency to tune to.
+            self.rtl433_unavailable = Some(
+                if bands::fits_at_default(
+                    &self.cfg.rtl433,
+                    self.window_center_hz,
+                    self.window_rate_hz,
+                ) {
+                    format!(
+                        "the receiver's window is too narrow for {} kHz — choose a narrower \
+                         bandwidth, or AUTO",
+                        self.cfg.rtl433.bandwidth_hz / 1000
+                    )
+                } else {
+                    "no enabled band is inside the receiver's window".to_string()
+                },
+            );
             return;
         };
 
-        let mut ddc = Ddc::new(self.window_rate_hz, band.rate_hz);
+        let mut ddc = Ddc::new(self.window_rate_hz, bands::rate_for(band, &self.cfg.rtl433));
         ddc.set_offset_hz(band.center_hz - self.window_center_hz);
         let rate = ddc.out_rate();
 
@@ -449,8 +466,15 @@ impl Worker {
             "rtl_433 decoders started"
         );
 
-        self.rtl433 =
-            Some(Rtl433Lane { inst, band, ddc, buf: Vec::new(), cs16: Vec::new(), decodes: 0 });
+        self.rtl433 = Some(Rtl433Lane {
+            inst,
+            band,
+            rate_hz: rate,
+            ddc,
+            buf: Vec::new(),
+            cs16: Vec::new(),
+            decodes: 0,
+        });
     }
 
     /// Decimate the window to the band, convert, and let rtl_433 decode it.
@@ -727,8 +751,22 @@ impl Worker {
                     Some("switched off".to_string())
                 } else if live {
                     None
-                } else if !bands::fits(b, self.window_center_hz, self.window_rate_hz) {
-                    Some("outside the receiver's window".to_string())
+                } else if !bands::fits(
+                    b,
+                    &self.cfg.rtl433,
+                    self.window_center_hz,
+                    self.window_rate_hz,
+                ) {
+                    // Same distinction the lane's own message draws: too far away
+                    // and too wide are different faults with different fixes.
+                    Some(
+                        if bands::fits_at(b, b.rate_hz, self.window_center_hz, self.window_rate_hz)
+                        {
+                            "too wide for the receiver's window".to_string()
+                        } else {
+                            "outside the receiver's window".to_string()
+                        },
+                    )
                 } else {
                     // Fits, enabled, but another band won: only one at a time.
                     Some("another band is live".to_string())
@@ -740,6 +778,7 @@ impl Worker {
         Some(Box::new(sdroxide_types::Rtl433Status {
             running: self.rtl433.is_some(),
             band: self.rtl433.as_ref().map(|l| l.band.label.to_string()).unwrap_or_default(),
+            rate_hz: self.rtl433.as_ref().map(|l| l.rate_hz).unwrap_or(0.0),
             decoders: self.rtl433.as_ref().map(|l| l.inst.decoder_count()).unwrap_or(0),
             flex: self.rtl433.as_ref().map(|l| l.inst.flex_count()).unwrap_or(0),
             decodes: self.rtl433.as_ref().map(|l| l.decodes).unwrap_or(0),
@@ -867,6 +906,40 @@ mod tests {
         let w = Worker::new(plan::ideal_center_hz(), 2_025_000.0, cfg, String::new());
         let zwave = w.status_chans.iter().find(|c| c.freq_hz == 868_420_000.0).unwrap();
         assert!(zwave.live, "Z-Wave must keep its native decoder: rtl_433 has none");
+    }
+
+    /// A chosen bandwidth the receiver cannot deliver has to say so in those
+    /// words (issue #141).
+    ///
+    /// "Outside the receiver's window" would be a lie here and an expensive one:
+    /// it sends the operator to the dial, which is already on the band, instead
+    /// of to the setting they just changed.
+    #[cfg(feature = "rtl433")]
+    #[test]
+    fn a_width_the_receiver_cannot_give_says_so_rather_than_blaming_the_dial() {
+        let band = &crate::rtl433::bands::BANDS[3]; // 315 MHz US, 250 kHz of its own
+        let mut cfg = on();
+        cfg.rtl433.bands = band.bit;
+
+        // Its own width, through a window with room for it: running.
+        let w = Worker::new(band.center_hz, 400_000.0, cfg, String::new());
+        assert!(w.rtl433.is_some(), "the band fits at its own width");
+
+        // The same window, with a megahertz asked for: not running, and the
+        // reason names the bandwidth rather than the frequency.
+        cfg.rtl433.bandwidth_hz = 1_024_000;
+        let w = Worker::new(band.center_hz, 400_000.0, cfg, String::new());
+        assert!(w.rtl433.is_none());
+        let why = w.rtl433_unavailable.clone().expect("a reason");
+        assert!(why.contains("1024 kHz"), "{why}");
+        let rows = w.rtl433_status().expect("the lane is switched on").bands;
+        let row = rows.iter().find(|r| r.freq_hz == band.center_hz).expect("the 315 MHz row");
+        assert_eq!(row.reason.as_deref(), Some("too wide for the receiver's window"));
+
+        // And tuned somewhere else entirely, the reason goes back to the dial.
+        let w = Worker::new(145_000_000.0, 400_000.0, cfg, String::new());
+        let why = w.rtl433_unavailable.clone().expect("a reason");
+        assert_eq!(why, "no enabled band is inside the receiver's window");
     }
 
     /// A decoder spec that does not pass has to reach the panel.

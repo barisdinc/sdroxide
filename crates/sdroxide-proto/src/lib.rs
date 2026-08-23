@@ -492,7 +492,17 @@ use sdroxide_types::{
 /// an older peer could simply never be sent: a v76 client decoding a v77 state
 /// would read the tail of it as garbage. The handshake is an equality test and
 /// catches that before a single frame is exchanged, which is what it is for.
-pub const PROTO_VERSION: u16 = 77;
+/// **78** — the ISM decoder's rtl_433 lane gained a chosen bandwidth and a
+/// fifth band (issue #141). `Rtl433Settings` carries `bandwidth_hz`, which is
+/// the width to watch or zero for the band's own, and `Rtl433Status` carries
+/// `rate_hz`, the width actually being decoded. Both are fields added to
+/// structs — the settings ride in [`sdroxide_types::RadioState`] and the status
+/// in an event — so a v77 peer would read the tail of either as garbage, and
+/// the handshake's equality test is what stops it trying.
+///
+/// The 345 MHz band itself is not on the wire: it is a row in a table both
+/// sides already have.
+pub const PROTO_VERSION: u16 = 78;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

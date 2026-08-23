@@ -159,8 +159,8 @@ impl SdroxideApp {
         self.ism_list(ui, cmds);
     }
 
-    /// Which band the decoder is on. One button each, and pressing one goes
-    /// there.
+    /// Which band the decoder is on, and how wide a window it gets. One button
+    /// each, and pressing a band goes there.
     ///
     /// This is the *only* set of tuning buttons in the window. There used to be
     /// two — a "TUNE 868.881 MHz" for the native channel plan and a separate
@@ -192,6 +192,29 @@ impl SdroxideApp {
                 ));
             }
         });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("bw").size(10.0).color(crate::theme::CYAN_DIM()));
+            for (hz, label) in sdroxide_types::RTL433_BANDWIDTHS {
+                let selected = cfg.rtl433.bandwidth_hz == hz;
+                let chip = crate::chrome::chip_enabled(ui, wideband, selected, label);
+                if chip.clicked() {
+                    cfg.rtl433.bandwidth_hz = hz;
+                }
+                chip.on_hover_text(if hz == sdroxide_types::RTL433_BANDWIDTH_AUTO {
+                    "Give each band the width it normally needs — a quarter of a megahertz \
+                     for the OOK bands at 315, 345 and 433 MHz, a full one for 868 and 915."
+                        .to_string()
+                } else {
+                    format!(
+                        "Watch {label}Hz around the band centre, whatever the band would have \
+                         asked for. Narrower fits a receiver that cannot deliver the band's \
+                         own width; wider reaches devices sitting further off centre. Your \
+                         receiver has to hand over about a third more than this."
+                    )
+                });
+            }
+        });
     }
 
     /// What the embedded rtl_433 is doing, as one row under the channel list.
@@ -218,7 +241,11 @@ impl SdroxideApp {
             }));
             let tail = match (&rt.unavailable, live) {
                 (Some(why), _) => format!("rtl_433  —  {why}"),
-                (None, Some(b)) => format!("rtl_433 {}", b.label),
+                // The width as well as the place: the operator chooses it now,
+                // and what the downconverter settles on is a whole-number
+                // division of the receiver's stream rather than the round figure
+                // that was asked for.
+                (None, Some(b)) => format!("rtl_433 {}  ·  {:.0} kHz", b.label, rt.rate_hz / 1e3),
                 (None, None) => "rtl_433".to_string(),
             };
             ui.label(RichText::new(tail).size(10.5).color(crate::theme::CYAN_DIM())).on_hover_text(

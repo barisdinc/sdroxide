@@ -454,6 +454,21 @@ pub struct Rtl433Settings {
     /// Which bands to listen on, as a bitmask. One is live at a time — the one
     /// the receiver's window can actually reach.
     pub bands: u32,
+    /// How wide a window to give rtl_433, in Hz, or [`RTL433_BANDWIDTH_AUTO`]
+    /// for whatever the selected band asks for.
+    ///
+    /// Each band has a default that suits what is normally on it — a quarter of
+    /// a megahertz for the OOK remotes at 315, 345 and 433 MHz, a full one for
+    /// the faster FSK devices at 868 and 915 — and those are what AUTO uses. An
+    /// explicit width is for the cases the defaults do not cover: a device that
+    /// sits far enough off the band centre to fall outside the narrow window, or
+    /// a receiver that cannot deliver the wide one.
+    ///
+    /// One figure rather than one per band, because only one band decodes at a
+    /// time and a per-band array in a struct that rides in every state broadcast
+    /// would change the wire layout each time a band was added — the same
+    /// reasoning as the bitmask above.
+    pub bandwidth_hz: u32,
 }
 
 /// The European 868 MHz band — where the native decoders already listen, so a
@@ -465,9 +480,40 @@ pub struct Rtl433Settings {
 /// one that runs. The panel selects exactly one.
 pub const RTL433_BANDS_DEFAULT: u32 = 1 << 1;
 
+/// [`Rtl433Settings::bandwidth_hz`] meaning "whatever the band itself asks for".
+///
+/// Zero rather than an `Option` so that a hand-edited `ism.json` missing the
+/// field, and one that names `0`, mean the same thing.
+pub const RTL433_BANDWIDTH_AUTO: u32 = 0;
+
+/// The narrowest window rtl_433 is ever given, in Hz.
+///
+/// Not a limit on the panel, which offers nothing near it, but a floor under
+/// what a hand-edited `ism.json` can ask for. The window is made by decimating
+/// the receiver's stream, so a request for a few hertz is a decimation by
+/// hundreds of thousands — a filter of that order gets built, and nothing is
+/// decoded through it afterwards.
+pub const RTL433_BANDWIDTH_MIN_HZ: u32 = 25_000;
+
+/// The window widths the panel offers, as (Hz, label).
+///
+/// 250 kHz and 1024 kHz are rtl_433's own two conventional rates and are what
+/// the bands default to; the others are there because a receiver's usable span
+/// is three quarters of its sample rate, so the width that fits is often not the
+/// one the band would have picked. The decoder's downconverter decimates by a
+/// whole number, so what it settles on is at or a little below the figure asked
+/// for — the panel shows the width actually in use beside the band.
+pub const RTL433_BANDWIDTHS: [(u32, &str); 5] = [
+    (RTL433_BANDWIDTH_AUTO, "AUTO"),
+    (250_000, "250k"),
+    (500_000, "500k"),
+    (1_024_000, "1024k"),
+    (2_048_000, "2048k"),
+];
+
 impl Default for Rtl433Settings {
     fn default() -> Self {
-        Rtl433Settings { bands: RTL433_BANDS_DEFAULT }
+        Rtl433Settings { bands: RTL433_BANDS_DEFAULT, bandwidth_hz: RTL433_BANDWIDTH_AUTO }
     }
 }
 
@@ -477,7 +523,8 @@ impl Rtl433Settings {
     /// No band selected, which is the only way to have the lane not run now that
     /// it has no switch of its own — the counterpart of `families: 0` in
     /// [`IsmSettings::OFF`].
-    pub const OFF: Rtl433Settings = Rtl433Settings { bands: 0 };
+    pub const OFF: Rtl433Settings =
+        Rtl433Settings { bands: 0, bandwidth_hz: RTL433_BANDWIDTH_AUTO };
 
     pub fn band_enabled(&self, bit: u32) -> bool {
         self.bands & bit != 0
@@ -490,6 +537,18 @@ impl Rtl433Settings {
             self.bands &= !bit;
         }
     }
+
+    /// How wide a window to give a band whose own default is `default_hz`.
+    ///
+    /// The one place the AUTO rule lives, so the engine's window planner, the
+    /// decoder and the panel cannot disagree about how wide the lane is.
+    pub fn bandwidth_for(&self, default_hz: f64) -> f64 {
+        if self.bandwidth_hz == RTL433_BANDWIDTH_AUTO {
+            default_hz
+        } else {
+            f64::from(self.bandwidth_hz.max(RTL433_BANDWIDTH_MIN_HZ))
+        }
+    }
 }
 
 /// The bands the rtl_433 lane offers, as (bit, label, centre in Hz).
@@ -498,11 +557,12 @@ impl Rtl433Settings {
 /// sample rate each one is decoded at. Repeated here because the UI draws these
 /// chips — and tunes to them — without linking any DSP, and the remote client
 /// cannot link it at all. Keep the two in step.
-pub const RTL433_BAND_LABELS: [(u32, &str, f64); 4] = [
+pub const RTL433_BAND_LABELS: [(u32, &str, f64); 5] = [
     (1 << 0, "433.92 MHz", 433_920_000.0),
     (1 << 1, "868 MHz EU", 868_650_000.0),
     (1 << 2, "915 MHz US", 915_000_000.0),
     (1 << 3, "315 MHz US", 315_000_000.0),
+    (1 << 4, "345 MHz US", 345_000_000.0),
 ];
 
 impl Default for IsmSettings {
@@ -638,6 +698,15 @@ pub struct Rtl433Status {
     pub running: bool,
     /// The band it settled on, e.g. "868 MHz EU". Empty when none fits.
     pub band: String,
+    /// How wide the window it is decoding actually is, in Hz. Zero when it is
+    /// not running.
+    ///
+    /// The width asked for and the width delivered are not the same number: the
+    /// downconverter decimates the receiver's stream by a whole number, so a
+    /// request for 1024 kHz out of 2.025 Msps settles on 1012.5. Shown because
+    /// the operator now chooses that width, and a setting whose effect cannot be
+    /// read back is a setting nobody can tell is working.
+    pub rate_hz: f64,
     /// How many device decoders are registered, including flex ones.
     pub decoders: u32,
     /// How many of those came from the operator's own flex specs.

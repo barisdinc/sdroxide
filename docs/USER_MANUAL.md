@@ -17,7 +17,7 @@ or connects to a remote sdroxide server.
 2. [Basic operation](#2-basic-operation)
 3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
-5. [ISM band decoder (433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
+5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
 7. [Solar system 3D view](#7-solar-system-3d-view)
 8. [Remote operation](#8-remote-operation)
@@ -2769,7 +2769,7 @@ There are two sets of decoders behind that window. SDRoxide's own read a handful
 of protocols on the European 868 MHz channels, in detail and with every checksum
 verified — those are what the rest of this section describes first. The
 **rtl_433** decoders ([§5.4](#54-the-rtl_433-decoders)) add several hundred more
-across 315, 433, 868 and 915 MHz. Most people will want both switched on.
+across 315, 345, 433, 868 and 915 MHz. Most people will want both switched on.
 
 - **DECODING / OFF** switches the decoder on. It costs four downconverters and a
   burst detector while it runs, so the ISM button stays lit — like SCAN and SAT —
@@ -3017,9 +3017,40 @@ megahertz apart and no receiver covers two at once.
 | **868 MHz EU** | Europe | The same weather families as the decoders above, plus Fine Offset and Bresser variants they do not cover, and assorted home-automation devices |
 | **915 MHz US** | North America, Australia | Acurite, LaCrosse and Oregon Scientific weather stations, tyre-pressure sensors, utility meters (ERT/SCM), Honeywell alarm sensors |
 | **315 MHz US** | North America | Tyre-pressure sensors, garage and gate remotes, alarm contacts |
+| **345 MHz US** | North America | Honeywell/Ademco, 2GIG and Vivint alarm sensors — door and window contacts, glass-break detectors, motion sensors |
 
 433.92 MHz is the one worth trying first if you have never looked: it is busy
 almost everywhere, and none of SDRoxide's own decoders reach it.
+
+#### Bandwidth
+
+**bw** is how wide a window rtl_433 gets around the band centre.
+
+**AUTO** gives each band the width it normally needs: a quarter of a megahertz
+on 315, 345 and 433 MHz, where everything is slow OOK crowded around one
+frequency, and a full megahertz on 868 and 915 MHz, where the FSK devices are
+faster and spread over several channels. That is what rtl_433 itself uses, and
+it is the right answer nearly always.
+
+Choose a width by hand for the two cases it is not:
+
+- **Your receiver cannot deliver the band's own width.** A window is usable only
+  across the middle three quarters of what the front end hands over, so 868 MHz
+  at AUTO needs about 1.4 MHz of IQ. On a receiver giving less, the band row
+  reads `too wide for the receiver's window` and nothing decodes — pick **250k**
+  or **500k** and it will.
+- **The device you want is further off centre than AUTO reaches.** Widening to
+  **1024k** or **2048k** covers more of the band at once, at the cost of more
+  work per second and a slightly higher noise floor per device.
+
+Narrowing has the opposite catch: **250k** on 868 MHz watches 868.525 to 868.775
+MHz and so hears neither of the two busy European sub-bands. The band row and
+the frequency beside `rtl_433` say what is actually being watched.
+
+The figure shown there is not always the one you picked. The window is a
+whole-number division of the receiver's stream, so a request for 250 kHz out of
+1.4 Msps settles on 350, and 1024 kHz out of the RX-888's 2.025 Msps settles on
+1012.5. It is never *narrower* than what you asked for.
 
 #### What it adds
 
@@ -3149,8 +3180,11 @@ the outside.
 1. **Is anything live?** The channel list needs at least one green lamp — the
    rtl_433 row counts. All grey with "outside the receiver's window" means the
    dial is wrong: press the band button for the band you want, which tunes there.
-   A native channel reading `handled by rtl_433` is not a fault; it means the
-   other set of decoders has that one ([§5.4](#54-the-rtl_433-decoders)).
+   A band reading `too wide for the receiver's window` is the other one: the
+   width under **bw** is more than this receiver can give, so set it back to
+   **AUTO** or narrower ([§5.4](#54-the-rtl_433-decoders)). A native channel
+   reading `handled by rtl_433` is not a fault; it means the other set of
+   decoders has that one ([§5.4](#54-the-rtl_433-decoders)).
 2. **Is the gate opening?** The **bursts / decoded** line says. `0 bursts` means
    nothing is reaching the threshold: lower **sql** towards 6 dB. A healthy count
    with `0 decoded` means the band is busy with devices this build cannot read —
@@ -8643,7 +8677,7 @@ sdroxide stores its settings under the per-user config directory:
 | `wsjtx.json` | JSON | WSJT-X UDP broadcast: enabled, destination host and port, and the name clients see. |
 | `scanner.json` | JSON | The scanner: memories or a range, the range and channel step, the level that counts as busy, the dwell, how it resumes, and which memories to skip. |
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
-| `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on and which band they watch. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
+| `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on, which band they watch and how wide a window they get. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
 | `rtl433_flex.conf` | text | Your own ISM decoders, in rtl_433's "flex" syntax ([§5.5](#55-adding-your-own-decoders-flex-specs)). Written with a commented example the first time the ISM decoder runs, and never rewritten afterwards — like `bandplan.json`, it is yours to edit. A specification that does not pass its check is listed in the ISM window and skipped; the rest still load. **RELOAD DECODERS** in the ISM window applies an edit without a restart. |
 | `input.json` | JSON | Control inputs: keyboard bindings, panadapter mouse behaviour, mouse-button bindings, and the MIDI controller mapping. Belongs to the machine running the user interface, not the engine. |
 | `remote_login.json` | JSON | A sign-in to *somebody else's* server that you asked this client to remember ([§8.3](#83-sign-in-who-may-operate-the-station)). Written only when the **Remember on this device** box is ticked, holds the password in plaintext, and deleted when you untick it or the server refuses it. Belongs to the user interface, like `input.json`; the browser client keeps the same thing in local storage instead. |

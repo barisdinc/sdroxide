@@ -103,7 +103,8 @@ pub use input::{
 pub use ism::{
     ISM_MAX_DEVICES_DEFAULT, ISM_THRESHOLD_DB_DEFAULT, IsmBurstClass, IsmChannelStatus, IsmFamily,
     IsmProtocol, IsmQuantity, IsmReading, IsmReport, IsmSettings, IsmStatus, RTL433_BAND_LABELS,
-    RTL433_BANDS_DEFAULT, Rtl433Settings, Rtl433Status,
+    RTL433_BANDS_DEFAULT, RTL433_BANDWIDTH_AUTO, RTL433_BANDWIDTH_MIN_HZ, RTL433_BANDWIDTHS,
+    Rtl433Settings, Rtl433Status,
 };
 pub use js8::{
     HB_BAND_HI_HZ, HB_BAND_LO_HZ, HB_SLOT_HZ, Js8FrameInfo, Js8FrameKind, Js8Heard, Js8Msg,
