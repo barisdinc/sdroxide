@@ -2407,7 +2407,7 @@ impl SdroxideApp {
             )
             .on_hover_text(match &self.state.recording_file {
                 Some(f) => format!("Recording to {f} — click to stop"),
-                None => "Record RX (left) and TX (right) audio to MP3".to_string(),
+                None => "Record RX and TX audio to MP3".to_string(),
             });
             if rec.clicked() {
                 cmds.push(Command::SetRecording(!recording));
@@ -2427,9 +2427,10 @@ impl SdroxideApp {
                 })
                 .inner
                 .on_hover_text(if mono {
-                    "Recording mixes RX/TX to one channel — click for RX left / TX right"
+                    "Recording mixes RX/TX to one channel — click for two channels"
                 } else {
-                    "Recording splits RX left / TX right — click for a single mixed channel"
+                    "Recording writes two channels: RX left / TX right while the sub receiver \
+                     is on, the same audio in both otherwise — click for a single mixed channel"
                 });
             if mono_chip.clicked() {
                 cmds.push(Command::SetRecordingMono(!mono));

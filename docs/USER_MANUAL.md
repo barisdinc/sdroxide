@@ -80,6 +80,11 @@ or connects to a remote sdroxide server.
 - **Voice keyer** — ten recorded messages, transmitted from a button, a numpad
   key, a MIDI pad or a Hamlib `send_voice_mem` command; works in the voice modes
   and in RADE digital voice.
+- **QSO recorder** — one button records both sides of the contact to an MP3:
+  what you hear as the receiver delivered it, before the volume control, and
+  what you send as it goes to the transmitter. Split into an ear each where a
+  second receiver or a stereo broadcast is using both channels, centred where
+  nothing is.
 - **FT8 / FT4 / FT2** with a live decode list, automatic QSO sequencing, a world map,
   a transcript, and automatic logging.
 - **Integrated logbook** for digital and manual QSOs, with contest and QSL
@@ -402,6 +407,9 @@ moves the transmit frequency, and what has to ride under it. See
   refusing it. The sub receiver still has to live inside the span, so if it was
   parked outside the new one it is moved back in.
 - **MUTE** (Filter/Noise row) — mute the receiver (keyboard shortcut **M**).
+- **REC** / **MONO** (Filter/Noise row) — record what you hear and what you send
+  to an MP3 file, and choose whether it is written in two channels or one. See
+  [2.20](#220-recording-the-audio).
 - **SQL** (Filter/Noise module) — squelch; below the open threshold it reads
   `off`.
 - **NB** — impulse noise blanker on the raw signal (keyboard shortcut **N**).
@@ -1653,6 +1661,91 @@ amateur DRM to send. **xHE-AAC** and the withdrawn CELP and HVXC speech codecs
 are not decoded — only AAC, which is what the surviving DRM30 shortwave
 broadcasts use. Journaline, MOT slideshows and the electronic programme guide
 are carried by the standard but not shown.
+
+### 2.20 Recording the audio
+
+**REC**, in the Filter/Noise module beside MUTE, records the session to an MP3
+file: press it to start, press it again to stop. While it runs, hovering it
+names the file being written. It has no keyboard shortcut by default, but
+**Record on/off** is in the bindable action list, so it can be put on a key, a
+mouse button or a MIDI pad ([6.4](#64-controls-keyboard-mouse-and-midi)).
+
+**What goes into it.** On receive, the audio at the end of the receive chain —
+past the AGC, the noise blanker, the auto-notch and noise reduction — but taken
+*before* the volume control and MUTE. Turning the AF down, muting the receiver,
+or a spoken announcement ducking the speakers changes what you hear and nothing
+about the file, and the sub receiver's own volume and mute are equally invisible
+to it. What you were listening to is what gets archived, at the level the
+receiver delivered it. The squelch is the one control that does reach the
+recording: what a closed squelch silences is recorded as silence. Where a mode
+replaces what you hear rather than filtering it — decoded FreeDV/RADE speech, or
+a voice-keyer message you are monitoring — the recording follows the speaker.
+
+On transmit, it takes the audio sdroxide sends: the microphone after mic gain
+and the transmit EQ, with any CTCSS tone or 1750 Hz burst that goes under it; a
+digital mode's burst; the CW keyer's sidetone; and, for a tune-up, a 1 kHz tone
+at the tune level standing in for the unmodulated carrier — without which the
+file would go quiet for the tune and drift out of step with real time, a little
+further with every one. Receive is held out of the recording for the length of
+the over, so a full-duplex radio hearing its own signal cannot land on top of
+your voice. One kind of over leaves no trace: CW handed to the radio's own keyer
+travels as text over the CAT link
+([6.2](#62-radio-choosing-and-configuring-the-rig)), and text has no audio to
+record.
+
+**The two channels.** The recording is stereo unless you ask otherwise, and
+what is in the two channels depends on whether anything is running that needs
+them apart:
+
+- **A second receiver** (SUB), or a stereo broadcast (WFM or DRM), is using the
+  right channel. The recording is then genuinely split — the main receiver in
+  the left channel, the sub or the stereo difference in the right — and your own
+  transmitted audio goes to the right channel alone, so the two ends of the QSO
+  can be separated afterwards.
+- **Nothing is using it** — the ordinary case, and always the case on a CAT radio with
+  its audio on a sound card, which has one receiver and no sub. There is then
+  nothing to keep apart, so both what you receive and what you send are written
+  to both channels and the file plays centred instead of out of one ear.
+
+**MONO**, the chip beside REC, writes a single channel instead, with receive and
+transmit taking turns on it: a smaller file, and the honest format for a
+recording that is going to be played back in mono anyway.
+
+Either way the layout is settled when the recording starts — which is why MONO
+is greyed out while REC is lit. A file already being written keeps the channel
+count it began with, so switching the sub receiver on, or a broadcast's stereo
+pilot coming and going, cannot change it halfway through.
+
+**Where it goes.** Recordings land in `<Music>/sdroxide/` (or
+`~/.config/sdroxide/recordings` on a platform with no music folder), named for
+when they started and what the radio was doing:
+
+```
+sdroxide_2026-08-23_14-32-05Z_14.074000MHz_USB.mp3
+```
+
+— the UTC date and time, then the dial frequency and mode at the moment you
+pressed REC. Tuning or changing mode later does not rename the file. All radios
+share the one folder, so the second and later radios of a multi-radio session
+put their number in the name (`sdroxide_radio1_…`); recording is per radio, and
+each tab has its own REC writing its own file.
+
+The file is 48 kHz MP3 at 192 kbps, encoded on a thread of its own so that
+neither the encoder nor the disk can interrupt the audio. If the disk does stall
+for longer than the few seconds of slack in front of it, the recording takes a
+clean gap rather than a stutter stitched out of whatever fitted.
+
+Started from a remote or browser client, a recording is written on the machine
+the radio is on — the server's music folder, not yours
+([8](#8-remote-operation)). REC needs an audio output to tap: with none
+configured it says so rather than recording silence. It stops by itself if the
+audio output device is changed under it, and one still running when you quit is
+closed properly, so there is never a half-written file to repair.
+
+This is not `--record-iq` ([12](#12-command-line-reference)), which writes the
+raw IQ of the whole span — tens of megabytes a second — so that a band can be
+replayed offline. This records what came out of the receiver, at a size you can
+send to someone.
 
 ---
 
@@ -9408,7 +9501,8 @@ remembered frequency is the first thing to check.
 
 Two things are kept outside the config directory, because they are things you
 will want to open in an ordinary file manager rather than program state:
-audio recordings go to `<Music>/sdroxide/`, and received weather-fax charts to
+audio recordings go to `<Music>/sdroxide/` ([2.20](#220-recording-the-audio)),
+and received weather-fax charts to
 `<Pictures>/sdroxide/wefax/`. Where the platform exposes no such folder, both
 fall back to the config directory.
 

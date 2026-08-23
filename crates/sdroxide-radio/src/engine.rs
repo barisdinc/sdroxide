@@ -899,7 +899,9 @@ struct StereoMixer {
     sub_q: Vec<f32>,
     dropped: u64,
     /// When recording: RX in the left channel, TX audio in the right (or both
-    /// time-multiplexed onto a single channel — see `rec_mono`).
+    /// time-multiplexed onto a single channel — see `rec_mono`). With nothing
+    /// to put in the right channel the recording is dual mono instead — see
+    /// `rec_split`.
     rec_tap: Option<rtrb::Producer<f32>>,
     /// Fed from `push`'s `rec_left`/`rec_right`, which the caller builds
     /// independent of the speaker path's AF volume/mute — see `RxChain::run`.
@@ -916,6 +918,14 @@ struct StereoMixer {
     /// Whether `rec_tap` was opened for a mono recording (one channel) rather
     /// than stereo (two) — must match what `Recorder::start` configured.
     rec_mono: bool,
+    /// Whether the recording's right channel has a source of its own: a sub
+    /// receiver, or a stereo broadcast (WFM or DRM). When it hasn't, a stereo recording would be
+    /// half silence — one ear of RX and, over on the other side, one ear of
+    /// TX — so both sides go to both channels instead and the file plays
+    /// centred. Latched from the last block that carried samples, because an
+    /// over stops feeding the RX tap altogether and `push_tx` still has to
+    /// know which of the two layouts the file is in.
+    rec_split: bool,
     /// Attenuation applied to the speaker path while a local spoken
     /// announcement plays. 1.0 is off.
     ///
@@ -955,6 +965,7 @@ impl StereoMixer {
             tx_rec_scratch: Vec::new(),
             rx_rec_enabled: true,
             rec_mono: false,
+            rec_split: false,
             duck: 1.0,
             tx_muted: false,
         }
@@ -1006,8 +1017,11 @@ impl StereoMixer {
         };
 
         if rec_n > 0 {
-            // Recording tap: RX left, sub receiver (if any) right, silence
-            // otherwise. Suppressed by rx_rec_enabled while transmitting.
+            // Recording tap: RX left, sub receiver (if any) right — and the
+            // same RX in both when there is no second receiver to put there,
+            // rather than a file with one silent ear. Suppressed by
+            // rx_rec_enabled while transmitting.
+            self.rec_split = rec_dual;
             if self.rx_rec_enabled {
                 if let Some(rec) = self.rec_tap.as_mut() {
                     let need = if self.rec_mono { 1 } else { 2 };
@@ -1026,7 +1040,7 @@ impl StereoMixer {
                         if self.rec_mono {
                             let _ = rec.push(l);
                         } else {
-                            let r = if rec_dual { self.rec_sub_q[i] } else { 0.0 };
+                            let r = if rec_dual { self.rec_sub_q[i] } else { l };
                             let _ = rec.push(l);
                             let _ = rec.push(r);
                         }
@@ -1079,8 +1093,9 @@ impl StereoMixer {
     }
 
     /// Recording tap for TX audio: right channel, silence in the left (or the
-    /// sole channel in mono). Resampled from `TX_MONITOR_RATE` to match
-    /// `rec_tap`.
+    /// sole channel in mono, or both channels where the recording has no
+    /// second receiver to keep them apart — see `rec_split`). Resampled from
+    /// `TX_MONITOR_RATE` to match `rec_tap`.
     fn push_tx(&mut self, tx: &[f32]) {
         if self.rec_tap.is_none() {
             return;
@@ -1104,7 +1119,11 @@ impl StereoMixer {
             if self.rec_mono {
                 let _ = rec.push(s);
             } else {
-                let _ = rec.push(0.0);
+                // Where a second receiver holds the right channel, the over
+                // stays on that side and the two ends of the QSO keep an ear
+                // each; where nothing does, the file is dual mono throughout
+                // and the over is centred like the receive audio around it.
+                let _ = rec.push(if self.rec_split { 0.0 } else { s });
                 let _ = rec.push(s);
             }
         }
@@ -5654,7 +5673,8 @@ impl Engine {
     }
 
     /// Begin recording both sides of the QSO to a new MP3 file (RX left, TX
-    /// right — or a single mixed channel if `recording_mono` is set). The
+    /// right where a second receiver is running, dual mono where none is, or a
+    /// single mixed channel if `recording_mono` is set — see `rec_split`). The
     /// filename encodes the UTC date/time, dial frequency and mode; the file
     /// lands in the user's music directory (or the config dir as a fallback).
     /// No-op if already recording; reports a [`RadioEvent::Notice`] if it
@@ -5689,6 +5709,9 @@ impl Engine {
                 let mixer = self.mixer.as_mut().expect("checked above");
                 mixer.rec_tap = Some(prod);
                 mixer.rec_mono = self.state.recording_mono;
+                // Whatever the last recording's layout was is no evidence
+                // about this one's; the first block re-latches it.
+                mixer.rec_split = false;
                 mixer.tx_rec_rs = MonoResampler::new(TX_MONITOR_RATE, self.audio_out_rate);
                 self.recorder = Some(rec);
                 self.state.recording = true;
@@ -10181,6 +10204,64 @@ mod digi_config_tests {
             "a chip toggle wiped the band offsets"
         );
         assert!(merged.hold_tx_freq, "and the edit the client actually made was lost");
+    }
+}
+
+#[cfg(test)]
+mod recording_tap_tests {
+    use super::*;
+
+    fn drained(cons: &mut rtrb::Consumer<f32>) -> Vec<f32> {
+        std::iter::from_fn(|| cons.pop().ok()).collect()
+    }
+
+    /// A stereo recording splits RX and TX into an ear each only when there is
+    /// a second receiver holding the right channel open. With one receiver and
+    /// a mono signal there is nothing to separate, so both sides go to both
+    /// channels rather than leaving the file playing out of one ear.
+    #[test]
+    fn one_receiver_records_dual_mono() {
+        let (out, _speaker) = rtrb::RingBuffer::<f32>::new(64);
+        let (tap, mut rec) = rtrb::RingBuffer::<f32>::new(64);
+        let mut mixer = StereoMixer::new(out);
+        mixer.rec_tap = Some(tap);
+
+        // Receive, no sub: the same sample in both channels.
+        mixer.push(&[0.5, 0.25], None, &[0.5, 0.25], None);
+        assert_eq!(drained(&mut rec), vec![0.5, 0.5, 0.25, 0.25]);
+
+        // The over that follows is centred the same way — a file that is dual
+        // mono on receive must not go one-sided the moment the operator keys.
+        mixer.rx_rec_enabled = false;
+        mixer.push_tx(&[0.75]);
+        assert_eq!(drained(&mut rec), vec![0.75, 0.75]);
+
+        // Switch the sub receiver on and the split is back: it owns the right
+        // channel, and the over keeps to that side so the two ends of the QSO
+        // stay apart.
+        mixer.rx_rec_enabled = true;
+        mixer.push(&[0.5], Some(&[0.1]), &[0.5], Some(&[0.1]));
+        assert_eq!(drained(&mut rec), vec![0.5, 0.1]);
+        mixer.rx_rec_enabled = false;
+        mixer.push_tx(&[0.75]);
+        assert_eq!(drained(&mut rec), vec![0.0, 0.75]);
+    }
+
+    /// The mono recording is one channel however many receivers are running —
+    /// dual mono is a stereo-file layout, not a downmix.
+    #[test]
+    fn mono_recording_stays_one_channel() {
+        let (out, _speaker) = rtrb::RingBuffer::<f32>::new(64);
+        let (tap, mut rec) = rtrb::RingBuffer::<f32>::new(64);
+        let mut mixer = StereoMixer::new(out);
+        mixer.rec_tap = Some(tap);
+        mixer.rec_mono = true;
+
+        mixer.push(&[0.5, 0.25], None, &[0.5, 0.25], None);
+        assert_eq!(drained(&mut rec), vec![0.5, 0.25]);
+        mixer.rx_rec_enabled = false;
+        mixer.push_tx(&[0.75]);
+        assert_eq!(drained(&mut rec), vec![0.75]);
     }
 }
 

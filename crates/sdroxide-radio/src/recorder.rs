@@ -1,5 +1,8 @@
 //! Off-thread MP3 recorder for a QSO: RX in the left channel, TX in the right
-//! — or, in mono mode, both time-multiplexed onto a single channel.
+//! — or, in mono mode, both time-multiplexed onto a single channel. A stereo
+//! recording with no second receiver to fill the right channel is written as
+//! dual mono instead of one silent ear; the mixer decides that, this end only
+//! ever sees interleaved frames.
 //!
 //! The engine's audio loop pushes interleaved frames straight off the stereo
 //! mixer into a lock-free ring; a dedicated thread drains it, resamples to
@@ -40,7 +43,8 @@ const MODE_MONO: i32 = 3;
 /// How many interleaved channels a recording carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingChannels {
-    /// RX in the left channel, TX in the right.
+    /// Two channels: RX in the left, TX in the right — or the same signal in
+    /// both, where the caller has nothing to separate (see `StereoMixer`).
     Stereo,
     /// RX and TX time-multiplexed onto a single channel — for RX-only
     /// listening, or anyone who doesn't want split-ear audio.
