@@ -974,6 +974,16 @@ pub struct Session {
     pub gains: Vec<(String, f64)>,
     /// Front-end TX gain stages, likewise.
     pub tx_gains: Vec<(String, f64)>,
+    /// Working a repeater: the transmit shift, the sub-audible tone under the
+    /// voice and the 1750 Hz burst.
+    ///
+    /// Here rather than in `config.toml` for the same reason the dial and the
+    /// squelch are: it is set at the radio as it is used, and a station left
+    /// on the local repeater should come back on it rather than transmitting
+    /// simplex into the input. Absent in a session written before this
+    /// existed, in which case `#[serde(default)]` on the struct gives the
+    /// plain simplex, no-tone setting every start used to have.
+    pub repeater: sdroxide_types::RepeaterState,
     /// Whether a recording mixes RX/TX down to one channel instead of putting
     /// RX left and TX right. A preference the operator sets once and expects to
     /// still hold next time, not something the engine moves on its own — but it
@@ -1012,6 +1022,7 @@ impl Default for Session {
             squelch_db: radio.rx[0].squelch_db,
             noise_reduction: radio.rx[0].noise_reduction,
             decimation: radio.decimation,
+            repeater: radio.repeater,
             gains: Vec::new(),
             tx_gains: Vec::new(),
             recording_mono: radio.recording_mono,
@@ -1739,6 +1750,17 @@ mod tests {
             squelch_db: -70.0,
             noise_reduction: sdroxide_types::NrLevel::RnnMed,
             decimation: 4,
+            repeater: sdroxide_types::RepeaterState {
+                shift: sdroxide_types::Shift::Minus,
+                offset_hz: 7_600_000,
+                auto: true,
+                tone: sdroxide_types::ToneMode::Ctcss,
+                ctcss_tenths: 1230,
+                dcs_code: 131,
+                dcs_invert: true,
+                burst_auto: true,
+                burst_ms: 750,
+            },
             gains: vec![("LNA".into(), 24.0), ("VGA".into(), 16.0)],
             tx_gains: vec![("PAD".into(), -6.0)],
             recording_mono: true,

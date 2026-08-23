@@ -23,8 +23,9 @@
 
 use eframe::egui::{self, Color32, ComboBox, DragValue, RichText, Slider};
 use sdroxide_types::{
-    AgcMode, Band, Command, CwSkimmerDecoder, DeviceCaps, Direction, GainElement, Mode, NrEngine,
-    NrLevel, NrStrength, RadioState, RxId, SkimmerKind, SubTone, Vfo,
+    AgcMode, BURST_MS_RANGE, Band, Command, CwSkimmerDecoder, DCS_CODES, DeviceCaps, Direction,
+    GainElement, MAX_OFFSET_HZ, Mode, NrEngine, NrLevel, NrStrength, RadioState, RxId, Shift,
+    SkimmerKind, SubTone, ToneMode, Vfo,
 };
 
 use crate::widgets::{freq_display, smeter};
@@ -84,6 +85,18 @@ const CHIP_STRETCH_FACTOR: f32 = 2.0;
 /// The VFO/RIT box's utility chips — the labels its top row is measured and
 /// drawn from.
 const VFO_CHIPS: [&str; 4] = ["A↔B", "A→B", "SPLIT", "SUB"];
+/// The repeater chips that follow them on the same row: the transmit shift and
+/// the tone that goes out under it.
+///
+/// In this box rather than one of their own because they belong with the other
+/// three things that decide where and how this radio transmits relative to
+/// where it listens — split, RIT and XIT — and because the strip has no room
+/// for another box. Both labels are fixed rather than showing the setting: a
+/// chip whose label grew from "TONE" to "88.5" would change width and move
+/// every chip beside it each time the operator picked a tone. What is set is in
+/// the hover text and, at a glance, in whether the chip is lit.
+const DUPLEX_CHIP: &str = "DUPLEX";
+const TONE_CHIP: &str = "TONE";
 /// Width of a RIT/XIT offset field on the desktop: a signed 4-digit offset
 /// plus " Hz".
 const HZ_FIELD_W: f32 = 74.0;
@@ -1551,7 +1564,8 @@ impl SdroxideApp {
     fn vfo_rit_module(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
         let tx_capable = self.tx_capable();
         let inner = w - 2.0 * crate::chrome::MODULE_MARGIN_X - 4.0;
-        let extra1 = ((inner - chip_row_w(ui, &VFO_CHIPS)) / VFO_CHIPS.len() as f32).max(0.0);
+        let chips = vfo_chip_labels(tx_capable);
+        let extra1 = ((inner - chip_row_w(ui, &chips)) / chips.len() as f32).max(0.0);
         let fields = if tx_capable { 2.0 } else { 1.0 };
         let extra2 = ((inner - vfo_offsets_w(ui, tx_capable)) / fields).max(0.0);
         crate::chrome::module_bare_h(ui, w, crate::chrome::MODULE_TALL_H, |ui| {
@@ -1586,6 +1600,10 @@ impl SdroxideApp {
         {
             cmds.push(Command::SetSubRx(!self.state.sub_rx_enabled));
         }
+        if self.tx_capable() {
+            self.duplex_chip(ui, cmds, extra);
+        }
+        self.repeater_tone_chip(ui, cmds, extra);
     }
 
     /// The RIT/XIT tuning offsets — the bottom row of the VFO/RIT box, and the
@@ -1637,6 +1655,362 @@ impl SdroxideApp {
         }
     }
 
+    /// The DUPLEX chip and the repeater-shift popup behind it.
+    ///
+    /// Lit — and in the warning colour, like the tone squelch — whenever the
+    /// transmitter is not where the receiver is. That is the whole of the
+    /// "split indicator" a repeater needs at a glance: the panadapter already
+    /// draws the transmit marker at its real frequency, and the hover text
+    /// spells the figure out.
+    fn duplex_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, extra: f32) {
+        let r = self.state.repeater;
+        let shifted = r.shift != Shift::Simplex;
+        let hover = if shifted {
+            format!(
+                "Repeater shift {} — receiving on {:.6}, transmitting on {:.6} MHz{}",
+                r.shift_label(),
+                self.state.rx_freq_hz() / 1e6,
+                self.state.tx_freq_hz() / 1e6,
+                if r.auto { ", from the band plan" } else { "" },
+            )
+        } else if r.auto {
+            "Repeater shift: following the band plan, which has no shift for this \
+             frequency — simplex"
+                .to_string()
+        } else {
+            "Repeater shift: transmit above or below the dial, to work a repeater. \
+             Simplex now"
+                .to_string()
+        };
+        let btn = if shifted {
+            accent_chip_stretched(
+                ui,
+                true,
+                DUPLEX_CHIP,
+                crate::theme::YELLOW(),
+                crate::theme::INK_ON_BRIGHT(),
+                extra,
+            )
+        } else {
+            chip_stretched(ui, false, DUPLEX_CHIP, extra)
+        }
+        .on_hover_text(hover);
+
+        let popup_id = egui::Popup::default_response_id(&btn);
+        let now = ui.input(|i| i.time);
+        let alpha =
+            crate::chrome::popup_fade_alpha(ui.ctx(), popup_id, now, &mut self.duplex_popup_since);
+        let resp = egui::Popup::from_toggle_button_response(&btn)
+            .frame(crate::chrome::window_frame_alpha(alpha))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_opacity(alpha);
+                crate::chrome::window_body_bg(ui);
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                self.duplex_controls(ui, cmds);
+            });
+        if let Some(r) = &resp {
+            crate::chrome::paint_popup_cut_border(ui.ctx(), &r.response, alpha);
+            if r.response.contains_pointer() {
+                self.duplex_popup_since = Some(now);
+            }
+        }
+    }
+
+    /// The repeater shift: which way, how far, and what that works out to.
+    fn duplex_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut r = self.state.repeater;
+        let mut changed = false;
+        crate::chrome::menu_caption(ui, "Repeater shift");
+        ui.horizontal_wrapped(|ui| {
+            for s in Shift::ALL {
+                if crate::chrome::chip(ui, r.shift == s, s.label()).clicked() {
+                    r.shift = s;
+                    // Chosen by hand, so stop following the plan — otherwise
+                    // the next turn of the dial would put it straight back and
+                    // the chip would look broken.
+                    r.auto = false;
+                    changed = true;
+                }
+            }
+            if crate::chrome::chip(ui, r.auto, "AUTO")
+                .on_hover_text(
+                    "Take the shift from the band plan as the dial moves. It only \
+                     speaks inside a repeater output sub-band — everywhere else it \
+                     leaves the radio simplex, so the calling channels stay simplex.",
+                )
+                .clicked()
+            {
+                r.auto = !r.auto;
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Offset").weak());
+            let mut khz = f64::from(r.offset_hz) / 1e3;
+            if crate::chrome::field(
+                ui,
+                DragValue::new(&mut khz)
+                    .speed(5.0)
+                    .range(0.0..=f64::from(MAX_OFFSET_HZ) / 1e3)
+                    // Four decimals is a shift to the Hz. Nothing published
+                    // needs them, but a hand-built machine might.
+                    .max_decimals(4)
+                    .suffix(" kHz"),
+            )
+            .changed()
+            {
+                r.offset_hz = (khz * 1e3).round().clamp(0.0, f64::from(MAX_OFFSET_HZ)) as u32;
+                r.auto = false;
+                changed = true;
+            }
+        });
+        // What it works out to, on the settings as they stand in this popup —
+        // the state's own figure is still the old one until the engine answers.
+        let tx = self.state.tx_freq_hz() - self.state.repeater.shift_hz() + r.shift_hz();
+        ui.label(
+            RichText::new(format!(
+                "RX {:.6}   TX {:.6} MHz",
+                self.state.rx_freq_hz() / 1e6,
+                tx / 1e6,
+            ))
+            .monospace()
+            .size(11.0)
+            .color(if r.shift == Shift::Simplex {
+                crate::theme::gray(140)
+            } else {
+                crate::theme::YELLOW()
+            }),
+        );
+        if changed {
+            self.state.repeater = r; // optimistic echo
+            cmds.push(Command::SetRepeater(r));
+        }
+    }
+
+    /// The TONE chip in the VFO box, and the repeater signalling behind it: the
+    /// CTCSS tone or DCS code that goes out under the voice, the 1750 Hz burst,
+    /// and the receive tone squelch.
+    ///
+    /// Not the same control as the RX box's tone chip, which is a *readout* of
+    /// what is arriving and only appears in NFM. This one is what the station
+    /// sends, which is a thing to set up before there is anything to hear —
+    /// and it carries the squelch as well, because a repeater directory gives
+    /// the tone once and radios ask for it on both sides.
+    fn repeater_tone_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, extra: f32) {
+        let r = self.state.repeater;
+        let sending = r.tx_tone();
+        let hover = match (sending, r.burst_auto) {
+            (Some(t), true) => format!(
+                "Transmitting {} under the voice, and a {} ms 1750 Hz burst at the \
+                 start of every over",
+                t.label(),
+                r.burst_ms,
+            ),
+            (Some(t), false) => format!("Transmitting {} under the voice", t.label()),
+            (None, true) => {
+                format!("A {} ms 1750 Hz burst at the start of every over", r.burst_ms)
+            }
+            (None, false) => "Repeater tone: the CTCSS/DCS that goes out under the voice, \
+                              the 1750 Hz burst, and the receive tone squelch"
+                .to_string(),
+        };
+        let lit = sending.is_some() || r.burst_auto;
+        let btn = if lit {
+            accent_chip_stretched(
+                ui,
+                true,
+                TONE_CHIP,
+                crate::theme::YELLOW(),
+                crate::theme::INK_ON_BRIGHT(),
+                extra,
+            )
+        } else {
+            chip_stretched(ui, false, TONE_CHIP, extra)
+        }
+        .on_hover_text(hover);
+
+        let popup_id = egui::Popup::default_response_id(&btn);
+        let now = ui.input(|i| i.time);
+        let alpha = crate::chrome::popup_fade_alpha(
+            ui.ctx(),
+            popup_id,
+            now,
+            &mut self.rpt_tone_popup_since,
+        );
+        let resp = egui::Popup::from_toggle_button_response(&btn)
+            .frame(crate::chrome::window_frame_alpha(alpha))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_opacity(alpha);
+                crate::chrome::window_body_bg(ui);
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                self.repeater_tone_controls(ui, cmds);
+            });
+        if let Some(r) = &resp {
+            crate::chrome::paint_popup_cut_border(ui.ctx(), &r.response, alpha);
+            if r.response.contains_pointer() {
+                self.rpt_tone_popup_since = Some(now);
+            }
+        }
+    }
+
+    /// The body of the TONE popup.
+    fn repeater_tone_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut r = self.state.repeater;
+        let mut changed = false;
+        let fm = self.state.rx[0].mode == Mode::Nfm;
+
+        crate::chrome::menu_caption(ui, "Transmit tone");
+        if !fm {
+            // Said rather than greyed out: the settings are worth arranging
+            // ahead of the mode, and a memory stores them whatever mode it is
+            // in. What is not worth doing is leaving the operator to wonder
+            // why nothing goes out.
+            ui.label(
+                RichText::new("set here, sent on NFM — sub-audible signalling is an FM channel's")
+                    .weak()
+                    .size(10.0),
+            );
+        }
+        ui.horizontal(|ui| {
+            for m in ToneMode::ALL {
+                if crate::chrome::chip(ui, r.tone == m, m.label()).clicked() {
+                    r.tone = m;
+                    changed = true;
+                }
+            }
+        });
+        match r.tone {
+            ToneMode::Off => {}
+            ToneMode::Ctcss => {
+                egui::ScrollArea::vertical().max_height(200.0).id_salt("rpt-ctcss").show(
+                    ui,
+                    |ui| {
+                        egui::Grid::new("rpt-ctcss-grid").spacing([3.0, 3.0]).show(ui, |ui| {
+                            for (i, &tenths) in sdroxide_types::CTCSS_TONES.iter().enumerate() {
+                                let label = format!("{}.{}", tenths / 10, tenths % 10);
+                                if crate::chrome::chip(ui, r.ctcss_tenths == tenths, label)
+                                    .clicked()
+                                {
+                                    r.ctcss_tenths = tenths;
+                                    changed = true;
+                                }
+                                if i % 10 == 9 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    },
+                );
+            }
+            ToneMode::Dcs => {
+                ui.horizontal(|ui| {
+                    for (invert, label) in [(false, "NORMAL"), (true, "INVERT")] {
+                        if crate::chrome::chip(ui, r.dcs_invert == invert, label).clicked() {
+                            r.dcs_invert = invert;
+                            changed = true;
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "the bit order DCS is encoded with here is transcribed from the \
+                         standard and has never been checked against a repeater — if it \
+                         will not open, try CTCSS",
+                    )
+                    .weak()
+                    .size(10.0),
+                );
+                egui::ScrollArea::vertical().max_height(200.0).id_salt("rpt-dcs").show(ui, |ui| {
+                    egui::Grid::new("rpt-dcs-grid").spacing([3.0, 3.0]).show(ui, |ui| {
+                        for (i, &code) in DCS_CODES.iter().enumerate() {
+                            if crate::chrome::chip(ui, r.dcs_code == code, format!("{code:03}"))
+                                .clicked()
+                            {
+                                r.dcs_code = code;
+                                changed = true;
+                            }
+                            if i % 8 == 7 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                });
+            }
+        }
+
+        crate::chrome::menu_caption(ui, "1750 Hz burst");
+        ui.horizontal(|ui| {
+            if crate::chrome::chip(ui, r.burst_auto, "EVERY OVER")
+                .on_hover_text("Open with the burst every time the transmitter keys")
+                .clicked()
+            {
+                r.burst_auto = !r.burst_auto;
+                changed = true;
+            }
+            let mut ms = r.burst_ms;
+            if crate::chrome::field(
+                ui,
+                DragValue::new(&mut ms).speed(10).range(BURST_MS_RANGE).suffix(" ms"),
+            )
+            .changed()
+            {
+                r.burst_ms = ms;
+                changed = true;
+            }
+            // The single button the whole feature is named after: on receive it
+            // keys, sends the burst and unkeys again; mid-over it plays over
+            // the microphone.
+            if crate::chrome::chip_accent_enabled(
+                ui,
+                fm,
+                false,
+                "SEND",
+                None,
+                crate::theme::GREEN(),
+                crate::theme::INK_ON_BRIGHT(),
+            )
+            .on_hover_text(if fm {
+                "Send the burst now — keying the transmitter for its length if it is \
+                 not already keyed"
+            } else {
+                "NFM only: the burst is an FM repeater's door-opener"
+            })
+            .clicked()
+            {
+                cmds.push(Command::ToneBurst);
+            }
+        });
+
+        crate::chrome::menu_caption(ui, "Receive tone squelch");
+        let heard = self.meters.as_ref().and_then(|m| m.tone);
+        let armed = self.state.rx[0].tone_sql;
+        // The shortcut that saves reading the tone out of one grid and finding
+        // it again in another: a repeater directory gives one tone and the
+        // radio wants it on both sides.
+        if let Some(t) = r.tx_tone() {
+            let want = match t {
+                sdroxide_types::TxSubTone::Ctcss(tenths) => SubTone::Ctcss(tenths),
+                sdroxide_types::TxSubTone::Dcs { .. } => SubTone::Dcs,
+            };
+            if armed != Some(want)
+                && crate::chrome::chip(ui, false, format!("MATCH TX ({})", t.label()))
+                    .on_hover_text("Require on receive what this station transmits")
+                    .clicked()
+            {
+                self.state.rx[0].tone_sql = Some(want); // optimistic echo
+                cmds.push(Command::SetToneSquelch { rx: RxId::Main, tone: Some(want) });
+            }
+        }
+        self.tone_controls(ui, cmds, heard, armed);
+
+        if changed {
+            self.state.repeater = r; // optimistic echo
+            cmds.push(Command::SetRepeater(r));
+        }
+    }
+
     /// The VFO utility chips and the RIT/XIT offsets — the body of the VFO
     /// menu. See [`crate::chrome::control_row`] for `narrow`.
     fn vfo_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, narrow: bool) {
@@ -1649,7 +2023,7 @@ impl SdroxideApp {
     /// receive-only rig has no XIT, and stops paying for it.
     fn vfo_rows_w(&self, ui: &egui::Ui) -> f32 {
         let tx_capable = self.tx_capable();
-        chip_row_w(ui, &VFO_CHIPS).max(vfo_offsets_w(ui, tx_capable))
+        chip_row_w(ui, &vfo_chip_labels(tx_capable)).max(vfo_offsets_w(ui, tx_capable))
             + 2.0 * crate::chrome::MODULE_MARGIN_X
             + 4.0
     }
@@ -3427,6 +3801,20 @@ fn band_mode_h(ui: &egui::Ui) -> f32 {
     (base + BAND_MODE_EXTRA_H).min(ui.available_height().max(base))
 }
 
+/// The labels on the VFO box's top row, in the order they are drawn.
+///
+/// DUPLEX is a transmit-side control and a receive-only front end does not pay
+/// for it, exactly as it does not pay for XIT on the row below. TONE stays
+/// either way: the receive tone squelch behind it belongs to the receiver.
+fn vfo_chip_labels(tx_capable: bool) -> Vec<&'static str> {
+    let mut labels = VFO_CHIPS.to_vec();
+    if tx_capable {
+        labels.push(DUPLEX_CHIP);
+    }
+    labels.push(TONE_CHIP);
+    labels
+}
+
 /// The natural width of a row of chips inside a condensed box: each chip at
 /// its label, with the box's row spacing between them.
 fn chip_row_w(ui: &egui::Ui, labels: &[&str]) -> f32 {
@@ -4539,7 +4927,7 @@ mod tests {
             + 12.0
             + RIGHT_W
             + 8.0;
-        let vfo = chip_row_w(ui, &VFO_CHIPS).max(vfo_offsets_w(ui, true))
+        let vfo = chip_row_w(ui, &vfo_chip_labels(true)).max(vfo_offsets_w(ui, true))
             + 2.0 * crate::chrome::MODULE_MARGIN_X
             + 4.0;
         let (rx_row, noise_row) = rx_rows_w(ui, false, false, false, mode);
@@ -4623,10 +5011,11 @@ mod tests {
             let (ctx, input) = desktop_ctx();
             let _ = ctx.run_ui(input, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(MODULE_ROW_SPACING, MODULE_ROW_SPACING);
-                let room = chip_row_w(ui, &VFO_CHIPS).max(vfo_offsets_w(ui, tx_capable)) + 4.0;
+                let chips = vfo_chip_labels(tx_capable);
+                let room = chip_row_w(ui, &chips).max(vfo_offsets_w(ui, tx_capable)) + 4.0;
                 let row1 = ui
                     .horizontal(|ui| {
-                        for label in VFO_CHIPS {
+                        for label in chips {
                             chip_stretched(ui, false, label, 0.0);
                         }
                         ui.min_rect().width()

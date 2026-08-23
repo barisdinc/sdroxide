@@ -21,6 +21,19 @@ pub struct MemoryChannel {
     /// this existed, which recalls on whatever the modem is already set to).
     #[serde(default)]
     pub rtty: Option<RttyMemory>,
+    /// The repeater setup this memory was stored with — the shift, the tone
+    /// that goes out under the voice, and whether the over opens on a 1750 Hz
+    /// burst.
+    ///
+    /// `None` only for a `memories.json` written before this existed, which
+    /// recalls onto whatever the repeater controls are already set to. Every
+    /// memory stored since carries an explicit setup, including a plainly
+    /// simplex one — a channel that says "simplex, no tone" has to be able to
+    /// take the radio *out* of the shift the last recall put it in, or working
+    /// down a list of repeater memories would leave the shift standing on the
+    /// simplex channel at the end of it.
+    #[serde(default)]
+    pub repeater: Option<crate::RepeaterState>,
 }
 
 /// The RTTY modem setup captured alongside a memory stored in RTTY mode.
@@ -172,6 +185,7 @@ mod tests {
             filter_hi: 2700.0,
             folder: None,
             rtty: None,
+            repeater: None,
         }
     }
 

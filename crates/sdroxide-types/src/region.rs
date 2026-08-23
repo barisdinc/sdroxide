@@ -106,6 +106,9 @@ pub(crate) mod mask {
     pub(crate) const ALL: u8 = 0;
     pub(crate) const R1: u8 = 1;
     pub(crate) const R2: u8 = 2;
+    /// Region 3 alone. The repeater plan is the first table to need it: the
+    /// Region 3 societies' 70 cm shift is neither of the other two regions'.
+    pub(crate) const R3: u8 = 4;
     /// Regions 2 and 3 together — the split most 40 m and 80 m conventions
     /// fall along.
     pub(crate) const R23: u8 = 2 | 4;

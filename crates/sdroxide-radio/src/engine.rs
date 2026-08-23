@@ -21,7 +21,8 @@ use sdroxide_digi::{
 use sdroxide_dsp::{
     Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
     MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
-    SpectrumAnalyzer, StereoResampler, channel_target, make_demod, make_modulator,
+    SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target, make_demod,
+    make_modulator,
 };
 use sdroxide_ism::{IsmAction, IsmController};
 use sdroxide_rigctld::{RigState, RigctldController};
@@ -30,8 +31,8 @@ use sdroxide_tci::server::{ServerRequest, TciServerController, TciStateSnapshot}
 use sdroxide_types::{
     AgcMode, Band, BandStackEntry, Command, DeviceCaps, DigiConfig, Direction, ImageKind,
     MemoryChannel, MemoryFolder, Meters, Mode, NrEngine, NrLevel, RadioEvent, RadioState,
-    RigctldConfig, RxId, RxState, ScanKind, ScanResume, SpectrumConfig, SpectrumFrame,
-    TciServerConfig, TxEqState, TxMeters, Vfo,
+    RepeaterState, RigctldConfig, RxId, RxState, ScanKind, ScanResume, SpectrumConfig,
+    SpectrumFrame, TciServerConfig, TxEqState, TxMeters, Vfo,
 };
 
 use crate::recorder::{Recorder, RecordingChannels};
@@ -1145,6 +1146,44 @@ fn apply_tx_eq(
     }
 }
 
+/// Put the repeater signalling on one block of outgoing FM audio: the 1750 Hz
+/// burst while one is running, and the sub-audible tone under the voice
+/// otherwise. Returns true when a burst finished inside this block.
+///
+/// FM only, and the caller checks that: a CTCSS tone is a slice of an FM
+/// channel's deviation budget and means nothing on a sideband, where the same
+/// 88.5 Hz would simply be an audible hum on the operator's audio.
+///
+/// A free function, like [`apply_tx_eq`] and for the same reason: both callers
+/// are already holding a `&mut` borrow of the [`TxChain`], and a method taking
+/// `&mut self` could not be called from there.
+fn apply_tx_signalling(
+    sub: &mut Option<SubToneGen>,
+    burst: &mut Option<ToneBurst>,
+    audio: &mut [f32],
+) -> bool {
+    if let Some(b) = burst.as_mut() {
+        // The burst replaces the microphone rather than mixing with it. A
+        // repeater's decoder is listening for a clean 1750 Hz tone, and every
+        // radio that has this button mutes the microphone behind it.
+        let n = b.fill(audio);
+        if !b.finished() {
+            return false;
+        }
+        *burst = None;
+        // Whatever is left of the block once the burst ends is voice again,
+        // and still wants its tone under it.
+        if let Some(g) = sub.as_mut() {
+            g.mix(&mut audio[n..]);
+        }
+        return true;
+    }
+    if let Some(g) = sub.as_mut() {
+        g.mix(audio);
+    }
+    false
+}
+
 /// Unix seconds as a float — the time base the satellite propagator runs on.
 fn unix_now_f64() -> f64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
@@ -1328,6 +1367,20 @@ struct Engine {
     /// Phase accumulator for the TUNE tone on audio-modulated rigs (CAT/TCI),
     /// which need an audio carrier to key up.
     tune_phase: f32,
+    /// The CTCSS tone or DCS stream going out under the voice, built from
+    /// [`RadioState::repeater`] and rebuilt whenever that changes. `None` with
+    /// the tone off, which is also what every non-FM mode gets: sub-audible
+    /// signalling is a property of an FM channel and means nothing on SSB.
+    sub_tone: Option<SubToneGen>,
+    /// The 1750 Hz burst in progress, if one is.
+    burst: Option<ToneBurst>,
+    /// Unkey when that burst finishes — set when it was fired from receive
+    /// ([`Command::ToneBurst`]), which keys the transmitter for the length of
+    /// the burst and no longer.
+    burst_unkeys: bool,
+    /// The dial the automatic repeater shift was last resolved against, so the
+    /// band plan is only consulted when the dial has actually moved.
+    auto_shift_dial: Option<f64>,
     nb: NoiseBlanker,
     /// Auto-notch + spectral NR for the CAT/demod-audio path (the IQ path uses
     /// per-`RxChain` instances instead).
@@ -1875,6 +1928,9 @@ fn engine_thread(
         // Clamped on the way in: `session.json` is a file, and an out-of-range
         // corner frequency or Q from a hand edit would reach the filter design.
         state.tx.eq = s.tx_eq.clamped();
+        // Clamped for the same reason, and with more at stake: this one decides
+        // a transmit frequency.
+        state.repeater = s.repeater.clamped();
         state.recording_mono = s.recording_mono;
     }
     // The command line outranks the remembered session, exactly as it does for
@@ -1940,6 +1996,10 @@ fn engine_thread(
         tx_analyzer: SpectrumAnalyzer::new(cfg.fft_size as usize, TX_MONITOR_RATE, cfg.avg_tc),
         tx_mon_buf: Vec::new(),
         tune_phase: 0.0,
+        sub_tone: None,
+        burst: None,
+        burst_unkeys: false,
+        auto_shift_dial: None,
         nb: NoiseBlanker::new(),
         audio_notch: AutoNotch::new(),
         audio_notch_on: false,
@@ -2187,6 +2247,11 @@ fn engine_thread(
         // Catch up with shared-store writes by any other engine in the process
         // (an atomic load per tick; reloads only when the generation moved).
         engine.poll_shared_stores();
+
+        // The band plan's repeater shift, if the operator asked to follow it.
+        // Ahead of `push_tx_freq`, which is what tells an accessory where we
+        // would transmit — and the shift is part of that answer.
+        engine.refresh_auto_shift();
 
         // Where we would transmit, for band-switching accessories that have to
         // be on the right band before any RF appears. No-op unless the source
@@ -4315,6 +4380,8 @@ impl Engine {
                 self.update_tuning();
             }
             SetXit { enabled, hz } => self.state.xit = sdroxide_types::OffsetState { enabled, hz },
+            SetRepeater(r) => self.set_repeater(r.clamped()),
+            ToneBurst => self.fire_tone_burst(),
             SetPtt(on) => self.set_ptt(on),
             SetTune(on) => {
                 // As with PTT, an operator TUNE takes the transmitter back.
@@ -4508,6 +4575,11 @@ impl Engine {
                     filter_hi: rx.filter_hi,
                     folder: None,
                     rtty,
+                    // Always captured, even plainly simplex with no tone: a
+                    // repeater memory recalled after this one has to be able to
+                    // take the shift back off, and a channel that stored no
+                    // opinion could not.
+                    repeater: Some(self.state.repeater),
                 });
                 self.save_memories();
             }
@@ -4528,6 +4600,13 @@ impl Engine {
                         filter_lo: m.filter_lo,
                         filter_hi: m.filter_hi,
                     });
+                    // After the dial, not before it: a memory stored with AUTO
+                    // on resolves its shift against the frequency it is being
+                    // recalled onto, and asking the band plan about the dial we
+                    // are leaving would answer for the wrong band.
+                    if let Some(r) = m.repeater {
+                        self.set_repeater(r.clamped());
+                    }
                     if m.rtty.is_some() {
                         // Already in RTTY when recalled: the mode didn't change,
                         // so no rebuild happened and the live modem still holds
@@ -4550,7 +4629,7 @@ impl Engine {
                 self.memories.retain(|m| m.id != id);
                 self.save_memories();
             }
-            EditMemory { id, name, freq_hz, mode } => {
+            EditMemory { id, name, freq_hz, mode, repeater } => {
                 // A dial that is not a number would be stored, scanned and
                 // tuned to; refuse it here rather than in each of those.
                 let name = name.trim().to_string();
@@ -4582,6 +4661,13 @@ impl Engine {
                     }
                     m.freq_hz = freq_hz;
                     m.mode = mode;
+                    // Unlike the RTTY setup above, this is not tied to the
+                    // mode: an operator may well store the shift and the tone
+                    // on a channel they listen to in another mode, and the
+                    // editor is where they say so. Clamped here because the
+                    // command is a door a remote client can push anything
+                    // through.
+                    m.repeater = repeater.map(|r| r.clamped());
                     self.save_memories();
                 }
             }
@@ -7431,6 +7517,7 @@ impl Engine {
             squelch_db: self.state.rx[0].squelch_db,
             noise_reduction: self.state.rx[0].noise_reduction,
             decimation: self.state.decimation,
+            repeater: self.state.repeater,
             // What the operator asked for rather than what the device currently
             // reports, for the antennas' reason again: a front end with no gain
             // to set — a CAT rig, a file — must not erase the stages a real
@@ -8121,6 +8208,109 @@ impl Engine {
         }
     }
 
+    // ── Repeater operation ──────────────────────────────────────────────────
+
+    /// Take a new repeater setting and make the transmit chain agree with it.
+    fn set_repeater(&mut self, r: RepeaterState) {
+        let was = self.state.repeater;
+        self.state.repeater = r;
+        // AUTO may have just been switched on, or its offset overridden by
+        // hand: ask the plan again rather than waiting for the dial to move.
+        self.auto_shift_dial = None;
+        self.refresh_auto_shift();
+        // Rebuilt rather than retuned, because a generator holds the phase of
+        // the tone it is part-way through and there is no sense in carrying
+        // that across to a different one.
+        if self.state.repeater.tx_tone() != was.tx_tone() {
+            self.rebuild_sub_tone();
+        }
+        self.emit_state();
+    }
+
+    /// Build (or drop) the sub-audible generator from the current setting.
+    fn rebuild_sub_tone(&mut self) {
+        self.sub_tone = self.state.repeater.tx_tone().map(|t| SubToneGen::new(t, TX_MONITOR_RATE));
+    }
+
+    /// Follow the band plan's repeater shift as the dial moves.
+    ///
+    /// The plan's answer is *resolved* into the state's own `shift` and
+    /// `offset_hz` rather than being left as a rule to re-run: that way the
+    /// figure on every screen, the one a memory stores and the one
+    /// [`RadioState::tx_freq_hz`] transmits on are the same figure, and only
+    /// one of them had to consult a table.
+    ///
+    /// Where the plan says nothing the shift goes to simplex — the safe
+    /// answer, and the honest one: outside a repeater sub-band there is no
+    /// standard shift to follow. The offset magnitude is left alone, so
+    /// switching AUTO off gives back the figure that was set by hand.
+    ///
+    /// Polled from the engine loop rather than pushed from everything that
+    /// moves the dial, for the same reason [`Engine::push_tx_freq`] is: there
+    /// are a lot of those and instrumenting them all is a list that would
+    /// silently fall out of date. It costs one comparison per iteration.
+    fn refresh_auto_shift(&mut self) {
+        if !self.state.repeater.auto {
+            self.auto_shift_dial = None;
+            return;
+        }
+        let dial = self.state.active_freq_hz();
+        if self.auto_shift_dial == Some(dial) {
+            return;
+        }
+        self.auto_shift_dial = Some(dial);
+        let (shift, offset_hz) = sdroxide_types::standard_shift(dial)
+            .unwrap_or((sdroxide_types::Shift::Simplex, self.state.repeater.offset_hz));
+        let r = &mut self.state.repeater;
+        if (r.shift, r.offset_hz) == (shift, offset_hz) {
+            return;
+        }
+        (r.shift, r.offset_hz) = (shift, offset_hz);
+        self.emit_state();
+    }
+
+    /// Send the 1750 Hz burst that opens a carrier-access repeater.
+    ///
+    /// Mid-over it plays over the microphone. From receive it keys the
+    /// transmitter, sends the burst and unkeys again — a whole over of its own,
+    /// which is what the burst button on a European mobile is. The key-down
+    /// goes through [`Engine::set_ptt`] like any other, so every transmit rail
+    /// applies and a refused one leaves nothing behind.
+    fn fire_tone_burst(&mut self) {
+        if self.state.rx[0].mode != Mode::Nfm {
+            return self.notice(
+                "the 1750 Hz burst is an FM repeater's door-opener — switch to NFM to send one",
+            );
+        }
+        let keyed = self.tx_active;
+        if !keyed {
+            self.set_ptt(true);
+            if !self.tx_active {
+                return; // refused; `deny_tx` has already said why
+            }
+        }
+        // After the key-down, so it outlives the burst `sync_tx_state` arms for
+        // an over that starts on one.
+        self.burst = Some(ToneBurst::new(self.state.repeater.burst_ms, TX_MONITOR_RATE));
+        self.burst_unkeys = !keyed;
+    }
+
+    /// End an over that existed only to carry a burst. Called when the burst
+    /// finishes inside a transmit block; a no-op for one fired mid-over, whose
+    /// over belongs to the operator.
+    fn end_burst_over(&mut self) {
+        if !std::mem::take(&mut self.burst_unkeys) {
+            return;
+        }
+        // Let the tone reach the air before PTT drops — a burst chopped in half
+        // opens nothing, the same reason an FT8 burst drains first.
+        self.source.tx_drain();
+        self.tx_pace = None;
+        self.state.tx.ptt = false;
+        self.sync_tx_state();
+        self.emit_state();
+    }
+
     /// The output power to command on a rig that has its own power control:
     /// the TUNE level while tuning, the drive level otherwise. We tune by
     /// transmitting a carrier through the normal TX path rather than through the
@@ -8135,6 +8325,12 @@ impl Engine {
     /// keyboard binding, or the radio's own PTT line ([`Self::apply_hw_ptt`]).
     /// Every route lands here so they cannot drift apart.
     fn set_ptt(&mut self, on: bool) {
+        // …and over a burst-only over. A hand on PTT while the 1750 Hz burst is
+        // still playing means the operator is about to speak, so the over
+        // becomes theirs and the end of the burst must not take it away from
+        // them. Before `fire_tone_burst` arms its own, which sets this again
+        // for the over it is keying.
+        self.burst_unkeys = false;
         // The operator takes precedence over a TCI client: keying up
         // locally mid-over takes the transmitter back rather than
         // swapping the on-air audio out from under whoever is talking.
@@ -8375,6 +8571,23 @@ impl Engine {
                     // Same reason: the EQ's delay line still holds the last
                     // over's audio, and an over should not open on its ring-out.
                     self.tx_eq.reset();
+                    // The repeater's signalling starts clean with the over: a
+                    // tone generator carries the phase of the tone it was
+                    // part-way through, and a DCS word its place in the word.
+                    self.rebuild_sub_tone();
+                    // A repeater that opens on a 1750 Hz burst wants it before
+                    // the first word. Not for a tune, which is a carrier and
+                    // not an over, and not for a digital burst, which owns its
+                    // own audio from the first sample.
+                    if self.state.repeater.burst_auto
+                        && self.state.rx[0].mode == Mode::Nfm
+                        && !self.state.tx.tune
+                        && !self.digi_tx
+                    {
+                        self.burst =
+                            Some(ToneBurst::new(self.state.repeater.burst_ms, TX_MONITOR_RATE));
+                        self.burst_unkeys = false;
+                    }
                 }
                 Err(e) => self.deny_tx(&format!("the radio refused to key: {e}")),
             }
@@ -8396,6 +8609,10 @@ impl Engine {
             self.source.discard_pending_rx();
             self.tx = None;
             self.tx_active = false;
+            // A burst belongs to the over that was carrying it; an over cut
+            // short must not leave one armed to play into the next.
+            self.burst = None;
+            self.burst_unkeys = false;
             // The run of over-limit readings belongs to the over that just
             // ended. The LATCH deliberately survives: that is what makes it a
             // latch rather than a per-over warning.
@@ -8766,8 +8983,19 @@ impl Engine {
             return self.tx_block_digi();
         }
 
+        let fm = self.state.rx[0].mode == Mode::Nfm;
+        // A 1750 Hz burst owns the whole block: it replaces the microphone
+        // anyway, and one fired from receive may have no microphone behind it
+        // at all — so it runs ahead of the wait for mic audio, which would
+        // otherwise stall it forever.
+        //
+        // Only while the mode is still the FM the burst was armed in. A mode
+        // changed mid-burst leaves the burst unplayed, and without this that
+        // unplayed burst would go on claiming every block — a microphone that
+        // had gone dead for the rest of the over.
+        let bursting = fm && self.burst.is_some();
         // Fill the 48 kHz FIFO from whoever owns this over (mic or TCI client).
-        if !self.fill_tx_audio_fifo() {
+        if !bursting && !self.fill_tx_audio_fifo() {
             std::thread::sleep(Duration::from_millis(2));
             return Ok(());
         }
@@ -8775,6 +9003,7 @@ impl Engine {
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         tx.mod_buf.clear();
+        let mut burst_done = false;
         if self.state.tx.tune || tx.modulator.is_none() {
             // Steady carrier at the tune level (also CW until the keyer exists).
             let level = self.state.tx.tune_drive.clamp(0.0, 1.0);
@@ -8798,18 +9027,31 @@ impl Engine {
             }
         } else {
             let mut audio = [0.0f32; TX_AUDIO_BLOCK];
-            let take = self.mic_fifo.len().min(TX_AUDIO_BLOCK);
-            audio[..take].copy_from_slice(&self.mic_fifo[..take]);
-            self.mic_fifo.drain(..take);
+            if bursting {
+                // The microphone is muted for the length of the burst; drop
+                // what arrived rather than letting it queue up behind the tone
+                // and go out a moment late.
+                self.mic_fifo.clear();
+            } else {
+                let take = self.mic_fifo.len().min(TX_AUDIO_BLOCK);
+                audio[..take].copy_from_slice(&self.mic_fifo[..take]);
+                self.mic_fifo.drain(..take);
 
-            // Mic gain is the operator's microphone control; a TCI client sets
-            // its own level and uses `drive` for power, so it is left alone.
-            let mic_gain = if tci_tx { 1.0 } else { self.state.tx.mic_gain * 2.0 };
-            for a in &mut audio {
-                *a = tx.dc.run(*a) * mic_gain;
+                // Mic gain is the operator's microphone control; a TCI client sets
+                // its own level and uses `drive` for power, so it is left alone.
+                let mic_gain = if tci_tx { 1.0 } else { self.state.tx.mic_gain * 2.0 };
+                for a in &mut audio {
+                    *a = tx.dc.run(*a) * mic_gain;
+                }
+                // Voice-only parametric EQ, ahead of the modulator.
+                apply_tx_eq(&mut self.tx_eq, &mut self.tx_eq_cfg, &self.state.tx.eq, &mut audio);
             }
-            // Voice-only parametric EQ, ahead of the modulator.
-            apply_tx_eq(&mut self.tx_eq, &mut self.tx_eq_cfg, &self.state.tx.eq, &mut audio);
+            // The repeater's own signalling, last of all: the tone has to reach
+            // the modulator at the level it was built at, and the EQ above
+            // exists to shape a voice rather than a 100 Hz sine.
+            if fm {
+                burst_done = apply_tx_signalling(&mut self.sub_tone, &mut self.burst, &mut audio);
+            }
             if let Some(mixer) = self.mixer.as_mut() {
                 mixer.push_tx(&audio);
             }
@@ -8850,6 +9092,9 @@ impl Engine {
         // Keep the device/network TX ring near-empty (HPSDR ≈ 0.5 s, SoapySDR
         // varies) rather than letting a fast loop fill it and delay the signal.
         pace_tx_block(&mut self.tx_pace, self.source.tx_pace_cushion_ms());
+        if burst_done {
+            self.end_burst_over();
+        }
         Ok(())
     }
 
@@ -8950,12 +9195,19 @@ impl Engine {
     /// its own modulation. PTT is asserted separately by `sync_tx_state`.
     fn tx_block_audio(&mut self) -> crate::Result<()> {
         let mut audio = [0.0f32; TX_AUDIO_BLOCK];
+        // The digital mode's burst has played out, and the 1750 Hz burst has —
+        // two different bursts, both of which end an over, so they are named
+        // apart rather than sharing one flag.
+        let mut digi_done = false;
         let mut burst_done = false;
+        // Whether this block carries repeater signalling — FM only, and never
+        // over a digital burst or a tune, both of which own their whole block.
+        let mut signalling = false;
 
         if self.digi_tx {
             self.feed_digi_mic();
             let mut digi_gain = 1.0;
-            burst_done = self
+            digi_done = self
                 .digi
                 .as_mut()
                 .map(|d| {
@@ -8998,6 +9250,13 @@ impl Engine {
                     self.tune_phase -= std::f32::consts::TAU;
                 }
             }
+        } else if self.burst.is_some() && self.state.rx[0].mode == Mode::Nfm {
+            // A 1750 Hz burst owns the whole block. Ahead of the voice branch
+            // because it replaces the microphone anyway, and because a burst
+            // fired from receive may have no microphone behind it at all —
+            // waiting for mic audio would stall it forever.
+            self.mic_fifo.clear();
+            signalling = true;
         } else {
             // Voice: mic (or a TCI client's stream) → 48 kHz FIFO → this block.
             if !self.fill_tx_audio_fifo() {
@@ -9037,6 +9296,22 @@ impl Engine {
             for a in &mut audio {
                 *a = a.clamp(-1.0, 1.0);
             }
+            signalling = self.state.rx[0].mode == Mode::Nfm;
+        }
+
+        // The repeater's own signalling.
+        //
+        // ⚠️ A rig that modulates its own audio is the one place this may not
+        // reach the air: a sub-audible tone at 67-250 Hz has to survive the
+        // radio's microphone input, and most of those high-pass the audio to
+        // keep exactly this sort of thing out of it. The 1750 Hz burst is
+        // in-band and passes; a CTCSS tone may not, in which case the answer is
+        // the rig's own encoder, set at the radio. Sent regardless, because
+        // where it does pass — a data/line input, or a rig fed at baseband —
+        // it works, and because the alternative is to decide on the operator's
+        // behalf that their radio cannot do it.
+        if signalling {
+            burst_done = apply_tx_signalling(&mut self.sub_tone, &mut self.burst, &mut audio);
         }
 
         // TX monitor: the rig modulates its own audio, so approximate the on-air
@@ -9062,6 +9337,10 @@ impl Engine {
         pace_tx_block(&mut self.tx_pace, self.source.tx_pace_cushion_ms());
 
         if burst_done {
+            self.end_burst_over();
+        }
+
+        if digi_done {
             // Let any queued audio play out before dropping PTT, so the rig
             // transmits the whole burst (FT8 needs every symbol).
             self.source.tx_drain();

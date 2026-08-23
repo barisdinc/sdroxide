@@ -481,7 +481,18 @@ use sdroxide_types::{
 /// screen lists its memories in is a client preference (`UiSettings`), the
 /// store keeps them in the order they were stored, and the engine is never
 /// told.
-pub const PROTO_VERSION: u16 = 76;
+///
+/// **77** — repeater operation (issue #137). [`sdroxide_types::RadioState`]
+/// carries a `RepeaterState`: the transmit shift, the CTCSS/DCS tone that goes
+/// out under the voice, and the 1750 Hz burst. `Command::SetRepeater` and
+/// `Command::ToneBurst` set and fire them, `Command::EditMemory` gained the
+/// setup a memory stores, and `MemoryChannel` gained the field it stores it in.
+///
+/// A field added to a struct in the state, so this is not a variant append that
+/// an older peer could simply never be sent: a v76 client decoding a v77 state
+/// would read the tail of it as garbage. The handshake is an equality test and
+/// catches that before a single frame is exchanged, which is what it is for.
+pub const PROTO_VERSION: u16 = 77;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

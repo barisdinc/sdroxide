@@ -78,6 +78,10 @@ pub enum Action {
     VoicePlay(u8),
     /// Stop a voice-keyer message mid-transmission.
     VoiceStop,
+    /// Send the 1750 Hz repeater tone burst. From receive it keys the
+    /// transmitter for the length of the burst and lets go again, which is
+    /// what makes it worth a button of its own.
+    ToneBurst,
 
     // ── Client-local only: never becomes a Command ──────────────────────────
     FitSpan,
@@ -140,7 +144,7 @@ impl Action {
             | Mute | NoiseBlanker | NoiseReductionCycle | AutoNotch | AgcCycle | SubRx
             | ModeNext | ModePrev | ModeSelect(_) | RecordToggle => "Receive",
             Ptt | TuneCarrier | TxDrive | TuneDrive | MicGain | DigiAudioFreq | AbortTx
-            | VoicePlay(_) | VoiceStop => "Transmit",
+            | VoicePlay(_) | VoiceStop | ToneBurst => "Transmit",
             SpectrumZoom | SpectrumPan | SpectrumFloorDb | SpectrumCeilDb | FitSpan | ZoomIn
             | ZoomOut | PeakHold | SpectrumCollapse | WaterfallCollapse | WaterfallFlip => {
                 "Display"
@@ -195,6 +199,7 @@ impl Action {
             RecordToggle => "Record on/off",
             AbortTx => "Abort transmit",
             VoiceStop => "Voice keyer stop",
+            ToneBurst => "1750 Hz tone burst",
             FitSpan => "Fit span",
             ZoomIn => "Zoom in",
             ZoomOut => "Zoom out",
@@ -284,7 +289,7 @@ impl Action {
         v.extend(Band::ALL.iter().map(|b| BandSelect(*b)));
         v.extend([ModeNext, ModePrev]);
         v.extend(Mode::ALL.iter().map(|m| ModeSelect(*m)));
-        v.extend([RecordToggle, AbortTx, VoiceStop]);
+        v.extend([RecordToggle, AbortTx, VoiceStop, ToneBurst]);
         v.extend((0..crate::VOICE_SLOTS as u8).map(VoicePlay));
         v.extend([
             FitSpan,

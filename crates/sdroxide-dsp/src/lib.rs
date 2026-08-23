@@ -36,6 +36,7 @@ mod spectrum;
 mod spectrum_paint;
 mod sstv;
 mod thor;
+mod tonegen;
 mod wbddc;
 mod wbspectrum;
 pub mod wefax;
@@ -77,6 +78,7 @@ pub use spectrum_paint::{
 };
 pub use sstv::{SstvEvent, SstvRx, SstvTx};
 pub use thor::{ThorRx, ThorTx};
+pub use tonegen::{BURST_LEVEL, SUB_TONE_LEVEL, SubToneGen, ToneBurst};
 pub use wbddc::WbDdc;
 pub use wbspectrum::WideSpectrum;
 pub use wefax::{Ioc as WefaxIoc, Lpm as WefaxLpm, WefaxEvent, WefaxRx};

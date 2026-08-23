@@ -113,11 +113,29 @@ fn an_edit_rewrites_the_channel_it_names() {
     // ---- A dial that is not a frequency is refused ----
     // Both would take the channel with them if they landed: each also switches
     // the mode, which is what re-defaults the passband.
-    send(Command::EditMemory { id, name: "zero".into(), freq_hz: 0.0, mode: Mode::Cw });
-    send(Command::EditMemory { id, name: "nan".into(), freq_hz: f64::NAN, mode: Mode::Cw });
+    send(Command::EditMemory {
+        id,
+        name: "zero".into(),
+        freq_hz: 0.0,
+        mode: Mode::Cw,
+        repeater: None,
+    });
+    send(Command::EditMemory {
+        id,
+        name: "nan".into(),
+        freq_hz: f64::NAN,
+        mode: Mode::Cw,
+        repeater: None,
+    });
 
     // ---- The name alone: everything else, the filter included, survives ----
-    send(Command::EditMemory { id, name: "DWD".into(), freq_hz: STORED_HZ, mode: Mode::Usb });
+    send(Command::EditMemory {
+        id,
+        name: "DWD".into(),
+        freq_hz: STORED_HZ,
+        mode: Mode::Usb,
+        repeater: None,
+    });
     let renamed = memories(&h.event_rx, 1, |m| m.name == "DWD");
     assert_eq!(renamed[0].id, id, "an edit is the same channel, not a new one");
     assert_eq!(renamed[0].freq_hz, STORED_HZ);
@@ -132,7 +150,13 @@ fn an_edit_rewrites_the_channel_it_names() {
     );
 
     // ---- Frequency and mode: the passband follows the new mode ----
-    send(Command::EditMemory { id, name: "DDK2".into(), freq_hz: EDITED_HZ, mode: Mode::Cw });
+    send(Command::EditMemory {
+        id,
+        name: "DDK2".into(),
+        freq_hz: EDITED_HZ,
+        mode: Mode::Cw,
+        repeater: None,
+    });
     let edited = memories(&h.event_rx, 1, |m| m.name == "DDK2");
     assert_eq!(edited[0].id, id);
     assert_eq!(edited[0].freq_hz, EDITED_HZ);

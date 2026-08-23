@@ -315,6 +315,13 @@ pub struct RadioState {
     pub rit: OffsetState,
     pub xit: OffsetState,
 
+    /// Working a repeater: the transmit shift, the sub-audible tone that goes
+    /// out under the voice, and the 1750 Hz burst. Off in every field by
+    /// default, so a station that never touches it transmits exactly where it
+    /// listens with nothing under the voice.
+    #[serde(default)]
+    pub repeater: crate::RepeaterState,
+
     pub tx: TxState,
     pub band: Band,
     /// What the scanner is doing. The settings behind it travel separately —
@@ -377,6 +384,7 @@ impl Default for RadioState {
             sub_rx_hz: 0.0, // never placed; the engine parks it on first use
             rit: OffsetState::default(),
             xit: OffsetState::default(),
+            repeater: crate::RepeaterState::default(),
             // Low drive defaults: digital amplitude stays far from full
             // scale until the operator raises it deliberately.
             tx: TxState { drive: 0.1, tune_drive: 0.05, mic_gain: 0.5, ..TxState::default() },
@@ -411,7 +419,7 @@ impl RadioState {
         self.active_freq_hz() + self.rit.effective_hz()
     }
 
-    /// Transmit frequency including XIT and split.
+    /// Transmit frequency including the repeater shift, XIT and split.
     pub fn tx_freq_hz(&self) -> f64 {
         let base = if self.split {
             match self.active_vfo {
@@ -421,6 +429,10 @@ impl RadioState {
         } else {
             self.active_freq_hz()
         };
-        base + self.xit.effective_hz()
+        // The repeater shift rides on top of split rather than instead of it:
+        // both are "transmit somewhere other than the dial", they are set from
+        // different places for different reasons, and a radio that silently
+        // dropped one of them would transmit where neither control says.
+        base + self.repeater.shift_hz() + self.xit.effective_hz()
     }
 }

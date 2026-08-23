@@ -33,6 +33,7 @@ mod propagation;
 mod radio;
 mod rds;
 pub mod region;
+mod repeater;
 mod rifp;
 mod rigctld;
 mod rotator;
@@ -154,6 +155,10 @@ pub use rds::{
     pty_name, rt_plus_class,
 };
 pub use region::{Region, region, set_region};
+pub use repeater::{
+    BURST_MS_RANGE, DCS_CODES, MAX_OFFSET_HZ, RepeaterState, Shift, TONE_BURST_HZ, ToneMode,
+    TxSubTone, dcs_bits, standard_shift, standard_shift_in,
+};
 pub use rifp::{
     RIFP_CALLING_HZ, RIFP_MAP_MAX_CHUNKS, RifpEncoding, RifpMeta, RifpProfile, RifpSession,
     RifpSize, RifpStatus,

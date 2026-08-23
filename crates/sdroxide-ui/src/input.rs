@@ -356,6 +356,10 @@ pub(crate) fn apply_action(
         // no-op there, which is where the keyer's state actually lives.
         VoicePlay(slot) => cmds.push(Command::VoicePlay(Some(slot))),
         VoiceStop => cmds.push(Command::VoicePlay(None)),
+        // The engine decides this one too: outside NFM it says so rather than
+        // transmitting, and a key-down from receive goes through every
+        // transmit rail on the way.
+        ToneBurst => cmds.push(Command::ToneBurst),
         FitSpan => ui.view.fit(state.center_hz, state.sample_rate),
         ZoomIn | ZoomOut => {
             let span = ui.view.span();

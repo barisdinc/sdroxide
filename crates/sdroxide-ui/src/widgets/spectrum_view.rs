@@ -1783,7 +1783,8 @@ pub fn show_ext(
     // When enabled, show the receive (RIT) and transmit (XIT) offsets from the
     // dial as labelled brackets, with a dashed dial reference (RIT — the red RX
     // marker/passband already sits at dial+RIT) and a TX marker line (XIT).
-    if state.rit.enabled || state.xit.enabled {
+    let shifted = state.repeater.shift != sdroxide_types::Shift::Simplex;
+    if state.rit.enabled || state.xit.enabled || shifted {
         let top_y = if spec_h > 1.0 { spec_rect.top() } else { wf_rect.top() } + 4.0;
         let rit_col = Color32::from_rgb(120, 200, 255);
         let xit_col = Color32::from_rgb(120, 230, 140);
@@ -1835,6 +1836,46 @@ pub fn show_ext(
                 xit_col,
                 &format!("XIT {:+} Hz", state.xit.hz),
             );
+            row += 1.0;
+        }
+        // The repeater shift, drawn like XIT because it is the same kind of
+        // thing: the transmitter is somewhere the receiver is not. The label
+        // stands whether or not the transmit frequency is on screen — a 70 cm
+        // shift is 7.6 MHz away and no panadapter shows both ends of that — and
+        // the marker and bracket only appear when there is somewhere to put
+        // them.
+        if shifted {
+            let tx = state.tx_freq_hz();
+            let dup_col = Color32::from_rgb(255, 205, 80);
+            let label = format!("TX {} · {:.6}", state.repeater.shift_label(), tx / 1e6);
+            if in_view(tx) {
+                marker_line(
+                    &painter,
+                    &spec_rect,
+                    &wf_rect,
+                    spec_h,
+                    view.freq_to_x(tx, &rect),
+                    dup_col,
+                    false,
+                );
+                offset_bracket(
+                    &painter,
+                    rect,
+                    view.freq_to_x(state.active_freq_hz(), &rect),
+                    view.freq_to_x(tx, &rect),
+                    top_y + row * 16.0,
+                    dup_col,
+                    &label,
+                );
+            } else {
+                label_box(
+                    &painter,
+                    pos2(rect.left() + 6.0, top_y + row * 16.0 - 6.0),
+                    &label,
+                    dup_col,
+                    rect,
+                );
+            }
         }
     }
 

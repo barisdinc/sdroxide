@@ -73,6 +73,10 @@ or connects to a remote sdroxide server.
   waterfall cursor that picks the signal to copy (and the frequency to answer
   on), and a type-ahead keyboard that sends as you type. The same decoder drives
   the wideband CW skimmer.
+- **Repeater operation** — a transmit shift (manual, or taken from the band
+  plan as you tune), a CTCSS tone or DCS code sent under the voice, and the
+  1750 Hz burst that opens a carrier-access repeater — from a button, or at the
+  start of every over. A memory stores the whole set-up with the channel.
 - **Voice keyer** — ten recorded messages, transmitted from a button, a numpad
   key, a MIDI pad or a Hamlib `send_voice_mem` command; works in the voice modes
   and in RADE digital voice.
@@ -332,6 +336,10 @@ the length of each over, then comes straight back. The radio's frequency display
 follows, which is also how you can see it working. sdroxide switches the radio's
 *own* RIT, XIT and split off when it connects, so an offset left over on the rig
 can't quietly add itself to the one you set here.
+
+The same box carries the **DUPLEX** and **TONE** buttons — the fourth thing that
+moves the transmit frequency, and what has to ride under it. See
+[2.18 Repeater operation](#218-repeater-operation-duplex-and-tone).
 
 ### 2.7 Receiver controls
 
@@ -848,6 +856,17 @@ has moved, costs one edit instead of a delete and a fresh store from that
 frequency. The filter follows the mode: change the mode and the channel takes
 the new mode's default passband, leave the mode alone and a filter you chose
 yourself is kept.
+
+The editor also carries a **RPT** button, which folds out the repeater set-up
+stored with the channel: the shift and its offset, the CTCSS tone or DCS code
+to transmit, and whether every over opens on the 1750 Hz burst. A channel that
+already has one comes up with the section open. Storing a memory captures
+whatever the DUPLEX and TONE controls are set to at the time — including plainly
+simplex with no tone, which is what lets the next recall take a shift back
+*off* rather than leaving the last repeater's on a simplex channel. The list
+shows what is stored beside the mode, so two memories on one dial read as the
+different channels they are. See
+[2.18 Repeater operation](#218-repeater-operation-duplex-and-tone).
 
 The **Sort** row above the list says what order it is drawn in — **Stored** (as
 stored, the historic order), **Name** (ignoring case), **Freq**, or **Band**
@@ -1383,6 +1402,90 @@ the same as if they were plugged into this machine
 made for you. That is the same mechanism that lets one screen hold this
 machine's radios and somebody else's at the same time. A browser tab holds one
 radio at a time and picks it with `?radio=<id>` ([9.1](#91-serve-the-web-client)).
+
+### 2.18 Repeater operation (DUPLEX and TONE)
+
+A repeater listens on one frequency and answers on another, so working one
+means transmitting where you are *not* listening — and usually proving who you
+are on the way in, with a sub-audible tone under the voice or a whistle at the
+start of the over. Both live in the **DUPLEX** and **TONE** buttons in the
+VFO/RIT module, beside split, RIT and XIT: the other three things that decide
+where this station transmits relative to where it listens.
+
+Everything here is per radio and is remembered across a restart, and a memory
+channel stores the whole set-up with the frequency ([2.12](#212-memory-channels)).
+
+#### The shift — DUPLEX
+
+Press **DUPLEX** for the shift controls.
+
+- **SIMPLEX / − / +** — which side of the dial to transmit on. The offset
+  magnitude is kept when you go back to simplex, so switching a repeater off
+  and on again does not cost the figure you set for it.
+- **Offset** — how far, in kHz. Whole kilohertz for anything published; the
+  field takes a shift to the hertz for a machine that needs one.
+- **AUTO** — take the shift from the band plan as you tune. It only speaks
+  inside a repeater *output* sub-band: everywhere else it leaves the radio
+  simplex, so the calling channels stay simplex. Touching the direction or the
+  offset by hand switches AUTO off, because otherwise the next turn of the dial
+  would put it straight back.
+
+Underneath, the popup shows the receive and transmit frequencies as they now
+stand. The **DUPLEX** button lights amber whenever the two differ, and the
+panadapter draws the transmit frequency the way it draws XIT — a marker line
+and a labelled bracket when it is on screen, and just the label when it is
+not, which on 70 cm (a 7.6 MHz shift in Region 1) it never is.
+
+> **NOTE:** The built-in shifts are transcribed from published band plans and
+> have not been checked against a repeater. They cover the sub-bands whose
+> shift is settled across a whole region — 10 m, 6 m and 4 m in Region 1, 2 m
+> and 70 cm in all three, 1.25 m and 33 cm in Region 2, 23 cm — and say nothing
+> anywhere else, deliberately: a missing entry leaves you simplex, which is
+> obvious the moment nobody comes back, while a wrong one transmits confidently
+> onto somebody else's channel. Set the region under
+> **Settings → General** ([6.1](#61-general-station-audio-and-remote-access)),
+> and set the shift by hand wherever your local plan differs.
+
+#### The tone — TONE
+
+Press **TONE** for what goes out under the voice, the 1750 Hz burst, and the
+receive tone squelch — the three things a repeater directory's one line about
+tones actually asks for.
+
+- **OFF / CTCSS / DCS**, then the tone or the code. CTCSS is the 50-entry
+  standard table; DCS is the 104 standard codes in either polarity
+  (**NORMAL** / **INVERT**).
+- **1750 Hz burst** — **EVERY OVER** opens each transmission with it, and
+  **SEND** sends one now. Pressed while you are transmitting it plays over the
+  microphone; pressed on receive it keys the transmitter, sends the burst and
+  lets go again, which is what the burst button on a European mobile does. The
+  length is next to it (100–2000 ms; 500 is a good default). It is also an
+  action — **1750 Hz tone burst** — so it can go on a key, a mouse button, a
+  MIDI pad or a footswitch ([6.4](#64-controls-keyboard-mouse-and-midi)).
+- **Receive tone squelch** — the same control as the tone chip in the receiver
+  module ([2.7](#27-receiver-controls)), with a **MATCH TX** shortcut that arms
+  on receive whatever this station transmits.
+
+The sub-audible tone is sent on **NFM** only — it is a slice of an FM channel's
+deviation budget and means nothing on a sideband — and the transmitted voice is
+high-passed and trimmed while it is on, so an over with a tone under it occupies
+the same channel width as one without. The settings can be arranged in any mode;
+they simply take effect when you are in FM.
+
+> **NOTE:** On a radio that modulates its own audio — a CAT rig fed through its
+> microphone or data input, or a TCI rig — a sub-audible tone has to survive
+> that input's own high-pass filter, and most microphone inputs are built to
+> keep exactly this sort of thing out. sdroxide sends it regardless, because
+> where the input passes it (a data or line input, or a rig fed at baseband) it
+> works. If the repeater will not open, use the rig's own CTCSS encoder, set at
+> the radio. The 1750 Hz burst is in-band and passes either way.
+
+> **NOTE:** DCS is a data stream rather than a tone, and the bit order it is
+> encoded with here is transcribed from the standard rather than measured
+> against a repeater — the same ambiguity that stops the *decoder* naming which
+> of the 104 codes a signal carries ([2.7](#27-receiver-controls)). If a machine
+> will not open on DCS, try the other polarity, and then CTCSS, which has no
+> such ambiguity.
 
 ---
 

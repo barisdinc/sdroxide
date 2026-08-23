@@ -6,7 +6,10 @@
 //! draw the list and push the [`Command`] a click means.
 
 use eframe::egui::{self, Color32, RichText};
-use sdroxide_types::{Command, MemoryChannel, MemoryFolder, MemorySort, Mode};
+use sdroxide_types::{
+    BURST_MS_RANGE, CTCSS_TONES, Command, DCS_CODES, MAX_OFFSET_HZ, MemoryChannel, MemoryFolder,
+    MemorySort, Mode, RepeaterState, Shift, ToneMode,
+};
 
 use crate::app::SdroxideApp;
 use crate::chrome::StyledCombo;
@@ -24,12 +27,48 @@ pub(in crate::app) struct MemoryEdit {
     pub name: String,
     pub freq_hz: f64,
     pub mode: Mode,
+    /// The repeater setup stored with the channel — the shift, the tone under
+    /// the voice and the 1750 Hz burst. `None` for a memory stored before the
+    /// field existed, which is what the RPT chip turns into a real setting the
+    /// first time it is opened.
+    pub repeater: Option<RepeaterState>,
+    /// Whether the repeater controls are unfolded. A memory is usually edited
+    /// to fix a typo, and four more rows of chips under every one of those
+    /// would make the common case the awkward one.
+    pub show_repeater: bool,
 }
 
 impl MemoryEdit {
     fn of(m: &MemoryChannel) -> Self {
-        MemoryEdit { id: m.id, name: m.name.clone(), freq_hz: m.freq_hz, mode: m.mode }
+        MemoryEdit {
+            id: m.id,
+            name: m.name.clone(),
+            freq_hz: m.freq_hz,
+            mode: m.mode,
+            repeater: m.repeater,
+            // Open on a channel that has something to show, so a repeater
+            // memory says what it is without being asked twice.
+            show_repeater: m.repeater.is_some_and(|r| r.is_active()),
+        }
     }
+}
+
+/// How a stored repeater setup reads in the memory list: the shift, then the
+/// tone, then the burst — and nothing at all for a plain simplex channel,
+/// which is most of them.
+fn repeater_summary(r: Option<RepeaterState>) -> String {
+    let Some(r) = r.filter(|r| r.is_active()) else { return String::new() };
+    let mut parts = Vec::new();
+    if r.shift != Shift::Simplex {
+        parts.push(r.shift_label());
+    }
+    if let Some(t) = r.tx_tone() {
+        parts.push(t.label());
+    }
+    if r.burst_auto {
+        parts.push("1750".to_string());
+    }
+    format!(" {}", parts.join(" "))
 }
 
 /// Wrap `add` in a frame that accepts a dragged memory, and say which memory
@@ -95,7 +134,7 @@ fn memory_row(
                 cmds.push(Command::DeleteMemory(m.id));
             }
             if crate::chrome::chip(ui, false, RichText::new("EDT").size(11.0))
-                .on_hover_text("Edit the name, frequency and mode")
+                .on_hover_text("Edit the name, frequency, mode and repeater setup")
                 .clicked()
             {
                 *edit = Some(MemoryEdit::of(m));
@@ -118,6 +157,10 @@ fn memory_row(
                                 if r.reverse { " R" } else { "" }
                             )
                         });
+                        // …and the repeater setup, for the same reason: two
+                        // memories on one dial are different channels if one
+                        // shifts and the other does not.
+                        let rpt = repeater_summary(m.repeater);
                         // Laid out rather than added: the whole of what is left
                         // is the drag handle, and the text is pinned to the left
                         // of it so the columns line up down the list. `add_sized`
@@ -132,11 +175,12 @@ fn memory_row(
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(format!(
-                                            "{:<10} {:>11.6} MHz {}{}",
+                                            "{:<10} {:>11.6} MHz {}{}{}",
                                             m.name,
                                             m.freq_hz / 1e6,
                                             m.mode.label(),
-                                            rtty
+                                            rtty,
+                                            rpt
                                         ))
                                         .monospace(),
                                     )
@@ -214,6 +258,15 @@ fn memory_edit_row(
                     ui.selectable_value(&mut e.mode, m, m.label());
                 }
             });
+        // The repeater setup folds out rather than always being there: most
+        // memories are a name, a dial and a mode, and this is four more rows.
+        let has_rpt = e.repeater.is_some_and(|r| r.is_active());
+        if crate::chrome::chip(ui, e.show_repeater || has_rpt, RichText::new("RPT").size(11.0))
+            .on_hover_text("The repeater shift, tone and 1750 Hz burst stored with this channel")
+            .clicked()
+        {
+            e.show_repeater = !e.show_repeater;
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if crate::chrome::chip(ui, false, RichText::new("✖").size(11.0))
                 .on_hover_text("Abandon the edit (Escape)")
@@ -241,6 +294,9 @@ fn memory_edit_row(
             }
         });
     });
+    if let Some(e) = edit.as_mut().filter(|e| e.show_repeater) {
+        memory_repeater_rows(ui, e);
+    }
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         cancel = true;
     }
@@ -252,10 +308,113 @@ fn memory_edit_row(
             name: e.name.trim().to_string(),
             freq_hz: e.freq_hz,
             mode: e.mode,
+            repeater: e.repeater,
         });
     } else if cancel {
         *edit = None;
     }
+}
+
+/// The repeater setup under the memory editor: the shift, the tone that goes
+/// out under the voice, and the 1750 Hz burst.
+///
+/// Pickers rather than the grids of chips the live TONE popup uses. That popup
+/// is a control panel and has a whole popup to spend; this is three rows
+/// inside a list row, and 104 DCS chips in it would bury the memory being
+/// edited.
+///
+/// Opening the section on a memory that has no setup gives it the default one
+/// — plain simplex with no tone — rather than leaving it `None`. That is the
+/// difference between "this channel says nothing" and "this channel says
+/// simplex", and the operator who opened these controls meant the second.
+fn memory_repeater_rows(ui: &mut egui::Ui, e: &mut MemoryEdit) {
+    let r = e.repeater.get_or_insert_with(RepeaterState::default);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Shift").weak().size(11.0));
+        for s in Shift::ALL {
+            if crate::chrome::chip(ui, r.shift == s, RichText::new(s.label()).size(11.0)).clicked()
+            {
+                r.shift = s;
+            }
+        }
+        let mut khz = f64::from(r.offset_hz) / 1e3;
+        if crate::chrome::field(
+            ui,
+            egui::DragValue::new(&mut khz)
+                .speed(5.0)
+                .range(0.0..=f64::from(MAX_OFFSET_HZ) / 1e3)
+                .max_decimals(4)
+                .suffix(" kHz"),
+        )
+        .changed()
+        {
+            r.offset_hz = (khz * 1e3).round().clamp(0.0, f64::from(MAX_OFFSET_HZ)) as u32;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Tone").weak().size(11.0));
+        for m in ToneMode::ALL {
+            if crate::chrome::chip(ui, r.tone == m, RichText::new(m.label()).size(11.0)).clicked() {
+                r.tone = m;
+            }
+        }
+        match r.tone {
+            ToneMode::Off => {}
+            ToneMode::Ctcss => {
+                egui::ComboBox::from_id_salt(crate::layout::salted_id(ui.ctx(), "mem-edit-ctcss"))
+                    .width(70.0)
+                    .selected_text(format!("{}.{}", r.ctcss_tenths / 10, r.ctcss_tenths % 10))
+                    .show_styled(ui, |ui| {
+                        for tenths in CTCSS_TONES {
+                            ui.selectable_value(
+                                &mut r.ctcss_tenths,
+                                tenths,
+                                format!("{}.{}", tenths / 10, tenths % 10),
+                            );
+                        }
+                    });
+            }
+            ToneMode::Dcs => {
+                egui::ComboBox::from_id_salt(crate::layout::salted_id(ui.ctx(), "mem-edit-dcs"))
+                    .width(70.0)
+                    .selected_text(format!("{:03}", r.dcs_code))
+                    .show_styled(ui, |ui| {
+                        for code in DCS_CODES {
+                            ui.selectable_value(&mut r.dcs_code, code, format!("{code:03}"));
+                        }
+                    });
+                if crate::chrome::chip(
+                    ui,
+                    r.dcs_invert,
+                    RichText::new(if r.dcs_invert { "INVERT" } else { "NORMAL" }).size(11.0),
+                )
+                .on_hover_text("DCS polarity")
+                .clicked()
+                {
+                    r.dcs_invert = !r.dcs_invert;
+                }
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if crate::chrome::chip(ui, r.burst_auto, RichText::new("1750 Hz").size(11.0))
+            .on_hover_text("Open every over on the tone burst while this channel is recalled")
+            .clicked()
+        {
+            r.burst_auto = !r.burst_auto;
+        }
+        if r.burst_auto {
+            let mut ms = r.burst_ms;
+            if crate::chrome::field(
+                ui,
+                egui::DragValue::new(&mut ms).speed(10).range(BURST_MS_RANGE).suffix(" ms"),
+            )
+            .changed()
+            {
+                r.burst_ms = ms;
+            }
+        }
+    });
 }
 
 impl SdroxideApp {

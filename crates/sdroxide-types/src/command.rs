@@ -639,5 +639,33 @@ pub enum Command {
         name: String,
         freq_hz: f64,
         mode: Mode,
+        /// The repeater setup to store with the channel. `None` clears it,
+        /// which is what a memory written before the field existed already
+        /// means: recall onto whatever the repeater controls are set to.
+        repeater: Option<crate::RepeaterState>,
     },
+
+    /// Working a repeater: the transmit shift, the sub-audible tone under the
+    /// voice and the 1750 Hz burst, all in one setting.
+    ///
+    /// The whole struct rather than a command per field, because these are set
+    /// together — a directory entry gives the output, the shift and the tone as
+    /// one line — and because a half-applied repeater setup transmits on the
+    /// right frequency with the wrong tone, or the other way round. The engine
+    /// clamps what arrives ([`crate::RepeaterState::clamped`]).
+    ///
+    /// The *receive* tone squelch is not in here: that is
+    /// [`Command::SetToneSquelch`], and it is a property of the receiver rather
+    /// than of the repeater.
+    SetRepeater(crate::RepeaterState),
+
+    /// Send the 1750 Hz tone burst that opens a carrier-access repeater.
+    ///
+    /// Mid-over it plays over the microphone for
+    /// [`crate::RepeaterState::burst_ms`]. Keyed from receive it keys the
+    /// transmitter, sends the burst and unkeys again — which is the whole of
+    /// what the button on a European mobile does, and the reason it is one
+    /// button. Every transmit rail applies: this is an ordinary key-down and it
+    /// is refused for the same reasons any other one would be.
+    ToneBurst,
 }
