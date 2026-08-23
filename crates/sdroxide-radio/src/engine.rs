@@ -1474,6 +1474,11 @@ struct Engine {
     /// Where the ISM window is currently centred, so a retune can tell whether it
     /// has to move.
     ism_center_hz: f64,
+    /// The stream rate `ism_ddc` was built to decimate, so a retune can tell
+    /// whether the chain still belongs to the front end feeding it. A `Ddc`
+    /// bakes its input rate into both the NCO and the decimation chain and
+    /// neither can be changed in place.
+    ism_in_rate: f64,
     /// The operator's persisted ISM preference, kept apart from `state.ism` for
     /// the same reason as `skim_cfg`.
     ism_cfg: sdroxide_types::IsmSettings,
@@ -2036,6 +2041,7 @@ fn engine_thread(
         ism: None,
         ism_buf: Vec::new(),
         ism_center_hz: 0.0,
+        ism_in_rate: 0.0,
         ism_cfg,
         iq_rec,
         iq_rec_buf: Vec::new(),
@@ -5544,11 +5550,7 @@ impl Engine {
         let want = self.state.ism.any_enabled();
         match (want, self.ism.is_some()) {
             (true, false) => {
-                let target = self.ism_window_target_hz();
-                let rate = Ddc::rate_for(self.state.sample_rate, target);
-                let center = self.ism_window_center_hz(rate);
-                let mut ddc = Ddc::new(self.state.sample_rate, target);
-                ddc.set_offset_hz(center - self.state.center_hz);
+                let (ddc, center) = self.build_ism_window();
                 let out_rate = ddc.out_rate();
                 // Read from disk here rather than on the worker: the operator's
                 // decoder file is config, and config loading lives on this side.
@@ -5569,25 +5571,67 @@ impl Engine {
         }
     }
 
-    /// Re-place the window after a retune or a sample-rate change.
+    /// A down-converter for the window the plan asks for *now*, already mixed
+    /// onto it, and the absolute frequency it is centred on.
     ///
-    /// Rebuilding the decoder outright would throw away the device table, which is
-    /// the one thing an operator watching a band accumulates over minutes. So the
-    /// mixer moves and the worker is told; it rebuilds only its channels.
+    /// The one place the chain is built, so that the rate it was built from is
+    /// always recorded with it.
+    fn build_ism_window(&mut self) -> (Ddc, f64) {
+        let target = self.ism_window_target_hz();
+        let mut ddc = Ddc::new(self.state.sample_rate, target);
+        let center = self.ism_window_center_hz(ddc.out_rate());
+        ddc.set_offset_hz(center - self.state.center_hz);
+        self.ism_in_rate = self.state.sample_rate;
+        (ddc, center)
+    }
+
+    /// Re-place the window after a retune, a band change or a sample-rate change.
+    ///
+    /// Rebuilding the *decoder* would throw away the device table, which is the
+    /// one thing an operator watching a band accumulates over minutes. So the
+    /// worker is kept and only its window moves; it rebuilds only its channels.
+    ///
+    /// The chain that feeds it is another matter. Its width is not a constant
+    /// chosen when the decoder started: selecting another band moves both where
+    /// the window aims and how wide it has to be — 433 MHz wants 250 kHz where
+    /// the 868 plan wants nearly two megahertz — and a device swap moves the rate
+    /// being decimated from. Neither can be retuned in place, so a chain built
+    /// for the old numbers is rebuilt rather than kept, which is what issue #142
+    /// was: after a band change the window stayed the width the previous band
+    /// needed, nothing fitted inside it, both lanes went quiet and only switching
+    /// the decoder off and on put it right.
     fn sync_ism_window(&mut self) {
-        let rate = match self.ism_ddc.as_ref() {
-            Some(ddc) => ddc.out_rate(),
-            None => return,
-        };
-        let center = self.ism_window_center_hz(rate);
+        let Some(ddc) = self.ism_ddc.as_ref() else { return };
+        let want_rate = Ddc::rate_for(self.state.sample_rate, self.ism_window_target_hz());
+        if (want_rate - ddc.out_rate()).abs() >= 1.0
+            || (self.state.sample_rate - self.ism_in_rate).abs() >= 1.0
+        {
+            let (ddc, center) = self.build_ism_window();
+            let rate = ddc.out_rate();
+            self.ism_ddc = Some(ddc);
+            self.ism_center_hz = center;
+            if let Some(d) = self.ism.as_ref() {
+                d.set_window(center, rate);
+            }
+            info!(rate, center, "ISM window rebuilt");
+            return;
+        }
+
+        let center = self.ism_window_center_hz(want_rate);
         let Some(ddc) = self.ism_ddc.as_mut() else { return };
+        // Re-seated even when the window has not moved in absolute terms: the
+        // offset is measured from the hardware centre, and on a front end wide
+        // enough to keep the plan in view either side of a retune that centre is
+        // exactly what just moved. Leaving the mixer where it was put the window
+        // as far off the channels as the dial had travelled. Phase-continuous and
+        // filter-free, so there is nothing to save by skipping it.
+        ddc.set_offset_hz(center - self.state.center_hz);
         if (center - self.ism_center_hz).abs() < 1.0 {
             return;
         }
-        ddc.set_offset_hz(center - self.state.center_hz);
         self.ism_center_hz = center;
         if let Some(d) = self.ism.as_ref() {
-            d.set_window(center, rate);
+            d.set_window(center, want_rate);
         }
     }
 
