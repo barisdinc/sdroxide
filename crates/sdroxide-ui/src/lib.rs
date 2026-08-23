@@ -91,6 +91,9 @@ pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
             required_limits: adapter.limits(),
             ..Default::default()
         });
+    // A slow OpenGL driver must not be able to kill the window — see
+    // `gl_fence_behavior`. Inert on every other backend.
+    setup.instance_descriptor.backend_options.gl.fence_behavior = gl_fence_behavior();
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(backends) = v3dv_backends(setup.instance_descriptor.backends) {
         setup.instance_descriptor.backends = backends;
@@ -98,6 +101,66 @@ pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
     egui_wgpu::WgpuConfiguration {
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()
+    }
+}
+
+/// How much a fence is worth on the OpenGL backend.
+///
+/// wgpu waits for the GPU to go idle before it reconfigures a surface — which
+/// happens at startup, when the window's real size arrives, and on every resize
+/// after that — and a wait that does not finish is a fatal validation error:
+///
+/// > wgpu error: Validation Error
+/// > In `Surface::configure`
+/// > Failed to wait for GPU to come idle before reconfiguring the Surface
+///
+/// The wait wgpu asks for there is indefinite, and on Vulkan, Metal and D3D12
+/// it really is. On OpenGL it is `glClientWaitSync`, and wgpu-hal passes that
+/// call a timeout clamped to `i32::MAX` — **nanoseconds**, so "wait forever"
+/// quietly becomes "wait 2.147 seconds". A GPU that needs longer to finish the
+/// frame already in flight than that therefore does not merely stutter: the
+/// window dies, and takes the process with it (issue #148, an Intel HD
+/// Graphics 4000 on its 2013 OpenGL 4.0 driver, where the *first* frame — every
+/// shader compiled, every texture allocated — did not land inside the 2.147 s).
+/// Tearing down after that then walks into the queue's own shutdown wait, which
+/// the same card misses as well, and *that* one panics inside a destructor —
+/// so the process aborts instead of unwinding.
+///
+/// `AutoFinish` answers such a wait from the value the last submit recorded
+/// rather than asking the driver, so a slow frame costs a slow frame and no
+/// more. That is sound here in a way it would not be on the other backends:
+/// OpenGL defers deleting anything the pipeline still refers to, so nothing is
+/// freed under the GPU's feet, and the reason to wait in the first place — a
+/// swapchain the application destroys itself — does not exist on OpenGL. It is
+/// also what wgpu did on every OpenGL context until gfx-rs/wgpu#4589.
+///
+/// What the setting really costs is a truthful `Queue::on_completed_work_done`
+/// and a truthful `poll(Wait)`, which matter to a reader mapping a buffer the
+/// GPU has just written. Nothing in this tree reads back from the GPU — every
+/// pass ends on the screen — so there is nothing to be early for.
+///
+/// `WGPU_GL_FENCE_BEHAVIOR=normal` puts the driver back in charge. (eframe
+/// builds its backend options with `from_env_or_default`, which does not read
+/// that variable, so honouring it is this function's job.)
+fn gl_fence_behavior() -> egui_wgpu::wgpu::GlFenceBehavior {
+    egui_wgpu::wgpu::GlFenceBehavior::AutoFinish.with_env()
+}
+
+#[cfg(test)]
+mod gl_fence_tests {
+    use super::{gl_fence_behavior, wgpu_options};
+    use crate::egui_wgpu::{WgpuSetup, wgpu};
+
+    /// The window must not be at the mercy of a 2.147-second `glClientWaitSync`
+    /// on a slow OpenGL driver, so the configuration every window opens with
+    /// carries `AutoFinish` into the GL backend.
+    #[test]
+    fn the_gl_backend_does_not_wait_on_the_driver() {
+        assert_eq!(gl_fence_behavior(), wgpu::GlFenceBehavior::AutoFinish);
+        let WgpuSetup::CreateNew(setup) = wgpu_options().wgpu_setup else {
+            panic!("wgpu_options should be building a new setup");
+        };
+        assert!(setup.instance_descriptor.backend_options.gl.fence_behavior.is_auto_finish());
     }
 }
 

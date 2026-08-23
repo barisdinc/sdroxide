@@ -9544,6 +9544,33 @@ WGPU_BACKEND=vulkan sdroxide
 machine, and pinning it also turns the check above off — so `WGPU_BACKEND=gl`
 is how to force the steady path on a GPU sdroxide does not know about.
 
+**A blank window appears for a moment, sdroxide exits, and the console says
+`Failed to wait for GPU to come idle before reconfiguring the Surface`.**
+An old graphics card taking too long over its first frame, on a machine with
+neither a Vulkan nor a Direct3D 12 driver — so OpenGL is all that is left. The
+first frame is where every shader is compiled and every texture allocated, and
+on such a card that can take several seconds; the window's real size, arriving
+while that is still going, used to make sdroxide wait for the card to catch up.
+OpenGL gives that kind of wait 2.147 seconds and not a moment more, after which
+the window counted as broken and the process died — twice over, the second time
+inside its own cleanup, which is where the backtrace came from. It was reported
+on an Intel HD Graphics 4000 running its 2013 OpenGL driver
+([#148](https://github.com/dividebysandwich/sdroxide/issues/148)).
+
+sdroxide no longer asks to be kept waiting by an OpenGL driver, so a slow card
+is now merely slow. The wait bought nothing here in any case — nothing in
+sdroxide reads back from the GPU; every pass ends on the screen. To hand the
+timing back to the driver, for a bug report say:
+
+```
+WGPU_GL_FENCE_BEHAVIOR=normal sdroxide
+```
+
+If no window appears at all on such a machine, `WGPU_BACKEND=dx12` on Windows
+falls back to the software renderer Windows always has (*Microsoft Basic Render
+Driver*). It is slow, and the log says `Software rasterizer detected`, but it
+draws.
+
 ---
 
 ## 15. Radio-specific notes
