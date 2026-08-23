@@ -46,7 +46,7 @@ copied.
 
 ## What is patched
 
-Four files, and no upstream line is edited except as described.
+Five files, and no upstream line is edited except as described.
 
 **`src/sound/sound.h`** — one added branch. Under `USE_SDROXIDE_SOUND` the
 `CSoundIn`/`CSoundOut` typedefs resolve to the ring-buffer shims in
@@ -78,3 +78,18 @@ business writing to stderr in a GUI application; sdroxide logs through
 
 **`src/DrmReceiver.cpp`** — one removed `cerr` line that printed every
 enumerated input device name while selecting one.
+
+**`src/datadecoding/journaline/NML.cpp`** — `#include <zlib.h>` made
+conditional on `HAVE_LIBZ`, which is how its sibling `DABMOT.cpp` already
+guards the same header, and the one function that uses zlib
+(`Inflate`, for *compressed* Journaline objects) returns failure when it is not
+built in. The caller already handles that — "could not uncompress NML body" —
+and uncompressed objects are unaffected.
+
+This is the only thing in the tree that wanted a system library nothing else
+here needs. It built anywhere `zlib.h` happened to be installed, which included
+every developer machine and the GitHub runner images, and failed on a clean
+distribution container; the symbols then resolved only because some unrelated
+dependency had pulled `-lz` onto the link line. sdroxide surfaces no Journaline
+at all, so the whole question is moot for this build — but it is exactly the
+kind of accidental dependency that shows up first in somebody else's release.

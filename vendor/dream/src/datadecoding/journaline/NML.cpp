@@ -69,7 +69,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <zlib.h>
+#ifdef HAVE_LIBZ
+# include <zlib.h>
+#endif
 #include "NML.h"
 #include "Splitter.h"
 #include "cpplog.h"
@@ -720,6 +722,16 @@ int Inflate(unsigned char *dest,
             const unsigned char *source,
             unsigned long sourceLen)
 {
+#ifndef HAVE_LIBZ
+  /* Built without zlib, so a *compressed* Journaline object cannot be read.
+     The caller already has a path for that (`could not uncompress NML body`),
+     and uncompressed objects are unaffected. */
+  (void)dest;
+  (void)destLen;
+  (void)source;
+  (void)sourceLen;
+  return 0;
+#else
   z_stream stream;
   int err;
   stream.next_in = const_cast<Bytef*>(source);
@@ -771,6 +783,7 @@ int Inflate(unsigned char *dest,
     return 0;
   }
   return 1;
+#endif
 }
 
 
