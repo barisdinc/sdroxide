@@ -2051,7 +2051,7 @@ pub(in crate::app) fn settings_pluto_tab(
     can_probe: bool,
     cmds: &mut Vec<Command>,
 ) {
-    use sdroxide_types::{PlutoAgc, PlutoConfig};
+    use sdroxide_types::{PlutoAgc, PlutoConfig, PlutoDuplex, PlutoPtt};
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
         return;
@@ -2278,6 +2278,39 @@ pub(in crate::app) fn settings_pluto_tab(
                  transmitted signal during an over; it is the audio that keeps \
                  coming.\n\nTakes effect on Apply.",
         );
+        ui.end_row();
+
+        // Below Full duplex because the two argue: TDD is one direction at a
+        // time in the silicon, so it settles the question the checkbox above
+        // asks about the link.
+        ui.label("Duplex").on_hover_text(
+            "Whether the AD9361 runs both directions at once (FDD, which is how a Pluto \
+             boots and what sdroxide has always left it in) or one at a time (TDD).\n\n\
+             Leave this on FDD unless you want the PTT pins below — TDD is what those \
+             key from, and it rules out Full duplex above. Takes effect on Apply.",
+        );
+        let mut duplex = cfg.pluto.duplex;
+        enum_combo(ui, "pluto_duplex", &mut duplex, &PlutoDuplex::ALL, PlutoDuplex::label);
+        cfg.pluto.duplex = duplex;
+        ui.end_row();
+
+        ui.label("PTT pins").on_hover_text(
+            "The Pluto's four GPO test points can key an external power amplifier, LNA \
+             or transmit-receive switch by themselves. Pick a pair and one pin is high \
+             the whole time the radio receives, the other the whole time it transmits — \
+             no host software in the loop and no serial PTT line to wire.\n\nThis puts \
+             the radio in TDD whatever the Duplex row says, because the pins follow the \
+             AD9361's enable lines and in FDD both of those are asserted the entire \
+             session. Full duplex goes off with it, so leave both at their defaults if \
+             you work satellites and need to hear your own downlink.\n\nAnalog Devices' \
+             own note puts an external LNA on GPO0/GPO1, so use GPO2/GPO3 if your board \
+             is wired that way. The pins are about 1.3 V at a few milliamps: drive a \
+             transistor or an opto-isolator with them, never a relay coil.\n\nTakes \
+             effect on Apply.",
+        );
+        let mut ptt = cfg.pluto.ptt_gpo;
+        enum_combo(ui, "pluto_ptt", &mut ptt, &PlutoPtt::ALL, PlutoPtt::label);
+        cfg.pluto.ptt_gpo = ptt;
         ui.end_row();
 
         // Next to Full duplex because it belongs to the same subject: both are

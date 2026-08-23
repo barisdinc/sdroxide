@@ -4863,6 +4863,15 @@ configured in exactly the same way as one on your desk.
   session and surprise the next program to open the radio. Run with
   `RUST_LOG=sdroxide_pluto=debug` and the log prints the measured clock error
   after about twenty seconds — that is the number to enter.
+- **Duplex** — whether the AD9361 runs both directions at once (**FDD**, how a
+  Pluto boots and what sdroxide has always left it in) or one at a time
+  (**TDD**). Leave it on FDD unless you want the **PTT pins** below: TDD is what
+  those key from, and it rules out *Full duplex*. Takes effect on Apply.
+- **PTT pins** — which pair of the Pluto's four GPO test points follows the
+  radio, for keying an external amplifier, LNA or transmit-receive switch with
+  no host software in the loop. **Off**, **GPO0 = RX, GPO1 = TX**, or **GPO2 =
+  RX, GPO3 = TX**. Picking a pair puts the radio in TDD whatever *Duplex* says.
+  See *Keying an external amplifier*, below. Takes effect on Apply.
 - **Buffer size** — how much the radio holds before each transfer, in complex
   samples, with the airtime and byte count it works out to shown beside it. The
   default of 32768 is about 16 ms at 2 Msps: long enough that the per-transfer
@@ -4913,7 +4922,56 @@ Three things to know before you switch it on:
 - **A board in TDD cannot do it at all.** sdroxide reads the AD9361's
   `ensm_mode` when you enable this and says so on connect if it is not `fdd`; a
   stock Pluto boots in FDD, so this is only a concern on a board somebody has
-  deliberately reconfigured.
+  deliberately reconfigured — or on one you have put there yourself with the
+  **PTT pins** setting below, which turns this checkbox off and says so.
+
+**Keying an external amplifier, LNA or T/R switch (the GPO pins).** A bare Pluto
+puts out a few milliwatts, so most of them end up in front of an amplifier —
+and an amplifier needs to know when you are transmitting. You can wire a serial
+PTT line for that, but the Pluto already has four output pins on the board
+(**GPO0–GPO3**, on test points; the Analog Devices note *Controlling external
+devices* has the locations), and the AD9361 can drive them from its own
+transmit and receive state with nothing in between. That is what the **PTT
+pins** setting does:
+
+- Pick **GPO0 = RX, GPO1 = TX** or **GPO2 = RX, GPO3 = TX**. One pin is high the
+  whole time you are receiving, the other the whole time you are transmitting —
+  a complementary pair, which is exactly what a T/R relay and a PA key line
+  want. Analog Devices' own note uses GPO0/GPO1 to switch an external LNA, so
+  **use GPO2/GPO3 if your board is already wired that way** (choosing GPO0/GPO1
+  stands the eLNA control down, because one pin cannot do both jobs).
+- **This puts the radio in TDD**, whatever *Duplex* is set to, and sdroxide says
+  so on connect. The pins follow the AD9361's enable lines, and in FDD both of
+  those are asserted the entire session — a pin slaved to transmit would go high
+  when the radio opened and stay there. So *Full duplex* is turned off with it:
+  the part is doing one direction at a time now, and no link is going to change
+  that. **If you work satellites and need to hear your own downlink, leave both
+  of these alone.**
+- **The pins are about 1.3 V at a few milliamps.** Drive a transistor, a MOSFET
+  or an opto-isolator with them — never a relay coil, and never an amplifier's
+  key line directly unless its datasheet says that level is enough.
+- Nothing else changes: PTT, VOX, the digital modes and the tune button all key
+  the radio the way they always did, and the pins follow. sdroxide moves the
+  state machine to transmit a couple of milliseconds *before* the signal starts
+  and back to receive *after* the last sample has gone out, so the amplifier is
+  switched in ahead of the RF and out behind it rather than hot-switched.
+- On the way out sdroxide puts the state machine back to receive, so closing it
+  does not leave your amplifier keyed. If the radio is pulled off the network
+  mid-over that cannot be delivered — the pin stays high until the Pluto is
+  reset. Anything that can transmit for hours wants a hardware timeout of its
+  own regardless.
+
+The settings are written as the AD9361 driver's device-tree properties
+(`adi,frequency-division-duplex-mode-enable`, `adi,gpo…-slave-rx-enable` and
+`adi,gpo…-slave-tx-enable`) and committed with `initialize`, which is the same
+sequence the Analog Devices note gives for `iio_attr`. They **persist in the
+radio** until it is rebooted or something writes them again, so sdroxide both
+writes and unwrites them: it rewrites the whole set every time it connects with
+a pair selected, and setting **PTT pins** back to *Off* puts the radio back into
+FDD and un-slaves all four pins on the next connect. A radio that has never had
+these settings touched is left exactly as it booted, and so is one you have put
+in TDD yourself with no pin slaved to it — sdroxide undoes its own arrangement,
+not somebody else's.
 
 **The sample rate is a transmit setting too.** Every I/Q sample is four bytes in
 each direction, so 2.5 Msps is 10 MB/s the link has to carry — and on transmit

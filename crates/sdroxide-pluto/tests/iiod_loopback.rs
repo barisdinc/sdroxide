@@ -60,6 +60,18 @@ const CONTEXT_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <attribute name="frequency_available" filename="out_altvoltage1_TX_LO_frequency_available" />
     </channel>
     <attribute name="ensm_mode" filename="ensm_mode" />
+    <debug-attribute name="adi,frequency-division-duplex-mode-enable" />
+    <debug-attribute name="adi,gpo0-slave-rx-enable" />
+    <debug-attribute name="adi,gpo0-slave-tx-enable" />
+    <debug-attribute name="adi,gpo1-slave-rx-enable" />
+    <debug-attribute name="adi,gpo1-slave-tx-enable" />
+    <debug-attribute name="adi,gpo2-slave-rx-enable" />
+    <debug-attribute name="adi,gpo2-slave-tx-enable" />
+    <debug-attribute name="adi,gpo3-slave-rx-enable" />
+    <debug-attribute name="adi,gpo3-slave-tx-enable" />
+    <debug-attribute name="adi,elna-rx1-gpo0-control-enable" />
+    <debug-attribute name="adi,elna-rx2-gpo1-control-enable" />
+    <debug-attribute name="initialize" />
   </device>
   <device id="iio:device3" name="cf-ad9361-lpc">
     <channel id="voltage0" type="input">
@@ -1075,6 +1087,183 @@ fn full_duplex_on_a_tdd_board_says_so() {
     let status = handle.open_status().unwrap_or_default();
     assert!(status.contains("tdd"), "the mode should be named, got {status:?}");
     assert!(status.contains("full duplex"), "and what it collides with, got {status:?}");
+}
+
+/// The GPO transmit-receive switching, end to end: the device-tree properties
+/// are written and committed *before* the front end is configured, and the
+/// enable state machine then follows the operator's key.
+///
+/// The ordering assertion is the one worth having. `initialize` re-runs the
+/// AD9361's whole setup from those properties, so a driver that set the sample
+/// rate first would have it thrown away — and the symptom is not an error but a
+/// radio quietly running at the board's default rate.
+#[test]
+fn the_gpo_pins_are_slaved_to_the_radio_and_keyed_by_an_over() {
+    let fake = Fake::start();
+    let cfg = PlutoConfig {
+        duplex: sdroxide_types::PlutoDuplex::Tdd,
+        ptt_gpo: sdroxide_types::PlutoPtt::Gpo23,
+        ..config()
+    };
+    let mut handle =
+        PlutoHandle::open(&fake.address(), &cfg, 145_500_000.0).expect("open the fake Pluto");
+    wait_for("the receive buffer", || fake.state.lock().unwrap().rx_buffer_open);
+
+    {
+        let g = fake.state.lock().expect("lock");
+        let debug = |attr: &str| g.get(&format!("ad9361-phy/DEBUG/{attr}")).map(str::to_string);
+        assert_eq!(debug("adi,frequency-division-duplex-mode-enable").as_deref(), Some("0"));
+        assert_eq!(debug("adi,gpo2-slave-rx-enable").as_deref(), Some("1"));
+        assert_eq!(debug("adi,gpo3-slave-tx-enable").as_deref(), Some("1"));
+        assert_eq!(debug("initialize").as_deref(), Some("1"));
+        // Every other slave bit is cleared, not merely left: a pair chosen in
+        // an earlier session is still slaved, and two pairs following the
+        // radio would key two amplifiers.
+        for attr in [
+            "adi,gpo0-slave-rx-enable",
+            "adi,gpo0-slave-tx-enable",
+            "adi,gpo1-slave-rx-enable",
+            "adi,gpo1-slave-tx-enable",
+            "adi,gpo2-slave-tx-enable",
+            "adi,gpo3-slave-rx-enable",
+        ] {
+            assert_eq!(debug(attr).as_deref(), Some("0"), "{attr}");
+        }
+        // An external LNA on GPO0/GPO1 is none of this pair's business.
+        assert_eq!(debug("adi,elna-rx1-gpo0-control-enable"), None);
+
+        let at = |key: &str| {
+            g.attrs
+                .iter()
+                .position(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("{key} was never written"))
+        };
+        assert!(
+            at("ad9361-phy/DEBUG/initialize") < at("ad9361-phy/INPUT/voltage0/sampling_frequency"),
+            "the commit has to come before the front end is set up, or it undoes it"
+        );
+        assert!(
+            at("ad9361-phy/DEBUG/adi,gpo2-slave-rx-enable") < at("ad9361-phy/DEBUG/initialize"),
+            "the pins have to be written before the commit that makes them take"
+        );
+        // Nothing receives in TDD until the state machine is told to.
+        assert_eq!(g.get("ad9361-phy/ensm_mode"), Some("rx"));
+    }
+
+    handle.tx_begin(145_500_000.0);
+    let iq: Vec<f32> = vec![0.0; 4096];
+    handle.tx_write(&iq);
+    wait_for("the transmit state", || {
+        fake.state.lock().unwrap().get("ad9361-phy/ensm_mode") == Some("tx")
+    });
+    {
+        let g = fake.state.lock().expect("lock");
+        let states = g.writes_of("ad9361-phy/ensm_mode");
+        // Keyed before the buffer opens: the transmit path is off until the
+        // state machine moves, and the amplifier should be switched in ahead
+        // of the signal rather than behind it.
+        assert_eq!(states, vec!["rx", "tx"], "{states:?}");
+    }
+
+    handle.tx_end();
+    wait_for("the receive state", || {
+        fake.state.lock().unwrap().get("ad9361-phy/ensm_mode") == Some("rx")
+    });
+    handle.release();
+}
+
+/// A GPO pair keys from the enable state machine, so it can only work in TDD —
+/// and TDD is one direction at a time however good the link is. Both of those
+/// silently disagree with settings the operator may have left behind, so both
+/// are overridden and both are said out loud.
+#[test]
+fn gpo_ptt_wins_over_fdd_and_full_duplex_and_says_so() {
+    let fake = Fake::start();
+    let cfg = PlutoConfig {
+        duplex: sdroxide_types::PlutoDuplex::Fdd,
+        ptt_gpo: sdroxide_types::PlutoPtt::Gpo01,
+        full_duplex: true,
+        ..config()
+    };
+    let mut handle =
+        PlutoHandle::open(&fake.address(), &cfg, 145_500_000.0).expect("open the fake Pluto");
+    let status = handle.open_status().unwrap_or_default();
+    assert!(status.contains("TDD"), "the override should be named, got {status:?}");
+    assert!(status.contains("full duplex"), "and so should the other, got {status:?}");
+    wait_for("the receive buffer", || fake.state.lock().unwrap().rx_buffer_open);
+
+    {
+        let g = fake.state.lock().expect("lock");
+        assert_eq!(g.get("ad9361-phy/DEBUG/adi,frequency-division-duplex-mode-enable"), Some("0"));
+        assert_eq!(g.get("ad9361-phy/DEBUG/adi,gpo0-slave-rx-enable"), Some("1"));
+        assert_eq!(g.get("ad9361-phy/DEBUG/adi,gpo1-slave-tx-enable"), Some("1"));
+        // This pair is Analog Devices' own external-LNA pair, and a pin cannot
+        // do both jobs — so the eLNA control is stood down with it.
+        assert_eq!(g.get("ad9361-phy/DEBUG/adi,elna-rx1-gpo0-control-enable"), Some("0"));
+        assert_eq!(g.get("ad9361-phy/DEBUG/adi,elna-rx2-gpo1-control-enable"), Some("0"));
+    }
+
+    // And the over is half duplex whatever the checkbox said.
+    handle.tx_begin(145_500_000.0);
+    handle.tx_write(&vec![0.0; 4096]);
+    wait_for("the over", || !fake.state.lock().unwrap().rx_buffer_open);
+    handle.tx_end();
+    handle.release();
+}
+
+/// Turning the PTT pins back off has to undo them, and the board is the only
+/// place that remembers: these are device-tree properties that live in the
+/// radio until it is rebooted. A session that walked away from them would leave
+/// an operator with a Pluto stuck in TDD, its transmitter disabled because
+/// nothing is driving the state machine any more, and nothing on screen saying
+/// so.
+#[test]
+fn a_board_this_left_in_tdd_is_put_back_when_the_pins_are_turned_off() {
+    let fake = Fake::start_with(
+        DeviceState {
+            attrs: vec![
+                ("ad9361-phy/ensm_mode".to_string(), "tdd".to_string()),
+                ("ad9361-phy/DEBUG/adi,gpo2-slave-rx-enable".to_string(), "1".to_string()),
+                ("ad9361-phy/DEBUG/adi,gpo3-slave-tx-enable".to_string(), "1".to_string()),
+            ],
+            ..DeviceState::default()
+        },
+        CONTEXT_XML.to_string(),
+    );
+    let handle =
+        PlutoHandle::open(&fake.address(), &config(), 145_500_000.0).expect("open the fake Pluto");
+    let status = handle.open_status().unwrap_or_default();
+    assert!(status.contains("FDD"), "the undo should be said out loud, got {status:?}");
+    wait_for("the receive buffer", || fake.state.lock().unwrap().rx_buffer_open);
+
+    let g = fake.state.lock().expect("lock");
+    assert_eq!(g.get("ad9361-phy/DEBUG/adi,frequency-division-duplex-mode-enable"), Some("1"));
+    assert_eq!(g.get("ad9361-phy/DEBUG/adi,gpo2-slave-rx-enable"), Some("0"));
+    assert_eq!(g.get("ad9361-phy/DEBUG/adi,gpo3-slave-tx-enable"), Some("0"));
+    assert_eq!(g.get("ad9361-phy/DEBUG/initialize"), Some("1"));
+    // And the state machine is put where FDD belongs, rather than left in
+    // whatever `initialize` happened to leave behind.
+    assert_eq!(g.get("ad9361-phy/ensm_mode"), Some("fdd"));
+}
+
+/// The default is to touch none of this. A Pluto that has never had these
+/// settings opened must come up exactly as it booted — somebody else's board
+/// may be in TDD for a reason, and its GPO pins may already be driving
+/// something this radio knows nothing about.
+#[test]
+fn a_radio_that_asked_for_neither_is_left_as_it_booted() {
+    let fake = Fake::start();
+    let handle =
+        PlutoHandle::open(&fake.address(), &config(), 145_500_000.0).expect("open the fake Pluto");
+    wait_for("the receive buffer", || fake.state.lock().unwrap().rx_buffer_open);
+    let g = fake.state.lock().expect("lock");
+    let touched: Vec<&str> =
+        g.attrs.iter().map(|(k, _)| k.as_str()).filter(|k| k.contains("/DEBUG/")).collect();
+    assert!(touched.is_empty(), "the device tree was rewritten unasked: {touched:?}");
+    // Nor is the state machine driven on a board that was left in FDD.
+    assert!(g.get("ad9361-phy/ensm_mode").is_none());
+    drop(g);
+    drop(handle);
 }
 
 #[test]

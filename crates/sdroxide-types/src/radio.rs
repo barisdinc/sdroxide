@@ -4110,6 +4110,91 @@ impl PlutoAgc {
     }
 }
 
+/// Which duplex the AD9361's enable state machine runs in.
+///
+/// A Pluto arrives in FDD, where receive and transmit are enabled together and
+/// each has a synthesiser of its own. That is the right mode for anything that
+/// listens while it talks — a QO-100 station hearing its own downlink — and it
+/// is what this backend has always left the board in.
+///
+/// TDD enables one direction at a time, which is what the part's GPO pins are
+/// slaved to: [`PlutoPtt`] can only key an external amplifier in TDD, because
+/// in FDD the transmit-enable line the GPO follows is asserted the whole time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PlutoDuplex {
+    /// Leave the board as it boots: both directions enabled at once.
+    #[default]
+    Fdd,
+    /// One direction at a time, with the enable state machine driven from
+    /// here — the mode the GPO PTT lines need.
+    Tdd,
+}
+
+impl PlutoDuplex {
+    pub const ALL: [PlutoDuplex; 2] = [PlutoDuplex::Fdd, PlutoDuplex::Tdd];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlutoDuplex::Fdd => "FDD (both at once)",
+            PlutoDuplex::Tdd => "TDD (one at a time)",
+        }
+    }
+
+    /// What `adi,frequency-division-duplex-mode-enable` is set to.
+    pub fn fdd_enable(self) -> &'static str {
+        match self {
+            PlutoDuplex::Fdd => "1",
+            PlutoDuplex::Tdd => "0",
+        }
+    }
+}
+
+/// Which pair of the Pluto's four GPO pins follows the transmit/receive state,
+/// for keying an external power amplifier, LNA or transmit-receive switch.
+///
+/// The AD9361 can slave any GPO to its receive-enable or transmit-enable line,
+/// so a pair gives a complementary drive: one pin high on receive, the other
+/// high on transmit — exactly what a T/R relay and a PA's key line want, with
+/// no host software in the loop once it is set up.
+///
+/// It only works in [`PlutoDuplex::Tdd`], and the pins are 1.3 V at a few
+/// milliamps: they drive a transistor or an opto-isolator, never a relay coil
+/// directly. Analog Devices' own note uses GPO0/GPO1 for an external LNA, which
+/// is why GPO2/GPO3 are offered as well — a board already wired for eLNA
+/// control keeps those two and puts PTT on the other pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PlutoPtt {
+    /// Leave every GPO alone.
+    #[default]
+    Off,
+    /// GPO0 high on receive, GPO1 high on transmit.
+    Gpo01,
+    /// GPO2 high on receive, GPO3 high on transmit — the pair to use when
+    /// GPO0/GPO1 already drive an external LNA.
+    Gpo23,
+}
+
+impl PlutoPtt {
+    pub const ALL: [PlutoPtt; 3] = [PlutoPtt::Off, PlutoPtt::Gpo01, PlutoPtt::Gpo23];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlutoPtt::Off => "Off",
+            PlutoPtt::Gpo01 => "GPO0 = RX, GPO1 = TX",
+            PlutoPtt::Gpo23 => "GPO2 = RX, GPO3 = TX",
+        }
+    }
+
+    /// The (receive, transmit) GPO numbers, or `None` when this is off.
+    pub fn pins(self) -> Option<(u8, u8)> {
+        match self {
+            PlutoPtt::Off => None,
+            PlutoPtt::Gpo01 => Some((0, 1)),
+            PlutoPtt::Gpo23 => Some((2, 3)),
+        }
+    }
+}
+
 /// ADALM-Pluto (PlutoSDR) backend configuration.
 ///
 /// The device is reached over the network — which the USB cable already
@@ -4177,6 +4262,17 @@ pub struct PlutoConfig {
     /// and what goes on the air is chopped.
     #[serde(default)]
     pub full_duplex: bool,
+    /// Which duplex to put the AD9361's enable state machine in. FDD is how a
+    /// Pluto boots and what every earlier version of this backend left alone;
+    /// TDD is what [`Self::ptt_gpo`] needs, and it rules out
+    /// [`Self::full_duplex`] — the part is only ever doing one of the two.
+    #[serde(default)]
+    pub duplex: PlutoDuplex,
+    /// Which GPO pair keys an external PA, LNA or T/R switch. Needs
+    /// [`PlutoDuplex::Tdd`]: the lines these pins follow are both asserted the
+    /// whole time in FDD, so nothing would ever toggle.
+    #[serde(default)]
+    pub ptt_gpo: PlutoPtt,
 }
 
 impl Default for PlutoConfig {
@@ -4198,6 +4294,8 @@ impl Default for PlutoConfig {
             buffer_samples: 32768,
             rx: 0,
             full_duplex: false,
+            duplex: PlutoDuplex::default(),
+            ptt_gpo: PlutoPtt::default(),
         }
     }
 }
@@ -6035,4 +6133,3 @@ mod tests {
         assert_eq!(chains("LimeNET-Micro, media=USB 2.0"), 1);
     }
 }
-

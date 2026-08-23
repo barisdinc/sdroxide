@@ -73,10 +73,10 @@ pub struct PlutoSource {
 impl PlutoSource {
     /// Attach receive chain `cfg.rx` of the Pluto at `address`, connecting
     /// only if no radio in this process already holds that connection, and
-    /// start receiving at `center_hz`. The rate, bandwidth, reference trim and
-    /// duplex are connection-level: whoever connects first sets them, and a
-    /// later attach runs with the established ones whatever its own config
-    /// says. (Which is why the capabilities read duplex back off the rig rather
+    /// start receiving at `center_hz`. The rate, bandwidth, reference trim,
+    /// duplex and GPO transmit-receive pins are connection-level: whoever
+    /// connects first sets them, and a later attach runs with the established
+    /// ones whatever its own config says. (Which is why the capabilities read duplex back off the rig rather
     /// than out of `cfg` — the engine must be told what the link is actually
     /// doing, not what this radio asked for.)
     pub fn open(address: &str, cfg: &PlutoConfig, center_hz: f64) -> anyhow::Result<Self> {

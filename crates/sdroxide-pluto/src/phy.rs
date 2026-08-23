@@ -27,6 +27,8 @@
 //! different things — receive `hardwaregain` is gain in dB, transmit
 //! `hardwaregain` is *attenuation* expressed as negative dB.
 
+use sdroxide_types::{PlutoDuplex, PlutoPtt};
+
 use crate::context::{Context, Device, ScanFormat};
 use crate::error::{Error, Result};
 use crate::iiod::Connection;
@@ -53,6 +55,33 @@ fn rx_chan(chain: u8) -> (bool, &'static str) {
 const RX_LO: (bool, &str) = (true, "altvoltage0");
 /// Transmit local oscillator.
 const TX_LO: (bool, &str) = (true, "altvoltage1");
+
+/// The device-tree property that picks the duplex: `1` for FDD, `0` for TDD. A
+/// debug attribute, and one that does nothing until [`INITIALIZE`] is written.
+const FDD_ENABLE: &str = "adi,frequency-division-duplex-mode-enable";
+/// Writing `1` here re-runs the driver's whole setup from its (just modified)
+/// copy of the device tree. Everything configured before it — sample rate,
+/// filter, gains, local oscillators — goes back to the board's own defaults,
+/// which is why the transmit-receive switching is set up before any of that
+/// rather than after it.
+const INITIALIZE: &str = "initialize";
+/// The properties that give GPO0 and GPO1 to an external LNA instead. Cleared
+/// when the PTT pair *is* GPO0/GPO1, because one pin cannot do both jobs —
+/// which is the reason [`PlutoPtt::Gpo23`] exists.
+const ELNA_GPO: [&str; 2] =
+    ["adi,elna-rx1-gpo0-control-enable", "adi,elna-rx2-gpo1-control-enable"];
+/// How many general-purpose output pins an AD9361 has.
+const GPO_PINS: u8 = 4;
+/// The four slave bits this backend ever sets — one per pin, in the direction
+/// [`PlutoPtt`] gives it. Finding one of them set on a board that is not in FDD
+/// is how a session's own leftovers are told apart from a board somebody put in
+/// TDD for reasons of their own.
+const PTT_SLAVE_ATTRS: [&str; 4] = [
+    "adi,gpo0-slave-rx-enable",
+    "adi,gpo1-slave-tx-enable",
+    "adi,gpo2-slave-rx-enable",
+    "adi,gpo3-slave-tx-enable",
+];
 
 /// AD9363 tuning range, the conservative fallback when the device publishes no
 /// `frequency_available`.
@@ -149,10 +178,28 @@ pub struct Phy {
     /// DDS tone channels on the transmit buffer, which have to be silenced
     /// before DMA transmit will be heard.
     pub dds_channels: Vec<String>,
+    /// The phy's debug attributes — the driver's copy of the device tree
+    /// (`adi,…`) and the `initialize` trigger. Kept so the transmit-receive
+    /// switching in [`Phy::setup_tr_switching`] can look before it writes: a
+    /// firmware that publishes none is a board this cannot be done on, which
+    /// is worth saying plainly rather than as four rejected writes.
+    pub debug_attrs: Vec<String>,
     pub limits: PlutoLimits,
     pub model: String,
     pub firmware: String,
     pub serial: String,
+}
+
+/// What [`Phy::setup_tr_switching`] left the board in.
+pub struct TrSwitching {
+    /// The part is in TDD: it does one direction at a time, and `ensm_mode`
+    /// is now this driver's job at every key-up and key-down. False when
+    /// nothing was asked for, and false when the board would not take it —
+    /// either way nobody should be driving a state machine that is still in
+    /// FDD.
+    pub tdd: bool,
+    /// What the operator should be told, if anything.
+    pub warnings: Vec<String>,
 }
 
 impl Phy {
@@ -249,6 +296,7 @@ impl Phy {
             tx_scan,
             rx2_control,
             dds_channels,
+            debug_attrs: phy.debug_attrs.clone(),
             limits,
             model: ctx.hw_model().to_string(),
             firmware: ctx.fw_version().to_string(),
@@ -464,14 +512,268 @@ impl Phy {
     /// The AD9361's enable-state-machine mode — `fdd` or `tdd`, a device-level
     /// attribute rather than a channel one.
     ///
-    /// Only full duplex cares. In FDD the part receives and transmits at once,
-    /// each direction with its own synthesiser; in TDD it does one at a time
-    /// and the receiver is dead for the length of an over whatever the link can
-    /// carry. Read rather than written: a board deliberately put in TDD (a
-    /// custom design, a timing experiment) should be told about the collision,
-    /// not silently reconfigured out from under its owner.
+    /// In FDD the part receives and transmits at once, each direction with its
+    /// own synthesiser; in TDD it does one at a time and the receiver is dead
+    /// for the length of an over whatever the link can carry. Two callers want
+    /// to know: full duplex, which collides with TDD and says so rather than
+    /// reconfiguring a board out from under its owner, and
+    /// [`Phy::setup_tr_switching`], which uses it to recognise a board an
+    /// earlier session left in TDD.
     pub fn ensm_mode(&self, conn: &mut Connection) -> Result<String> {
         conn.read_attr(&self.phy_id, None, "ensm_mode")
+    }
+
+    /// Put the enable state machine into `mode` — `rx` or `tx` on a board this
+    /// backend has put in TDD.
+    ///
+    /// In FDD nobody writes this: the part is in both states at once and the
+    /// mode is a fact about the board, not a control. In TDD it is the control
+    /// — the one that decides which direction is live, and with it which of the
+    /// slaved GPO pins is high, which is to say whether the external amplifier
+    /// is keyed.
+    pub fn set_ensm_mode(&self, conn: &mut Connection, mode: &str) -> Result<()> {
+        conn.write_attr(&self.phy_id, None, "ensm_mode", mode)
+    }
+
+    pub fn has_debug_attr(&self, attr: &str) -> bool {
+        self.debug_attrs.iter().any(|a| a == attr)
+    }
+
+    /// Put the part in the duplex `duplex` asks for and slave `ptt`'s pair of
+    /// GPO pins to the receive and transmit enable lines, so an external power
+    /// amplifier, LNA or transmit-receive switch follows the radio with no host
+    /// software in the loop.
+    ///
+    /// # Why this is not just two attribute writes
+    ///
+    /// The `adi,…` properties are the driver's copy of the device tree, and
+    /// writing one changes nothing until [`INITIALIZE`] re-runs the AD9361's
+    /// whole setup from it — which also puts the sample rate, the filter, the
+    /// gains and both oscillators back to the board's defaults. So this runs
+    /// *first*, before the front end is configured, and everything after it
+    /// lands on a part that has already been reinitialised.
+    ///
+    /// The GPO pins follow the ENSM's enable lines, and in FDD both of those
+    /// are asserted for the whole session: a pin slaved to transmit would go
+    /// high at open and stay there. That is why choosing a pair implies TDD
+    /// rather than being refused alongside FDD — the operator asked for a
+    /// keyed amplifier, and TDD is what keys it.
+    ///
+    /// A device that refuses one of these writes is not a failed open. The
+    /// radio still works; its PTT pins do not, and the operator is told which.
+    ///
+    /// # Putting it back
+    ///
+    /// These properties live in the radio until it is rebooted, so turning the
+    /// pins back off has to undo them — otherwise the board stays in TDD with
+    /// nobody driving its state machine, which is a transmitter that does
+    /// nothing and no way out but a power cycle. What is undone is exactly what
+    /// this writes: a board found in TDD with one of [`PTT_SLAVE_ATTRS`] set is
+    /// put back into FDD, and one in TDD with no pin slaved is somebody else's
+    /// arrangement and is left alone.
+    pub fn setup_tr_switching(
+        &self,
+        conn: &mut Connection,
+        duplex: PlutoDuplex,
+        ptt: PlutoPtt,
+    ) -> Result<TrSwitching> {
+        let mut out = TrSwitching { tdd: false, warnings: Vec::new() };
+        let pins = ptt.pins();
+        // The pins are what decides the duplex. They follow the enable lines,
+        // and in FDD both of those are asserted for the whole session, so a
+        // pair chosen alongside FDD would simply never move.
+        let want_tdd = duplex == PlutoDuplex::Tdd || pins.is_some();
+        if want_tdd && duplex == PlutoDuplex::Fdd {
+            let msg = format!(
+                "PlutoSDR: {} keys from the enable-state machine, which needs TDD — so \
+                 the duplex setting of FDD is being overridden. Set the PTT pins to \
+                 Off to run in FDD",
+                ptt.label()
+            );
+            tracing::warn!("{msg}");
+            out.warnings.push(msg);
+        }
+        if !want_tdd {
+            // Nothing asked for — usually. Leave a board that is already in
+            // FDD exactly as it booted: that is every Pluto that has never had
+            // these settings opened, and reinitialising one unasked is not
+            // this driver's business.
+            //
+            // The exception is a board this very feature left in TDD, which
+            // an operator turning the PTT pins back off would otherwise be
+            // stuck with: nothing here would drive its state machine, so its
+            // transmitter would stay disabled and its receiver would run only
+            // because the last session happened to leave it in `rx` — a radio
+            // that appears broken with nothing on screen to explain it, and
+            // no way out but power-cycling the Pluto. So the *specific*
+            // configuration this writes is recognised and undone, and a board
+            // in TDD for somebody else's reasons is still left alone.
+            match self.ensm_mode(conn) {
+                Ok(mode) if !mode.to_ascii_lowercase().contains("fdd") => {
+                    let mut slaved = Vec::new();
+                    for attr in PTT_SLAVE_ATTRS {
+                        if self.has_debug_attr(attr)
+                            && conn
+                                .read_debug_attr(&self.phy_id, attr)
+                                .is_ok_and(|v| v.trim() == "1")
+                        {
+                            slaved.push(attr);
+                        }
+                    }
+                    if slaved.is_empty() {
+                        tracing::info!(
+                            "PlutoSDR: this board's enable state machine is in {mode} and \
+                             no GPO pin is slaved to it — somebody put it in TDD for their \
+                             own reasons, so it is left that way"
+                        );
+                        return Ok(out);
+                    }
+                    let msg = format!(
+                        "PlutoSDR: this board is in {mode} with {} slaved to the radio — \
+                         the transmit-receive switching from an earlier session. Putting \
+                         it back into FDD and un-slaving the pins, because with the PTT \
+                         pins off nothing here drives its state machine. Choose TDD in \
+                         the PlutoSDR settings if you meant to keep it",
+                        slaved.join(", ")
+                    );
+                    tracing::warn!("{msg}");
+                    out.warnings.push(msg);
+                }
+                // In FDD, or a firmware that does not publish the mode: either
+                // way there is nothing to undo and nothing to say.
+                _ => return Ok(out),
+            }
+        }
+        for attr in [FDD_ENABLE, INITIALIZE] {
+            if !self.has_debug_attr(attr) {
+                let msg = format!(
+                    "PlutoSDR: this firmware publishes no {attr}, so the transmit-receive \
+                     switching cannot be set up — the GPO pins are left alone. It is \
+                     the AD9361 driver's own device-tree property, so a board without \
+                     it is running something other than a stock Pluto image"
+                );
+                tracing::warn!("{msg}");
+                out.warnings.push(msg);
+                return Ok(out);
+            }
+        }
+
+        // The duplex first, then the pins, then the commit — the order the
+        // AD9361 driver's own note gives, and the only one where `initialize`
+        // sees all of it.
+        let fdd_enable = if want_tdd { "0" } else { "1" };
+        if !self.write_setup_attr(conn, FDD_ENABLE, fdd_enable, &mut out.warnings)? {
+            return Ok(out);
+        }
+        for pin in 0..GPO_PINS {
+            // Every pin is written, not just the chosen pair: a pair selected
+            // in an earlier session is still slaved, and leaving it that way
+            // would key two amplifiers.
+            for (attr, want) in [
+                (format!("adi,gpo{pin}-slave-rx-enable"), pins.is_some_and(|(rx, _)| rx == pin)),
+                (format!("adi,gpo{pin}-slave-tx-enable"), pins.is_some_and(|(_, tx)| tx == pin)),
+            ] {
+                if !self.has_debug_attr(&attr) {
+                    if want {
+                        let msg = format!(
+                            "PlutoSDR: this firmware publishes no {attr}, so GPO{pin} cannot \
+                             be slaved to the radio — pick the other pair, or a \
+                             firmware that offers it"
+                        );
+                        tracing::warn!("{msg}");
+                        out.warnings.push(msg);
+                    }
+                    continue;
+                }
+                let value = if want { "1" } else { "0" };
+                self.write_setup_attr(conn, &attr, value, &mut out.warnings)?;
+            }
+        }
+        if pins == Some((0, 1)) {
+            // Analog Devices' own note puts an external LNA on these two, so a
+            // board wired that way has them claimed. PTT wins here because the
+            // operator just asked for it; GPO2/GPO3 is the pair that leaves an
+            // eLNA alone.
+            for attr in ELNA_GPO {
+                if self.has_debug_attr(attr) {
+                    tracing::info!(
+                        "PlutoSDR: clearing {attr} — GPO0/GPO1 are the PTT pair now, and a \
+                         pin cannot drive an external LNA and a T/R switch at once"
+                    );
+                    self.write_setup_attr(conn, attr, "0", &mut out.warnings)?;
+                }
+            }
+        }
+        if !self.write_setup_attr(conn, INITIALIZE, "1", &mut out.warnings)? {
+            return Ok(out);
+        }
+        // Read the duplex back rather than trusting the write. An accepted
+        // write only means the driver stored the property; whether the part
+        // came up in the duplex asked for is the question, and getting it
+        // wrong the optimistic way is the worst of the outcomes — a radio
+        // driving `ensm_mode` on a board still in FDD, where receive would
+        // stop at the first key-up and never come back.
+        match conn.read_debug_attr(&self.phy_id, FDD_ENABLE) {
+            Ok(v) if v.trim() == fdd_enable => out.tdd = want_tdd,
+            Ok(v) => {
+                let msg = format!(
+                    "PlutoSDR: the radio took {FDD_ENABLE} = {fdd_enable} and then read it \
+                     back as {v:?} — so it is in the other duplex, the GPO pins will not \
+                     follow the radio, and its state machine is being left alone"
+                );
+                tracing::warn!("{msg}");
+                out.warnings.push(msg);
+                return Ok(out);
+            }
+            // A firmware that will not read back what it just accepted is odd
+            // but not a reason to refuse the setting the operator asked for.
+            Err(e) => {
+                tracing::debug!("PlutoSDR: could not read {FDD_ENABLE} back: {e}");
+                out.tdd = want_tdd;
+            }
+        }
+        if !want_tdd {
+            // Restoring: `initialize` leaves the state machine wherever the
+            // driver's setup puts it, and this backend does not drive it in
+            // FDD — so the one write that says "and receive, please" is worth
+            // making rather than assuming. Best-effort: a board that refuses
+            // it will say so in the full-duplex check on the way past.
+            if let Err(e) = self.set_ensm_mode(conn, "fdd") {
+                tracing::debug!("PlutoSDR: could not put the state machine back to fdd: {e}");
+            }
+            return Ok(out);
+        }
+        match pins {
+            Some((rx, tx)) => tracing::info!(
+                "PlutoSDR: TDD, with GPO{rx} high on receive and GPO{tx} high on \
+                 transmit — those pins are about 1.3 V at a few milliamps, enough \
+                 for a transistor or an opto-isolator and not for a relay coil"
+            ),
+            None => tracing::info!("PlutoSDR: TDD, with no GPO pin slaved to the radio"),
+        }
+        Ok(out)
+    }
+
+    /// Write one setup attribute, answering whether it landed. A device that
+    /// refuses the value becomes a warning for the operator; a socket that has
+    /// gone is still an error, because nothing after it would work either.
+    fn write_setup_attr(
+        &self,
+        conn: &mut Connection,
+        attr: &str,
+        value: &str,
+        warnings: &mut Vec<String>,
+    ) -> Result<bool> {
+        match conn.write_debug_attr(&self.phy_id, attr, value) {
+            Ok(()) => Ok(true),
+            Err(e @ (Error::Remote { .. } | Error::Unsupported(_))) => {
+                let msg = format!("PlutoSDR: the radio refused {attr} = {value} ({e})");
+                tracing::warn!("{msg}");
+                warnings.push(msg);
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn tx_port(&self, conn: &mut Connection) -> Result<String> {
@@ -620,6 +922,7 @@ mod tests {
             id: "iio:device4".into(),
             name: "cf-ad9361-lpc".into(),
             attrs: Vec::new(),
+            debug_attrs: Vec::new(),
             channels: indices
                 .iter()
                 .map(|&i| Channel {

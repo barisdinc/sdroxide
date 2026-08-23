@@ -166,6 +166,15 @@ pub struct Device {
     /// The driver's name (`ad9361-phy`).
     pub name: String,
     pub attrs: Vec<String>,
+    /// Attributes reached with `READ <dev> DEBUG <attr>` rather than plainly.
+    ///
+    /// On an `ad9361-phy` these are the driver's copy of the device tree —
+    /// `adi,frequency-division-duplex-mode-enable`, the `adi,gpo…-slave-…`
+    /// lines, and `initialize`, which makes a batch of them take effect. They
+    /// are how the GPO transmit-receive switching in [`crate::PlutoRig`] is set
+    /// up, and they are listed here so a firmware that publishes none can be
+    /// told apart from one that refused the write.
+    pub debug_attrs: Vec<String>,
     pub channels: Vec<Channel>,
 }
 
@@ -176,6 +185,10 @@ impl Device {
 
     pub fn has_attr(&self, name: &str) -> bool {
         self.attrs.iter().any(|a| a == name)
+    }
+
+    pub fn has_debug_attr(&self, name: &str) -> bool {
+        self.debug_attrs.iter().any(|a| a == name)
     }
 
     /// Buffer channels in scan-element order — the order samples arrive in.
@@ -299,22 +312,27 @@ fn parse_device(node: roxmltree::Node) -> Result<Device> {
     let id = node.attribute("id").unwrap_or_default().to_string();
     let name = node.attribute("name").unwrap_or(&id).to_string();
     let mut attrs = Vec::new();
+    let mut debug_attrs = Vec::new();
     let mut channels = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
-            // `debug-attribute` and `buffer-attribute` are deliberately not
-            // collected: they need different commands, and this driver uses
-            // neither.
+            // `buffer-attribute` is deliberately not collected: it needs a
+            // command of its own and this driver uses none of them.
             "attribute" => {
                 if let Some(n) = child.attribute("name") {
                     attrs.push(n.to_string());
+                }
+            }
+            "debug-attribute" => {
+                if let Some(n) = child.attribute("name") {
+                    debug_attrs.push(n.to_string());
                 }
             }
             "channel" => channels.push(parse_channel(child)?),
             _ => {}
         }
     }
-    Ok(Device { id, name, attrs, channels })
+    Ok(Device { id, name, attrs, debug_attrs, channels })
 }
 
 fn parse_channel(node: roxmltree::Node) -> Result<Channel> {
@@ -383,6 +401,10 @@ mod tests {
     <attribute name="ensm_mode" filename="ensm_mode" />
     <attribute name="calib_mode" filename="calib_mode" />
     <debug-attribute name="adi,agc-attack-delay-us" />
+    <debug-attribute name="adi,frequency-division-duplex-mode-enable" />
+    <debug-attribute name="adi,gpo0-slave-rx-enable" />
+    <debug-attribute name="adi,gpo1-slave-tx-enable" />
+    <debug-attribute name="initialize" />
   </device>
   <device id="iio:device3" name="cf-ad9361-lpc">
     <channel id="voltage0" type="input">
@@ -433,6 +455,28 @@ mod tests {
         // The LO channels carry their human label as well as their wire id.
         let lo = phy.channel("altvoltage0", true).expect("rx lo");
         assert_eq!(lo.name.as_deref(), Some("RX_LO"));
+    }
+
+    /// The `adi,…` device-tree properties and `initialize` are a separate
+    /// namespace on the wire (`READ … DEBUG …`), and the GPO transmit-receive
+    /// switching is set up entirely through them — so they have to survive the
+    /// parse as something distinct from the plain attributes, not be folded in
+    /// with them and written with the wrong command.
+    #[test]
+    fn debug_attributes_are_kept_apart_from_the_plain_ones() {
+        let ctx = Context::parse(PLUTO_XML).expect("parse");
+        let phy = ctx.device("ad9361-phy").unwrap();
+        assert!(phy.has_debug_attr("adi,frequency-division-duplex-mode-enable"));
+        assert!(phy.has_debug_attr("adi,gpo0-slave-rx-enable"));
+        assert!(phy.has_debug_attr("initialize"));
+        // Not reachable as a plain attribute, and the plain ones are not
+        // reachable as debug ones.
+        assert!(!phy.has_attr("initialize"));
+        assert!(phy.has_attr("ensm_mode"));
+        assert!(!phy.has_debug_attr("ensm_mode"));
+        // A firmware without them is how a board that cannot do this is told
+        // apart from one that refused the write.
+        assert!(!phy.has_debug_attr("adi,gpo2-slave-rx-enable"));
     }
 
     #[test]

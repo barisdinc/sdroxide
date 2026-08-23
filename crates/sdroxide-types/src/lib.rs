@@ -146,12 +146,12 @@ pub use radio::{
     HydraSdrPort, IcomModel, IcomNetConfig, IcomRxSource, IcomScopeSpan, IfModeClass, KenwoodSend,
     LimeAuxConfig, LimeAuxRole, LimeConfig, LimeDevice, LimeDiversityMode, LineState, ModeControl,
     PANADAPTER_OFFSET_MAX_HZ, PanadapterAudio, PanadapterConfig, PanadapterTap, Parity, PlutoAgc,
-    PlutoConfig, PlutoDevice, PttMethod, RadioConfig, RtlSdrAgc, RtlSdrConfig, RtlSdrDevice,
-    RtlSdrHfMode, RtlTcpConfig, Rx888Config, Rx888Device, SdrPlayAgc, SdrPlayConfig, SdrPlayDevice,
-    SdrPlayDuoTuner, SdrPlayModel, SerialConfig, SmartSdrConfig, SmartSdrDevice, SoapyConfig,
-    SoapyDeviceInfo, SoundFormat, SpyServerConfig, SpyServerFormat, StopBits, TciConfig,
-    cat_iq_offset_max_hz, converter_preset_name, elad_cat_baud, format_freq_ranges,
-    hackrf_serial_matches, parse_freq_ranges,
+    PlutoConfig, PlutoDevice, PlutoDuplex, PlutoPtt, PttMethod, RadioConfig, RtlSdrAgc,
+    RtlSdrConfig, RtlSdrDevice, RtlSdrHfMode, RtlTcpConfig, Rx888Config, Rx888Device, SdrPlayAgc,
+    SdrPlayConfig, SdrPlayDevice, SdrPlayDuoTuner, SdrPlayModel, SerialConfig, SmartSdrConfig,
+    SmartSdrDevice, SoapyConfig, SoapyDeviceInfo, SoundFormat, SpyServerConfig, SpyServerFormat,
+    StopBits, TciConfig, cat_iq_offset_max_hz, converter_preset_name, elad_cat_baud,
+    format_freq_ranges, hackrf_serial_matches, parse_freq_ranges,
 };
 pub use rds::{
     RdsClock, RdsData, RdsGroupLog, RdsStandard, RdsStats, RtPlus, af_code_hz, pi_callsign,

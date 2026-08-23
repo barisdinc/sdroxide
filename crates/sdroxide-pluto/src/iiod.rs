@@ -253,12 +253,20 @@ impl Connection {
         chan: Option<(bool, &str)>,
         attr: &str,
     ) -> Result<String> {
-        let cmd = match chan {
-            None => format!("READ {dev} {attr}"),
-            Some((output, id)) => {
-                format!("READ {dev} {} {id} {attr}", if output { "OUTPUT" } else { "INPUT" })
-            }
-        };
+        self.read_attr_in(dev, &selector(chan), attr)
+    }
+
+    /// `READ <dev> DEBUG <attr>` — the driver's copy of the device tree
+    /// (`adi,…`) and the `initialize` trigger that makes a batch of it take
+    /// effect. A separate namespace on the wire, not a differently spelled
+    /// device attribute: `READ ad9361-phy adi,gpo2-slave-rx-enable` answers
+    /// `-ENOENT` on the very board that has it.
+    pub fn read_debug_attr(&mut self, dev: &str, attr: &str) -> Result<String> {
+        self.read_attr_in(dev, "DEBUG ", attr)
+    }
+
+    fn read_attr_in(&mut self, dev: &str, sel: &str, attr: &str) -> Result<String> {
+        let cmd = format!("READ {dev} {sel}{attr}");
         self.send(&cmd)?;
         let n = self.read_code(&cmd)?;
         let bytes = self.read_exact_n(&cmd, n as usize)?;
@@ -282,16 +290,18 @@ impl Connection {
         attr: &str,
         value: &str,
     ) -> Result<()> {
+        self.write_attr_in(dev, &selector(chan), attr, value)
+    }
+
+    /// `WRITE <dev> DEBUG <attr> <len>` — see [`Self::read_debug_attr`].
+    pub fn write_debug_attr(&mut self, dev: &str, attr: &str, value: &str) -> Result<()> {
+        self.write_attr_in(dev, "DEBUG ", attr, value)
+    }
+
+    fn write_attr_in(&mut self, dev: &str, sel: &str, attr: &str, value: &str) -> Result<()> {
         let mut payload = value.as_bytes().to_vec();
         payload.push(0);
-        let cmd = match chan {
-            None => format!("WRITE {dev} {attr} {}", payload.len()),
-            Some((output, id)) => format!(
-                "WRITE {dev} {} {id} {attr} {}",
-                if output { "OUTPUT" } else { "INPUT" },
-                payload.len()
-            ),
-        };
+        let cmd = format!("WRITE {dev} {sel}{attr} {}", payload.len());
         self.trace.cmd(&format!("{cmd}  [{value}]"));
         self.write_all_raw(&format!("{cmd}\r\n"))?;
         self.writer.write_all(&payload).map_err(|e| Error::io("write attribute value", e))?;
@@ -535,6 +545,17 @@ impl Connection {
     }
 }
 
+/// What comes between the device and the attribute name in a `READ`/`WRITE`:
+/// nothing for a device attribute, `INPUT`/`OUTPUT` and the channel id for a
+/// channel one. Ends with its own separating space so a device attribute
+/// contributes none.
+fn selector(chan: Option<(bool, &str)>) -> String {
+    match chan {
+        None => String::new(),
+        Some((output, id)) => format!("{} {id} ", if output { "OUTPUT" } else { "INPUT" }),
+    }
+}
+
 /// How many 32-bit words a mask for `channels` scan elements occupies.
 pub fn mask_words(channels: usize) -> usize {
     channels.div_ceil(32).max(1)
@@ -643,6 +664,34 @@ mod tests {
             sent.contains("WRITE ad9361-phy OUTPUT altvoltage0 frequency 11\r\n1000000000\0"),
             "sent: {sent:?}"
         );
+    }
+
+    /// Debug attributes are a namespace of their own on the wire, and the
+    /// keyword goes between the device and the attribute name. `READ
+    /// ad9361-phy adi,gpo2-slave-rx-enable` — the same attribute without it —
+    /// answers `-ENOENT` on the very board that has it, so this is a spelling
+    /// that has to be right rather than merely plausible.
+    #[test]
+    fn a_debug_attribute_is_addressed_with_the_debug_keyword() {
+        let mut script = preamble();
+        script.extend_from_slice(b"2\r\n1\0\n");
+        let (value, sent) =
+            with_server(script, |c| c.read_debug_attr("ad9361-phy", "adi,gpo2-slave-rx-enable"));
+        assert_eq!(value.expect("read"), "1");
+        let sent = String::from_utf8_lossy(&sent);
+        assert!(
+            sent.contains("READ ad9361-phy DEBUG adi,gpo2-slave-rx-enable\r\n"),
+            "sent: {sent:?}"
+        );
+
+        let mut script = preamble();
+        script.extend_from_slice(b"2\r\n");
+        let (ok, sent) =
+            with_server(script, |c| c.write_debug_attr("ad9361-phy", "initialize", "1"));
+        ok.expect("write");
+        let sent = String::from_utf8_lossy(&sent);
+        // One byte of value plus the NUL, as on any other write.
+        assert!(sent.contains("WRITE ad9361-phy DEBUG initialize 2\r\n1\0"), "sent: {sent:?}");
     }
 
     #[test]

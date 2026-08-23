@@ -560,7 +560,17 @@ use sdroxide_types::{
 /// and an event, so a v82 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying. The new role variant
 /// would have been survivable on its own; the fields are not.
-pub const PROTO_VERSION: u16 = 83;
+///
+/// **84** — a PlutoSDR can key an external amplifier, LNA or transmit-receive
+/// switch from its own GPO pins (issue #135). [`sdroxide_types::PlutoConfig`]
+/// gained `duplex` ([`sdroxide_types::PlutoDuplex`]) and `ptt_gpo`
+/// ([`sdroxide_types::PlutoPtt`]): which duplex the AD9361's enable state
+/// machine runs in, and which pair of pins follows the radio.
+///
+/// Fields appended to the radio configuration, which rides in both a command
+/// and an event, so a v83 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying.
+pub const PROTO_VERSION: u16 = 84;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

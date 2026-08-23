@@ -53,6 +53,11 @@ use crate::trace::Trace;
 /// How long the TCP handshake may take before the address counts as wrong.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The two enable-state-machine states a TDD board is driven between. Only
+/// written on a board this driver put in TDD — see [`Shared::tdd`].
+const ENSM_RX: &str = "rx";
+const ENSM_TX: &str = "tx";
+
 /// How often a stream thread emits a throughput line (`RUST_LOG=…=debug`).
 pub(crate) const STATS_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -166,6 +171,12 @@ pub(crate) struct Shared {
     /// module's header. Fixed for the life of the connection: it describes the
     /// network the radio is on, which does not change under it.
     pub full_duplex: bool,
+    /// The part was put in TDD, so `ensm_mode` is this driver's to drive: the
+    /// receiver is dead until it says `rx`, the transmitter until it says
+    /// `tx`, and the GPO pins keying an external amplifier follow whichever it
+    /// last said. False on a board left in FDD, where writing it would be
+    /// wrong rather than merely redundant.
+    pub tdd: bool,
     pub buffer_samples: usize,
     pub rate_hz: f64,
     /// The transmit path's own rate. The AD9361 clocks both directions
@@ -362,6 +373,29 @@ impl PlutoRig {
         );
         let phy = Phy::probe(&mut control, &ctx, &addr.to_string())?;
 
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Before anything else is configured, and not for tidiness: committing
+        // the duplex and the GPO pins re-runs the AD9361's setup from its
+        // device-tree copy, which puts the rate, the filter, the gains and both
+        // oscillators back to the board's defaults. Everything below has to
+        // land on the far side of that.
+        let tr = phy.setup_tr_switching(&mut control, cfg.duplex, cfg.ptt_gpo)?;
+        warnings.extend(tr.warnings);
+        // TDD is one direction at a time in the silicon, so the link is no
+        // longer what decides this — the part is.
+        let full_duplex = if tr.tdd && cfg.full_duplex {
+            let msg = "PlutoSDR: full duplex is off — TDD enables one direction at a time, \
+                       and that is what the GPO transmit-receive pins key from. Set the PTT \
+                       pins to Off and the duplex to FDD to listen through an over"
+                .to_string();
+            tracing::warn!("{msg}");
+            warnings.push(msg);
+            false
+        } else {
+            cfg.full_duplex
+        };
+
         // Order matters. The rate sets the clock tree, the bandwidth is chosen
         // against the rate, and the receive gain only takes effect once the AGC
         // is in manual — so each step depends on the one before it.
@@ -398,11 +432,10 @@ impl PlutoRig {
         let rx_port = phy.rx_port(&mut control).unwrap_or_default();
         let tx_port = phy.tx_port(&mut control).unwrap_or_default();
 
-        let mut warnings: Vec<String> = Vec::new();
         if let Some(n) = phy.limits.assumption_notice() {
             warnings.push(n);
         }
-        if cfg.full_duplex {
+        if full_duplex {
             // Both a note for the log — full duplex is the setting a chopped
             // transmission gets blamed on, so the session has to say whether it
             // was on — and the one check that can be made from here. The link
@@ -462,6 +495,21 @@ impl PlutoRig {
             cfg.rx_gain_db,
         );
 
+        // In TDD nothing receives until the state machine is told to. Last,
+        // because every write above it moves the part through its own
+        // transitions — and because the transmitter has been silenced by now,
+        // so the first state this radio is deliberately put into is receive.
+        if tr.tdd {
+            phy.set_ensm_mode(&mut control, ENSM_RX).map_err(|e| {
+                Error::Msg(format!(
+                    "this board is in TDD — which is what the GPO transmit-receive pins key \
+                     from — but it would not take ensm_mode = {ENSM_RX} ({e}), so its \
+                     receiver would never start. Set the PTT pins to Off in the \
+                     PlutoSDR settings to run it in FDD"
+                ))
+            })?;
+        }
+
         if phy.rx_pairs_available() > 1 {
             tracing::info!(
                 "PlutoSDR: this firmware streams {} receive chains — a second radio on the \
@@ -483,7 +531,8 @@ impl PlutoRig {
             last_rx_ms: AtomicU64::new(0),
             last_rx1_ms: AtomicU64::new(0),
             transmitting: AtomicBool::new(false),
-            full_duplex: cfg.full_duplex,
+            full_duplex,
+            tdd: tr.tdd,
             buffer_samples,
             rate_hz: rate,
             tx_rate_hz: tx_rate,
@@ -1244,6 +1293,17 @@ fn control_thread(
     shared.rx_enabled.store(false, Ordering::Relaxed);
     shared.tx_enabled.store(false, Ordering::Relaxed);
     shared.alive.store(false, Ordering::Relaxed);
+    // Last thing on the way out, and best-effort by design: on a TDD board the
+    // transmit GPO is keying somebody's amplifier, and a session that ends
+    // during an over would otherwise leave it keyed until the Pluto is
+    // rebooted. The socket may already have been shut down to break a blocked
+    // read, in which case this simply fails — which is why it is not the only
+    // thing standing between an over and a stuck PA, just the cheap one.
+    if shared.tdd
+        && let Err(e) = shared.phy.set_ensm_mode(&mut conn, ENSM_RX)
+    {
+        tracing::debug!("PlutoSDR: could not put the state machine back to receive: {e}");
+    }
     conn.exit();
     tracing::debug!("PlutoSDR: control thread finished");
 }
@@ -1280,6 +1340,15 @@ fn key_up(conn: &mut Connection, shared: &Shared, hz: f64, ppm: f64) -> Result<(
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    // In TDD the transmit path is off until the state machine is moved, so
+    // this comes before the buffer opens rather than after: a DMA buffer
+    // filling a disabled transmitter is samples thrown away. It is also what
+    // asserts the slaved GPO pin, so an external amplifier is keyed a couple
+    // of milliseconds before there is anything for it to amplify — which is
+    // the order a T/R switch wants.
+    if shared.tdd {
+        phy.set_ensm_mode(conn, ENSM_TX)?;
+    }
     shared.tx_enabled.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -1302,6 +1371,12 @@ fn key_down(conn: &mut Connection, shared: &Shared, rx_hz: f64, ppm: f64) -> Res
     let deadline = Instant::now() + Duration::from_millis(500);
     while shared.tx_active.load(Ordering::Relaxed) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(2));
+    }
+    // After the buffer has drained, for the same reason key-up ran before it:
+    // this drops the transmit GPO, and an amplifier switched out from under a
+    // signal that is still there is one arcing its relay.
+    if shared.tdd {
+        shared.phy.set_ensm_mode(conn, ENSM_RX)?;
     }
     shared.rx_enabled.store(true, Ordering::Relaxed);
     if rx_hz > 0.0 {
