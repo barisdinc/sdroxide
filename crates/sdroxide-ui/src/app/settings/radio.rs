@@ -47,9 +47,9 @@ pub(in crate::app) fn settings_cat_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        CAT_SCOPE_MIN_BAUD, CatFamily, CwKeying, DigiMode, Direction, EladAntenna, EladTxInput,
-        IcomModel, IcomScopeSpan, KenwoodSend, LineState, ModeControl, Parity, PttMethod,
-        SoundFormat, StopBits,
+        CAT_SCOPE_MIN_BAUD, CatFamily, CwKeying, DigiMode, Direction, ELAD_CAT_BAUDS,
+        ELAD_DEFAULT_CAT_BAUD, EladAntenna, EladTxInput, IcomModel, IcomScopeSpan, KenwoodSend,
+        LineState, ModeControl, Parity, PttMethod, SoundFormat, StopBits,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -223,15 +223,47 @@ pub(in crate::app) fn settings_cat_tab(
 
         if serial {
             ui.label("Baud");
-            ComboBox::from_id_salt("baud")
-                .selected_text(cfg.cat.serial.baud.to_string())
-                .show_styled(ui, |ui| {
-                    for b in [4800u32, 9600, 19200, 38400, 57600, 115200] {
-                        if ui.selectable_label(cfg.cat.serial.baud == b, b.to_string()).clicked() {
-                            cfg.cat.serial.baud = b;
+            // Most families take whatever the operator has set at the radio, so
+            // the whole spread is offered. An ELAD is the exception: an FDM-DUO's
+            // CAT port has four rates and no others, and at any other one the
+            // link is silent both ways rather than merely slow — so offering
+            // 19200 here (which is also this block's own default) would be
+            // offering a link that cannot work. See `sdroxide_cat::spawn`.
+            let bauds: &[u32] = if cfg.cat.family == CatFamily::Elad {
+                &ELAD_CAT_BAUDS
+            } else {
+                &[4800, 9600, 19200, 38400, 57600, 115200]
+            };
+            ui.horizontal(|ui| {
+                ComboBox::from_id_salt("baud")
+                    .selected_text(cfg.cat.serial.baud.to_string())
+                    .show_styled(ui, |ui| {
+                        for &b in bauds {
+                            if ui
+                                .selectable_label(cfg.cat.serial.baud == b, b.to_string())
+                                .clicked()
+                            {
+                                cfg.cat.serial.baud = b;
+                            }
                         }
-                    }
-                });
+                    });
+                // A rate the combo is showing without offering — which for an
+                // ELAD is where an untouched config starts, this block's own
+                // default being 19200.
+                if !bauds.contains(&cfg.cat.serial.baud) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "the radio has no {} baud setting — {ELAD_DEFAULT_CAT_BAUD} \
+                                 will be used instead",
+                                cfg.cat.serial.baud,
+                            ))
+                            .color(crate::theme::YELLOW()),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
             ui.end_row();
 
             ui.label("Data bits");
@@ -3389,8 +3421,8 @@ pub(in crate::app) fn settings_elad_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        Direction, ELAD_ATTENUATOR_DB, ELAD_SAMPLE_RATES, EladAntenna, EladConfig, EladTxInput,
-        ModeControl, PttMethod,
+        Direction, ELAD_ATTENUATOR_DB, ELAD_CAT_BAUDS, ELAD_DEFAULT_CAT_BAUD, ELAD_SAMPLE_RATES,
+        EladAntenna, EladConfig, EladTxInput, ModeControl, PttMethod,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -3532,6 +3564,17 @@ pub(in crate::app) fn settings_elad_tab(
         )
         .weak(),
     );
+    ui.label(
+        RichText::new(
+            "The radio's display follows the CENTRE of the panadapter rather than \
+             the dial inside it: on an FDM-DUO the VFO is what the receive window \
+             is built around, so tuning within the window leaves the front panel \
+             where it is and dragging the window moves it. That is not the control \
+             port failing — transmit goes out on the dial, and the VFO is put there \
+             at key-down and brought back on unkey.",
+        )
+        .weak(),
+    );
 
     egui::Grid::new("elad-cat-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Serial port");
@@ -3559,19 +3602,43 @@ pub(in crate::app) fn settings_elad_tab(
         });
         ui.end_row();
 
-        ui.label("Baud")
-            .on_hover_text("Must match menu 70 \"CAT BAUD\" on the radio, which ships at 38400.");
-        ComboBox::from_id_salt("elad_baud")
-            .selected_text(cfg.cat.serial.baud.to_string())
-            .show_styled(ui, |ui| {
-                // The four the FDM-DUO's own menu offers, and only those:
-                // anything else is a rate the radio will not answer at.
-                for b in [9600u32, 38400, 57600, 115200] {
-                    if ui.selectable_label(cfg.cat.serial.baud == b, b.to_string()).clicked() {
-                        cfg.cat.serial.baud = b;
+        ui.label("Baud").on_hover_text(
+            "Must match menu 70 \"CAT BAUD\" on the radio, which ships at 38400. The \
+             radio has these four rates and no others, and a port opened at any \
+             other one is silent both ways — the radio ignores the dial and refuses \
+             to key, with nothing to say why.",
+        );
+        ui.horizontal(|ui| {
+            ComboBox::from_id_salt("elad_baud")
+                .selected_text(cfg.cat.serial.baud.to_string())
+                .show_styled(ui, |ui| {
+                    // The four the FDM-DUO's own menu offers, and only those:
+                    // anything else is a rate the radio will not answer at.
+                    for b in ELAD_CAT_BAUDS {
+                        if ui.selectable_label(cfg.cat.serial.baud == b, b.to_string()).clicked() {
+                            cfg.cat.serial.baud = b;
+                        }
                     }
-                }
-            });
+                });
+            // Which the combo above can be *showing* without offering, because
+            // this is the `cat` block the CAT / Audio interface uses and its own
+            // default is 19200 — a rate no FDM-DUO has. A configuration that has
+            // never had this field touched lands here, so it is worth a line on
+            // screen rather than a number that looks set and is not.
+            if !ELAD_CAT_BAUDS.contains(&cfg.cat.serial.baud) {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "the radio has no {} baud setting — {ELAD_DEFAULT_CAT_BAUD} will be \
+                             used instead",
+                            cfg.cat.serial.baud,
+                        ))
+                        .color(crate::theme::YELLOW()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
         ui.end_row();
 
         ui.label("PTT method").on_hover_text(

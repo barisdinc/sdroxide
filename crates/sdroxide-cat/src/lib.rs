@@ -1045,8 +1045,48 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
     (freq.is_some() || mode.is_some()).then_some((freq, mode))
 }
 
+/// Bring the serial parameters into line with what the *radio* actually has,
+/// where the family fixes them.
+///
+/// Only the FDM-DUO so far, and it earns the treatment: its CAT port is
+/// asynchronous 8N1 at 9600, 38400, 57600 or 115200 and nothing else (manual
+/// v2.6 §6.1). A port opened outside that is not slow or lossy, it is silent in
+/// both directions — no command lands and no answer comes back, so what the
+/// operator sees is a radio ignoring the dial and refusing to key, on whatever
+/// port they try next.
+///
+/// The reason this is worth doing rather than leaving to the settings dialog is
+/// that the failing value is the *default*. [`SerialConfig`]'s own default baud
+/// is 19200, which is not one of the four, and the `cat` block is shared between
+/// the CAT interface and the native ELAD one — so an ELAD owner who has never
+/// touched Baud starts from a link their radio cannot hear a word of. That was
+/// [issue #146].
+///
+/// [`SerialConfig`]: sdroxide_types::SerialConfig
+/// [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
+fn with_family_serial_limits(mut cfg: CatConfig) -> CatConfig {
+    if cfg.family != CatFamily::Elad {
+        return cfg;
+    }
+    let asked = cfg.serial.baud;
+    cfg.serial.baud = sdroxide_types::elad_cat_baud(asked);
+    if cfg.serial.baud != asked {
+        warn!(
+            asked,
+            using = cfg.serial.baud,
+            "no FDM-DUO has that CAT baud rate (menu 70 offers four); opening at the \
+             factory rate instead"
+        );
+    }
+    cfg.serial.data_bits = 8;
+    cfg.serial.parity = Parity::None;
+    cfg.serial.stop_bits = StopBits::One;
+    cfg
+}
+
 /// Spawn the serial CAT thread from a persisted [`CatConfig`].
 pub fn spawn(cfg: CatConfig) -> CatHandle {
+    let cfg = with_family_serial_limits(cfg);
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (telem_tx, telem_rx) = crossbeam_channel::unbounded();
@@ -1494,10 +1534,23 @@ fn open_link(cfg: &CatConfig) -> std::io::Result<Box<dyn Link>> {
 }
 
 /// What to call this link in the log — a port and a baud rate, or a host.
+///
+/// The rate named is the one the port will actually be opened at, not
+/// necessarily the one in the config: see [`with_family_serial_limits`]. A label
+/// that repeated a baud rate the radio has no setting for would be pointing at
+/// the wrong thing in exactly the moment somebody is reading it to find out why
+/// the link is dead.
 pub fn link_label(cfg: &CatConfig) -> String {
     match cfg.family {
         CatFamily::Rigctld => format!("rigctld at {}", cfg.rigctld_addr.trim()),
         CatFamily::Flrig => format!("flrig at {}", cfg.flrig_addr.trim()),
+        CatFamily::Elad => {
+            format!(
+                "{} at {} baud",
+                cfg.serial.path,
+                sdroxide_types::elad_cat_baud(cfg.serial.baud)
+            )
+        }
         _ => format!("{} at {} baud", cfg.serial.path, cfg.serial.baud),
     }
 }
@@ -2779,6 +2832,65 @@ mod tests {
             CatFamily::Flrig,
         ] {
             assert!(!family(f).pushes_updates(), "{f:?}");
+        }
+    }
+
+    /// An FDM-DUO's CAT port is 8N1 at one of four rates, and the default this
+    /// config block ships with is none of them — so the link an ELAD owner gets
+    /// before touching anything is one the radio cannot hear a word of. Issue
+    /// #146: a DUO receiving perfectly and refusing to transmit, on every
+    /// serial port its owner tried.
+    #[test]
+    fn an_elad_is_held_to_the_serial_settings_its_port_has() {
+        let elad = |serial: sdroxide_types::SerialConfig| {
+            with_family_serial_limits(CatConfig {
+                family: CatFamily::Elad,
+                serial,
+                ..CatConfig::default()
+            })
+            .serial
+        };
+        // The untouched default, which is the case that matters.
+        let fixed = elad(sdroxide_types::SerialConfig::default());
+        assert_eq!(fixed.baud, sdroxide_types::ELAD_DEFAULT_CAT_BAUD);
+        assert_eq!(fixed.data_bits, 8);
+        assert_eq!(fixed.parity, Parity::None);
+        assert_eq!(fixed.stop_bits, StopBits::One);
+        // A frame carried over from a rig that wanted something else.
+        let fixed = elad(sdroxide_types::SerialConfig {
+            baud: 115_200,
+            data_bits: 7,
+            parity: Parity::Even,
+            stop_bits: StopBits::Two,
+            ..Default::default()
+        });
+        assert_eq!(fixed.baud, 115_200, "a rate the radio has is the operator's own");
+        assert_eq!(fixed.data_bits, 8);
+        assert_eq!(fixed.parity, Parity::None);
+        assert_eq!(fixed.stop_bits, StopBits::One);
+    }
+
+    /// And nobody else is touched: every other family takes whatever the
+    /// operator has set at the radio, including the frames an ELAD cannot use.
+    #[test]
+    fn no_other_family_has_its_serial_settings_rewritten() {
+        let odd = sdroxide_types::SerialConfig {
+            baud: 4800,
+            data_bits: 7,
+            parity: Parity::Even,
+            stop_bits: StopBits::Two,
+            ..Default::default()
+        };
+        for f in CatFamily::ALL {
+            if f == CatFamily::Elad {
+                continue;
+            }
+            let cfg = with_family_serial_limits(CatConfig {
+                family: f,
+                serial: odd.clone(),
+                ..CatConfig::default()
+            });
+            assert_eq!(cfg.serial, odd, "{f:?}");
         }
     }
 

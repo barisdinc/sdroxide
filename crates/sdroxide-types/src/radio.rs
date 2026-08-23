@@ -2497,6 +2497,38 @@ pub const ELAD_DEFAULT_RATE_HZ: u32 = 192_000;
 /// The attenuator's depth in dB. One pad, in or out.
 pub const ELAD_ATTENUATOR_DB: f64 = 12.0;
 
+/// The baud rates an FDM-DUO's CAT port can be set to, from menu 70 `CAT BAUD`.
+///
+/// The whole list, and nothing outside it works: the port is asynchronous 8N1
+/// at one of these four (FDM-DUO manual v2.6 §6.1), so a link opened at any
+/// other rate is silent in both directions — no command lands, no answer comes
+/// back, and the radio sits there ignoring the dial and refusing to key.
+///
+/// It is worth being explicit about which rate that is in practice.
+/// [`SerialConfig`]'s own default is **19200**, which is not one of these, and
+/// [`RadioConfig::cat`] is shared with the CAT / Audio interface — so a `cat`
+/// block whose baud has never been touched describes a link an FDM-DUO cannot
+/// hear a word of. That is not an exotic mistake; it is what a fresh
+/// configuration looks like, and it is why [`elad_cat_baud`] exists rather than
+/// this being left to the operator to notice.
+pub const ELAD_CAT_BAUDS: [u32; 4] = [9_600, 38_400, 57_600, 115_200];
+
+/// The rate an FDM-DUO ships on, and what a rate it has no setting for falls
+/// back to.
+pub const ELAD_DEFAULT_CAT_BAUD: u32 = 38_400;
+
+/// The rate an FDM-DUO's CAT port will actually be opened at, given what the
+/// configuration asks for.
+///
+/// A rate the radio has is used as it stands — the operator may well have moved
+/// menu 70 off the factory setting, and this must not drag them back. Anything
+/// else is a rate no FDM-DUO answers at, so it becomes [`ELAD_DEFAULT_CAT_BAUD`]:
+/// a link that might work beats one that certainly cannot, and the caller says
+/// on screen that the substitution happened.
+pub fn elad_cat_baud(configured: u32) -> u32 {
+    if ELAD_CAT_BAUDS.contains(&configured) { configured } else { ELAD_DEFAULT_CAT_BAUD }
+}
+
 /// ELAD FDM-DUO / FDM-S1 / FDM-S2 (USB) backend configuration.
 ///
 /// The DUO's rig control is *not* here: it reuses [`RadioConfig::cat`] with
@@ -5217,6 +5249,38 @@ mod tests {
         assert!(CatFamily::Flrig.is_network());
     }
 
+    /// sdroxide's own serial default is a rate no FDM-DUO has, and the `cat`
+    /// block it lives in is shared with the CAT / Audio interface — so the
+    /// configuration an ELAD owner starts from describes a control port the
+    /// radio cannot hear a word of. That was issue #146: a DUO receiving
+    /// perfectly and refusing to transmit on every port its owner tried.
+    #[test]
+    fn the_default_baud_is_one_no_fdm_duo_has() {
+        let default = SerialConfig::default().baud;
+        assert!(
+            !ELAD_CAT_BAUDS.contains(&default),
+            "if the shared default ever becomes an ELAD rate, the substitution below stops \
+             being the thing that makes a fresh configuration work"
+        );
+        assert_eq!(elad_cat_baud(default), ELAD_DEFAULT_CAT_BAUD);
+    }
+
+    /// A rate the radio *does* have is left exactly as it is: menu 70 is the
+    /// operator's own setting, and an owner who moved it off the factory 38400
+    /// must not be dragged back to it.
+    #[test]
+    fn a_rate_the_radio_has_is_left_alone() {
+        for b in ELAD_CAT_BAUDS {
+            assert_eq!(elad_cat_baud(b), b, "{b} is one of the radio's own");
+        }
+        assert!(ELAD_CAT_BAUDS.contains(&ELAD_DEFAULT_CAT_BAUD), "the fallback must be reachable");
+        // The rates the manual does not list, including the ones every other
+        // family here uses.
+        for b in [1200, 4800, 19_200, 230_400] {
+            assert_eq!(elad_cat_baud(b), ELAD_DEFAULT_CAT_BAUD, "{b} is not an FDM-DUO rate");
+        }
+    }
+
     /// The offset is a position inside the digitised window, so what may be
     /// asked for grows with the window. Half the rate either way, and the 8 kHz
     /// an Elecraft's `RX SHFT` asks for fits in the narrowest of them.
@@ -5971,3 +6035,4 @@ mod tests {
         assert_eq!(chains("LimeNET-Micro, media=USB 2.0"), 1);
     }
 }
+

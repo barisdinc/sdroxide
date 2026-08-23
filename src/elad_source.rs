@@ -196,6 +196,29 @@ impl EladSource {
             // still say Kenwood.
             let mut cat = cat.clone();
             cat.family = CatFamily::Elad;
+            // Forcing the family is also what brings the line discipline into
+            // line: `sdroxide_cat::spawn` holds an ELAD to the four baud rates
+            // and the 8N1 frame its CAT port actually has. Worth saying on
+            // screen as well as in the log, because the value that fails this
+            // way is the *default* — `RadioConfig::cat` is shared with the CAT
+            // interface and its own default baud is 19200, which no FDM-DUO
+            // has, so an owner who has never touched Baud starts from a link
+            // the radio cannot hear a word of. It is silent in both directions,
+            // which is what [issue #146] looked like from the operator's chair:
+            // a DUO that received perfectly and would not transmit, on every
+            // serial port they tried.
+            //
+            // [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
+            let asked = cat.serial.baud;
+            let using = sdroxide_types::elad_cat_baud(asked);
+            if using != asked {
+                status.push(format!(
+                    "the FDM-DUO has no {asked} baud CAT setting, so its control port is \
+                     being opened at {using} instead — at any rate the radio does not have, \
+                     it ignores the dial and refuses to key. Set Baud under Settings → Radio \
+                     to whatever menu 70 \"CAT BAUD\" says on the radio.",
+                ));
+            }
             Control::Serial(Box::new(sdroxide_cat::spawn(cat)))
         };
         let signal_max_age = sdroxide_cat::signal_max_age(cat);

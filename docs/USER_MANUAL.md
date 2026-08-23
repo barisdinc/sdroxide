@@ -4417,7 +4417,9 @@ what does the selecting.
 > refused the transmit command*.
 
 > **Note (ELAD):** this family is the FDM-DUO and FDM-DUOr. Set **Baud** to
-> match menu 70 `CAT BAUD` on the radio, which ships at 38400. The rig's own
+> match menu 70 `CAT BAUD` on the radio, which ships at 38400 — the radio has
+> only 9600, 38400, 57600 and 115200, and at any other rate the link is silent
+> both ways rather than merely unreliable. The rig's own
 > S-meter and SWR are read (`SM` and `WR`) and its transmit power appears on the
 > Drive slider as the nine fixed steps the radio has — 0.3, 0.5, 1, 1.2, 1.5, 2,
 > 3, 4 and 5 W — rather than as a continuous control. **Transmit input** beside
@@ -6014,6 +6016,17 @@ get everything a CAT radio gives: the front-panel knob moves the display (it
 pans the whole window — see below), the mode, PTT, the radio's own S-meter and
 SWR, and its transmit power on the Drive slider (nine fixed steps from 0.3 W to
 5 W, which is what the radio has rather than a continuous control).
+
+> **Check the baud rate first if nothing you do reaches the radio.** The
+> FDM-DUO's CAT port has four rates and no others — 9600, 38400, 57600 and
+> 115200, always 8N1 — and a port opened at any other one is silent in both
+> directions: no command lands, no answer comes back, and what you see is a
+> radio that ignores the dial and will not key, on every serial port you try.
+> This setting is shared with the CAT / Audio interface ([6.2.2](#622-cat-radios-serial-control--usb-audio)),
+> whose own default is 19200, so a configuration in which you have never touched
+> **Baud** starts out at a rate the radio has no setting for. sdroxide falls back
+> to 38400 in that case and says so on screen, but the honest fix is to set this
+> to whatever menu 70 says ([issue #146](https://github.com/dividebysandwich/sdroxide/issues/146)).
 
 Leave the port **empty** and an FDM-DUO is still usable on its receive cable
 alone: the driver tunes, changes mode and keys through the CAT gateway on the
