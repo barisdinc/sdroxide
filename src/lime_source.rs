@@ -81,8 +81,33 @@ pub struct LimeSource {
     /// `open_status` rather than refusing the radio: a front end that failed to
     /// answer should not cost the operator their receiver.
     rfe_note: Option<String>,
+    /// Where the chip's own DC/IQ calibration was last made, and when the next
+    /// one falls due. See [`Self::recalibrate_if_due`].
+    cal_center: f64,
+    cal_due: Option<Instant>,
     label: String,
 }
+
+/// How far the synthesiser may move before the chip's DC-offset and
+/// image-rejection calibration is no longer the one for where it is.
+///
+/// Proportional, with a floor: the LO leakage a zero-IF mixer demodulates
+/// against itself is a property of the synthesiser's own settings, so it drifts
+/// on a scale that goes with the frequency rather than a fixed number of
+/// megahertz. One per cent puts the boundary at 1.5 MHz on 2 m and 4 MHz on
+/// 70 cm, and the floor keeps HF — where one per cent would be a few tens of
+/// kilohertz — from recalibrating on every band change within a band.
+const RECAL_FRACTION: f64 = 0.01;
+const RECAL_FLOOR_HZ: f64 = 1.0e6;
+
+/// How long the dial has to sit still before the calibration is actually run.
+///
+/// `LMS_Calibrate` stalls whatever thread calls it for the better part of a
+/// second, and the thread that calls it here is the one reading samples. So it
+/// is never run *while* the operator is moving: dragging a panadapter across a
+/// band pushes this deadline ahead of itself and nothing happens until they
+/// stop.
+const RECAL_SETTLE: Duration = Duration::from_millis(1500);
 
 impl LimeSource {
     pub fn open(cfg: &LimeConfig, center_hz: f64) -> anyhow::Result<Self> {
@@ -177,6 +202,8 @@ impl LimeSource {
             last_depth_log: Instant::now(),
             rfe,
             rfe_note,
+            cal_center: center_hz,
+            cal_due: None,
             label,
         })
     }
@@ -247,6 +274,69 @@ impl LimeSource {
         }
     }
 
+    /// Note that the front end has moved far enough for its calibration to be
+    /// stale, and when to do something about it.
+    ///
+    /// A zero-IF receiver's DC offset and image rejection are corrected by
+    /// numbers `LMS_Calibrate` measured *at one LO frequency*. Carry those to
+    /// another band and the correction is not merely absent but wrong — which
+    /// is what the LO leakage sitting in the middle of the span as a carrier
+    /// the operator can see actually is (issue #94). SDRangel recalibrates on
+    /// every retune; here it waits for the dial to settle first, because a
+    /// panadapter drag is a stream of retunes and each calibration costs the
+    /// receiver most of a second.
+    ///
+    /// Also called when the receive port changes: a different LNA input is a
+    /// different path to the mixer, so the offsets it measured are somebody
+    /// else's.
+    fn calibration_may_be_stale(&mut self, now_center_hz: f64) {
+        if !self.cfg.calibrate {
+            return;
+        }
+        let moved = (now_center_hz - self.cal_center).abs();
+        let far = (self.cal_center.abs() * RECAL_FRACTION).max(RECAL_FLOOR_HZ);
+        if moved > far {
+            self.cal_due = Some(Instant::now() + RECAL_SETTLE);
+        } else {
+            // Back where the calibration was made: whatever was pending is no
+            // longer owed.
+            self.cal_due = None;
+        }
+    }
+
+    /// Run it, if it has fallen due and the radio is free to be stopped.
+    ///
+    /// Called from the read path, which is the one place on this backend that
+    /// runs often and is allowed to block — and never during an over, where the
+    /// stall would come out of the transmitter's budget and the calibration
+    /// would be measuring our own carrier.
+    fn recalibrate_if_due(&mut self) {
+        let Some(due) = self.cal_due else { return };
+        if Instant::now() < due || self.handle.tx_active() {
+            return;
+        }
+        self.cal_due = None;
+        let was = self.cal_center;
+        let center = self.handle.center_hz();
+        // Recorded either way: a calibration that will not converge here will
+        // not converge on the next block either, and retrying it every read
+        // would cost the receiver far more than the stale numbers do.
+        self.cal_center = center;
+        match self.handle.calibrate() {
+            Ok(()) => tracing::info!(
+                "LimeSDR recalibrated for {:.3} MHz — the DC offset and image rejection it \
+                 was carrying were measured {:.3} MHz away",
+                center / 1e6,
+                (center - was).abs() / 1e6
+            ),
+            // Not fatal: the host DC blocker and the image estimator are still
+            // running, so an uncalibrated radio is a poorer one, not a dead one.
+            Err(e) => {
+                tracing::warn!("LimeSDR would not recalibrate for the new band, continuing: {e}")
+            }
+        }
+    }
+
     /// One block from the radio, corrected and — where a second aerial is
     /// running — combined with it.
     ///
@@ -260,6 +350,9 @@ impl LimeSource {
     /// uncombined rather than combined against the wrong samples — see
     /// `LimeHandle::read_pair`.
     fn read_within(&mut self, buf: &mut [Complex32], timeout_ms: u32) -> Result<usize> {
+        // Before the read rather than after it: the calibration stops the
+        // converters, so the samples either side of it are not ones to hand on.
+        self.recalibrate_if_due();
         // The coupler chain is not part of what is being listened to: it is
         // read separately, and only its own loop ever sees it.
         if self.puresignal.is_some() {
@@ -420,6 +513,7 @@ impl IqSource for LimeSource {
         self.handle.set_center_hz(hz).map_err(|e| RadioError::Msg(e.to_string()))?;
         self.center = hz;
         self.push_rfe_rx();
+        self.calibration_may_be_stale(hz);
         Ok(())
     }
 
@@ -460,8 +554,11 @@ impl IqSource for LimeSource {
                 self.handle.set_lpf_bw(true, db).map_err(|e| RadioError::Msg(e.to_string()))?;
             }
             LimeConfig::CALIBRATE_ELEMENT if db >= 0.5 => {
-                // Momentary, and slow — the better part of a second. Only ever
-                // from an explicit request, never from a tuning path.
+                // Momentary, and slow — the better part of a second. The
+                // automatic one waits for the dial to settle (see
+                // `recalibrate_if_due`); this is the operator saying "now".
+                self.cal_due = None;
+                self.cal_center = self.handle.center_hz();
                 self.handle.calibrate().map_err(|e| RadioError::Msg(e.to_string()))?;
             }
             LimeConfig::IQ_CORRECTION_ELEMENT => {
@@ -563,26 +660,6 @@ impl IqSource for LimeSource {
                     }
                 }
             }
-            // The LimeRFE controls. Carried through here for the usual reason:
-            // no new `Command` variant for settings only this backend has.
-            LimeConfig::RFE_ATTEN_ELEMENT => {
-                self.cfg.rfe.atten_steps = (db / 2.0).round().clamp(0.0, 7.0) as u8;
-                if let Some(r) = &self.rfe {
-                    r.set_config(self.cfg.rfe.clone());
-                }
-            }
-            LimeConfig::RFE_NOTCH_ELEMENT => {
-                self.cfg.rfe.notch = db >= 0.5;
-                if let Some(r) = &self.rfe {
-                    r.set_config(self.cfg.rfe.clone());
-                }
-            }
-            LimeConfig::RFE_FAN_ELEMENT => {
-                self.cfg.rfe.fan = db >= 0.5;
-                if let Some(r) = &self.rfe {
-                    r.set_fan(self.cfg.rfe.fan);
-                }
-            }
             _ => {}
         }
         Ok(())
@@ -597,6 +674,12 @@ impl IqSource for LimeSource {
 
     fn set_antenna(&mut self, name: &str) -> Result<()> {
         self.handle.set_antenna(false, name).map_err(|e| RadioError::Msg(e.to_string()))?;
+        // A different LNA input is a different path into the mixer, so the
+        // offsets the chip is carrying were measured on somebody else's.
+        // SDRangel recalibrates on an antenna change for the same reason.
+        if self.cfg.calibrate {
+            self.cal_due = Some(Instant::now() + RECAL_SETTLE);
+        }
         // Kept in step with the handle's own copy, which pins the choice so the
         // automatic one stops overriding it. Here it is what stops
         // [`Self::owns_rx_antenna`] going on claiming a socket the operator has
@@ -609,12 +692,49 @@ impl IqSource for LimeSource {
         self.handle.antenna_rx().to_string()
     }
 
-    /// The second chain's socket. A name rather than a number, which is why it
-    /// comes through here and not on a pseudo-gain with everything else.
+    /// The settings that are not numbers: the second chain's socket, and the
+    /// LimeRFE's whole configuration.
+    ///
+    /// The front end comes through here as one value rather than a control at a
+    /// time because its fields only mean anything together — see
+    /// [`LimeConfig::RFE_SETTING`]. Before this, the connectors, the band and
+    /// the relay mode had no door at all: changing them in the settings panel
+    /// wrote the file and left the board doing what it had been doing until the
+    /// next restart (issue #94).
     fn set_device_setting(&mut self, key: &str, value: &str) -> Result<()> {
-        if key == LimeConfig::AUX_ANTENNA_SETTING && !value.trim().is_empty() {
-            self.handle.set_aux_antenna(value).map_err(|e| RadioError::Msg(e.to_string()))?;
-            self.cfg.aux.antenna = value.to_string();
+        match key {
+            LimeConfig::AUX_ANTENNA_SETTING if !value.trim().is_empty() => {
+                self.handle.set_aux_antenna(value).map_err(|e| RadioError::Msg(e.to_string()))?;
+                self.cfg.aux.antenna = value.to_string();
+            }
+            LimeConfig::RFE_SETTING => {
+                let Some(want) = sdroxide_types::LimeRfeConfig::from_setting(value) else {
+                    return Err(RadioError::Msg("that is not a LimeRFE configuration".to_string()));
+                };
+                // Which cable the board is on is settled when it is opened, so
+                // those two fields stay as they are however they arrive: the
+                // settings panel asks for a rebuild when they change.
+                let cfg = sdroxide_types::LimeRfeConfig {
+                    link: self.cfg.rfe.link,
+                    serial: self.cfg.rfe.serial.clone(),
+                    ..want
+                };
+                if cfg == self.cfg.rfe {
+                    return Ok(());
+                }
+                let fan_moved = cfg.fan != self.cfg.rfe.fan;
+                self.cfg.rfe = cfg;
+                if let Some(r) = &self.rfe {
+                    r.set_config(self.cfg.rfe.clone());
+                    // The fan is not part of the board's configured state — it
+                    // is its own one-byte command — so it does not ride the
+                    // state the follower sends.
+                    if fan_moved {
+                        r.set_fan(self.cfg.rfe.fan);
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -643,10 +763,15 @@ impl IqSource for LimeSource {
         if let Some(rfe) = &self.rfe {
             rfe.set_tx_hz(center_hz);
             rfe.set_keyed(true);
-            // On a shared connector the relay has to have thrown before drive
-            // arrives. One round trip, and the transport knows what it costs.
-            if self.cfg.rfe.needs_ptt_switching() {
-                std::thread::sleep(Duration::from_millis(60));
+            // The relay has to have thrown before drive arrives, and how long
+            // that takes is the transport's answer rather than a guess: the
+            // board's own serial port is tens of milliseconds and the
+            // bit-banged I²C path through the LimeSDR is the better part of a
+            // second. Not conditional on the cabling any more either — a
+            // receiving board is left in receive on both, so both switch at
+            // key-down (issue #94).
+            if self.cfg.rfe.switches_at_key_down() {
+                std::thread::sleep(rfe.relay_settle());
             }
         }
         // A new over: the amplifier's curve has not changed since the last one,

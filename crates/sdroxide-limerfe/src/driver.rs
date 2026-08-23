@@ -36,6 +36,13 @@ const MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// Consecutive failures before the board is declared gone.
 const MAX_TRIES: u32 = 3;
 
+/// How long the board's thread sleeps between looks at its channel. Short
+/// enough that a key-down is acted on promptly, long enough that an idle board
+/// costs nothing — and it sleeps *on* the channel, so a key-down wakes it
+/// rather than waiting this out. The rate limit, not this, is what bounds how
+/// often anything is actually sent.
+const TICK: Duration = Duration::from_millis(20);
+
 /// Whether the board is there. Not configuration: it either answers or it does
 /// not, and an operator should not have to tell us which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +75,8 @@ pub struct Follower {
     /// near it, and on a shared connector move the relays to do it.
     rx_hz: Option<f64>,
     tx_hz: Option<f64>,
-    /// Whether the operator is keyed, when the cabling makes that matter.
+    /// Whether the operator is keyed. Always matters now: a receiving board is
+    /// left in receive whatever the cabling — see [`sdroxide_types::RfeModeControl::Auto`].
     keyed: bool,
 }
 
@@ -131,8 +139,9 @@ impl Follower {
         let tx_hz = self.tx_hz.or(self.rx_hz).unwrap_or(0.0);
         let (channel_rx, channel_tx) = sdroxide_types::rfe_resolve(&self.cfg, rx_hz, tx_hz);
         let mode = if self.keyed {
-            // `tx_mode` is None on split connectors, where the standing mode
-            // already transmits and key-down costs no transaction at all.
+            // `tx_mode` is None only where the operator has pinned the board:
+            // held in transmit there is nothing to switch to, and held in
+            // receive the source has already refused the over.
             self.cfg.tx_mode().unwrap_or_else(|| self.cfg.rx_mode())
         } else {
             self.cfg.rx_mode()
@@ -255,6 +264,7 @@ pub struct LimeRfeHandle {
     join: Option<std::thread::JoinHandle<()>>,
     describe: String,
     status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    relay_settle: Duration,
 }
 
 impl LimeRfeHandle {
@@ -281,6 +291,19 @@ impl LimeRfeHandle {
     pub fn status(&self) -> Option<String> {
         self.status.lock().ok().and_then(|s| s.clone())
     }
+
+    /// How long to allow for a relay to have thrown after
+    /// [`Self::set_keyed`] — the thread's own wake-up plus one transaction on
+    /// this transport.
+    ///
+    /// Asked rather than assumed because the two links are two orders of
+    /// magnitude apart: the board's own serial port answers in tens of
+    /// milliseconds, and the bit-banged I²C path through the LimeSDR's GPIO
+    /// header in the better part of a second. A caller that guessed the first
+    /// number would let drive out into a receive path on the second.
+    pub fn relay_settle(&self) -> Duration {
+        self.relay_settle
+    }
 }
 
 impl Drop for LimeRfeHandle {
@@ -296,6 +319,7 @@ impl Drop for LimeRfeHandle {
 pub fn spawn(mut transport: Box<dyn RfeTransport>, cfg: LimeRfeConfig) -> LimeRfeHandle {
     let (tx, rx) = crossbeam_channel::unbounded::<Ctrl>();
     let describe = transport.describe();
+    let relay_settle = transport.round_trip() + TICK;
     let status = std::sync::Arc::new(std::sync::Mutex::new(None));
     let status_thread = std::sync::Arc::clone(&status);
 
@@ -311,7 +335,7 @@ pub fn spawn(mut transport: Box<dyn RfeTransport>, cfg: LimeRfeConfig) -> LimeRf
         })
         .expect("spawn sdroxide-limerfe thread");
 
-    LimeRfeHandle { tx, join: Some(join), describe, status }
+    LimeRfeHandle { tx, join: Some(join), describe, status, relay_settle }
 }
 
 fn run(
@@ -320,10 +344,7 @@ fn run(
     rx: &Receiver<Ctrl>,
     status: &std::sync::Mutex<Option<String>>,
 ) {
-    // Short enough that a key-down is acted on promptly, long enough that an
-    // idle board costs nothing. The rate limit, not this, is what bounds how
-    // often anything is actually sent.
-    let tick = Duration::from_millis(20);
+    let tick = TICK;
     loop {
         // Drain the whole channel before acting: a band change and a key-down
         // that arrived together should produce one decision, not two.
@@ -355,7 +376,28 @@ fn run(
                     if let Ok(mut s) = status.lock() {
                         *s = None;
                     }
-                    tracing::debug!("LimeRFE: {action:?}");
+                    // Loud on purpose, and affordable because the whole design
+                    // is about not saying much: a band change, a key-down, and
+                    // nothing in between. A front end that answers every
+                    // command and passes no signal is diagnosed from exactly
+                    // this line — what it was told, and that it agreed.
+                    match action {
+                        Action::Configure(st) => tracing::info!(
+                            "LimeRFE set to {} in, {} out, receiving on {}, transmitting on \
+                             {}, relays {}{}{}",
+                            st.channel_rx.label(),
+                            st.channel_tx.label(),
+                            st.port_rx.label(),
+                            st.port_tx.label(),
+                            st.mode.label(),
+                            if st.notch { ", notch in" } else { "" },
+                            match st.atten_steps {
+                                0 => String::new(),
+                                n => format!(", {} dB of attenuation", u16::from(n) * 2),
+                            }
+                        ),
+                        Action::Mode(m) => tracing::info!("LimeRFE relays: {}", m.label()),
+                    }
                 }
                 Err(e) => {
                     follower.on_error(Instant::now());
@@ -542,22 +584,34 @@ mod tests {
         assert_eq!(mode, RfeMode::Tx);
     }
 
-    /// On split connectors the board stands in both-on and an over costs no
-    /// transaction whatsoever.
+    /// Split connectors switch the relays around an over exactly as a shared
+    /// one does, and the standing state is *receive* (issue #94). Leaving the
+    /// board in both-on because the connectors happen to be split saved a
+    /// round trip at key-down and cost the receiver: the amateur channels have
+    /// one filter with a transmit/receive switch either side, so both-on puts
+    /// that switch on the transmitter.
     #[test]
-    fn keying_on_split_connectors_sends_nothing() {
+    fn keying_on_split_connectors_still_moves_the_relays() {
         let now = Instant::now();
         let mut f = Follower::new(split_cabling(), Duration::from_millis(45));
         f.set_rx_hz(144.2e6);
         f.set_tx_hz(144.2e6);
         let first = f.due(now).unwrap();
         f.on_ack(first, now);
-        assert!(matches!(first, Action::Configure(st) if st.mode == RfeMode::TxRx));
+        assert!(matches!(first, Action::Configure(st) if st.mode == RfeMode::Rx));
 
         f.set_keyed(true);
-        assert_eq!(f.due(now + Duration::from_millis(1)), None, "nothing to switch");
+        let Some(Action::Mode(m)) = f.due(now + Duration::from_millis(1)) else {
+            panic!("key-down switches to transmit")
+        };
+        assert_eq!(m, RfeMode::Tx);
+        f.on_ack(Action::Mode(m), now + Duration::from_millis(1));
+
         f.set_keyed(false);
-        assert_eq!(f.due(now + Duration::from_millis(2)), None);
+        let Some(Action::Mode(m)) = f.due(now + Duration::from_millis(2)) else {
+            panic!("and key-up switches back")
+        };
+        assert_eq!(m, RfeMode::Rx);
     }
 
     /// A failed transaction forgets everything and re-sends the whole state.

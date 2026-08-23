@@ -6145,9 +6145,17 @@ where the library is absent.
   receive half-deaf and transmit at milliwatts. The digital filters keep the
   selectivity either way.
 - **Corrections** — host-side IQ/DC correction on top of the chip's own
-  calibration, whether to calibrate when the radio opens (about a second), and
-  **Calibrate now**. Turning the host correction off is the one-click way to
-  tell a driver problem from a DSP one.
+  calibration, **Calibrate automatically**, and **Calibrate now**. Turning the
+  host correction off is the one-click way to tell a driver problem from a DSP
+  one. *Calibrate automatically* runs LimeSuite's own DC-offset and
+  image-rejection calibration when the radio opens **and again once the dial has
+  settled on a new band or a different socket** — those numbers are measured at
+  one LO frequency and are simply wrong at another, which is what a carrier
+  sitting in the middle of the span usually is. Each run costs about a second
+  and stops the receiver for it, so it deliberately waits for you to stop
+  moving: dragging the panadapter across a band never triggers one. If the
+  calibration will not run, the radio says so when it opens rather than leaving
+  you to work out why the centre of the span has a carrier in it.
 
 ##### The second chain: diversity, QRM suppression and PureSignal
 
@@ -6324,20 +6332,34 @@ puts nothing on the control link at all; changing band always does. The mapping
 is LimeSuite's own, so a LimeRFE configured here and one configured in
 LimeSuiteGUI put the same filters in circuit.
 
-**Relays** is the setting worth understanding, because the cabling decides how
-much work an over is:
+**Relays** decides what the board is doing between overs. On *Automatic* — the
+default — it **receives**, is switched to transmit at key-down, and switched
+back at key-up. That is true on either cabling, and the reason is the hardware:
+the LimeRFE's amateur channels have one filter with a transmit/receive switch
+either side of it, so a board asked for both directions at once puts that switch
+on the transmitter and stops passing anything to the receiver. It answers the
+command and goes deaf. LimeSuite's own GUI and SDRangel both leave a receiving
+board in receive for the same reason, and reach for *both at once* only on the
+cellular bands, which have duplexers.
 
-| Receive | Transmit | What happens at key-down |
-| --- | --- | --- |
-| J3 | J4 | Nothing. The board sits in receive-and-transmit permanently. |
-| J3 | J3 | The relays switch to transmit, and back at key-up. |
-| J5 | J5 | The same — and this is every HF contact, because J5 is the only path to the HF amplifier and is one jack for both directions. |
+So an over costs one short transaction either side of it, and sdroxide waits for
+the relay before letting drive out. On the GPIO/I²C link that transaction is the
+better part of a second — another reason to use the LimeRFE's own USB cable if
+you transmit.
 
-*Automatic* does whichever of those the cabling calls for, which is why it is
-the default: the board **refuses** receive-and-transmit on a shared connector,
-so there is no standing mode that can transmit there. Pinning it to *Always
-receive* makes transmit refuse outright rather than drive into a closed relay —
-the panel says so, in yellow, as soon as the combination is selected.
+The other three settings are pins rather than automation:
+
+| Relays | What it does |
+| --- | --- |
+| *Always receive* | Transmit is refused outright rather than driven into a closed relay. The panel says so, in yellow, as soon as it is selected. |
+| *Always transmit* | Bench use: the board stays keyed. |
+| *Always both* | For a cellular band, which has the duplexer for it. On an amateur channel it stops receive — the panel warns. Not reachable at all when one connector serves both directions; the board refuses that combination. |
+
+Which connector is which still matters, but for what it can reach rather than
+for how an over is switched: J5 is one jack for both directions and the only
+path to the HF and 6 m amplifiers, so every HF contact shares a connector with a
+live amplifier. Above 30 MHz, transmitting from J4 keeps the receive path off
+it.
 
 If a band you use falls back to the unfiltered wideband path on your chosen
 connectors, the panel names it: J5 receives only up to 70 cm, and HF and 6 m
@@ -6345,6 +6367,14 @@ transmit only through J5.
 
 **Receive attenuator** is 0–14 dB in 2 dB steps. **Notch** and **Fan** are the
 board's own; the fan is worth having on for any sustained transmitting.
+
+Every control in this section — the connectors, the band, the relays, the
+attenuator, the notch and the fan — applies to the board **immediately**, with
+no Apply and no restart. Only *Connected by* and the serial port rebuild the
+session, because which cable the board is on is settled when it is opened. Each
+accepted transaction is logged in full (what the board was told, and that it
+agreed), which is what to look at first if the front end answers but nothing
+comes through.
 
 > **Not verified against hardware.** No LimeSDR has been attached to this code.
 > The wire-level facts come from LimeSuite's headers and source and from a
@@ -9643,18 +9673,33 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   opens wide on purpose (the LMS7002M's synthesisers stop at 30 MHz).
 - Transmit has **no filtering of its own**: low-pass filter, a LimeRFE
   channel, or a dummy load.
-- **A LimeRFE that answers but passes nothing** is almost always the
-  **Receive port**: the front end feeds one of the LimeSDR's receive sockets,
-  and the radio has to be listening on that one. Cabled to `RX1_W`, which is
-  the usual place, *Automatic* is right; cabled anywhere else, name the socket.
-  The quick test is to move the aerial straight to the socket the radio is on —
-  if signals appear, the front end was never in the path.
+- **A LimeRFE that answers but passes nothing** has two usual causes, and the
+  log line the board's every accepted command produces tells them apart — it
+  names the channel, both connectors and the relay state the board agreed to.
+  - The **Receive port**: the front end feeds one of the LimeSDR's receive
+    sockets, and the radio has to be listening on that one. Cabled to `RX1_W`,
+    which is the usual place, *Automatic* is right; cabled anywhere else, name
+    the socket. The quick test is to move the aerial straight to the socket the
+    radio is on — if signals appear, the front end was never in the path.
+  - The **Relays** setting pinned to *Always both*. The amateur channels have
+    one filter with a transmit/receive switch either side of it, so a board
+    asked for both directions at once puts that switch on the transmitter and
+    hears nothing. *Automatic* is the answer; the panel warns in yellow.
 - **LimeRFE:** prefer its own USB cable if you change band often — the
-  through-the-LimeSDR link costs the better part of a second per transaction.
-  On HF, **J5 is the only path to the amplifier and is one jack for both
-  directions**; leave the connector setting on `Automatic`. Turn the fan on
-  for sustained transmitting. Nothing sdroxide does keys an external
-  amplifier.
+  through-the-LimeSDR link costs the better part of a second per transaction,
+  and an over waits for the relay either way. On HF, **J5 is the only path to
+  the amplifier and is one jack for both directions**; leave the connector
+  setting on `Automatic`. Turn the fan on for sustained transmitting. Nothing
+  sdroxide does keys an external amplifier.
+- **A carrier parked in the middle of the span, or a mirror image of every
+  signal**, is the chip's own DC-offset and image calibration. Those numbers are
+  measured at one LO frequency and are wrong elsewhere, so leave **Calibrate
+  automatically** ticked: it runs at open and again once the dial has settled on
+  a new band or a different socket, which costs about a second each time and is
+  never run while you are dragging the panadapter. **Calibrate now** does it on
+  demand. If the calibration would not run at all the radio says so when it
+  opens — an uncorrected zero-IF front end is exactly what a centre carrier and
+  a band full of images look like.
 - **PureSignal that never locks** is the coupler, the cabling, or the second
   chain's gain — the log says how well the feedback matched every ten seconds
   while you transmit. Turn that gain right down first: a feedback chain in

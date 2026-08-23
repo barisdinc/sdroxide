@@ -2998,8 +2998,13 @@ pub struct LimeConfig {
     /// The same on the transmit side; `0.0` follows the rate.
     pub lpf_tx_hz: f64,
     /// Run LimeSuite's own DC-offset and IQ-imbalance calibration when the
-    /// device is opened. Costs about a second at open and is worth it: this is
-    /// a zero-IF radio and the uncalibrated image sits across the band.
+    /// device is opened, **and again once the dial settles on a new band or a
+    /// different socket**. Costs about a second each time and is worth it: this
+    /// is a zero-IF radio, the uncalibrated image sits across the band, and the
+    /// numbers are measured at one LO frequency — carried to another they are
+    /// not merely absent but wrong, which is what a carrier parked in the
+    /// middle of the span usually is (issue #94). The retune half waits for the
+    /// operator to stop moving, so dragging a panadapter never stalls on it.
     pub calibrate: bool,
     /// Adaptive IQ image correction and DC removal on the host, on top of the
     /// chip's own calibration. On by default for the same reason the HackRF
@@ -3073,12 +3078,6 @@ impl LimeConfig {
     pub const IQ_CORRECTION_ELEMENT: &'static str = "IQCORR";
     /// Momentary: any value at or above 0.5 runs a calibration now.
     pub const CALIBRATE_ELEMENT: &'static str = "CAL";
-    /// LimeRFE controls, all momentary or level, all through the same door.
-    pub const RFE_MODE_ELEMENT: &'static str = "RFEMODE";
-    pub const RFE_CHANNEL_ELEMENT: &'static str = "RFECHAN";
-    pub const RFE_ATTEN_ELEMENT: &'static str = "RFEATT";
-    pub const RFE_NOTCH_ELEMENT: &'static str = "RFENOTCH";
-    pub const RFE_FAN_ELEMENT: &'static str = "RFEFAN";
     /// The second chain and the diversity filter, through the same door.
     /// `DIVMODE` is [`LimeDiversityMode`]'s index; `DIVRESET` is momentary.
     pub const AUX_GAIN_ELEMENT: &'static str = "AUXGAIN";
@@ -3098,6 +3097,20 @@ impl LimeConfig {
     /// than a number, so it goes through `SetDeviceSetting` rather than riding
     /// a pseudo-gain like everything else here.
     pub const AUX_ANTENNA_SETTING: &'static str = "aux_antenna";
+
+    /// The LimeRFE's whole configuration, as
+    /// [`LimeRfeConfig::to_setting`](crate::LimeRfeConfig::to_setting) writes
+    /// it, through the same door.
+    ///
+    /// One setting rather than a pseudo-gain per control. These fields only
+    /// mean anything together — which channel a dial resolves to depends on
+    /// the connectors, and which relay modes the board will accept depends on
+    /// both — so pushing them one at a time would put states on the wire that
+    /// no configuration ever asked for. It also means a control added to the
+    /// panel reaches a running board without a new element to plumb, which is
+    /// what the connectors, the band and the relay mode were missing (issue
+    /// #94: changing them wrote the file and did nothing until a restart).
+    pub const RFE_SETTING: &'static str = "limerfe";
 
     /// The chain the auxiliary stream runs on: the one the main stream is not.
     /// There are two, so this is arithmetic rather than a setting.

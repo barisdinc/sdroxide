@@ -204,20 +204,23 @@ impl RfeMode {
 /// panel says it should be working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RfeModeControl {
-    /// Let the cabling decide, which is the only setting that is right for
-    /// both cablings.
+    /// Receive, and transmit only while the operator is keyed.
     ///
-    /// With receive and transmit on **different** connectors the board sits in
-    /// [`RfeMode::TxRx`] and nothing happens at key-down at all — the band is
-    /// the only thing that ever gets switched, which is what most people mean
-    /// by wanting this automated.
+    /// [`RfeMode::Rx`] whenever the transmitter is not running — **whatever the
+    /// cabling**, and that last part is the correction issue #94 turned on.
+    /// `TxRx` looks like the tidier answer on split connectors because it costs
+    /// no round trip at key-down, and on this board it is the wrong one: the
+    /// amateur channels have a single filter with a transmit/receive switch
+    /// either side of it (`RFE_MCU_BYTE_TXRX0_BIT`, `TXRX1_BIT`), so a board
+    /// asked for both at once puts that switch in the transmit position and the
+    /// receive path stops passing anything. It answers the command and goes
+    /// deaf, which is exactly what was reported. LimeSuite's own GUI and
+    /// SDRangel both leave a receiving board in `Rx` and reach for `TxRx` only
+    /// on the cellular bands, which are the ones with duplexers.
     ///
-    /// On a **shared** connector — one antenna on J3, or anything on HF, where
-    /// J5 is one jack for both directions — the board refuses `TxRx`, so there
-    /// is no standing mode that can transmit. Auto then switches to
-    /// [`RfeMode::Tx`] at key-down and back at key-up, because the alternative
-    /// is not "less automation", it is a transmitter driving into the receive
-    /// path with the amplifier bypassed.
+    /// So an over costs one relay transaction either side of it — see
+    /// [`LimeRfeConfig::switches_at_key_down`], which is what the source waits
+    /// for before letting drive out.
     #[default]
     Auto,
     /// Pinned to receive. A key-down is refused rather than sent into a closed
@@ -225,8 +228,12 @@ pub enum RfeModeControl {
     Rx,
     /// Pinned to transmit. Bench use: the board stays keyed.
     Tx,
-    /// Pinned to both. Only reachable on split connectors; asking for it on a
-    /// shared one is caught here rather than by the board's error code.
+    /// Pinned to both at once. What the cellular bands want — they have the
+    /// duplexer for it, and bands 1, 2, 3 and 7 accept nothing else. On an
+    /// amateur channel it stops receive, for the reason [`Self::Auto`] gives,
+    /// so the settings panel says so rather than leaving it to be discovered.
+    /// Asking for it on a shared connector is caught here rather than by the
+    /// board's error code.
     TxRx,
 }
 
@@ -343,15 +350,17 @@ impl LimeRfeConfig {
 
     /// What the board should sit in while receiving.
     ///
-    /// Never [`RfeMode::TxRx`] on a shared connector, whatever was asked for:
-    /// putting an impossible request on the wire gets an error code back and
-    /// leaves the board in whatever it was, which is a worse outcome than
-    /// quietly asking for the reachable thing.
+    /// [`RfeMode::Rx`] on Automatic, on either cabling — see
+    /// [`RfeModeControl::Auto`] for why a standing `TxRx` goes deaf on the
+    /// amateur channels. And never `TxRx` on a shared connector whatever was
+    /// asked for: putting an impossible request on the wire gets an error code
+    /// back and leaves the board in whatever it was, which is a worse outcome
+    /// than quietly asking for the reachable thing.
     pub fn rx_mode(&self) -> RfeMode {
         match self.mode {
-            RfeModeControl::Rx => RfeMode::Rx,
+            RfeModeControl::Rx | RfeModeControl::Auto => RfeMode::Rx,
             RfeModeControl::Tx => RfeMode::Tx,
-            RfeModeControl::Auto | RfeModeControl::TxRx => {
+            RfeModeControl::TxRx => {
                 if self.needs_ptt_switching() {
                     RfeMode::Rx
                 } else {
@@ -364,9 +373,9 @@ impl LimeRfeConfig {
     /// What the board should be in for an over, or `None` when it is already
     /// in a mode that transmits and nothing need be sent at key-down.
     ///
-    /// Returning `None` is the split-connector case and the common one: the
-    /// board stands in `TxRx`, the band is the only thing that ever changes,
-    /// and an over costs no round trip at all.
+    /// `None` is now only the pinned cases: a board held in transmit has
+    /// nothing to switch, and one held in receive refuses the over outright
+    /// (see [`Self::tx_refusal`]).
     pub fn tx_mode(&self) -> Option<RfeMode> {
         match self.mode {
             // Pinned to receive: nothing to switch to. The caller refuses the
@@ -374,9 +383,21 @@ impl LimeRfeConfig {
             // `tx_refusal`.
             RfeModeControl::Rx => None,
             RfeModeControl::Tx => None,
-            RfeModeControl::Auto => self.needs_ptt_switching().then_some(RfeMode::Tx),
+            RfeModeControl::Auto => Some(RfeMode::Tx),
             RfeModeControl::TxRx => self.needs_ptt_switching().then_some(RfeMode::Tx),
         }
+    }
+
+    /// Whether an over moves the board's relays, and so has to wait for them.
+    ///
+    /// What the source reads before letting drive out: a transmitter that
+    /// starts before the switch has thrown is driving into the receive path
+    /// with the amplifier bypassed. Not the same question as
+    /// [`Self::needs_ptt_switching`], which is about the *cabling* — this one
+    /// is about the mode actually in force, and on Automatic the answer is yes
+    /// on both cablings.
+    pub fn switches_at_key_down(&self) -> bool {
+        self.tx_mode().is_some()
     }
 
     /// Why a key-down cannot be honoured with this configuration, if it cannot.
@@ -397,22 +418,59 @@ impl LimeRfeConfig {
     }
 
     /// The standing-cost sentence for the settings panel and `open_status`.
-    /// `None` when the cabling costs nothing at all, which is the good case and
-    /// worth being able to say.
+    /// `None` when there is nothing worth saying, which is the ordinary case.
+    ///
+    /// Only the *surprising* configuration gets a sentence. Automatic switching
+    /// the relays around an over is what everybody's LimeRFE does and costs one
+    /// short transaction, so it is described in the panel's own prose rather
+    /// than painted as a warning; being pinned to both at once is neither
+    /// ordinary nor safe on an amateur channel, so it is.
     pub fn switching_note(&self) -> Option<String> {
-        if self.link == RfeLink::Off || !self.needs_ptt_switching() {
+        if self.link == RfeLink::Off {
             return None;
         }
-        Some(format!(
-            "Receive and transmit are both on {}, so the LimeRFE cannot do both at once: it \
-             is switched to transmit at key-down and back at key-up. Wire transmit to J4 and \
-             receive to J3 to remove the switch entirely.",
-            self.port_rx.label()
-        ))
+        if self.mode == RfeModeControl::TxRx && !self.needs_ptt_switching() {
+            return Some(
+                "The LimeRFE is pinned to receive and transmit at once. Only the cellular \
+                 bands have the duplexer that needs — on an amateur channel the board puts \
+                 its transmit/receive switch in the transmit position and receive goes \
+                 silent. Set the relays to Automatic unless this really is a cellular band."
+                    .to_string(),
+            );
+        }
+        self.needs_ptt_switching().then(|| {
+            format!(
+                "Receive and transmit are both on {}, so the board is switched to transmit at \
+                 key-down and back at key-up and there is no arrangement that avoids it. \
+                 Above 30 MHz, wiring transmit to J4 lets the switch happen without the \
+                 receive path sharing a connector with a live amplifier.",
+                self.port_rx.label()
+            )
+        })
     }
 
     pub fn atten_db(&self) -> f64 {
         f64::from(self.atten_steps.min(RFE_ATTEN_MAX_STEPS) * RFE_ATTEN_STEP_DB)
+    }
+
+    /// The whole configuration as one string, for `Command::SetDeviceSetting`.
+    ///
+    /// One door rather than a pseudo-gain per control, because these settings
+    /// only mean anything together: the channel a dial resolves to depends on
+    /// the connectors, and the mode the board may be asked for depends on
+    /// both. Five separate elements pushed one at a time would put states on
+    /// the wire that no configuration ever asked for.
+    ///
+    /// [`Self::link`] and [`Self::serial`] ride along and are ignored on the
+    /// far side: which cable the board is on is decided when it is opened.
+    pub fn to_setting(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Read one back. `None` for anything that is not a configuration, so a
+    /// stale or hand-typed value leaves the board where it is.
+    pub fn from_setting(value: &str) -> Option<LimeRfeConfig> {
+        serde_json::from_str(value).ok()
     }
 }
 
@@ -545,18 +603,45 @@ mod tests {
         assert_eq!(tx_port_check(RfePort::J4, RfeChannel::Ham0145), RfeChannel::Ham0145);
     }
 
-    /// The cabling question the settings panel warns about, and the one the
-    /// transmit interlock reads. Two ordinary setups share a connector — one
-    /// antenna on J3, and anything on HF where J5 is the only transmit path —
-    /// so this is the common case, not an exotic one.
+    /// The field report this exists for (issue #94): a receiving board must be
+    /// left in `Rx`, on **either** cabling. Standing in `TxRx` because the
+    /// connectors happen to be split is what put the board's transmit/receive
+    /// switch in the transmit position and left the receive path passing
+    /// nothing at all.
+    #[test]
+    fn a_receiving_board_is_never_left_standing_in_both_on() {
+        for (rx, tx) in
+            [(RfePort::J3, RfePort::J4), (RfePort::J3, RfePort::J3), (RfePort::J5, RfePort::J5)]
+        {
+            let cfg = LimeRfeConfig {
+                port_rx: rx,
+                port_tx: tx,
+                link: RfeLink::Serial,
+                ..Default::default()
+            };
+            assert_eq!(cfg.mode, RfeModeControl::Auto, "the default");
+            assert_eq!(cfg.rx_mode(), RfeMode::Rx, "receiving means receiving");
+            assert_eq!(cfg.tx_mode(), Some(RfeMode::Tx), "and an over switches the relays");
+            assert!(cfg.switches_at_key_down(), "which the source has to wait for");
+        }
+    }
+
+    /// The cabling question the transmit path reads. Two ordinary setups share
+    /// a connector — one antenna on J3, and anything on HF where J5 is the only
+    /// transmit path — so this is the common case, not an exotic one.
     #[test]
     fn a_shared_connector_forbids_the_standing_both_on_mode() {
-        let split =
-            LimeRfeConfig { port_rx: RfePort::J3, port_tx: RfePort::J4, ..Default::default() };
+        let split = LimeRfeConfig {
+            port_rx: RfePort::J3,
+            port_tx: RfePort::J4,
+            mode: RfeModeControl::TxRx,
+            link: RfeLink::Serial,
+            ..Default::default()
+        };
         assert!(!split.needs_ptt_switching());
-        assert_eq!(split.rx_mode(), RfeMode::TxRx);
+        assert_eq!(split.rx_mode(), RfeMode::TxRx, "asked for by hand, and reachable here");
         assert_eq!(split.tx_mode(), None, "nothing to send at key-down");
-        assert_eq!(split.switching_note(), None, "and nothing to warn about");
+        assert!(split.switching_note().is_some(), "but it is not a good idea and says so");
 
         for shared in [RfePort::J3, RfePort::J5] {
             let cfg = LimeRfeConfig {
@@ -570,6 +655,27 @@ mod tests {
             assert_eq!(cfg.tx_mode(), Some(RfeMode::Tx), "so an over has to switch");
             assert!(cfg.switching_note().is_some(), "and the operator is told");
         }
+    }
+
+    /// The whole configuration survives the round trip through
+    /// `SetDeviceSetting`, which is the only way anything the operator changes
+    /// reaches a board that is already open.
+    #[test]
+    fn a_configuration_survives_the_settings_door() {
+        let cfg = LimeRfeConfig {
+            link: RfeLink::Serial,
+            port_rx: RfePort::J5,
+            port_tx: RfePort::J5,
+            follow_band: false,
+            channel: RfeChannel::Ham0435,
+            mode: RfeModeControl::Rx,
+            notch: true,
+            atten_steps: 5,
+            fan: true,
+            ..Default::default()
+        };
+        assert_eq!(LimeRfeConfig::from_setting(&cfg.to_setting()), Some(cfg));
+        assert_eq!(LimeRfeConfig::from_setting("LNAW"), None, "not a configuration");
     }
 
     /// Asking for both-on where the board cannot do it resolves to something

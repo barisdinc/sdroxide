@@ -103,6 +103,11 @@ pub struct LimeHandle {
     /// Set when a stream was found stopped and put back. Reported once through
     /// `open_status` rather than every tick.
     note: Option<String>,
+    /// Set when the chip's own DC/IQ calibration would not run. Worth its own
+    /// field rather than folding into `note`: it is the standing explanation
+    /// for a carrier in the middle of the span and an image across the band,
+    /// and it is answered by a button in the settings panel.
+    cal_note: Option<String>,
     /// Set once [`LimeHandle::close`] has run: the streams are destroyed and
     /// the device is closed, so nothing here may touch either again.
     closed: bool,
@@ -212,20 +217,42 @@ impl LimeHandle {
             ctl.set_lo(true, center_hz)?;
         }
 
+        let mut cal_note = None;
         if cfg.calibrate {
             // Best-effort: an uncalibrated radio still receives, and refusing
             // to open because the calibration would not converge would be a
-            // poor trade. The image is visible and the log says why.
+            // poor trade. But it is *said*, on screen and not only in the log —
+            // an uncorrected zero-IF front end puts a carrier in the middle of
+            // the span and an image across the band, and an operator looking at
+            // those deserves to be told which of the two possible causes it is
+            // (issue #94).
             //
             // Calibrated for the *wanted* width, not the NCO-widened filter:
             // the span the operator uses is what the DC and image corrections
             // should be best over.
             if let Err(e) = ctl.calibrate(false, lpf_rx_want) {
                 tracing::warn!("LimeSDR receive calibration failed, continuing: {e}");
+                cal_note = Some(format!(
+                    "the LimeSDR's own DC-offset and image calibration would not run ({e}), \
+                     so the receiver is uncorrected — expect a carrier at the centre of \
+                     the span and a mirror image of every signal. Try again with Calibrate \
+                     now in Settings → Radio."
+                ));
             }
             if want_tx && let Err(e) = ctl.calibrate(true, lpf_tx_want) {
                 tracing::warn!("LimeSDR transmit calibration failed, continuing: {e}");
             }
+            // LimeSuite's calibration drives the chip's own test tone through a
+            // loopback and reprograms the receive chain to hear it. It restores
+            // what it changed when it succeeds; a run that stopped half way is
+            // exactly the case where that is least certain, so the three
+            // settings that decide whether anything is heard at all are put
+            // back by hand.
+            if !antenna_rx.is_empty() {
+                let _ = ctl.set_antenna_named(false, &antenna_rx);
+            }
+            let _ = ctl.set_gain_db(false, cfg.rx_gain_db);
+            let _ = ctl.set_lpf_bw(false, analog_bw);
         }
 
         // Both streams while the device is idle — see the module doc.
@@ -366,6 +393,7 @@ impl LimeHandle {
             underruns: 0,
             restarts: 0,
             note: aux_note,
+            cal_note,
             closed: false,
         })
     }
@@ -708,18 +736,35 @@ impl LimeHandle {
         Ok(())
     }
 
-    /// Run LimeSuite's calibration now. Only ever from an explicit request:
-    /// it stalls whatever thread calls it for the better part of a second.
+    /// Run LimeSuite's calibration now. Stalls whatever thread calls it for the
+    /// better part of a second — see `LimeSource::recalibrate_if_due` for when
+    /// that is allowed to happen on its own.
     pub fn calibrate(&mut self) -> Result<()> {
         self.ensure_open()?;
         // The wanted widths, not the NCO-widened filters: the span the
         // operator uses is what the corrections should be best over.
         let bw = self.lpf_rx_want;
-        self.ctl().calibrate(false, bw)?;
-        if self.tx.is_some() {
+        let rx = self.ctl().calibrate(false, bw);
+        let tx = if self.tx.is_some() {
             let tx_bw = self.lpf_tx_want;
-            self.ctl().calibrate(true, tx_bw)?;
+            self.ctl().calibrate(true, tx_bw)
+        } else {
+            Ok(())
+        };
+        // Whatever happened above, put the receive chain back where it was —
+        // the calibration reprograms it to hear the chip's own test tone
+        // through a loopback, and a run that stopped part way is the case
+        // where its own restore is least to be relied on.
+        let (antenna, gain, analog) = (self.antenna_rx.clone(), self.rx_gain_db, self.analog_bw);
+        if !antenna.is_empty() {
+            let _ = self.ctl().set_antenna_named(false, &antenna);
         }
+        let _ = self.ctl().set_gain_db(false, gain);
+        let _ = self.ctl().set_lpf_bw(false, analog);
+        rx?;
+        tx?;
+        // A calibration that ran is the answer to the note left at open.
+        self.cal_note = None;
         Ok(())
     }
 
@@ -900,7 +945,12 @@ impl LimeHandle {
 
     /// Standing conditions worth telling the operator about.
     pub fn status_note(&self) -> Option<String> {
-        self.note.clone()
+        match (&self.note, &self.cal_note) {
+            (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        }
     }
 
     /// Start transmitting on `center_hz`. Returns the transmit sample rate.

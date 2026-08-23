@@ -646,14 +646,15 @@ starting sdroxide before the rig is fine:
   second against a few tens of milliseconds over the serial cable. Pick whichever
   suits the shack; if you change band often, pick the cable.
 
-  **Cabling decides whether an over costs anything.** Receive on J3 and transmit
-  on J4 and the board sits in receive-and-transmit permanently — the relays never
-  move. Share one connector — one antenna on J3, or anything on HF, where J5 is
-  the only path to the HF amplifier and is one jack for both directions — and the
-  board physically cannot do both, so it is switched at key-down and back at
-  key-up. The **Relays** setting is left on *Automatic*, which does whichever of
-  those the cabling calls for; pin it to *Always receive* and transmit is refused
-  outright rather than driven into a closed relay.
+  **The board receives between overs, and is switched to transmit at key-down.**
+  On either cabling: its amateur channels have one filter with a
+  transmit/receive switch either side of it, so a board asked for both
+  directions at once puts that switch on the transmitter and stops passing
+  anything to the receiver. The **Relays** setting is left on *Automatic*, which
+  does that and waits for the relay before letting drive out; pin it to *Always
+  receive* and transmit is refused outright rather than driven into a closed
+  relay. Which connector still decides what is reachable — J5 is one jack for
+  both directions and the only path to the HF and 6 m amplifiers.
 
   **LimeSuite is found at runtime, not linked**, so this interface is in every
   build variant and simply reports what to install where the library is absent

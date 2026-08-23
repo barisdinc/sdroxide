@@ -5693,8 +5693,14 @@ pub(in crate::app) fn settings_lime_tab(
                     f64::from(u8::from(cfg.lime.iq_correction)),
                 );
             }
-            crate::chrome::checkbox(ui, &mut cfg.lime.calibrate, "Calibrate at open")
-                .on_hover_text("Costs about a second when the radio is opened.");
+            crate::chrome::checkbox(ui, &mut cfg.lime.calibrate, "Calibrate automatically")
+                .on_hover_text(
+                    "Runs the chip's own DC-offset and image calibration when the radio is \
+                     opened, and again once the dial has settled on a new band or a different \
+                     socket. Those numbers are measured at one frequency and are wrong \
+                     elsewhere, which is what a carrier sitting in the middle of the span \
+                     usually is. Costs about a second each time.",
+                );
             if ui
                 .button("Calibrate now")
                 .on_hover_text("Stalls the receiver for the better part of a second.")
@@ -6080,6 +6086,14 @@ pub(in crate::app) fn settings_lime_tab(
     ui.separator();
     ui.label(egui::RichText::new("LimeRFE front end").strong());
 
+    // Everything below reaches an open board through one setting rather than a
+    // control at a time — see `LimeConfig::RFE_SETTING`. Snapshotted here and
+    // compared once at the end of the section, so a control added to the panel
+    // is live without any plumbing of its own; before this the connectors, the
+    // band and the relay mode had no door at all and only took effect on the
+    // next restart (issue #94).
+    let rfe_before = cfg.lime.rfe.clone();
+
     egui::Grid::new("lime-rfe-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Connected by");
         egui::ComboBox::from_id_salt("lime-rfe-link")
@@ -6180,30 +6194,14 @@ pub(in crate::app) fn settings_lime_tab(
             .changed()
             {
                 cfg.lime.rfe.atten_steps = steps;
-                push_gain(cmds, LimeConfig::RFE_ATTEN_ELEMENT, cfg.lime.rfe.atten_db());
             }
             ui.end_row();
 
             ui.label("Other");
             ui.horizontal(|ui| {
-                if crate::chrome::checkbox(ui, &mut cfg.lime.rfe.notch, "Notch filter").changed() {
-                    push_gain(
-                        cmds,
-                        LimeConfig::RFE_NOTCH_ELEMENT,
-                        f64::from(u8::from(cfg.lime.rfe.notch)),
-                    );
-                }
-                if ui
-                    .checkbox(&mut cfg.lime.rfe.fan, "Fan")
-                    .on_hover_text("Worth having on for any sustained transmitting.")
-                    .changed()
-                {
-                    push_gain(
-                        cmds,
-                        LimeConfig::RFE_FAN_ELEMENT,
-                        f64::from(u8::from(cfg.lime.rfe.fan)),
-                    );
-                }
+                crate::chrome::checkbox(ui, &mut cfg.lime.rfe.notch, "Notch filter");
+                ui.checkbox(&mut cfg.lime.rfe.fan, "Fan")
+                    .on_hover_text("Worth having on for any sustained transmitting.");
             });
             ui.end_row();
         });
@@ -6275,12 +6273,29 @@ pub(in crate::app) fn settings_lime_tab(
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "The 30 MHz channel is reachable only through J5, which is one connector for \
-                 both directions — so HF always switches at key-down. Wire receive to J3 and \
-                 transmit to J4 for everything above it and the relays never move.",
+                "On Automatic the board receives, and is switched to transmit at key-down and \
+                 back at key-up — on either cabling. Its amateur channels have one filter \
+                 with a transmit/receive switch either side of it, so a board asked for both \
+                 at once puts that switch on the transmitter and stops hearing anything. \
+                 The 30 MHz channel is reachable only through J5, which is one connector for \
+                 both directions; above it, transmitting from J4 keeps the receive path off \
+                 the connector the amplifier is driving.",
             )
             .weak(),
         );
+    }
+
+    // The link and the port are what force a rebuild (they are in `before`
+    // below), so they are deliberately not compared here: everything else about
+    // the front end applies to the board that is already open.
+    if cfg.lime.rfe != rfe_before
+        && cfg.lime.rfe.link == rfe_before.link
+        && cfg.lime.rfe.serial.path == rfe_before.serial.path
+    {
+        cmds.push(Command::SetDeviceSetting {
+            key: LimeConfig::RFE_SETTING.to_string(),
+            value: cfg.lime.rfe.to_setting(),
+        });
     }
 
     ui.add_space(6.0);
@@ -6318,9 +6333,10 @@ pub(in crate::app) fn settings_lime_tab(
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(
-            "Gains, filters, corrections, the antenna sockets and every LimeRFE control apply \
-             immediately. The board, the receive chain, the sample rate, arming transmit and \
-             the LimeRFE's connection take effect on Apply.",
+            "Gains, filters, corrections, the antenna sockets and every LimeRFE control — its \
+             connectors, band, relays, attenuator, notch and fan — apply immediately. The \
+             board, the receive chain, the sample rate, arming transmit and the LimeRFE's \
+             connection take effect on Apply.",
         )
         .weak(),
     );
