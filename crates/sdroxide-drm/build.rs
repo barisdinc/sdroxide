@@ -296,6 +296,14 @@ fn build_shim(manifest: &Path, dream: &Path, faad2: &Path) {
 
     // cc links the C++ runtime for the objects it builds; the Dream and shim
     // archives both need it, and on unix Dream's LibraryLoader needs dlopen.
+    if cfg!(unix) {
+        // Both upstreams link the maths library themselves (`dream.pro`'s
+        // `-lm`, faad2's CMake `MATH_LIBRARY`), and this build has to as well.
+        // It happens to be redundant on a current glibc, where libm was folded
+        // into libc in 2.34 — which is exactly why it is easy to leave out and
+        // only notice on an older target.
+        println!("cargo:rustc-link-lib=dylib=m");
+    }
     if cfg!(unix) && !cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=dl");
     }

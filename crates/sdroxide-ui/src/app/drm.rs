@@ -38,6 +38,16 @@ fn sync_ink(s: DrmSync) -> Color32 {
     }
 }
 
+/// One axis-aligned rectangle, as two triangles, into a mesh that is drawn in a
+/// single pass. Flat-shaded and unfeathered — see the note at the call site.
+fn push_quad(mesh: &mut egui::Mesh, rect: egui::Rect, color: Color32) {
+    let base = mesh.vertices.len() as u32;
+    for pos in [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()] {
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::epaint::WHITE_UV, color });
+    }
+    mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 /// Distance from a received symbol to the nearest ideal one.
 fn nearest_error(re: f32, im: f32, levels: &[f32]) -> f32 {
     // The constellation is a square grid symmetric about both axes, so the
@@ -349,6 +359,8 @@ impl SdroxideApp {
         );
 
         // The ideal symbols, as faint rings the received cloud should sit in.
+        // Sixty-four of them at most, and they are what makes the plot legible,
+        // so they stay proper stroked circles.
         let levels = c.ideal_levels();
         let ideal_ink = crate::theme::gray(70);
         for &lx in &levels {
@@ -363,15 +375,29 @@ impl SdroxideApp {
             }
         }
 
+        // The symbols themselves go into one mesh of flat quads rather than a
+        // shape apiece.
+        //
+        // There are 512 of them, and as separate `circle_filled` shapes each is
+        // tessellated into a feathered antialiased fan — every frame, for a
+        // picture that changes four times a second. How often it is drawn is
+        // the frame rate's business (Settings → UI), and it is paced by it;
+        // how much work each of those frames costs on a thin machine should
+        // not also be left to chance. Two triangles apiece in a single draw
+        // takes about a quarter off the panel's cost, and at two pixels a
+        // hard-edged square and a feathered disc are the same few pixels.
+        let mut mesh = egui::Mesh::default();
+
         // Half the spacing between neighbouring ideal points: the distance at
         // which a symbol is as close to its neighbour as to its own point, and
         // therefore the natural unit for "how wrong is this one".
         let tolerance = levels.first().copied().unwrap_or(0.5).max(1e-6);
-        let radius = if c.len() > 300 { 1.0 } else { 1.4 };
+        let size = egui::Vec2::splat(if c.len() > 300 { 2.0 } else { 2.8 });
         for (re, im) in c.iter() {
             let err = nearest_error(re, im, &levels) / tolerance;
-            p.circle_filled(to_px(re, im), radius, error_ink(err));
+            push_quad(&mut mesh, egui::Rect::from_center_size(to_px(re, im), size), error_ink(err));
         }
+        p.add(egui::Shape::mesh(mesh));
 
         ui.label(dim(&format!(
             "{} symbols \u{00b7} {}",
