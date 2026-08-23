@@ -875,14 +875,21 @@ impl SdroxideApp {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(tag).size(13.0).strong().color(crate::theme::CYAN()));
+                    let (shown, ink, offset) = self.readout();
+                    ui.label(
+                        RichText::new(tag)
+                            .size(13.0)
+                            .strong()
+                            .color(ink.unwrap_or_else(crate::theme::CYAN)),
+                    );
                     if let Some(hz) = freq_display::show_typed(
                         ui,
                         crate::layout::salted_id(ui.ctx(), "main-freq"),
-                        self.state.active_freq_hz(),
+                        shown,
                         plan.digit,
+                        ink,
                     ) {
-                        cmds.push(Command::SetVfo { vfo: active, hz });
+                        cmds.push(Command::SetVfo { vfo: active, hz: hz - offset });
                     }
                 });
                 let meter_h = ui.available_height();
@@ -1311,6 +1318,9 @@ impl SdroxideApp {
             ui.add_space(10.0);
 
             // Big frequency readout, centred vertically by measured height.
+            // On the air through a repeater it is the transmit frequency — see
+            // [`Self::readout`].
+            let (shown, ink, offset) = self.readout();
             let mut new_hz = None;
             let readout = ui.allocate_ui_with_layout(
                 egui::vec2(readout_w, full_h),
@@ -1320,9 +1330,10 @@ impl SdroxideApp {
                     new_hz = freq_display::show(
                         ui,
                         crate::layout::salted_id(ui.ctx(), "main-freq"),
-                        self.state.active_freq_hz(),
+                        shown,
                         self.input.cfg.wheel,
                         size,
+                        ink,
                     );
                 },
             );
@@ -1342,7 +1353,7 @@ impl SdroxideApp {
                 );
             }
             if let Some(hz) = new_hz {
-                cmds.push(Command::SetVfo { vfo: active, hz });
+                cmds.push(Command::SetVfo { vfo: active, hz: hz - offset });
             }
             ui.add_space(12.0);
 
@@ -1482,16 +1493,23 @@ impl SdroxideApp {
         let box_w = fixed + fit.width(size) + if band_mode { 8.0 + bm_w } else { 0.0 };
         crate::chrome::module_bare_h(ui, box_w, PHONE_FREQ_H, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0; // control every gap explicitly
-            ui.label(RichText::new(tag).size(13.0).strong().color(crate::theme::CYAN()));
+            let (shown, ink, offset) = self.readout();
+            ui.label(
+                RichText::new(tag)
+                    .size(13.0)
+                    .strong()
+                    .color(ink.unwrap_or_else(crate::theme::CYAN)),
+            );
             ui.add_space(6.0);
             let new_hz = freq_display::show_typed(
                 ui,
                 crate::layout::salted_id(ui.ctx(), "main-freq"),
-                self.state.active_freq_hz(),
+                shown,
                 size,
+                ink,
             );
             if let Some(hz) = new_hz {
-                cmds.push(Command::SetVfo { vfo: active, hz });
+                cmds.push(Command::SetVfo { vfo: active, hz: hz - offset });
             }
             if band_mode {
                 ui.add_space(8.0);
@@ -1499,6 +1517,31 @@ impl SdroxideApp {
             }
         });
         band_mode
+    }
+
+    /// What the big frequency readout shows: the number, the ink to draw it in,
+    /// and how far it sits from the dial.
+    ///
+    /// Normally that is the dial itself, in the resting amber, at no offset.
+    /// While the transmitter is keyed and a repeater shift has put it somewhere
+    /// else, the readout follows it there in the alert red — because on a
+    /// repeater the number on the front of the radio is no longer the frequency
+    /// being listened to, and a display that quietly went on showing the output
+    /// while the transmitter was on the input would be saying something untrue
+    /// at the one moment it matters. It is also what every radio with a duplex
+    /// button does.
+    ///
+    /// The offset comes back with it so the readout stays *tunable*: a wheel
+    /// turn or a typed frequency on those digits still has to move the VFO by
+    /// what the operator changed, not jump it by the shift.
+    ///
+    /// The whole gap to the transmit frequency is used, not just the repeater's
+    /// share of it, so a shift stacked on split or XIT reads as the frequency
+    /// that is actually going out. What it is gated on is the repeater shift
+    /// alone: split has always left this readout on the dial, and this is not
+    /// the place to change that.
+    fn readout(&self) -> (f64, Option<Color32>, f64) {
+        readout_for(&self.state, self.tab_tx_on())
     }
 
     /// The band/mode chip's label, e.g. `20m · USB`.
@@ -3815,6 +3858,17 @@ fn vfo_chip_labels(tx_capable: bool) -> Vec<&'static str> {
     labels
 }
 
+/// [`SdroxideApp::readout`]'s arithmetic, over the state alone — so what the
+/// readout says on the air can be tested without an app around it.
+fn readout_for(state: &RadioState, tx_on: bool) -> (f64, Option<Color32>, f64) {
+    let dial = state.active_freq_hz();
+    if tx_on && state.repeater.shift != Shift::Simplex {
+        let offset = state.tx_freq_hz() - dial;
+        return (dial + offset, Some(crate::theme::ALERT()), offset);
+    }
+    (dial, None, 0.0)
+}
+
 /// The natural width of a row of chips inside a condensed box: each chip at
 /// its label, with the box's row spacing between them.
 fn chip_row_w(ui: &egui::Ui, labels: &[&str]) -> f32 {
@@ -5043,6 +5097,41 @@ mod tests {
                 assert!(row2 <= room + 0.5, "tx={tx_capable}: row 2 took {row2} of {room}");
             });
         }
+    }
+
+    /// On the air through a repeater the readout follows the transmitter onto
+    /// the repeater's input, and says so in the alert red. Off the air, and on
+    /// simplex, it is the dial in the resting amber — which is every other
+    /// moment of every other mode.
+    #[test]
+    fn the_readout_follows_the_transmitter_onto_a_repeaters_input() {
+        let mut state = RadioState::default();
+        state.vfo_a_hz = 145_712_500.0;
+        state.vfo_b_hz = 145_712_500.0;
+
+        // Simplex: the dial, whether or not anything is keyed.
+        for tx in [false, true] {
+            assert_eq!(readout_for(&state, tx), (145_712_500.0, None, 0.0), "simplex, tx={tx}");
+        }
+
+        state.repeater.shift = Shift::Minus;
+        state.repeater.offset_hz = 600_000;
+        // Shifted but listening: still the output, because that is what is
+        // being listened to.
+        assert_eq!(readout_for(&state, false), (145_712_500.0, None, 0.0));
+        // Keyed: the input, in the alert red, and the offset comes back so a
+        // turn of the dial on those digits still moves the VFO by what was
+        // turned rather than jumping it by the shift.
+        let (shown, ink, offset) = readout_for(&state, true);
+        assert_eq!(shown, 145_112_500.0);
+        assert_eq!(offset, -600_000.0);
+        assert_eq!(ink, Some(crate::theme::ALERT()));
+        assert_eq!(shown - offset, state.active_freq_hz(), "an edit maps back to the dial");
+
+        // A shift stacked on XIT reads as the frequency that actually goes
+        // out, not as the repeater's share of it.
+        state.xit = sdroxide_types::OffsetState { enabled: true, hz: 250 };
+        assert_eq!(readout_for(&state, true).0, 145_112_750.0);
     }
 
     /// Open the band/mode menu on a `screen`-sized viewport and measure the

@@ -31,7 +31,20 @@ fn digit_ink() -> Color32 {
 ///
 /// `size` is the digit height; the caller fits it to the room it actually has
 /// (see `freq_module`). [`DIGIT_SIZE`] is the design size a desktop uses.
-pub fn show(ui: &mut Ui, id: egui::Id, hz: f64, wheel: WheelSettings, size: f32) -> Option<f64> {
+///
+/// `ink` overrides the lit digits' amber. `None` is the resting dial; the one
+/// caller that passes a colour is the readout following the transmitter onto a
+/// repeater's input, where the number on the front of the radio is no longer
+/// the frequency it is listening on and has to say so.
+pub fn show(
+    ui: &mut Ui,
+    id: egui::Id,
+    hz: f64,
+    wheel: WheelSettings,
+    size: f32,
+    ink: Option<Color32>,
+) -> Option<f64> {
+    let lit = ink.unwrap_or_else(digit_ink);
     let mut freq = hz.round().max(0.0) as i64;
     let orig = freq;
 
@@ -47,7 +60,7 @@ pub fn show(ui: &mut Ui, id: egui::Id, hz: f64, wheel: WheelSettings, size: f32)
             let step = 10i64.pow(p);
             let digit = (freq / step) % 10;
             let leading_zero = p > 0 && freq < step;
-            let color = if leading_zero { crate::theme::gray(70) } else { digit_ink() };
+            let color = if leading_zero { crate::theme::gray(70) } else { lit };
 
             let resp = ui
                 .add(
@@ -59,11 +72,7 @@ pub fn show(ui: &mut Ui, id: egui::Id, hz: f64, wheel: WheelSettings, size: f32)
                 .on_hover_cursor(egui::CursorIcon::ResizeVertical);
 
             if resp.hovered() {
-                ui.painter().hline(
-                    resp.rect.x_range(),
-                    resp.rect.bottom() - 1.0,
-                    (2.0, digit_ink()),
-                );
+                ui.painter().hline(resp.rect.x_range(), resp.rect.bottom() - 1.0, (2.0, lit));
                 let acc_id = id.with("acc").with(p);
                 let mut acc = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(0.0);
                 let detents = if wheel.digit_wheel {
@@ -117,13 +126,20 @@ fn zero_from_digit(freq: i64, step: i64) -> i64 {
 /// Losing the per-digit targets is also what lets the compact boxes shrink
 /// the digits below comfortable clicking size.
 ///
-/// Returns `Some(new_hz)` when a typed frequency is committed.
-pub fn show_typed(ui: &mut Ui, id: egui::Id, hz: f64, size: f32) -> Option<f64> {
+/// Returns `Some(new_hz)` when a typed frequency is committed. `ink` is
+/// [`show`]'s.
+pub fn show_typed(
+    ui: &mut Ui,
+    id: egui::Id,
+    hz: f64,
+    size: f32,
+    ink: Option<Color32>,
+) -> Option<f64> {
     let edit_id = id.with("edit");
     match ui.data(|d| d.get_temp::<String>(edit_id)) {
         Some(text) => edit_field(ui, id, edit_id, text, size),
         None => {
-            show_dial(ui, id, edit_id, hz, size);
+            show_dial(ui, id, edit_id, hz, size, ink);
             None
         }
     }
@@ -131,7 +147,15 @@ pub fn show_typed(ui: &mut Ui, id: egui::Id, hz: f64, size: f32) -> Option<f64> 
 
 /// The dial in its resting state: the digits of [`show`], drawn without their
 /// per-digit senses, behind one whole-row click target that opens the editor.
-fn show_dial(ui: &mut Ui, id: egui::Id, edit_id: egui::Id, hz: f64, size: f32) {
+fn show_dial(
+    ui: &mut Ui,
+    id: egui::Id,
+    edit_id: egui::Id,
+    hz: f64,
+    size: f32,
+    ink: Option<Color32>,
+) {
+    let lit = ink.unwrap_or_else(digit_ink);
     let freq = hz.round().max(0.0) as i64;
     let row = ui
         .horizontal(|ui| {
@@ -145,7 +169,7 @@ fn show_dial(ui: &mut Ui, id: egui::Id, edit_id: egui::Id, hz: f64, size: f32) {
                 let step = 10i64.pow(p);
                 let digit = (freq / step) % 10;
                 let leading_zero = p > 0 && freq < step;
-                let color = if leading_zero { crate::theme::gray(70) } else { digit_ink() };
+                let color = if leading_zero { crate::theme::gray(70) } else { lit };
                 ui.add(Label::new(
                     RichText::new(format!("{digit}")).monospace().size(size).color(color),
                 ));
@@ -161,7 +185,7 @@ fn show_dial(ui: &mut Ui, id: egui::Id, edit_id: egui::Id, hz: f64, size: f32) {
         .on_hover_cursor(egui::CursorIcon::Text)
         .on_hover_text("Tap to type a frequency");
     if resp.hovered() {
-        ui.painter().hline(row.rect.x_range(), row.rect.bottom() - 1.0, (2.0, digit_ink()));
+        ui.painter().hline(row.rect.x_range(), row.rect.bottom() - 1.0, (2.0, lit));
     }
     if resp.clicked() {
         ui.data_mut(|d| {
