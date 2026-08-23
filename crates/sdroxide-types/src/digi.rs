@@ -895,6 +895,43 @@ pub struct DigiConfig {
     /// (−) the image time-scale to null out slant against a receiver whose sound-
     /// card clock differs from this station's. 0 = no correction.
     pub sstv_tx_ppm: f32,
+
+    // ── The banner across the top of every transmitted picture ──
+    //
+    // On the station and not on the screen, unlike the waterfall's colours:
+    // this is drawn *into* the picture that goes on the air, so it is the
+    // station identifying itself, and every client composing a preview of the
+    // same slot has to draw the same thing.
+    /// Draw the banner strip at all. Off sends the picture and the slot's
+    /// message with nothing over the top of them.
+    #[serde(default = "yes")]
+    pub sstv_banner: bool,
+    /// What to print at the left end of the banner.
+    ///
+    /// Placeholders, substituted when the picture is composed:
+    /// `{call}` — the operator callsign, uppercased; `{grid}` — the locator;
+    /// `{version}` — the running sdroxide version, without a leading `v`.
+    /// An unknown `{…}` is left alone rather than swallowed, so a typo shows
+    /// up in the preview instead of silently printing nothing.
+    #[serde(default = "sstv_default_banner_left")]
+    pub sstv_banner_left: String,
+    /// What to print at the right end of the banner, right-aligned. Same
+    /// placeholders as [`sstv_banner_left`](Self::sstv_banner_left).
+    #[serde(default = "sstv_default_banner_right")]
+    pub sstv_banner_right: String,
+    /// The banner's colour at its top edge (sRGB), fading to black at the
+    /// bottom of the strip.
+    #[serde(default = "sstv_default_banner_fill")]
+    pub sstv_banner_fill: [u8; 3],
+    /// The colour both texts are printed in (sRGB).
+    #[serde(default = "sstv_default_banner_ink")]
+    pub sstv_banner_ink: [u8; 3],
+    /// Height of the strip in pixels of the transmitted picture. The text is
+    /// sized from it, so this is the one control over how large the banner
+    /// reads on the far end — worth turning up, since an SSTV frame is 320
+    /// pixels wide and lands on the other operator's screen as a small window.
+    #[serde(default = "sstv_default_banner_height")]
+    pub sstv_banner_height: u16,
     /// RF Paint scan speed as a fraction of the base rate (1.0 = base/fastest,
     /// 0.25 = default = quarter speed / 4× slower). Lower scans the text/image
     /// more slowly, giving the receiver's waterfall more lines to render it.
@@ -1229,6 +1266,33 @@ fn wspr_default_hop_bands() -> u16 {
         .fold(0u16, |m, i| m | (1 << i))
 }
 
+/// Default for [`DigiConfig::sstv_banner_left`] — the operator's own callsign,
+/// which is what the banner was hard-wired to print before it could be edited.
+fn sstv_default_banner_left() -> String {
+    "{call}".into()
+}
+
+/// Default for [`DigiConfig::sstv_banner_right`] — the program and its version,
+/// as the banner has always printed them.
+fn sstv_default_banner_right() -> String {
+    "SDRoxide v{version}".into()
+}
+
+/// Default for [`DigiConfig::sstv_banner_fill`] — the historic red.
+fn sstv_default_banner_fill() -> [u8; 3] {
+    [170, 0, 0]
+}
+
+/// Default for [`DigiConfig::sstv_banner_ink`] — white.
+fn sstv_default_banner_ink() -> [u8; 3] {
+    [255, 255, 255]
+}
+
+/// Default for [`DigiConfig::sstv_banner_height`], in picture pixels.
+fn sstv_default_banner_height() -> u16 {
+    16
+}
+
 fn cw_default_pitch() -> f32 {
     700.0
 }
@@ -1268,6 +1332,12 @@ impl Default for DigiConfig {
             tx_watchdog_min: 6,
             max_tx_repeats: 10,
             sstv_tx_ppm: 0.0,
+            sstv_banner: true,
+            sstv_banner_left: sstv_default_banner_left(),
+            sstv_banner_right: sstv_default_banner_right(),
+            sstv_banner_fill: sstv_default_banner_fill(),
+            sstv_banner_ink: sstv_default_banner_ink(),
+            sstv_banner_height: sstv_default_banner_height(),
             rf_paint_speed: 0.25,
             auto_tx_freq: true,
             hold_tx_freq: false,

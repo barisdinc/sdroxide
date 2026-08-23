@@ -13,37 +13,18 @@
 //! be worse than no strip.
 
 use eframe::egui::{Color32, FontId, Painter, Rect, Stroke, pos2};
-use sdroxide_types::{Band, Region, SegmentKind};
+use sdroxide_types::{Band, BandplanKind as Kind, Region, SegmentKind};
 
 use crate::theme;
 use crate::view::ViewState;
 
-/// Usage class → colour.
-#[derive(Clone, Copy)]
-enum Kind {
-    Cw,
-    Digi,
-    Phone,
-    Beacon,
-    Broadcast,
-    Ham,
-    Cb,
-    Am,
-}
-
-impl Kind {
-    fn color(self) -> Color32 {
-        match self {
-            Kind::Cw => Color32::from_rgb(0xE6, 0xB0, 0x3C),
-            Kind::Digi => Color32::from_rgb(0x2E, 0xC4, 0xE6),
-            Kind::Phone => Color32::from_rgb(0x4C, 0xC9, 0x6A),
-            Kind::Beacon => Color32::from_rgb(0xE0, 0x5A, 0xA0),
-            Kind::Broadcast => Color32::from_rgb(0xE8, 0x82, 0x2E),
-            Kind::Ham => Color32::from_rgb(0x2C, 0x9E, 0x8C),
-            Kind::Cb => Color32::from_rgb(0x9A, 0x6C, 0xE0),
-            Kind::Am => Color32::from_rgb(0xC9, 0x6A, 0x3C),
-        }
-    }
+/// The shade this usage class is currently painted in — the operator's pick,
+/// or the stock one until they make one. Looked up per block per frame rather
+/// than cached, the same way [`theme::spot_color`] is: it is an atomic load,
+/// and a retint has to show on the very next frame to be worth picking.
+fn color(kind: Kind) -> Color32 {
+    let (r, g, b) = theme::bandplan_color(kind);
+    Color32::from_rgb(r, g, b)
 }
 
 /// One block of the allocation strip.
@@ -404,7 +385,7 @@ pub fn overlay(p: &Painter, view: &ViewState, wf: &Rect, panel_below: bool) {
 
     // Base allocation row (coarse bands, or fine CW/Digi/SSB sub-segments).
     for seg in if span <= FINE_MAX_SPAN { fine(region) } else { coarse(region) } {
-        let color = seg.kind.color();
+        let color = color(seg.kind);
         draw_seg(p, view, wf, seg.lo, seg.hi, color, seg.label, base_top, base_h, 10.5 * fs);
     }
 

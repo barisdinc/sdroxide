@@ -2220,10 +2220,34 @@ inverted.
   `~/.config/sdroxide/sstv_messages.json`, so they persist across restarts. The
   lines are drawn over the image in bold with a black outline for readability;
   the **first line is rendered at double size** as a title. A **live preview**
-  shows exactly what will be transmitted,
-  including a small red→black header strip with your **callsign** on the left and
-  "SDRoxide" + version on the right. (Set your callsign on the **General**
-  settings tab, or the FT8 setup dialog.)
+  shows exactly what will be transmitted, banner and all.
+- **Banner…** opens the editor for the strip across the top of every picture
+  this station sends. Out of the box it is the one sdroxide has always drawn: a
+  red→black strip with your **callsign** at the top left and `SDRoxide` + the
+  version at the top right. All of it is yours to change:
+  - **Top left** and **Top right** are free text, with three placeholders
+    substituted when the picture is composed — `{call}` (your callsign, put into
+    capitals), `{grid}` (your locator) and `{version}` (the sdroxide version).
+    Anything else in braces is printed as you typed it, so a mistyped
+    placeholder shows up in the preview instead of quietly printing nothing.
+    Leave a field empty to print nothing at that end.
+  - **Colours** — the strip at its top edge (it fades to black at the bottom),
+    and the colour both texts are printed in.
+  - **Height** — how tall the strip is, in pixels of the transmitted picture
+    (8–64, default 16). The text is sized from it, so this is the control that
+    matters: an SSTV frame is only 320 pixels across and lands on the other
+    operator's screen as a small window, and a 16-pixel banner is hard to read
+    there.
+  - Untick **Draw the banner** to send the picture and its message with nothing
+    over the top, and **Reset** puts the whole thing back to the callsign and
+    the version.
+
+  The banner belongs to the *station*, not to the slot and not to the screen: it
+  is drawn into the picture that goes on the air, so it is saved with the rest of
+  your digital-mode settings and every screen attached to the radio — the
+  console and the browser tab — composes the same slot identically. (Your
+  callsign itself is set on the **General** settings tab, or in the FT8 setup
+  dialog.)
 - Press **TX** to transmit the composed image; **ABORT TX** stops a transmission
   in progress.
 - **TX slant** trims the transmit clock (in ppm) to remove slant seen on a
@@ -6254,6 +6278,16 @@ spoken announcements below them under `[speech]`:
   own preview, and **Reset** puts all six back to their defaults. The colours
   are this screen's preference, like the theme — a remote client picks its own,
   and the station is not touched.
+- **Band plan colours** — the shade each class of allocation is painted in on
+  the band-plan strip along the bottom of the waterfall: **Ham**, **CW**,
+  **Digital**, **Voice**, **Beacon**, **Broadcast**, **AM / LW / MW** and
+  **CB**. Same picker and same **Reset** as the spot colours above, and the same
+  standing — the plan itself comes from the station's `bandplan.json`, but what
+  colour a block is drawn in is whatever the operator looking at it can read.
+  Bear in mind that the blocks are drawn semi-transparent over the waterfall, so
+  a colour lands a good deal darker there than in the swatch: the stock burnt
+  orange for broadcast reads as brown over a near-black band, which is what this
+  setting exists to fix.
 - **Skimmer font size** — how large the spot and decode boxes the skimmer paints
   on the waterfall are: **Small**, **Medium** or **Large**. Larger boxes are
   easier to read across the shack and cover more of the band while they sit

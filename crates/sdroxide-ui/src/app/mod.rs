@@ -853,6 +853,7 @@ impl SdroxideApp {
             ui_settings.menu_font_size,
         );
         crate::theme::set_spot_colors(&ui_settings.spot_colors);
+        crate::theme::set_bandplan_colors(&ui_settings.bandplan_colors);
         crate::theme::apply(egui_ctx);
         if let Some(rs) = &wgpu_render_state {
             waterfall_gpu::init(rs);

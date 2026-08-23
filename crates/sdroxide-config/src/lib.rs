@@ -2051,6 +2051,36 @@ mod tests {
         assert_eq!(back.ui.spot_colors, s.ui.spot_colors);
     }
 
+    /// The band-plan strip's shades load and round-trip on the same terms as
+    /// the spot tints above — including a list of the wrong width, which is
+    /// what an operator gets by upgrading past a build that added a class.
+    #[test]
+    fn bandplan_colours_load_and_round_trip() {
+        use sdroxide_types::BandplanKind;
+        let stock: Settings = toml::from_str("[ui]\nframe_rate_fps = 30\n").unwrap();
+        assert_eq!(stock.ui.frame_rate_fps, 30, "the rest of the table still applies");
+        for kind in BandplanKind::ALL {
+            let (r, g, b) = kind.default_color();
+            assert_eq!(stock.ui.bandplan_colors[kind.index()], [r, g, b]);
+        }
+
+        let short: Settings =
+            toml::from_str("[ui]\nframe_rate_fps = 30\nbandplan_colors = [[1, 2, 3]]\n").unwrap();
+        assert_eq!(short.ui.frame_rate_fps, 30);
+        assert_eq!(short.ui.bandplan_colors[0], [1, 2, 3]);
+        let (r, g, b) = BandplanKind::Broadcast.default_color();
+        assert_eq!(
+            short.ui.bandplan_colors[BandplanKind::Broadcast.index()],
+            [r, g, b],
+            "a class the list never reached stays on its stock shade"
+        );
+
+        let mut s = Settings::default();
+        s.ui.bandplan_colors[BandplanKind::Am.index()] = [10, 20, 30];
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.ui.bandplan_colors, s.ui.bandplan_colors);
+    }
+
     #[test]
     fn network_config_loads_without_the_freedv_section() {
         // A net.json written before FreeDV Reporter existed.

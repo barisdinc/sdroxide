@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
 };
-use sdroxide_types::{ChromeStyle, FontSize, SpotKind, UiTheme};
+use sdroxide_types::{BandplanKind, ChromeStyle, FontSize, SpotKind, UiTheme};
 
 /// Every colour role the chrome wears. A theme is one full assignment of
 /// these; the field names keep the historic constant names (`cyan` is "the
@@ -1109,6 +1109,31 @@ pub fn set_spot_colors(colors: &[[u8; 3]; SpotKind::COUNT]) {
 #[inline]
 pub fn spot_color(kind: SpotKind) -> (u8, u8, u8) {
     let packed = SPOT_COLORS[kind.index()].load(Ordering::Relaxed);
+    if packed == SPOT_UNSET {
+        return kind.default_color();
+    }
+    let [_, r, g, b] = packed.to_be_bytes();
+    (r, g, b)
+}
+
+// The band-plan strip's shades, packed 0x00RRGGBB, one per `BandplanKind`.
+// `UNSET` for the same reason as the spot tints above.
+static BANDPLAN_COLORS: [AtomicU32; BandplanKind::COUNT] =
+    [const { AtomicU32::new(SPOT_UNSET) }; BandplanKind::COUNT];
+
+/// Select the process-wide band-plan shades, as
+/// [`sdroxide_types::UiSettings::bandplan_colors`] holds them.
+pub fn set_bandplan_colors(colors: &[[u8; 3]; BandplanKind::COUNT]) {
+    for (slot, c) in BANDPLAN_COLORS.iter().zip(colors) {
+        slot.store(u32::from_be_bytes([0, c[0], c[1], c[2]]), Ordering::Relaxed);
+    }
+}
+
+/// The shade a band-plan class currently wears (r, g, b) — what the operator
+/// picked, or [`BandplanKind::default_color`] until they pick anything.
+#[inline]
+pub fn bandplan_color(kind: BandplanKind) -> (u8, u8, u8) {
+    let packed = BANDPLAN_COLORS[kind.index()].load(Ordering::Relaxed);
     if packed == SPOT_UNSET {
         return kind.default_color();
     }

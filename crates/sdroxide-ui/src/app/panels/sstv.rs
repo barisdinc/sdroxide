@@ -74,8 +74,16 @@ pub(in crate::app) struct SstvUi {
     /// Size the cached preview was composed at, so a change of transmit size
     /// rebuilds it.
     pub(in crate::app) preview_dims: (u16, u16),
-    /// Operator callsign for the transmit-image header (mirrors the digi config).
-    pub(in crate::app) callsign: String,
+    /// The banner drawn across the top of the transmit image, resolved from the
+    /// station's digital-mode config. `None` when the operator switched it off.
+    ///
+    /// Resolved here rather than at each compose because it is what tells the
+    /// preview it is stale: the strip changes when the callsign changes, when a
+    /// template is edited, when a colour is picked, and comparing the composed
+    /// banner catches all of that with one test.
+    pub(in crate::app) banner: Option<crate::sstv::Banner>,
+    /// Whether the banner editor window is open.
+    pub(in crate::app) banner_open: bool,
     /// Auto mode: RX auto-detects the mode; TX defaults to Martin 1 until a mode
     /// is heard or the operator picks one.
     pub(in crate::app) auto: bool,
@@ -159,7 +167,8 @@ impl Default for SstvUi {
             rifp: RifpStatus::default(),
             rx_dims: (0, 0),
             preview_dims: (0, 0),
-            callsign: String::new(),
+            banner: None,
+            banner_open: false,
             auto: true,
             presets: ImagePresets::default(),
             slot_thumbs: (0..IMAGE_SLOTS).map(|_| None).collect(),
@@ -449,7 +458,7 @@ impl SstvUi {
                     slot.sw,
                     slot.sh,
                     &message,
-                    &self.callsign,
+                    self.banner.as_ref(),
                 );
                 let ci = crate::sstv::color_image(&rgb, w, h);
                 self.preview_tex =
@@ -469,7 +478,7 @@ impl SstvUi {
             slot.sw,
             slot.sh,
             self.current_message(),
-            &self.callsign,
+            self.banner.as_ref(),
         );
         crate::sstv::encode_png(&rgb, w, h)
     }
@@ -602,9 +611,11 @@ impl SdroxideApp {
             self.sstv.src_asked.insert(sel, want.version);
             cmds.push(Command::ImageGetSlot(sel as u8));
         }
-        // Keep the header callsign in sync with the operator config.
-        if self.sstv.callsign != self.digi_cfg_edit.my_call {
-            self.sstv.callsign = self.digi_cfg_edit.my_call.clone();
+        // Keep the banner in sync with the operator config — the callsign it
+        // prints, the two templates, the colours and the height.
+        let banner = crate::sstv::Banner::from_config(&self.digi_cfg_edit);
+        if self.sstv.banner != banner {
+            self.sstv.banner = banner;
             self.sstv.preview_dirty = true;
         }
         // The transmitted size: SSTV's line format fixes it, RIFP leaves it to
@@ -1038,6 +1049,17 @@ impl SdroxideApp {
                         {
                             cmds.push(Command::ImageClearSlot(sel as u8));
                         }
+                        // The banner belongs to the station, not to the slot:
+                        // one editor, reached from whichever slot is in front.
+                        if crate::chrome::chip(ui, self.sstv.banner_open, "Banner…")
+                            .on_hover_text(
+                                "What is printed across the top of every picture this station \
+                                 sends",
+                            )
+                            .clicked()
+                        {
+                            self.sstv.banner_open = !self.sstv.banner_open;
+                        }
                     });
                     if let Some(err) = &self.sstv.pick_error {
                         ui.label(RichText::new(err).size(10.0).color(crate::theme::YELLOW()));
@@ -1198,6 +1220,8 @@ impl SdroxideApp {
             }
         });
 
+        self.banner_window(&ctx, cmds);
+
         // Enlarged view of a clicked received image (overlay window).
         if let Some(idx) = self.sstv.enlarged {
             let mut open = true;
@@ -1347,6 +1371,164 @@ impl SdroxideApp {
                 self.sstv.confirm_delete = None;
             }
         }
+    }
+
+    /// The editor for the banner drawn across the top of every transmitted
+    /// picture: the two texts, the two colours, and how tall the strip is.
+    ///
+    /// A window rather than another row in the transmit column, because this is
+    /// set once for the station and then left alone, and the column it would
+    /// have gone in is already the narrow half of a split panel.
+    fn banner_window(&mut self, ctx: &egui::Context, cmds: &mut Vec<Command>) {
+        if !self.sstv.banner_open {
+            return;
+        }
+        let seeded = self.digi_cfg_seeded;
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Image banner")
+            .id(crate::layout::salted_id(ctx, "Image banner"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(crate::layout::window_w(ctx, 420.0))
+            .frame(crate::chrome::window_frame())
+            .show(ctx, |ui| {
+                crate::chrome::window_body_bg(ui);
+                ui.label(
+                    RichText::new(
+                        "Drawn into every picture this station transmits, over the slot's own \
+                         message.",
+                    )
+                    .size(10.5)
+                    .weak(),
+                );
+                ui.add_space(6.0);
+                let cfg = &mut self.digi_cfg_edit;
+                ui.add_enabled_ui(seeded, |ui| {
+                    if crate::chrome::checkbox(ui, &mut cfg.sstv_banner, "Draw the banner")
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    ui.add_space(4.0);
+                    ui.add_enabled_ui(cfg.sstv_banner, |ui| {
+                        // The placeholder list is the whole documentation for
+                        // these two fields, so it hangs off both of them.
+                        let hint: String = std::iter::once(
+                            "Substituted when the picture is composed:".to_string(),
+                        )
+                        .chain(
+                            crate::sstv::BANNER_PLACEHOLDERS
+                                .iter()
+                                .map(|(k, what)| format!("  {k} — {what}")),
+                        )
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                        egui::Grid::new("sstv-banner-grid")
+                            .num_columns(2)
+                            .spacing([10.0, 7.0])
+                            .show(ui, |ui| {
+                                ui.label("Top left");
+                                let resp = crate::chrome::field(
+                                    ui,
+                                    egui::TextEdit::singleline(&mut cfg.sstv_banner_left)
+                                        .desired_width(240.0)
+                                        .hint_text("{call}"),
+                                )
+                                .on_hover_text(&hint);
+                                // On focus loss, like the RIFP caption: this is
+                                // persisted engine-side and a config write per
+                                // keystroke would be absurd. The preview still
+                                // follows every keystroke, because it is
+                                // recomposed from `digi_cfg_edit` and not from
+                                // what the engine has heard about.
+                                if resp.lost_focus() && resp.changed() {
+                                    changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Top right");
+                                let resp = crate::chrome::field(
+                                    ui,
+                                    egui::TextEdit::singleline(&mut cfg.sstv_banner_right)
+                                        .desired_width(240.0)
+                                        .hint_text("SDRoxide v{version}"),
+                                )
+                                .on_hover_text(&hint);
+                                if resp.lost_focus() && resp.changed() {
+                                    changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Colours");
+                                ui.horizontal(|ui| {
+                                    changed |= ui
+                                        .color_edit_button_srgb(&mut cfg.sstv_banner_fill)
+                                        .on_hover_text(
+                                            "The strip, at its top edge — it fades to black at \
+                                             the bottom",
+                                        )
+                                        .changed();
+                                    ui.label(RichText::new("strip").size(10.5).weak());
+                                    ui.add_space(8.0);
+                                    changed |= ui
+                                        .color_edit_button_srgb(&mut cfg.sstv_banner_ink)
+                                        .on_hover_text("Both texts")
+                                        .changed();
+                                    ui.label(RichText::new("text").size(10.5).weak());
+                                });
+                                ui.end_row();
+
+                                ui.label("Height").on_hover_text(
+                                    "How tall the strip is, in pixels of the transmitted \
+                                     picture. The text is sized from it — an SSTV frame is only \
+                                     320 pixels wide, so a taller banner is what makes it \
+                                     readable on the far end.",
+                                );
+                                ui.spacing_mut().slider_width = 180.0;
+                                let resp = crate::chrome::slider(
+                                    ui,
+                                    egui::Slider::new(&mut cfg.sstv_banner_height, 8..=64)
+                                        .suffix(" px"),
+                                );
+                                changed |=
+                                    resp.drag_stopped() || (resp.changed() && !resp.dragged());
+                                ui.end_row();
+                            });
+                    });
+                    ui.add_space(6.0);
+                    if ui
+                        .button("Reset")
+                        .on_hover_text(
+                            "Back to the callsign on the left and the version on the right",
+                        )
+                        .clicked()
+                    {
+                        let d = sdroxide_types::DigiConfig::default();
+                        cfg.sstv_banner = d.sstv_banner;
+                        cfg.sstv_banner_left = d.sstv_banner_left;
+                        cfg.sstv_banner_right = d.sstv_banner_right;
+                        cfg.sstv_banner_fill = d.sstv_banner_fill;
+                        cfg.sstv_banner_ink = d.sstv_banner_ink;
+                        cfg.sstv_banner_height = d.sstv_banner_height;
+                        changed = true;
+                    }
+                    if !seeded {
+                        ui.label(
+                            RichText::new(
+                                "Waiting for the station's digital-mode settings to load…",
+                            )
+                            .size(10.0)
+                            .weak(),
+                        );
+                    }
+                });
+            });
+        if changed {
+            cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
+        }
+        self.sstv.banner_open = open;
     }
 
     /// The RIFP half of the image panel's control strip: profile, picture size

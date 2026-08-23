@@ -511,7 +511,24 @@ use sdroxide_types::{
 /// A field appended to a struct that rides in an event, so a v78 client would
 /// read the tail of the capabilities as garbage — the handshake's equality test
 /// is what stops it trying.
-pub const PROTO_VERSION: u16 = 79;
+///
+/// **80** — the banner across the top of a transmitted SSTV/RIFP picture is
+/// the operator's to write (issue #145). [`sdroxide_types::DigiConfig`] gained
+/// `sstv_banner`, `sstv_banner_left`, `sstv_banner_right`, `sstv_banner_fill`,
+/// `sstv_banner_ink` and `sstv_banner_height`: what the strip prints at each
+/// end, what colour it and its text are, and how tall it is. The two texts
+/// carry `{call}` / `{grid}` / `{version}` placeholders, resolved by whichever
+/// client composes the picture.
+///
+/// On the station rather than in this screen's `UiSettings`, where the
+/// waterfall's own colours live, because this one is drawn *into* the picture
+/// that goes on the air — it is the station identifying itself, and the
+/// browser tab and the console have to compose the same slot identically.
+///
+/// Fields added to a struct that rides in both a command and an event, so a
+/// v79 peer would read the tail of either as garbage; the handshake's equality
+/// test is what stops it trying.
+pub const PROTO_VERSION: u16 = 80;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

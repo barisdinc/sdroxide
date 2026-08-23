@@ -26,6 +26,103 @@ impl Speed {
     }
 }
 
+/// A usage class on the band-plan strip painted along the bottom of the
+/// waterfall — what an allocation is *for*, which is the only thing the strip
+/// colours by.
+///
+/// Here rather than in the widget that draws it because the operator can
+/// retint every class, and the picked colours are kept in
+/// [`UiSettings::bandplan_colors`], indexed by [`BandplanKind::index`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BandplanKind {
+    /// Amateur band as a whole, drawn when zoomed out past its sub-segments.
+    Ham,
+    /// CW sub-segment of an amateur band.
+    Cw,
+    /// Digital-mode sub-segment.
+    Digi,
+    /// Voice sub-segment.
+    Phone,
+    /// Beacon sub-segment.
+    Beacon,
+    /// Shortwave/tropical broadcasting allocation.
+    Broadcast,
+    /// Longwave and mediumwave AM broadcasting.
+    Am,
+    /// Citizens' band.
+    Cb,
+}
+
+impl BandplanKind {
+    /// Every class, in the order the settings colour pickers and
+    /// [`BandplanKind::index`] use. Anything indexed by class —
+    /// [`UiSettings::bandplan_colors`] — is this wide.
+    pub const ALL: [BandplanKind; 8] = [
+        BandplanKind::Ham,
+        BandplanKind::Cw,
+        BandplanKind::Digi,
+        BandplanKind::Phone,
+        BandplanKind::Beacon,
+        BandplanKind::Broadcast,
+        BandplanKind::Am,
+        BandplanKind::Cb,
+    ];
+
+    /// How many classes there are, i.e. the width of every per-class array.
+    pub const COUNT: usize = BandplanKind::ALL.len();
+
+    /// This class's position in [`BandplanKind::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            BandplanKind::Ham => 0,
+            BandplanKind::Cw => 1,
+            BandplanKind::Digi => 2,
+            BandplanKind::Phone => 3,
+            BandplanKind::Beacon => 4,
+            BandplanKind::Broadcast => 5,
+            BandplanKind::Am => 6,
+            BandplanKind::Cb => 7,
+        }
+    }
+
+    /// Short label for the settings picker beside the swatch.
+    pub fn label(self) -> &'static str {
+        match self {
+            BandplanKind::Ham => "Ham",
+            BandplanKind::Cw => "CW",
+            BandplanKind::Digi => "Digital",
+            BandplanKind::Phone => "Voice",
+            BandplanKind::Beacon => "Beacon",
+            BandplanKind::Broadcast => "Broadcast",
+            BandplanKind::Am => "AM / LW / MW",
+            BandplanKind::Cb => "CB",
+        }
+    }
+
+    /// The stock RGB the strip shades this class with (r, g, b).
+    ///
+    /// Where a class starts, not where it has to stay: the operator can retint
+    /// any of them from the UI settings tab, and what they chose is kept in
+    /// [`UiSettings::bandplan_colors`]. Clients read that, not this.
+    ///
+    /// The blocks are painted at about 60% opacity over a near-black
+    /// waterfall, so a saturated hue lands a good deal darker than it looks
+    /// here — which is why the two broadcast classes read as brown and why
+    /// they are worth being able to change (issue #145).
+    pub fn default_color(self) -> (u8, u8, u8) {
+        match self {
+            BandplanKind::Ham => (0x2C, 0x9E, 0x8C),
+            BandplanKind::Cw => (0xE6, 0xB0, 0x3C),
+            BandplanKind::Digi => (0x2E, 0xC4, 0xE6),
+            BandplanKind::Phone => (0x4C, 0xC9, 0x6A),
+            BandplanKind::Beacon => (0xE0, 0x5A, 0xA0),
+            BandplanKind::Broadcast => (0xE8, 0x82, 0x2E),
+            BandplanKind::Am => (0xC9, 0x6A, 0x3C),
+            BandplanKind::Cb => (0x9A, 0x6C, 0xE0),
+        }
+    }
+}
+
 /// Coarse font-size step for one family of hand-painted labels — the skimmer
 /// boxes, the panadapter's own labels, the popup menus. Each family maps the
 /// three steps onto its own point sizes, so `Small` here is "the small end of
@@ -210,6 +307,15 @@ pub struct UiSettings {
     /// remote client picks its own.
     #[serde(default = "default_spot_colors", deserialize_with = "spot_colors")]
     pub spot_colors: [[u8; 3]; SpotKind::COUNT],
+    /// The shade each band-plan class wears on the strip along the bottom of
+    /// the waterfall, indexed by [`BandplanKind::index`]. Starts at
+    /// [`BandplanKind::default_color`]; the UI tab retints any of them.
+    ///
+    /// This screen's preference, like the spot tints above: the plan itself is
+    /// the station's, but what colour an allocation is shaded is whatever the
+    /// operator looking at it can read (issue #145).
+    #[serde(default = "default_bandplan_colors", deserialize_with = "bandplan_colors")]
+    pub bandplan_colors: [[u8; 3]; BandplanKind::COUNT],
     /// Which layout the window wears, or `Auto` to pick from the viewport.
     pub layout: LayoutMode,
     /// Colour theme for the UI chrome.
@@ -272,6 +378,31 @@ where
     Ok(out)
 }
 
+/// Default for [`UiSettings::bandplan_colors`] — every class on its stock shade.
+fn default_bandplan_colors() -> [[u8; 3]; BandplanKind::COUNT] {
+    let mut out = [[0u8; 3]; BandplanKind::COUNT];
+    for kind in BandplanKind::ALL {
+        let (r, g, b) = kind.default_color();
+        out[kind.index()] = [r, g, b];
+    }
+    out
+}
+
+/// Read [`UiSettings::bandplan_colors`] as a list of any length, for the same
+/// reason [`spot_colors`] does: one extra or one missing entry must cost the
+/// operator that entry, not the whole `[ui]` table.
+fn bandplan_colors<'de, D>(d: D) -> Result<[[u8; 3]; BandplanKind::COUNT], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let list = Vec::<[u8; 3]>::deserialize(d)?;
+    let mut out = default_bandplan_colors();
+    for (slot, c) in out.iter_mut().zip(list) {
+        *slot = c;
+    }
+    Ok(out)
+}
+
 impl Default for UiSettings {
     fn default() -> Self {
         UiSettings {
@@ -283,6 +414,7 @@ impl Default for UiSettings {
             gradient_top: [64, 0, 0],   // dark red
             gradient_bottom: [0, 0, 0], // black
             spot_colors: default_spot_colors(),
+            bandplan_colors: default_bandplan_colors(),
             layout: LayoutMode::Auto,
             theme: UiTheme::Default,
             button_style: ChromeStyle::Angled,

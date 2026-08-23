@@ -1,8 +1,14 @@
 //! SSTV image compositing for transmit: crop/scale a source picture to the
-//! selected mode's dimensions, stamp a red→black header strip with the program
-//! name + version, and overlay the operator's multi-line message (one bundled
-//! font, bold with a black outline for readability, with the first line drawn at
-//! double size).
+//! selected mode's dimensions, stamp the operator's banner strip across the
+//! top of it, and overlay the slot's multi-line message (one bundled font, bold
+//! with a black outline for readability, with the first line drawn at double
+//! size).
+//!
+//! The banner is what the station puts its name on, so its two texts, its two
+//! colours and its height come from [`sdroxide_types::DigiConfig`] rather than
+//! from here — see [`Banner`]. The stock settings compose exactly the strip
+//! this module used to hard-wire: the callsign at the left, `SDRoxide vX.Y.Z`
+//! at the right, white on red fading to black.
 //!
 //! Pure-Rust (`image` + `ab_glyph`) so it runs identically in the native app and
 //! the wasm browser client — the composed buffer is both the live preview and,
@@ -11,8 +17,84 @@
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use eframe::egui;
 
-/// Height of the header strip, in pixels.
-const HEADER_H: usize = 16;
+/// The banner strip drawn across the top of a transmitted picture, with the
+/// operator's templates already resolved against the station identity.
+///
+/// Resolved rather than carried as templates because the same banner is drawn
+/// several times for one picture — the live preview on every keystroke, then
+/// the transmit copy — and because it keeps the drawing code free of any
+/// notion of what a `{call}` is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Banner {
+    /// Height of the strip in picture pixels. The text is sized from it.
+    pub height: u16,
+    /// Text printed at the left end.
+    pub left: String,
+    /// Text printed at the right end, right-aligned.
+    pub right: String,
+    /// Colour at the top of the strip, fading to black at its bottom.
+    pub fill: [u8; 3],
+    /// Colour both texts are printed in.
+    pub ink: [u8; 3],
+}
+
+impl Banner {
+    /// The banner the station's digital-mode config asks for, or `None` when
+    /// the operator has switched it off.
+    ///
+    /// A banner whose two texts both resolve to nothing still draws its strip:
+    /// blanking the text is not the same request as turning the banner off,
+    /// and a strip that vanished when a callsign had not been entered yet
+    /// would look like a bug rather than like an empty field.
+    pub fn from_config(cfg: &sdroxide_types::DigiConfig) -> Option<Banner> {
+        cfg.sstv_banner.then(|| Banner {
+            // A zero height would be an invisible banner that still pushed the
+            // message down by nothing; one pixel is the smallest honest strip.
+            height: cfg.sstv_banner_height.max(1),
+            left: expand(&cfg.sstv_banner_left, &cfg.my_call, &cfg.my_grid),
+            right: expand(&cfg.sstv_banner_right, &cfg.my_call, &cfg.my_grid),
+            fill: cfg.sstv_banner_fill,
+            ink: cfg.sstv_banner_ink,
+        })
+    }
+}
+
+/// Substitute the banner placeholders in `template`.
+///
+/// `{call}` is uppercased — a callsign belongs in capitals on the air and the
+/// header always printed it that way — but the template around it is left as
+/// the operator typed it, which is what stops `SDRoxide` becoming `SDROXIDE`.
+/// An unrecognised `{…}` is copied through untouched so a typo is visible in
+/// the preview rather than silently printing nothing.
+pub fn expand(template: &str, call: &str, grid: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        let Some(close) = rest.find('}') else {
+            // An unclosed brace is just text.
+            break;
+        };
+        match rest[1..close].to_ascii_lowercase().as_str() {
+            "call" => out.push_str(call.trim().to_uppercase().as_str()),
+            "grid" => out.push_str(grid.trim()),
+            "version" => out.push_str(env!("CARGO_PKG_VERSION")),
+            _ => out.push_str(&rest[..=close]),
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The placeholders [`expand`] knows, with a word on each, for the hint text
+/// beside the two fields that take them.
+pub const BANNER_PLACEHOLDERS: [(&str, &str); 3] = [
+    ("{call}", "your callsign, in capitals"),
+    ("{grid}", "your locator"),
+    ("{version}", "the sdroxide version"),
+];
 
 /// The single font used for the header and the message overlay
 /// (ChakraPetch-SemiBold, already bundled OFL for the UI's own text).
@@ -64,10 +146,12 @@ pub fn crop_scale(src_rgb: &[u8], sw: u16, sh: u16, w: u16, h: u16) -> Vec<u8> {
 }
 
 /// Build the final transmit image: crop/scale the source to `(w, h)`, add the
-/// header strip, then the message overlay. Returns `(rgb, w, h)`.
+/// banner strip, then the message overlay. Returns `(rgb, w, h)`.
 ///
 /// The size is the caller's: SSTV takes it from the line format, RIFP from the
-/// operator, since the protocol fixes none of its own.
+/// operator, since the protocol fixes none of its own. `banner` is `None` when
+/// the operator has switched the strip off, and the message then starts at the
+/// top of the picture instead of below it.
 pub fn compose(
     w: u16,
     h: u16,
@@ -75,11 +159,14 @@ pub fn compose(
     sw: u16,
     sh: u16,
     message: &str,
-    callsign: &str,
+    banner: Option<&Banner>,
 ) -> (Vec<u8>, u16, u16) {
     let mut img = crop_scale(src_rgb, sw, sh, w, h);
-    draw_header(&mut img, w as usize, h as usize, callsign);
-    draw_message(&mut img, w as usize, h as usize, message);
+    let strip = match banner {
+        Some(b) => draw_banner(&mut img, w as usize, h as usize, b),
+        None => 0,
+    };
+    draw_message(&mut img, w as usize, h as usize, message, strip);
     (img, w, h)
 }
 
@@ -165,53 +252,57 @@ fn blend(img: &mut [u8], w: usize, h: usize, x: i32, y: i32, r: u8, g: u8, b: u8
     img[i + 2] = mix(img[i + 2], b);
 }
 
-/// The red→black gradient strip: operator callsign on the left, program name +
-/// version on the right ("SDRoxide vX.Y.Z").
-fn draw_header(img: &mut [u8], w: usize, h: usize, callsign: &str) {
-    let strip = HEADER_H.min(h);
+/// The banner: a strip fading from the operator's colour at the top to black
+/// at the bottom, their left text at the left and their right text at the
+/// right. Returns how many rows of the picture it actually covered, which is
+/// where the message overlay starts.
+///
+/// The type sizes off the height rather than being a setting of its own — the
+/// eleven points the strip was drawn at were eleven points *because* it was
+/// sixteen pixels tall, and two controls that have to be turned together are
+/// worse than one.
+fn draw_banner(img: &mut [u8], w: usize, h: usize, banner: &Banner) -> usize {
+    let strip = usize::from(banner.height).min(h);
+    if strip == 0 {
+        return 0;
+    }
+    let [fr, fg, fb] = banner.fill;
     for y in 0..strip {
-        // Red at the top fading to black at the bottom of the strip.
-        let t = 1.0 - (y as f32 / strip.max(1) as f32);
-        let r = (170.0 * t) as u8;
+        let t = 1.0 - (y as f32 / strip as f32);
+        let shade = |c: u8| (f32::from(c) * t) as u8;
         for x in 0..w {
-            put(img, w, h, x as i32, y as i32, r, 0, 0);
+            put(img, w, h, x as i32, y as i32, shade(fr), shade(fg), shade(fb));
         }
     }
-    if let Some(font) = message_font() {
-        let scale = PxScale::from(11.0);
-        let baseline = (strip as f32 * 0.72).round();
-        // Left: operator callsign (uppercased).
-        let call = callsign.trim().to_uppercase();
-        if !call.is_empty() {
-            draw_text(img, w, h, 4.0, baseline, &call, &font, scale, (255, 255, 255), 1.0);
-        }
-        // Right: program name + version.
-        let brand = format!("SDRoxide v{}", env!("CARGO_PKG_VERSION"));
-        let tw = text_width(&brand, &font, scale);
-        draw_text(
-            img,
-            w,
-            h,
-            w as f32 - tw - 4.0,
-            baseline,
-            &brand,
-            &font,
-            scale,
-            (235, 235, 235),
-            1.0,
-        );
+    let Some(font) = message_font() else {
+        return strip;
+    };
+    let ink = (banner.ink[0], banner.ink[1], banner.ink[2]);
+    let scale = PxScale::from(strip as f32 * 11.0 / 16.0);
+    let baseline = (strip as f32 * 0.72).round();
+    // The inset scales with the strip too, so a tall banner does not print
+    // hard against the edge of the picture.
+    let pad = (strip as f32 * 4.0 / 16.0).max(1.0);
+    if !banner.left.is_empty() {
+        draw_text(img, w, h, pad, baseline, &banner.left, &font, scale, ink, 1.0);
     }
+    if !banner.right.is_empty() {
+        let tw = text_width(&banner.right, &font, scale);
+        draw_text(img, w, h, w as f32 - tw - pad, baseline, &banner.right, &font, scale, ink, 1.0);
+    }
+    strip
 }
 
 /// Overlay the message in a single font, white with a black outline, starting
-/// just below the header. The first line is drawn at double the size of the
-/// rest (a title line), with its outline thickened to match.
-fn draw_message(img: &mut [u8], w: usize, h: usize, message: &str) {
+/// just below the banner — or at the top of the picture when there is none.
+/// The first line is drawn at double the size of the rest (a title line), with
+/// its outline thickened to match.
+fn draw_message(img: &mut [u8], w: usize, h: usize, message: &str, top: usize) {
     let Some(font) = message_font() else {
         return;
     };
     let base_px = 30.0_f32;
-    let mut baseline = HEADER_H as f32;
+    let mut baseline = top as f32;
     for (i, line) in message.lines().enumerate() {
         // First line twice as large; the line height and outline scale with it.
         let px = if i == 0 { base_px * 1.5 } else { base_px };
@@ -294,7 +385,7 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sdroxide_types::{Command, ImagePresets, ImageSlotInfo};
+    use sdroxide_types::{Command, DigiConfig, ImagePresets, ImageSlotInfo};
 
     fn presets(messages: &[&str]) -> ImagePresets {
         ImagePresets {
@@ -357,5 +448,76 @@ mod tests {
         edit = Some((4, "e and more".to_string()));
         assert_eq!(claim_message(&mut edit, &p, 4), None);
         assert_eq!(edit, Some((4, "e and more".to_string())));
+    }
+
+    /// The stock settings have to compose the strip the header was hard-wired
+    /// to draw before it could be edited, or every existing station's pictures
+    /// change appearance on upgrade.
+    #[test]
+    fn the_stock_banner_is_the_header_that_was_hard_wired() {
+        let cfg = DigiConfig { my_call: "oe1test".into(), ..DigiConfig::default() };
+        let b = Banner::from_config(&cfg).expect("on by default");
+        assert_eq!(b.left, "OE1TEST");
+        assert_eq!(b.right, format!("SDRoxide v{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(b.height, 16);
+        assert_eq!(b.fill, [170, 0, 0]);
+    }
+
+    #[test]
+    fn switching_the_banner_off_leaves_no_strip_to_draw() {
+        let cfg = DigiConfig { sstv_banner: false, ..DigiConfig::default() };
+        assert_eq!(Banner::from_config(&cfg), None);
+    }
+
+    /// The callsign goes up in capitals, but only the callsign: uppercasing the
+    /// whole template would turn `SDRoxide` into `SDROXIDE`.
+    #[test]
+    fn only_the_callsign_is_uppercased() {
+        assert_eq!(expand("de {call} ", " oe1test ", ""), "de OE1TEST ");
+        assert_eq!(expand("SDRoxide {grid}", "", "jn88"), "SDRoxide jn88");
+        assert_eq!(expand("v{version}", "", ""), format!("v{}", env!("CARGO_PKG_VERSION")));
+        // Case-insensitive, so {CALL} works as well as {call}.
+        assert_eq!(expand("{CALL}", "oe1test", ""), "OE1TEST");
+    }
+
+    /// A typo has to reach the preview as itself. Swallowing it would leave the
+    /// operator staring at a gap with nothing to tell them what went wrong.
+    #[test]
+    fn an_unknown_placeholder_survives_untouched() {
+        assert_eq!(expand("{callsign} {call}", "oe1test", ""), "{callsign} OE1TEST");
+        assert_eq!(expand("100% {open", "", ""), "100% {open");
+        assert_eq!(expand("}{}{", "", ""), "}{}{");
+    }
+
+    /// The message used to start at a fixed 16 rows whether or not a strip was
+    /// there. With the banner off, the picture is the operator's from the top.
+    #[test]
+    fn the_message_starts_below_whatever_the_banner_actually_covered() {
+        // A three-pixel-tall picture cannot hold a 16-pixel banner; the strip
+        // must report what it covered, not what it was asked for.
+        let mut img = vec![0u8; 8 * 3 * 3];
+        let tall = Banner { height: 16, ..Banner::default() };
+        assert_eq!(draw_banner(&mut img, 8, 3, &tall), 3);
+        let none = Banner { height: 0, ..Banner::default() };
+        assert_eq!(draw_banner(&mut img, 8, 3, &none), 0);
+    }
+
+    /// Composing with no banner must leave the top row of the picture alone —
+    /// it is the check that "off" means off rather than "a black strip".
+    #[test]
+    fn composing_without_a_banner_leaves_the_top_row_of_the_picture() {
+        let src = vec![200u8; 4 * 4 * 3];
+        let (with, _, _) = compose(
+            4,
+            4,
+            &src,
+            4,
+            4,
+            "",
+            Some(&Banner { height: 2, fill: [170, 0, 0], ..Banner::default() }),
+        );
+        let (without, _, _) = compose(4, 4, &src, 4, 4, "", None);
+        assert_eq!(with[0], 170);
+        assert_eq!(&without[..12], &[200u8; 12]);
     }
 }

@@ -6,7 +6,7 @@
 //! is read straight out of the settings each frame.
 
 use eframe::egui::{self, Color32, ComboBox, RichText};
-use sdroxide_types::{CallsignStyle, FreqStyle, SpeechSettings, SpotKind, Verbosity};
+use sdroxide_types::{BandplanKind, CallsignStyle, FreqStyle, SpeechSettings, SpotKind, Verbosity};
 
 use crate::colormap;
 
@@ -120,6 +120,38 @@ pub(in crate::app) fn settings_ui_tab(
                 for kind in SpotKind::ALL {
                     let (r, g, b) = kind.default_color();
                     cfg.spot_colors[kind.index()] = [r, g, b];
+                }
+            }
+        });
+        ui.end_row();
+
+        ui.label("Band plan colours").on_hover_text(
+            "The shade each class of allocation is painted in on the band-plan \
+             strip along the bottom of the waterfall. The blocks are drawn \
+             semi-transparent over the waterfall, so they land darker there \
+             than in the swatch here.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            for kind in BandplanKind::ALL {
+                ui.color_edit_button_srgb(&mut cfg.bandplan_colors[kind.index()])
+                    .on_hover_text(format!("Colour for {} allocations", kind.label()));
+                let [r, g, b] = cfg.bandplan_colors[kind.index()];
+                ui.label(
+                    RichText::new(kind.label())
+                        .size(11.0)
+                        .strong()
+                        .color(crate::theme::data_ink((r, g, b))),
+                );
+                ui.add_space(6.0);
+            }
+            if ui
+                .button("Reset")
+                .on_hover_text("Put every band-plan colour back to its default")
+                .clicked()
+            {
+                for kind in BandplanKind::ALL {
+                    let (r, g, b) = kind.default_color();
+                    cfg.bandplan_colors[kind.index()] = [r, g, b];
                 }
             }
         });
