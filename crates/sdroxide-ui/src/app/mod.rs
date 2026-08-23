@@ -322,6 +322,11 @@ pub struct SdroxideApp {
     mem_folder_edit: Option<(u32, String)>,
     /// One-shot: focus the rename field on the frame after REN was clicked.
     mem_folder_focus: bool,
+    /// The memory being edited in the list, if any — see
+    /// [`self::windows::MemoryEdit`].
+    mem_edit: Option<self::windows::MemoryEdit>,
+    /// One-shot: focus the name field on the frame after EDT was clicked.
+    mem_edit_focus: bool,
     // Skimmer (CW etc.) spots, newest merge-by-id.
     skimmer_spots: Vec<SkimmerSpot>,
     /// Per-spot last-active timestamp (egui seconds), so a box fades out over
@@ -961,6 +966,8 @@ impl SdroxideApp {
             mem_folder_name: String::new(),
             mem_folder_edit: None,
             mem_folder_focus: false,
+            mem_edit: None,
+            mem_edit_focus: false,
             skimmer_spots: Vec::new(),
             skimmer_active_at: std::collections::HashMap::new(),
             digi_decodes: Vec::new(),

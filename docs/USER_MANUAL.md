@@ -837,9 +837,28 @@ running ([6.9](#69-servers-letting-other-programs-drive-the-radio)),
 
 Open **MEM** (System module) for the memory channels window. Type a name and
 press **Store** to save the current frequency and mode. Each saved row has a
-**RCL** (recall) button and a **DEL** (delete) button.
+**RCL** (recall) button, an **EDT** (edit) button and a **DEL** (delete)
+button.
 
-Memories can be sorted into folders. Type a name into the second field and
+**EDT** turns the row into an editor: the name, the frequency in MHz and the
+mode, with **SAVE** to keep the change (Enter does it too, from the name field)
+and **✖** to abandon it (so does Escape). It is the same channel afterwards —
+same place in the list, same folder — so correcting a typo, or a frequency that
+has moved, costs one edit instead of a delete and a fresh store from that
+frequency. The filter follows the mode: change the mode and the channel takes
+the new mode's default passband, leave the mode alone and a filter you chose
+yourself is kept.
+
+The **Sort** row above the list says what order it is drawn in — **Stored** (as
+stored, the historic order), **Name** (ignoring case), **Freq**, or **Band**
+(each band's channels together, general coverage last, by frequency inside
+each) — and the **▲** button reads that order backwards. It is a preference of
+*this* screen, remembered in `config.toml` under `[ui]`: the store keeps its
+channels in the order they were stored, a memory scan works through them in
+that order whatever the list shows, and somebody at another screen on the same
+station sorts the same memories their own way.
+
+Memories can be filed into folders. Type a name into the second field and
 press **New folder**, then drag a memory row onto the folder to file it under
 that folder — and drop it on the area below the folders to take it out again.
 Every folder header has a **REN** button (rename in place — Enter or clicking

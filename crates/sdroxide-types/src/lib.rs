@@ -113,7 +113,7 @@ pub use limerfe::{
     RFE_I2C_ADDRESS, RfeChannel, RfeLink, RfeMode, RfeModeControl, RfePort, channel_for,
     resolve as rfe_resolve, rx_port_check, tx_port_check,
 };
-pub use memory::{BandStackEntry, MemoryChannel, MemoryFolder, RttyMemory};
+pub use memory::{BandStackEntry, MemoryChannel, MemoryFolder, MemorySort, RttyMemory};
 pub use meters::{Meters, TxMeters, TxTelemetry};
 pub use mode::{AgcMode, Mode, NrEngine, NrLevel, NrStrength, SlotTiming};
 pub use netcfg::{

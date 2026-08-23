@@ -468,7 +468,20 @@ use sdroxide_types::{
 /// command rides in. Switching a radio off already worked at the station; what
 /// did not was doing it from away, which meant the browser client — a headless
 /// station's *only* screen — could not put a radio down and pick it back up.
-pub const PROTO_VERSION: u16 = 75;
+///
+/// **76** — a stored memory can be edited (issue #138).
+/// `Command::EditMemory` carries the channel's new name, dial and mode.
+/// Appended last, so no surviving discriminant moves and a v75 *engine* would
+/// simply never be sent one — but the handshake is an equality test, and the
+/// client that does send one has no way to find out beforehand that the
+/// station on the other end has never heard of it. Correcting a typo used to
+/// mean deleting the memory and storing it again from the frequency itself.
+///
+/// The sort that landed with it is not on the wire at all: which order a
+/// screen lists its memories in is a client preference (`UiSettings`), the
+/// store keeps them in the order they were stored, and the engine is never
+/// told.
+pub const PROTO_VERSION: u16 = 76;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

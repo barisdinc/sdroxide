@@ -224,6 +224,13 @@ pub struct UiSettings {
     /// `[ui]` because it is this screen's preference, like the theme — the
     /// native client checks for its own build, wherever its radio is.
     pub update_check: bool,
+    /// How the memory channel window orders its list. This screen's
+    /// preference, not the station's: the store keeps its own order and every
+    /// client reads it whichever way its operator asked for.
+    pub memory_sort: crate::MemorySort,
+    /// Read that order backwards — Z to A, highest frequency first, and
+    /// newest-stored first for [`crate::MemorySort::Stored`].
+    pub memory_sort_desc: bool,
 }
 
 impl Default for UiSettings {
@@ -244,6 +251,8 @@ impl Default for UiSettings {
             waterfall_font_size: FontSize::Small,
             menu_font_size: FontSize::Medium,
             update_check: true,
+            memory_sort: crate::MemorySort::Stored,
+            memory_sort_desc: false,
         }
     }
 }

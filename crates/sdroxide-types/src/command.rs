@@ -618,4 +618,26 @@ pub enum Command {
     /// all that is left is to ask the engine to run the factory again, which
     /// is exactly this.
     ReopenSource,
+
+    /// Edit a stored memory in place. Appended for the usual reason: postcard
+    /// numbers variants by position.
+    ///
+    /// Correcting a typo in a name, or a frequency that has moved, used to
+    /// mean deleting the channel and storing it again — which takes the
+    /// operator to the frequency first, loses the channel's place in the list
+    /// and its folder with it, and does not scale past a handful of memories.
+    ///
+    /// The filter is not here: it is the mode's, and the engine gives the
+    /// channel the new mode's default whenever the mode (or the sideband that
+    /// mode rides at the new dial) changes, and otherwise leaves the passband
+    /// the operator stored. Neither is the folder — filing is
+    /// [`Command::MoveMemoryToFolder`], which is the drag in the list, and one
+    /// act should have one command. An empty name is ignored rather than
+    /// stored: a memory called nothing is a row nobody can pick out.
+    EditMemory {
+        id: u32,
+        name: String,
+        freq_hz: f64,
+        mode: Mode,
+    },
 }

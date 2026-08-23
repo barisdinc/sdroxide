@@ -6,13 +6,31 @@
 //! draw the list and push the [`Command`] a click means.
 
 use eframe::egui::{self, Color32, RichText};
-use sdroxide_types::{Command, MemoryChannel, MemoryFolder};
+use sdroxide_types::{Command, MemoryChannel, MemoryFolder, MemorySort, Mode};
 
 use crate::app::SdroxideApp;
+use crate::chrome::StyledCombo;
 
 /// What a drag out of the memory list carries: the memory's id. Its own type
 /// so no unrelated drag could ever be mistaken for one.
 struct DraggedMemory(u32);
+
+/// A memory being edited in place: its id and the fields as they are being
+/// typed. UI-owned until the edit commits — the engine republishes the whole
+/// list on every change, and a field bound straight to it would fight the
+/// keyboard — exactly like `mem_folder_edit`.
+pub(in crate::app) struct MemoryEdit {
+    pub id: u32,
+    pub name: String,
+    pub freq_hz: f64,
+    pub mode: Mode,
+}
+
+impl MemoryEdit {
+    fn of(m: &MemoryChannel) -> Self {
+        MemoryEdit { id: m.id, name: m.name.clone(), freq_hz: m.freq_hz, mode: m.mode }
+    }
+}
 
 /// Wrap `add` in a frame that accepts a dragged memory, and say which memory
 /// was dropped on it this frame, if any. While a drag is live every target
@@ -37,36 +55,32 @@ fn mem_drop_target<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     (out.inner, dropped)
 }
 
-/// One memory: recall, name/frequency/mode, delete. The label is the drag
-/// handle — deliberately not the whole row, whose drag sense would sit over
-/// the buttons and turn a sloppy RCL or DEL press into a drag.
-fn memory_row(ui: &mut egui::Ui, m: &MemoryChannel, cmds: &mut Vec<Command>) {
+/// One memory: recall, name/frequency/mode, edit, delete. The label is the
+/// drag handle — deliberately not the whole row, whose drag sense would sit
+/// over the buttons and turn a sloppy RCL or DEL press into a drag.
+///
+/// `edit` is the edit in progress anywhere in the list; when it is this
+/// memory's, the row is replaced by the editor.
+fn memory_row(
+    ui: &mut egui::Ui,
+    m: &MemoryChannel,
+    edit: &mut Option<MemoryEdit>,
+    focus: &mut bool,
+    cmds: &mut Vec<Command>,
+) {
+    if matches!(edit, Some(e) if e.id == m.id) {
+        memory_edit_row(ui, edit, focus, cmds);
+        return;
+    }
     ui.horizontal(|ui| {
         if crate::chrome::chip(ui, false, "RCL").on_hover_text("Recall").clicked() {
             cmds.push(Command::RecallMemory(m.id));
         }
-        ui.dnd_drag_source(
-            crate::layout::salted_id(ui.ctx(), "mem-drag").with(m.id),
-            DraggedMemory(m.id),
-            |ui| {
-                // An RTTY memory recalls its modem setup with it; show that setup
-                // so two memories on the same dial read as the different stations
-                // they are (f32's Display keeps 45.45 as-is and 170.0 as "170").
-                let rtty = m.rtty.map_or(String::new(), |r| {
-                    format!(" {}/{}{}", r.baud, r.shift_hz, if r.reverse { " R" } else { "" })
-                });
-                ui.label(
-                    RichText::new(format!(
-                        "{:<12} {:>12.6} MHz  {}{}",
-                        m.name,
-                        m.freq_hz / 1e6,
-                        m.mode.label(),
-                        rtty
-                    ))
-                    .monospace(),
-                );
-            },
-        );
+        // The buttons are placed before the label rather than after it, so that
+        // what is left over is the label's and it truncates inside it. Drawn
+        // the other way round the label claims the width its text wants — a
+        // memory list is monospace and wide — and the row's buttons end up
+        // painted over the end of it.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if crate::chrome::chip_accent(
                 ui,
@@ -80,8 +94,168 @@ fn memory_row(ui: &mut egui::Ui, m: &MemoryChannel, cmds: &mut Vec<Command>) {
             {
                 cmds.push(Command::DeleteMemory(m.id));
             }
+            if crate::chrome::chip(ui, false, RichText::new("EDT").size(11.0))
+                .on_hover_text("Edit the name, frequency and mode")
+                .clicked()
+            {
+                *edit = Some(MemoryEdit::of(m));
+                *focus = true;
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.dnd_drag_source(
+                    crate::layout::salted_id(ui.ctx(), "mem-drag").with(m.id),
+                    DraggedMemory(m.id),
+                    |ui| {
+                        // An RTTY memory recalls its modem setup with it; show that
+                        // setup so two memories on the same dial read as the
+                        // different stations they are (f32's Display keeps 45.45
+                        // as-is and 170.0 as "170").
+                        let rtty = m.rtty.map_or(String::new(), |r| {
+                            format!(
+                                " {}/{}{}",
+                                r.baud,
+                                r.shift_hz,
+                                if r.reverse { " R" } else { "" }
+                            )
+                        });
+                        // Laid out rather than added: the whole of what is left
+                        // is the drag handle, and the text is pinned to the left
+                        // of it so the columns line up down the list. `add_sized`
+                        // would centre each row's text in its own box, which puts
+                        // a short name in a different place from a long one.
+                        let w = ui.available_width();
+                        let h = ui.spacing().interact_size.y;
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(w, h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "{:<10} {:>11.6} MHz {}{}",
+                                            m.name,
+                                            m.freq_hz / 1e6,
+                                            m.mode.label(),
+                                            rtty
+                                        ))
+                                        .monospace(),
+                                    )
+                                    .truncate(),
+                                );
+                            },
+                        );
+                    },
+                );
+            });
         });
     });
+}
+
+/// The editor that replaces a row while that memory is being edited.
+///
+/// In the list rather than in a dialog of its own: correcting a typo is the
+/// smallest thing anyone does to a memory, and a window that has to be opened
+/// and dismissed for it is most of the reason it was easier to delete the
+/// channel and store it again.
+///
+/// Wrapped rather than one line: with a name, a dial and a mode picker on it
+/// the row is wider than the window's default, and the alternative to wrapping
+/// is a horizontal scrollbar under every list.
+fn memory_edit_row(
+    ui: &mut egui::Ui,
+    edit: &mut Option<MemoryEdit>,
+    focus: &mut bool,
+    cmds: &mut Vec<Command>,
+) {
+    let Some(e) = edit.as_mut() else { return };
+    let mut commit = false;
+    let mut cancel = false;
+    ui.horizontal_wrapped(|ui| {
+        let name = crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut e.name).hint_text("name").desired_width(110.0),
+        );
+        if *focus {
+            name.request_focus();
+            *focus = false;
+        }
+        // Enter commits from the name field, the way it does from every other
+        // single-line edit here. Losing focus does *not*: the operator moving
+        // on to the frequency or the mode is still editing.
+        if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            commit = true;
+        }
+        // What there is to save: a memory with no name is a row nobody can
+        // pick out of a list, and a dial of zero is what an emptied field
+        // leaves behind.
+        let valid = !e.name.trim().is_empty() && e.freq_hz > 0.0;
+        // Six decimals because the field is in MHz and a memory is a dial
+        // frequency to the Hz — four would round 14.070150 to 14.0702 and
+        // store what it showed.
+        let mut mhz = e.freq_hz / 1e6;
+        if crate::chrome::field(
+            ui,
+            egui::DragValue::new(&mut mhz)
+                .speed(0.001)
+                .range(0.0..=6000.0)
+                .max_decimals(6)
+                .fixed_decimals(6),
+        )
+        .changed()
+        {
+            e.freq_hz = mhz * 1e6;
+        }
+        ui.label(RichText::new("MHz").weak());
+        egui::ComboBox::from_id_salt(crate::layout::salted_id(ui.ctx(), "mem-edit-mode"))
+            .width(70.0)
+            .selected_text(e.mode.label())
+            .show_styled(ui, |ui| {
+                for m in Mode::ALL {
+                    ui.selectable_value(&mut e.mode, m, m.label());
+                }
+            });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::chrome::chip(ui, false, RichText::new("✖").size(11.0))
+                .on_hover_text("Abandon the edit (Escape)")
+                .clicked()
+            {
+                cancel = true;
+            }
+            // Greyed rather than silently doing nothing while the name is
+            // empty or the dial is zero: an emptied field is a state the
+            // operator is passing through, and the answer to it is to show
+            // that there is nothing yet to save.
+            if crate::chrome::chip_accent_enabled(
+                ui,
+                valid,
+                false,
+                "SAVE",
+                Some(11.0),
+                crate::theme::GREEN(),
+                crate::theme::INK_ON_BRIGHT(),
+            )
+            .on_hover_text("Keep the changes (Enter)")
+            .clicked()
+            {
+                commit = true;
+            }
+        });
+    });
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        cancel = true;
+    }
+    // Enter on an empty name leaves the editor open rather than throwing the
+    // edit away — the same answer the greyed SAVE gives.
+    if commit && let Some(e) = edit.take_if(|e| !e.name.trim().is_empty() && e.freq_hz > 0.0) {
+        cmds.push(Command::EditMemory {
+            id: e.id,
+            name: e.name.trim().to_string(),
+            freq_hz: e.freq_hz,
+            mode: e.mode,
+        });
+    } else if cancel {
+        *edit = None;
+    }
 }
 
 impl SdroxideApp {
@@ -92,7 +266,10 @@ impl SdroxideApp {
             .open(&mut open)
             .frame(crate::chrome::window_frame())
             .resizable(true)
-            .default_width(crate::layout::window_w(ctx, 400.0))
+            // Wide enough for a row: the recall button, a name, a dial to the
+            // Hz, a mode, and the edit and delete buttons. Narrower than this
+            // and every name is drawn with an ellipsis on it.
+            .default_width(crate::layout::window_w(ctx, 460.0))
             // A real starting height, and a floor under what egui remembers:
             // the window used to hug its (often short) list and come up a few
             // rows tall. See the voice keyer below for why the minimum matters
@@ -110,6 +287,14 @@ impl SdroxideApp {
     }
 
     fn memories_ui(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        // An edit whose memory has gone — deleted here, or from another screen
+        // on the same station — has nothing left to draw itself against, and
+        // would otherwise sit in the state until the window was reopened.
+        if let Some(e) = &self.mem_edit
+            && !self.memories.iter().any(|m| m.id == e.id)
+        {
+            self.mem_edit = None;
+        }
         ui.horizontal(|ui| {
             crate::chrome::field(
                 ui,
@@ -138,6 +323,7 @@ impl SdroxideApp {
                 self.mem_folder_name.clear();
             }
         });
+        self.memory_sort_bar(ui);
         ui.separator();
         if self.memories.is_empty() && self.mem_folders.is_empty() {
             ui.label(RichText::new("no memories yet").color(crate::theme::gray(120)));
@@ -179,9 +365,15 @@ impl SdroxideApp {
                     }
                 }
             }
+            // Worked out once for the whole window, so every folder and the
+            // top level agree on the order and none of them sorts twice.
+            let order = self
+                .ui_settings
+                .memory_sort
+                .order(&self.memories, self.ui_settings.memory_sort_desc);
             let folders = self.mem_folders.clone();
             for f in &folders {
-                self.folder_section(ui, f, cmds);
+                self.folder_section(ui, f, &order, cmds);
             }
             // The top level: everything unfiled — including anything whose
             // folder has gone from under it — and, while a drag is live, the
@@ -189,9 +381,10 @@ impl SdroxideApp {
             let (_, dropped) = mem_drop_target(ui, |ui| {
                 let known = |id: u32| folders.iter().any(|f| f.id == id);
                 let mut any = false;
-                for m in &self.memories {
+                for &i in &order {
+                    let m = &self.memories[i];
                     if m.folder.is_none_or(|id| !known(id)) {
-                        memory_row(ui, m, cmds);
+                        memory_row(ui, m, &mut self.mem_edit, &mut self.mem_edit_focus, cmds);
                         any = true;
                     }
                 }
@@ -207,9 +400,64 @@ impl SdroxideApp {
         });
     }
 
+    /// The order the list is drawn in: four chips and a direction.
+    ///
+    /// Remembered in `[ui]` with the rest of this screen's preferences, and
+    /// applied the moment it is clicked — there is nothing to apply engine-side
+    /// and nothing to send: the store keeps its channels in the order they were
+    /// stored, a memory scan works through them in that order whatever this
+    /// says, and the operator at the next screen sorts the same station's list
+    /// their own way.
+    fn memory_sort_bar(&mut self, ui: &mut egui::Ui) {
+        let (was_sort, was_desc) =
+            (self.ui_settings.memory_sort, self.ui_settings.memory_sort_desc);
+        let (mut sort, mut desc) = (was_sort, was_desc);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Sort").weak().size(11.0));
+            for s in MemorySort::ALL {
+                if crate::chrome::chip(ui, sort == s, RichText::new(s.label()).size(11.0))
+                    .on_hover_text(match s {
+                        MemorySort::Stored => "In the order they were stored",
+                        MemorySort::Name => "By name, ignoring case",
+                        MemorySort::Freq => "By frequency",
+                        MemorySort::Band => "By band, then by frequency inside each",
+                    })
+                    .clicked()
+                {
+                    sort = s;
+                }
+            }
+            if crate::chrome::chip(
+                ui,
+                false,
+                RichText::new(if desc { "▼" } else { "▲" }).size(11.0),
+            )
+            .on_hover_text(if desc {
+                "Descending — click for ascending"
+            } else {
+                "Ascending — click for descending"
+            })
+            .clicked()
+            {
+                desc = !desc;
+            }
+        });
+        if (sort, desc) != (was_sort, was_desc) {
+            self.ui_settings.memory_sort = sort;
+            self.ui_settings.memory_sort_desc = desc;
+            crate::app::persist::persist_ui_settings(&self.ui_settings);
+        }
+    }
+
     /// One folder of the memory list: a collapsible section whose header
     /// carries the rename and delete controls, the whole of it a drop target.
-    fn folder_section(&mut self, ui: &mut egui::Ui, f: &MemoryFolder, cmds: &mut Vec<Command>) {
+    fn folder_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        f: &MemoryFolder,
+        order: &[usize],
+        cmds: &mut Vec<Command>,
+    ) {
         let count = self.memories.iter().filter(|m| m.folder == Some(f.id)).count();
         let (_, dropped) = mem_drop_target(ui, |ui| {
             let state = egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -271,9 +519,10 @@ impl SdroxideApp {
                     if count == 0 {
                         ui.label(RichText::new("empty — drop memories here").weak().size(11.0));
                     }
-                    for m in &self.memories {
+                    for &i in order {
+                        let m = &self.memories[i];
                         if m.folder == Some(f.id) {
-                            memory_row(ui, m, cmds);
+                            memory_row(ui, m, &mut self.mem_edit, &mut self.mem_edit_focus, cmds);
                         }
                     }
                 });

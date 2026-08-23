@@ -4550,6 +4550,41 @@ impl Engine {
                 self.memories.retain(|m| m.id != id);
                 self.save_memories();
             }
+            EditMemory { id, name, freq_hz, mode } => {
+                // A dial that is not a number would be stored, scanned and
+                // tuned to; refuse it here rather than in each of those.
+                let name = name.trim().to_string();
+                if !freq_hz.is_finite() || freq_hz <= 0.0 {
+                    warn!("edit memory {id}: {freq_hz} Hz is not a frequency");
+                } else if let Some(m) = self.memories.iter_mut().find(|m| m.id == id) {
+                    // The stored passband belongs to the mode it was stored in
+                    // — a 300 Hz CW filter recalled on USB is a channel nobody
+                    // can hear — so a change of mode takes the new mode's
+                    // default. So does a move that flips the sideband the mode
+                    // rides (SSTV below 30 MHz), where the sign of the edges
+                    // *is* the sideband. Otherwise the operator's own filter
+                    // survives an edit of the name.
+                    let (lo, hi) = mode.default_filter_at(freq_hz);
+                    if m.mode != mode || (m.filter_lo < 0.0) != (lo < 0.0) {
+                        (m.filter_lo, m.filter_hi) = (lo, hi);
+                    }
+                    // The RTTY modem setup is only meaningful in RTTY: carried
+                    // along while the memory stays there, dropped when it is
+                    // edited into another mode. Edited *into* RTTY it stays
+                    // `None`, which means what it has always meant — recall on
+                    // whatever the modem is already set to — rather than
+                    // silently capturing the setup that happens to be live.
+                    if mode != Mode::Rtty {
+                        m.rtty = None;
+                    }
+                    if !name.is_empty() {
+                        m.name = name;
+                    }
+                    m.freq_hz = freq_hz;
+                    m.mode = mode;
+                    self.save_memories();
+                }
+            }
             CreateMemoryFolder { name } => {
                 let id = self.mem_folders.iter().map(|f| f.id).max().unwrap_or(0) + 1;
                 self.mem_folders.push(MemoryFolder { id, name });
