@@ -5323,6 +5323,7 @@ dependencies = [
  "image",
  "num-complex",
  "rtrb",
+ "sdroxide-aprs",
  "sdroxide-ax25",
  "sdroxide-config",
  "sdroxide-digi",

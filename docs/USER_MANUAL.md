@@ -3047,11 +3047,13 @@ The panel header carries the channel itself: the receive level, how many
 stations are on the map, whether the channel is busy, and — on the right — the
 beacon interval and the buttons.
 
-**STATIONS** is everything heard, most recent first, each with the icon its
-symbol asks for. A `·` after a callsign means the frame arrived *direct* — no
-digipeater repeated it — which on a channel where almost everything is
-digipeated is how you tell who is actually within range. Type in the **filter**
-box to narrow the list by callsign or comment.
+**STATIONS** is everything heard, most recent first: a table of icon, callsign,
+whatever the station last said, and how long ago. The bar down the left edge of
+each row is green for a station heard *direct* — no digipeater repeated it —
+which on a channel where almost everything is digipeated is how you tell who is
+actually within range; amber marks an object somebody else put on the map, and
+grey one that has been cancelled. Type in the **filter** box to narrow the list
+by callsign or comment. Clicking anywhere on a row selects that station.
 
 Click a station and its card opens underneath: what it is, what it said, where
 it is, how far away and on what bearing, its course, speed and altitude, its
@@ -3141,6 +3143,13 @@ on your channel is sending a format this build does not read.
   acknowledgement is a transmission this station makes without you asking, so a
   receive-only setup should turn it off; the beacon then stops claiming to be
   reachable too.
+- **TX delay** — flags sent ahead of every frame so the far end's modem hears
+  the carrier and locks its clock before the data starts. It has to outlast
+  everything between pressing transmit and actually radiating: sdroxide alone
+  spends 165–240 ms of it on a CAT rig, and a radio taking its audio over a
+  network buffers more on top of that. Too little and the far end never locks —
+  the transmission is on the air and nothing decodes it. Shared with the packet
+  mode, since it is a property of the radio rather than of the protocol.
 - **Keep stations** — how long a station stays on the map after it was last
   heard, and what the map's fade is measured against.
 

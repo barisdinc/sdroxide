@@ -384,6 +384,29 @@ impl SdroxideApp {
                             .changed();
                         ui.end_row();
 
+                        ui.label("TX delay");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut cfg.packet_txdelay_ms)
+                                        .range(50..=2000)
+                                        .suffix(" ms"),
+                                )
+                                .on_hover_text(
+                                    "Flags sent ahead of every frame, so the far end's modem \
+                                     hears the carrier and locks its clock before the data \
+                                     starts. It has to outlast everything between pressing \
+                                     transmit and radiating: sdroxide alone spends 165–240 ms \
+                                     of it on a CAT rig, and a radio taking audio over a \
+                                     network buffers more on top. Too little and the far end \
+                                     never locks — the transmission is there and nothing \
+                                     decodes it.",
+                                )
+                                .changed();
+                            ui.label(RichText::new("shared with the packet mode").size(9.5).weak());
+                        });
+                        ui.end_row();
+
                         ui.label("Keep stations");
                         changed |= ui
                             .add(

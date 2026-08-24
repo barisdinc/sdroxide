@@ -50,3 +50,7 @@ sdroxide-wsjtx = { path = "../sdroxide-wsjtx" }
 # operator picked, and the file picker offers both.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 shine-rs = "0.1.3"
+
+[dev-dependencies]
+# The APRS codec, so the transmit test can read back what the engine sent.
+sdroxide-aprs.workspace = true

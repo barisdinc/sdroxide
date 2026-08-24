@@ -507,12 +507,10 @@ impl AprsController {
             sdroxide_types::distance_km((old.lat, old.lon), (pos.lat, pos.lon)) * 1000.0
                 > TRACK_MIN_M
         });
-        if moved {
-            if let Some(old) = st.pos {
-                st.track.push((old.lat, old.lon));
-                if st.track.len() > APRS_TRACK_MAX {
-                    st.track.remove(0);
-                }
+        if moved && let Some(old) = st.pos {
+            st.track.push((old.lat, old.lon));
+            if st.track.len() > APRS_TRACK_MAX {
+                st.track.remove(0);
             }
         }
         st.pos = Some(pos);
@@ -704,11 +702,11 @@ impl DigiEngine for AprsController {
             let me = self.cfg.aprs_call();
             let via = sdroxide_aprs::parse_path(&self.cfg.aprs_path);
             for f in sent {
-                if let Ok(p) = Packet::parse(&f, None) {
-                    if let PacketType::Ui(ui) = p.packet_type() {
-                        let payload = ui.payload.clone();
-                        self.absorb(&me, TOCALL, &via, true, &payload, true);
-                    }
+                if let Ok(p) = Packet::parse(&f, None)
+                    && let PacketType::Ui(ui) = p.packet_type()
+                {
+                    let payload = ui.payload.clone();
+                    self.absorb(&me, TOCALL, &via, true, &payload, true);
                 }
             }
             self.status_dirty = true;

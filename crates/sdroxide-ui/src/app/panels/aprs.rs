@@ -211,6 +211,13 @@ impl SdroxideApp {
     }
 
     /// Everything heard, and the card for whichever one is selected.
+    ///
+    /// A table rather than a row of widgets: every column starts at a fixed
+    /// offset so callsigns and ages line up down the list, and the whole row is
+    /// one click target. Built the way the FT8 decode list is
+    /// ([`super::decodes`]) — painted into an allocated rectangle, with
+    /// `ui.interact` over the whole of it — because a row assembled out of
+    /// labels is only clickable where the labels happen to be.
     fn aprs_station_list(
         &mut self,
         ui: &mut egui::Ui,
@@ -246,71 +253,41 @@ impl SdroxideApp {
 
         let selected = self.aprs_map.selected.clone();
         let card = selected.as_ref().and_then(|n| st.stations.iter().find(|s| &s.name == n));
-        let card_h = if card.is_some() { (avail_h * 0.42).clamp(96.0, 230.0) } else { 0.0 };
-        let list_h = (avail_h - card_h - 26.0).max(50.0);
+        // The card sits at the bottom of the column and stays there, whether
+        // the list above it holds two stations or two hundred. It used to be
+        // laid out straight after the list, which put it half way up the panel
+        // on a quiet channel and moved it every time somebody new was heard.
+        let card_h = if card.is_some() { (avail_h * 0.42).clamp(120.0, 260.0) } else { 0.0 };
+        let list_h = (avail_h - card_h - 24.0).max(48.0);
 
         let mut pick = None;
-        egui::ScrollArea::vertical().id_salt("aprs-stations").max_height(list_h).show_themed(
-            ui,
-            |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("aprs-stations")
+            .max_height(list_h)
+            .min_scrolled_height(list_h)
+            // Hold the full height rather than shrinking onto the rows, so the
+            // card below is pinned to the bottom of the column.
+            .auto_shrink([false, false])
+            .show_themed(ui, |ui| {
                 if rows.is_empty() {
                     ui.label(RichText::new("nothing heard yet").weak());
                 }
-                for s in &rows {
-                    let sel = selected.as_deref() == Some(s.name.as_str());
-                    let resp = ui
-                        .horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            let (r, _) = ui
-                                .allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
-                            let tint = if s.killed {
-                                theme::gray(120)
-                            } else if sel {
-                                theme::YELLOW()
-                            } else {
-                                theme::CYAN()
-                            };
-                            self.aprs_icons.paint(ui, r, s.symbol.kind(), tint);
-                            let name = RichText::new(&s.name)
-                                .monospace()
-                                .size(11.0)
-                                .color(if s.killed { theme::gray(120) } else { theme::CYAN() });
-                            ui.label(if sel { name.strong() } else { name });
-                            // Direct is the fact worth a mark: on a channel
-                            // where everything is digipeated, the stations you
-                            // hear direct are the ones actually in range.
-                            if s.direct {
-                                ui.label(RichText::new("·").size(11.0).color(theme::GREEN()))
-                                    .on_hover_text("Heard direct — no digipeater repeated it");
-                            }
-                            crate::chrome::row_tail(ui, |ui| {
-                                ui.label(
-                                    RichText::new(fmt_age(now - s.last_heard))
-                                        .size(9.5)
-                                        .weak()
-                                        .monospace(),
-                                );
-                            });
-                        })
-                        .response;
-                    let resp = resp.interact(egui::Sense::click());
-                    if resp.clicked() {
-                        pick = Some(s.name.clone());
+                for (i, s) in rows.iter().enumerate() {
+                    if let Some(name) = self.aprs_row(ui, s, st, now, selected.as_deref(), i) {
+                        pick = Some(name);
                     }
                 }
-            },
-        );
+            });
         if let Some(name) = pick {
             let same = self.aprs_map.selected.as_deref() == Some(name.as_str());
             self.aprs_map.selected = if same { None } else { Some(name.clone()) };
-            if !same {
+            if !same
+                && let Some(s) = st.stations.iter().find(|s| s.name == name)
+                && s.entry == AprsEntryKind::Station
+            {
                 // Selecting a station is also how you address a message to it,
                 // which saves typing a callsign that is already on screen.
-                if let Some(s) = st.stations.iter().find(|s| s.name == name) {
-                    if s.entry == AprsEntryKind::Station {
-                        self.aprs_target = name;
-                    }
-                }
+                self.aprs_target = name;
             }
         }
 
@@ -318,6 +295,139 @@ impl SdroxideApp {
             ui.separator();
             self.aprs_station_card(ui, s, st, now, card_h, tx_ok);
         }
+    }
+
+    /// One row of the station table. Returns its name if it was clicked.
+    fn aprs_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &AprsStation,
+        st: &AprsStatus,
+        now: i64,
+        selected: Option<&str>,
+        i: usize,
+    ) -> Option<String> {
+        const ROW_H: f32 = 18.0;
+        // Column offsets from the left of the row. Fixed, so the table reads
+        // down as well as across.
+        const ACCENT_W: f32 = 2.5;
+        const ICON_X: f32 = 6.0;
+        const ICON_W: f32 = 15.0;
+        const NAME_X: f32 = 25.0;
+        const NAME_W: f32 = 82.0;
+        const AGE_W: f32 = 30.0;
+
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), egui::Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return None;
+        }
+        let is_sel = selected == Some(s.name.as_str());
+        let p = ui.painter_at(rect);
+
+        // The row's own colour: what it is takes precedence over how it got
+        // here, and a killed object over both.
+        let (accent, ink) = if s.killed {
+            (theme::gray(90), theme::gray(120))
+        } else if is_sel {
+            (theme::YELLOW(), theme::YELLOW())
+        } else if s.entry == AprsEntryKind::Object {
+            (theme::map().preview, theme::CYAN())
+        } else if s.direct {
+            // Heard direct: on a channel where nearly everything arrives
+            // through a digipeater, the ones you hear yourself are the ones
+            // actually in range, and that is worth a colour rather than a
+            // punctuation mark.
+            (theme::GREEN(), theme::CYAN())
+        } else {
+            (theme::CYAN_DIM(), theme::CYAN())
+        };
+        if is_sel {
+            p.rect_filled(rect, 0.0, theme::gray(34));
+        }
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.left() + ACCENT_W, rect.bottom()),
+            ),
+            0.0,
+            accent,
+        );
+
+        let icon = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + ICON_X + ICON_W / 2.0, rect.center().y),
+            egui::vec2(ICON_W, ICON_W),
+        );
+        self.aprs_icons.paint(ui, icon, s.symbol.kind(), ink);
+
+        let p = ui.painter_at(rect);
+        let name = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + NAME_X, rect.top()),
+            egui::pos2(rect.left() + NAME_X + NAME_W, rect.bottom()),
+        );
+        p.with_clip_rect(name).text(
+            egui::pos2(name.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &s.name,
+            egui::FontId::monospace(11.0),
+            ink,
+        );
+
+        // Whatever the station last said, in the space between the callsign and
+        // the age — clipped rather than wrapped, because a table row is one
+        // line high.
+        let note = if !s.comment.is_empty() { &s.comment } else { &s.status };
+        let note_rect = egui::Rect::from_min_max(
+            egui::pos2(name.right() + 6.0, rect.top()),
+            egui::pos2(rect.right() - AGE_W - 6.0, rect.bottom()),
+        );
+        if !note.is_empty() && note_rect.width() > 20.0 {
+            p.with_clip_rect(note_rect).text(
+                egui::pos2(note_rect.left(), rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                note,
+                egui::FontId::proportional(10.0),
+                theme::gray(140),
+            );
+        }
+        p.text(
+            egui::pos2(rect.right() - 2.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            fmt_age(now - s.last_heard),
+            egui::FontId::monospace(9.5),
+            theme::gray(130),
+        );
+
+        // One click target, the whole row wide. Registered after everything
+        // above it and with an id of its own, which is what makes the callsign
+        // as clickable as the icon.
+        let hit = ui.interact(rect, ui.id().with(("aprs-row", i)), egui::Sense::click());
+        let hit = hit.on_hover_ui(|ui| {
+            ui.label(RichText::new(&s.name).monospace().strong().color(theme::YELLOW()));
+            ui.label(RichText::new(s.symbol.kind().label()).size(10.5));
+            if s.entry == AprsEntryKind::Object && !s.reported_by.is_empty() {
+                ui.label(RichText::new(format!("object from {}", s.reported_by)).size(10.0).weak());
+            }
+            if !s.comment.is_empty() {
+                ui.label(RichText::new(&s.comment).size(10.5));
+            }
+            if let (Some(me), Some(q)) = (st.my_pos, s.pos) {
+                let km = sdroxide_types::distance_km((me.lat, me.lon), (q.lat, q.lon));
+                ui.label(RichText::new(format!("{km:.0} km")).size(10.0).weak());
+            }
+            ui.label(
+                RichText::new(if s.direct {
+                    "heard direct".to_string()
+                } else if s.via.is_empty() {
+                    String::new()
+                } else {
+                    format!("via {}", s.via.join(","))
+                })
+                .size(10.0)
+                .weak(),
+            );
+        });
+        hit.clicked().then(|| s.name.clone())
     }
 
     /// Everything one station has told us.
