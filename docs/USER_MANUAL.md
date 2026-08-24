@@ -7094,6 +7094,21 @@ that remembered to check. A LimeSDR transmits from about 100 kHz to 3.8 GHz with
 no filtering of its own; use a low-pass filter, an appropriate LimeRFE channel,
 or a dummy load.
 
+**Transmit gain starts at 0 dB**, the bottom of the board's 0–73 dB range, and
+that is the same decision as the arming box: a transmitter that has just been
+armed should not be able to radiate anything anybody has to explain. It does
+mean the first over after arming produces microwatts — which downstream of an
+amplifier and a power meter is indistinguishable from a radio that does not
+transmit at all — so the panel says so under the slider while it is down there,
+and the log says so at every key-down. Raise it into a dummy load first and
+measure; the useful setting is a property of your board, your band and whatever
+is in front of it, not a number this program can pick.
+
+Every over prints one line naming what it went out through — the frequency, the
+socket, the drive and the analog filter — and prints it again whenever any of
+those changes. That line, and the LimeRFE's own beside it, is what to read
+first when a transmission does not appear where it should.
+
 ##### The LimeRFE
 
 Two cables decide whether any of this works, and only one of them is a setting.
@@ -7166,11 +7181,21 @@ The other three settings are pins rather than automation:
 | *Always transmit* | Bench use: the board stays keyed. |
 | *Always both* | For a cellular band, which has the duplexer for it. On an amateur channel it stops receive — the panel warns. Not reachable at all when one connector serves both directions; the board refuses that combination. |
 
-Which connector is which still matters, but for what it can reach rather than
-for how an over is switched: J5 is one jack for both directions and the only
-path to the HF and 6 m amplifiers, so every HF contact shares a connector with a
-live amplifier. Above 30 MHz, transmitting from J4 keeps the receive path off
-it.
+Which connector is which still matters, and for two separate reasons.
+
+The first is simply **which jack the antenna is in**. Receive comes in on J3 and
+transmit goes out of J4 by default, which is the board doing what it is for —
+one aerial or amplifier chain per direction — and is wrong for the very common
+station with a single antenna: everything transmitted goes into an open
+connector while receive carries on perfectly. Nothing warns you in hardware, so
+the panel states the pair under the connector combos. With one antenna, put
+**Transmit connector** on the same jack it is in.
+
+The second is what each connector can reach: J5 is one jack for both directions
+and the only path to the HF and 6 m amplifiers, so every HF contact shares a
+connector with a live amplifier. Above 30 MHz, transmitting from J4 keeps the
+receive path off it — which is why it is the default, and why it is worth a
+look before the first over.
 
 If a band you use falls back to the unfiltered wideband path on your chosen
 connectors, the panel names it: J5 receives only up to 70 cm, and HF and 6 m
@@ -7192,9 +7217,17 @@ comes through.
 > measured struct-layout check against the installed library; what cannot be
 > checked without a board is whether the streams behave as documented, how long
 > a LimeRFE band change really takes, and whether the LimeRFE's port rules match
-> its datasheet in every case. **Copy diagnostic report** on this tab dumps the
-> session's library calls, and `cargo run -p sdroxide-lime --example probe` does
-> the same from a terminal.
+> its datasheet in every case. **Copy diagnostic report** on this tab is the
+> thing to send: it dumps every library call this session made — what was asked
+> for and what LimeSuite said — with the LimeRFE's own transactions beside it,
+> on either of its cables. `cargo run -p sdroxide-lime --example probe` does the
+> radio half from a terminal.
+>
+> The **console log** is the other half, and it is where an over is described:
+> start sdroxide from a terminal to see it. `RUST_LOG=info sdroxide` is enough
+> for the transmit and LimeRFE lines; `RUST_LOG=sdroxide_lime=debug,sdroxide_limerfe=debug,info`
+> adds every retune. On Windows, run `sdroxide.exe` from `cmd` or PowerShell
+> rather than from Explorer, or the console goes nowhere.
 >
 > See "LimeSDR and LimeRFE permissions" in the README for the Linux udev rule —
 > the LimeSDR itself needs nothing from this project, because LimeSuite ships
@@ -10624,6 +10657,29 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   opens wide on purpose (the LMS7002M's synthesisers stop at 30 MHz).
 - Transmit has **no filtering of its own**: low-pass filter, a LimeRFE
   channel, or a dummy load.
+- **Keying produces no power at all** is four things, in the order they are
+  worth checking. Every one of them is silent — the radio keys, nothing errors,
+  and the meter reads zero — so the log is what tells them apart: every over
+  prints one line naming the frequency, the socket, the drive and the filter it
+  went out through, and the LimeRFE prints the channel, both connectors and the
+  relay position it agreed to.
+  - **Transmit gain** is `0 dB` until you raise it, which is the bottom of a
+    0–73 dB range and a few microwatts out of the board. That default is
+    deliberate — arming the transmitter must not by itself put anything on the
+    air — but left there it looks exactly like a transmitter that does not
+    work. The panel says so under the slider, and the log warns at every
+    key-down.
+  - **Which LimeRFE connector transmit leaves by.** Receive comes in on J3 and
+    transmit goes out of **J4** unless you say otherwise, which is right for a
+    station with a receive aerial and a transmit aerial and wrong for everyone
+    else: with one antenna in J3, everything you transmit goes into an open
+    connector. Set **Transmit connector** to the one the antenna is in.
+  - **Transmit is armed** — the *Enabled* box under Transmit. With it off the
+    interface publishes no transmit channel at all, and the refusal appears
+    wherever you keyed from rather than on the meter.
+  - **The transmit port on the board itself**, `BAND1` or `BAND2` — the SMA the
+    LimeRFE's transmit input is cabled to. *Automatic* picks `BAND1`, which is
+    `TX1_1`.
 - **A LimeRFE that answers but passes nothing** has two usual causes, and the
   log line the board's every accepted command produces tells them apart — it
   names the channel, both connectors and the relay state the board agreed to.
