@@ -2634,11 +2634,16 @@ fn engine_thread(
         // simply running at its own rate.
         if now.duration_since(lane_at) >= Duration::from_secs(1) {
             let secs = now.duration_since(lane_at).as_secs_f64();
+            // Saturating, not wrapping: the analyser is rebuilt whenever the
+            // rate, the FFT size or the decimation changes, and a rebuild puts
+            // its counter back to zero. Subtracting the old baseline from that
+            // wrapped to 1.8e19 and printed it as a rate.
             let ffts = engine.analyzer.transforms();
+            let ffts_delta = ffts.saturating_sub(lane_ffts);
             debug!(
                 target: "sdroxide::panadapter",
                 samples_per_s = lane_samples as f64 / secs,
-                fft_per_s = ffts.wrapping_sub(lane_ffts) as f64 / secs,
+                fft_per_s = ffts_delta as f64 / secs,
                 frames_per_s = lane_frames as f64 / secs,
                 rate_hz = engine.state.sample_rate,
                 fft_size = engine.cfg.fft_size,
