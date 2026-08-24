@@ -53,9 +53,11 @@ pub(crate) struct Pending {
     pub center: Option<f64>,
     pub attenuator: Option<bool>,
     pub preselector: Option<bool>,
-    /// **Not** coalesced. Each CAT command is its own instruction to the radio
-    /// and they are not interchangeable — collapsing a queue of them to the
-    /// last would drop everything but the most recent.
+    /// **Not** coalesced, with one exception. Each CAT command is its own
+    /// instruction to the radio and they are not interchangeable — collapsing a
+    /// queue of them to the last would drop everything but the most recent. The
+    /// exception is a run of dial commands, which are a *value*: see
+    /// [`Pending::absorb`].
     pub cat: Vec<String>,
     pub shutdown: bool,
 }
@@ -66,7 +68,23 @@ impl Pending {
             Ctrl::Center(v) => self.center = Some(v),
             Ctrl::Attenuator(v) => self.attenuator = Some(v),
             Ctrl::Preselector(v) => self.preselector = Some(v),
-            Ctrl::Cat(s) => self.cat.push(s),
+            // A dial command *is* a value, and only the last of a run of them
+            // can matter — so consecutive ones replace each other rather than
+            // queueing, exactly as `center` does. Everything else queues.
+            //
+            // This is not a nicety. On a DUO reached through the USB gateway the
+            // dial is commanded with `FA`, and dragging the panadapter emits one
+            // per UI frame; each costs a control transfer plus a busy-wait on
+            // the radio's CAT buffer, on the same thread that has to keep the
+            // sample transfers submitted. A queue of them is a stalled stream.
+            //
+            // Only *consecutive* ones, so the order of everything else is left
+            // exactly as the operator's instructions arrived: `FA` then `TX;` is
+            // a frequency and then a key-down, and it still is.
+            Ctrl::Cat(s) => match self.cat.last_mut() {
+                Some(last) if is_dial_frame(last) && is_dial_frame(&s) => *last = s,
+                _ => self.cat.push(s),
+            },
             Ctrl::Shutdown => self.shutdown = true,
         }
     }
@@ -74,6 +92,15 @@ impl Pending {
     pub(crate) fn is_empty(&self) -> bool {
         *self == Pending::default()
     }
+}
+
+/// Whether an ELAD CAT frame is a bare "put the dial here" — the one command
+/// that arrives in floods and whose earlier values mean nothing.
+///
+/// `FA` and `FB` set VFO A and VFO B; the query forms (`FA;`) ask instead of
+/// setting and carry no value to collapse, so they are left alone.
+fn is_dial_frame(frame: &str) -> bool {
+    matches!(frame.get(..2), Some("FA" | "FB")) && frame.len() > 3
 }
 
 /// Throughput and health accounting.
@@ -551,6 +578,42 @@ mod tests {
         p.absorb(Ctrl::Cat("FA00014074000;".into()));
         p.absorb(Ctrl::Cat("TX;".into()));
         assert_eq!(p.cat, vec!["MD2;", "FA00014074000;", "TX;"]);
+    }
+
+    /// Except the dial, which is a value like any other. A drag emits one of
+    /// these per UI frame and each costs a control transfer plus a busy-wait on
+    /// the radio's CAT buffer — on the thread that has to keep the sample
+    /// stream fed. Only the frequency the drag ended on can matter.
+    #[test]
+    fn a_run_of_dial_commands_keeps_only_the_last() {
+        let mut p = Pending::default();
+        for hz in [14_074_000u64, 14_075_000, 14_076_000] {
+            p.absorb(Ctrl::Cat(format!("FA{hz:011};")));
+        }
+        assert_eq!(p.cat, vec!["FA00014076000;"]);
+    }
+
+    /// And only a *consecutive* run: an instruction between two dial commands
+    /// is a fence, because the order of the operator's instructions against the
+    /// dial is the whole meaning of a key-down.
+    #[test]
+    fn a_dial_command_after_an_instruction_does_not_swallow_the_one_before_it() {
+        let mut p = Pending::default();
+        p.absorb(Ctrl::Cat("FA00014074000;".into()));
+        p.absorb(Ctrl::Cat("TX;".into()));
+        p.absorb(Ctrl::Cat("FA00014200000;".into()));
+        assert_eq!(p.cat, vec!["FA00014074000;", "TX;", "FA00014200000;"]);
+    }
+
+    /// A read is not a value. `FA;` asks the radio where it is, and two of them
+    /// are two questions — though nothing on the gateway can hear the answer,
+    /// which is why this only has to not make things worse.
+    #[test]
+    fn a_dial_query_is_not_collapsed_into_a_dial_command() {
+        let mut p = Pending::default();
+        p.absorb(Ctrl::Cat("FA;".into()));
+        p.absorb(Ctrl::Cat("FA00014074000;".into()));
+        assert_eq!(p.cat, vec!["FA;", "FA00014074000;"]);
     }
 
     /// Shutdown must survive anything that arrives after it in the same batch,

@@ -6768,10 +6768,10 @@ command, so it works wherever the rig is reached.
 
 **Rig control (FDM-DUO only).** Set the serial port and the baud rate to match
 menu 70 `CAT BAUD` on the radio, which ships at **38400**. With the port set you
-get everything a CAT radio gives: the front-panel knob moves the display (it
-pans the whole window — see below), the mode, PTT, the radio's own S-meter and
-SWR, and its transmit power on the Drive slider (nine fixed steps from 0.3 W to
-5 W, which is what the radio has rather than a continuous control).
+get everything a CAT radio gives: frequency and mode in **both** directions (see
+below), PTT, the radio's own S-meter and SWR, and its transmit power on the Drive
+slider (nine fixed steps from 0.3 W to 5 W, which is what the radio has rather
+than a continuous control).
 
 > **Check the baud rate first if nothing you do reaches the radio.** The
 > FDM-DUO's CAT port has four rates and no others — 9600, 38400, 57600 and
@@ -6799,27 +6799,39 @@ which is why this is a visible setting rather than an assumption. Pick the
 radio's own USB Audio device beside it, or under Settings → General → Radio
 audio.
 
-**The dial is not the panadapter centre — the radio's VFO is.** Unlike a CAT
-radio feeding audio, this front end hands over a whole down-converter window, so
-the dial moves inside it in software the way it does on any other SDR here.
+**The panadapter centre is the dial, because on this radio they are one knob.**
+This front end hands over a whole down-converter window, but that window is
+centred on the transceiver's own VFO: the receiver being streamed is the one the
+radio tunes for itself, so moving the VFO moves the window with it, hertz for
+hertz. There is no arrangement in which the radio's display and sdroxide's
+readout are different numbers and both are true.
 
-What the window is centred on is the transceiver's own VFO: the receiver being
-streamed is the one the radio tunes for itself, so moving the VFO moves the
-window with it. sdroxide therefore parks the VFO on the **centre** of the
-panadapter and leaves it there while receiving — clicking a station 30 kHz down
-the band tunes it without the radio moving at all — and re-centres, which does
-move the radio, only when the dial would otherwise leave the window. Turning the
-**front-panel knob** pans the whole window and the dial stays on the station it
-was on, rather than the two fighting each other.
+So with the CAT port set, the two agree in both directions. Tuning here — the
+digits, the mouse wheel, a click on the waterfall, a memory, a band button —
+moves the radio's VFO, and the panadapter re-centres on the dial as it goes.
+Turning the **front-panel knob** moves the readout here. Nothing is commanded
+back at a frequency the radio itself reported, so your hand on the knob and
+sdroxide cannot fight over it.
 
-The transmit frequency is asserted at key-down instead of being held ahead of
-time, and the centre is put back on unkey. That costs a few milliseconds at the
-start of an over and is invisible in use; what it buys is a panadapter that does
-not slide sideways every time you touch the dial.
+With no CAT port — or one the radio does not answer on — there is no VFO to
+command, and sdroxide tunes inside the window the radio is already sending, the
+way it does on any other SDR. The frequency axis is then only as right as the
+number you have typed into it, so set the band on the radio and type its dial
+frequency here to line the two up. That is also how an FDM-S1 or FDM-S2 works,
+having no VFO at all.
 
-> Earlier versions held the VFO on the transmit frequency while receiving, which
-> on this radio dragged the window along with the dial: a click on a signal moved
-> that signal across the screen by the same distance instead of tuning it
+> Earlier versions parked the VFO on the panadapter **centre** and moved the dial
+> inside the window in software. The radio's display then never agreed with
+> sdroxide's, its own audio was demodulating the centre rather than the station
+> you were listening to, an over keyed at the radio went out on the centre, and a
+> tuning step smaller than half the window commanded nothing at all — so the dial
+> and the mouse wheel simply did not move the radio
+> ([issue #146](https://github.com/dividebysandwich/sdroxide/issues/146)).
+>
+> Before that, the VFO was held on the transmit frequency while receiving, which
+> dragged the window along underneath a panadapter that did not know it had
+> moved: a click on a signal moved that signal across the screen by the same
+> distance instead of tuning it
 > ([issue #111](https://github.com/dividebysandwich/sdroxide/issues/111)).
 
 **CW is keyed by the radio's own key or paddle.** The FDM-DUO has no command

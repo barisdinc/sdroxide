@@ -3731,12 +3731,13 @@ pub(in crate::app) fn settings_elad_tab(
     );
     ui.label(
         RichText::new(
-            "The radio's display follows the CENTRE of the panadapter rather than \
-             the dial inside it: on an FDM-DUO the VFO is what the receive window \
-             is built around, so tuning within the window leaves the front panel \
-             where it is and dragging the window moves it. That is not the control \
-             port failing — transmit goes out on the dial, and the VFO is put there \
-             at key-down and brought back on unkey.",
+            "With the port set, the radio's display and this dial are the same \
+             number in both directions: the FDM-DUO's receive window is built \
+             around its VFO, so tuning here moves the front panel and turning the \
+             front-panel knob moves the readout here. The panadapter re-centres on \
+             the dial as it goes. With no port — or none the radio answers on — \
+             there is no VFO to command, and tuning stays inside the window the \
+             radio is already sending.",
         )
         .weak(),
     );

@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sdroxide_radio::{Complex32, ControlUpdate, EngineConfig, IqSource, Result, start_engine};
-use sdroxide_types::{Command, DeviceCaps, RadioEvent, Vfo};
+use sdroxide_types::{Command, DeviceCaps, Mode, RadioEvent, RxId, Vfo};
 
 const DIAL: f64 = 14_074_000.0;
 const RATE: f64 = 48_000.0;
@@ -50,6 +50,8 @@ struct Rig {
     /// a transceiver sending I/Q down a sound card with no CAT cable on it —
     /// one synthesiser still, but not one this end can say anything to.
     dial_reachable: bool,
+    /// Modes the engine commanded, in order.
+    modes: Vec<sdroxide_types::Mode>,
 }
 
 /// A stand-in for a CAT rig whose I/Q output is the capture device: the dial is
@@ -84,6 +86,17 @@ impl IqSource for MockIqRig {
     }
     fn describe(&self) -> String {
         "mock rig with an I/Q output".into()
+    }
+    /// The radio in front of us owns its mode as well as its dial: sdroxide
+    /// demodulates the I/Q, but the mode is what the rig's own IF filter, its
+    /// front panel and its transmitter are all set by, so a mode chosen here has
+    /// to reach it. Not `tracks_rx_mode` — nothing is imposed at connect.
+    fn commands_rx_mode(&self) -> bool {
+        true
+    }
+    fn set_control_mode(&mut self, mode: Mode) -> Result<()> {
+        self.rig.lock().unwrap().modes.push(mode);
+        Ok(())
     }
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
         let mut r = self.rig.lock().unwrap();
@@ -360,6 +373,31 @@ fn a_control_link_that_comes_up_late_takes_the_dial_back() {
         rig.lock().unwrap().commanded.last().copied(),
         Some(clicked),
         "with a link to command through, the click moves the radio again"
+    );
+    shutdown(h);
+}
+
+/// The mode goes the other way too — and only because the source says so.
+///
+/// The engine asks its front end whether the radio in front of it owns the
+/// receive mode, and where the answer is no, an operator's mode change reaches
+/// nothing until the next key-down asserts it. That is not a hypothetical: it is
+/// what an ELAD FDM-DUO on its own USB receiver did (issue #146) and what a CAT
+/// rig sending I/Q down a sound card did before it, in the same shape both
+/// times — mode followed rig→app on the poll perfectly, and never travelled
+/// app→rig at all, so the two readouts sat there disagreeing.
+#[test]
+fn a_mode_chosen_here_reaches_a_rig_that_owns_its_mode() {
+    let (h, rig) = engine();
+    settle(&h, |s| s.vfo_a_hz == DIAL);
+    rig.lock().unwrap().modes.clear();
+
+    h.cmd_tx.send(Command::SetMode { rx: RxId::Main, mode: Mode::Cw }).unwrap();
+    settle(&h, |s| s.rx[0].mode == Mode::Cw);
+    assert_eq!(
+        rig.lock().unwrap().modes.last().copied(),
+        Some(Mode::Cw),
+        "the operator's mode has to be commanded at the radio that is doing the receiving"
     );
     shutdown(h);
 }

@@ -1011,6 +1011,13 @@ const QUERY_WAIT: Duration = Duration::from_millis(300);
 /// startup so the app adopts the radio's state instead of overwriting it.
 /// Returns `None` if the port can't be opened or the rig doesn't answer.
 pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
+    // The third door onto the port, and it has to be held to the same line
+    // discipline as the other two ([`with_family_serial_limits`], applied in
+    // [`spawn`]). Without this an FDM-DUO left on the shared 19200 default is
+    // asked its dial at a rate it has no setting for, answers nothing, and the
+    // caller reads that as a radio with no control link at all — while the
+    // driver opening behind it snaps to 38400 and talks to the rig perfectly.
+    let cfg = &with_family_serial_limits(cfg.clone());
     let mut port = open_link(cfg).ok()?;
     let mut protocol = make_protocol(cfg);
     protocol.link_opened();

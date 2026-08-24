@@ -15,27 +15,42 @@
 //! An FDM-S1 or FDM-S2 has only the first of the three and comes up
 //! receive-only, with no control path at all.
 //!
-//! # The dial is not the centre — the rig's VFO is
+//! # The centre is the dial, because on this radio they are one knob
 //!
-//! Unlike a CAT rig, this front end hands over a whole DDC window — 192 kHz at
-//! the least — so [`IqSource::center_is_dial`] is false and the engine tunes
-//! inside it in software.
-//!
-//! What that window is centred *on* is the transceiver's own VFO. The DDC is
+//! This front end hands over a whole DDC window — 192 kHz at the least — but
+//! what that window is centred *on* is the transceiver's own VFO. The DDC is
 //! not a second receiver alongside the one the radio tunes for itself: move the
-//! VFO and the window moves with it, hertz for hertz. So the VFO is parked on
-//! the panadapter centre and left there for as long as the radio is receiving,
-//! the front-panel knob is read back as the *centre* being panned rather than
-//! the dial being tuned ([`EladSource::poll_control`]), and the transmit
-//! frequency is asserted at key-down and the centre put back on unkey.
+//! VFO and the window moves with it, hertz for hertz. There is therefore no
+//! arrangement in which the radio's displayed frequency and sdroxide's dial can
+//! be different numbers and both be true, so [`IqSource::center_is_dial`] says
+//! so and the engine commands the VFO for every tune, exactly as it does for a
+//! transceiver sending I/Q down a sound card ([`crate::audio_cat_source`]).
 //!
-//! This file used to do the opposite — it pushed the receive dial at the VFO,
-//! which is what [`IqSource::set_tx_freq_hz`] invites — and the result was
-//! [issue #111]: every click on the waterfall slid the window by the distance
-//! clicked, underneath a panadapter that believed it had not moved, so the
-//! station being clicked on ran away across the screen instead of being tuned.
+//! It used to be the other way round — the VFO was parked on the panadapter
+//! centre and the dial moved inside the window in software — and every way that
+//! could go wrong, did. The rig's display never agreed with sdroxide's readout;
+//! the radio's own audio was demodulating the centre rather than the station
+//! being listened to; an over keyed at the *radio* (mic, key, VOX) went out on
+//! the centre, which is up to half a window from where the operator could see
+//! they were tuned; and a tuning step smaller than half the window commanded
+//! nothing at all, so the dial and the mouse wheel simply did not move the
+//! radio ([issue #146]).
+//!
+//! What must **not** come back with that is [issue #111]: the receive dial used
+//! to be pushed at the VFO through [`IqSource::set_tx_freq_hz`], which slid the
+//! window underneath a panadapter that believed it had not moved, so the station
+//! clicked on ran away across the screen instead of being tuned. That hook stays
+//! a no-op. The window moves only through [`IqSource::set_center_hz`], which is
+//! the one path the engine also relabels the frequency axis from.
+//!
+//! An FDM-S1 or FDM-S2 has no VFO to command and is an ordinary SDR: its centre
+//! is its LO, and the engine tunes inside the span. So is an FDM-DUO whose
+//! control port never answered — commanding a dial nothing is listening to is
+//! how the panadapter comes to look locked (issue #155), so the claim is made
+//! only once the radio has been heard from.
 //!
 //! [issue #111]: https://github.com/dividebysandwich/sdroxide/issues/111
+//! [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
 //!
 //! # Not verified against hardware
 //!
@@ -141,6 +156,22 @@ pub struct EladSource {
     /// on its way there — leaves genuine front-panel movements getting through,
     /// which is the whole point of reading the rig at all.
     expect_freq: Option<(f64, std::time::Instant)>,
+    /// Whether the transceiver's VFO is something this end can move at all,
+    /// and so whether the window centre is the dial ([`IqSource::center_is_dial`]).
+    ///
+    /// True the moment there is any path to the VFO: the USB gateway always has
+    /// one (it is the interface the samples are already arriving on), and a
+    /// serial port has one as soon as the radio has answered it. Seeded from the
+    /// startup query and latched on by the first thing the rig says afterwards,
+    /// so a DUO switched on after sdroxide — or one whose CAT baud the operator
+    /// has just corrected — is picked up rather than left out for the session.
+    /// Never cleared: a rig that has missed a poll or two is still a rig whose
+    /// dial we own, and flipping the panadapter's whole tuning behaviour on a
+    /// quiet moment would be worse than either answer.
+    ///
+    /// False for an FDM-S, which has no VFO, and for a DUO on a serial port
+    /// nothing has ever answered — see the module header.
+    dial_reachable: bool,
     /// Whether sdroxide is holding the rig keyed.
     ///
     /// For the length of an over the VFO is the *transmit* frequency rather
@@ -180,6 +211,10 @@ impl EladSource {
         let label = handle.label.clone();
         let mut status = handle.warnings.clone();
 
+        // Whether the transceiver's VFO can be moved from here at all, decided
+        // alongside the control path because it is the same question: see
+        // `IqSource::center_is_dial`.
+        let mut dial_reachable = false;
         let control = if model != Model::Duo {
             Control::None
         } else if cat.serial.path.trim().is_empty() {
@@ -189,6 +224,9 @@ impl EladSource {
                  front-panel knob cannot be read. Set the port under Settings → Radio."
                     .to_string(),
             );
+            // Write-only, but it is the interface the samples are arriving on,
+            // so there is no question of whether it is there.
+            dial_reachable = true;
             Control::Gateway
         } else {
             // The family is forced rather than read: this interface *is* an
@@ -217,6 +255,22 @@ impl EladSource {
                      being opened at {using} instead — at any rate the radio does not have, \
                      it ignores the dial and refuses to key. Set Baud under Settings → Radio \
                      to whatever menu 70 \"CAT BAUD\" says on the radio.",
+                ));
+            }
+            // Ask the radio one question before commanding it anything, for
+            // the same reason `AudioCatSource` does: whether it answers at all
+            // is the only evidence there is that there *is* a control link, and
+            // the whole shape of tuning hangs on it. A DUO that has not answered
+            // by the time the first sample arrives can still say so later —
+            // `poll_control` latches this on at the first update.
+            dial_reachable = sdroxide_cat::query_once(&cat).is_some();
+            if !dial_reachable {
+                status.push(format!(
+                    "No answer from the FDM-DUO on {} — its VFO cannot be commanded from \
+                     here, so tuning stays inside the window the radio is already sending \
+                     and its display will not follow. Check the port, and that Baud matches \
+                     menu 70 \"CAT BAUD\" on the radio.",
+                    sdroxide_cat::link_label(&cat),
                 ));
             }
             Control::Serial(Box::new(sdroxide_cat::spawn(cat)))
@@ -265,6 +319,7 @@ impl EladSource {
             preselector: cfg.preselector,
             antenna: EladAntenna::default(),
             expect_freq: None,
+            dial_reachable,
             keyed: false,
             last_telem: None,
             last_signal: None,
@@ -349,7 +404,8 @@ impl IqSource for EladSource {
         self.center
     }
 
-    /// Move the window, which on a transceiver means moving its VFO.
+    /// Move the window, which on a transceiver means moving its VFO — and on
+    /// this one, since the VFO carries the window, moving the dial with it.
     ///
     /// Both are commanded to the same frequency: the DDC tuning word through
     /// the streaming interface, and the rig's VFO through whichever control
@@ -369,12 +425,45 @@ impl IqSource for EladSource {
         Ok(())
     }
 
-    /// The DDC window is the panadapter and the dial moves inside it, the same
-    /// as any other SDR here. The transceiver's own VFO holds the *centre* of
-    /// that window rather than the dial, because on this radio the two are one
-    /// knob — see the module header.
+    /// On an FDM-DUO the window centre *is* the dial: the DDC rides on the
+    /// transceiver's VFO, so the two cannot be different numbers, and the engine
+    /// commands the VFO for every tune rather than sliding a software dial
+    /// around inside the span. See the module header.
+    ///
+    /// False where there is no VFO to command — an FDM-S, or a DUO whose control
+    /// port has never answered. Claiming a dial nothing hears is how a
+    /// panadapter comes to look locked (issue #155): every gesture relabels the
+    /// span around spectrum the radio is not sending, and the station clicked on
+    /// walks out of the receiver instead of into it.
     fn center_is_dial(&self) -> bool {
-        false
+        self.dial_reachable
+    }
+
+    /// The transceiver in front of us owns its mode, and a mode chosen here has
+    /// to reach it.
+    ///
+    /// Without this the engine's "command the rig's mode" gate never fired — it
+    /// is demod audio, a tracked mode, or this — so the mode travelled rig→app
+    /// on the `MD;` poll and never the other way. Change mode on the radio and
+    /// sdroxide followed perfectly; change it in sdroxide and the radio sat
+    /// there on the old one until the next key-down, where `tx_begin` asserts it
+    /// anyway — which is the wrong moment to find out the rig was still on the
+    /// other sideband ([issue #146]). The same fault, in the same shape, as the
+    /// one `AudioCatSource::commands_rx_mode` was added for.
+    ///
+    /// [`IqSource::commands_rx_mode`] rather than [`IqSource::tracks_rx_mode`]:
+    /// nothing is imposed when the interface opens. The rig's own `MD;` reply is
+    /// adopted instead, because rearranging somebody's radio out of a restored
+    /// session is not what connecting to it should do.
+    ///
+    /// The receive *filter* does not travel with it. The engine guards that
+    /// separately on whether the rig is the one doing the receiving, and here it
+    /// is not — sdroxide demodulates the DDC window itself, and the width the
+    /// operator sets belongs to its own demodulator, not to the radio's IF.
+    ///
+    /// [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
+    fn commands_rx_mode(&self) -> bool {
+        !matches!(self.control, Control::None)
     }
 
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
@@ -474,8 +563,13 @@ impl IqSource for EladSource {
         let Control::Serial(cat) = &self.control else {
             return Vec::new();
         };
+        let updates = cat.poll();
+        // A radio that has said anything at all is a radio whose VFO this end
+        // can move — the point of the latch is a DUO switched on, or a baud rate
+        // corrected, after sdroxide started. See `IqSource::center_is_dial`.
+        self.dial_reachable |= !updates.is_empty();
         let mut out = Vec::new();
-        for u in cat.poll() {
+        for u in updates {
             match u {
                 sdroxide_cat::CatUpdate::Freq(hz) => {
                     // Nothing the rig says about its frequency means anything
@@ -497,17 +591,24 @@ impl IqSource for EladSource {
                         // crossed our command on the wire. See `FREQ_SETTLE`.
                         Some((_, at)) if at.elapsed() < FREQ_SETTLE => {}
                         // The operator's knob, turned by hand. On this radio
-                        // that pans the DDC window rather than tuning inside
-                        // it, so it is the *centre* that has moved: the engine
-                        // adopts it, keeps the dial on the station it was
-                        // listening to (clamped into the new span), and — the
-                        // point of `Center` rather than `Freq` — sends nothing
-                        // back, so the operator's hand and our own re-centring
-                        // cannot fight over the knob.
+                        // the VFO carries the window and the dial together, so
+                        // this is both: the centre moves here (the engine reads
+                        // it straight back out of `center_hz` when it takes the
+                        // `Freq`, and the axis has to be relabelled against the
+                        // same number the samples are now arriving on), and the
+                        // dial goes up as `Freq` so the readout follows the
+                        // radio instead of sitting where it was left.
+                        //
+                        // Nothing goes back at the VFO over the control link:
+                        // the only write here is the DDC's own tuning word,
+                        // which keeps the device's record of the centre in step
+                        // with ours. So the operator's hand and this end cannot
+                        // fight over the knob.
                         _ => {
                             self.expect_freq = None;
                             self.center = hz;
-                            out.push(ControlUpdate::Center(hz));
+                            self.handle.set_center_hz(hz);
+                            out.push(ControlUpdate::Freq(hz));
                         }
                     }
                 }
@@ -606,11 +707,11 @@ impl IqSource for EladSource {
     // ── Transmit ─────────────────────────────────────────────────────────────
 
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {
-        // The VFO has been sitting on the receive window's centre, so this is a
-        // real retune and it has to land before the key does: it is the only
-        // thing that decides what frequency the over goes out on. Ordinarily
-        // the centre and the transmit frequency are within a window of each
-        // other; under split or XIT they need not be.
+        // The VFO has been sitting on the dial, which is the receive window's
+        // centre, so ordinarily this asserts the frequency it is already on.
+        // Under split or XIT it does not, and then it is a real retune that has
+        // to land before the key does: the VFO is the only thing that decides
+        // what frequency the over goes out on.
         self.keyed = true;
         self.command_freq(center_hz);
         self.command_ptt(true);
