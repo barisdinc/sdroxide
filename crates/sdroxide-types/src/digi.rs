@@ -1230,9 +1230,13 @@ pub struct DigiConfig {
     // beacon different things at different intervals, and are configured on
     // different days. One set of fields would mean changing the mailbox SSID
     // every time the tracker's did.
-    /// The callsign this station beacons under, with its SSID. Empty means it
-    /// will not transmit at all: an APRS frame with no callsign in it is an
-    /// unidentified transmission.
+    /// The callsign this station beacons under, with its SSID.
+    ///
+    /// Empty falls back to the station callsign ([`DigiConfig::my_call`]) —
+    /// see [`DigiConfig::aprs_call`]. It is a field of its own because an
+    /// APRS station conventionally carries an SSID that distinguishes it from
+    /// the operator (`-9` for a car, `-10` for an I-gate), not because an
+    /// operator should have to type their callsign twice.
     #[serde(default)]
     pub aprs_mycall: String,
     /// The digipeater path, as an operator writes it — `WIDE1-1,WIDE2-1`.
@@ -1477,6 +1481,20 @@ impl Default for DigiConfig {
 }
 
 impl DigiConfig {
+    /// The callsign APRS transmits under: the APRS-specific one if the
+    /// operator set one, else the station callsign.
+    ///
+    /// One function rather than the same two-line fallback in the controller
+    /// and in the panel: they have to agree about what is on the air, and
+    /// about whether transmit is possible at all. Empty means it is not —
+    /// an APRS frame with no callsign in it is an unidentified transmission,
+    /// which is illegal everywhere.
+    #[must_use]
+    pub fn aprs_call(&self) -> String {
+        let own = self.aprs_mycall.trim();
+        if own.is_empty() { self.my_call.trim().to_uppercase() } else { own.to_uppercase() }
+    }
+
     /// Fill a template's placeholders. `report` is a signed dB value.
     pub fn fill(
         template: &str,

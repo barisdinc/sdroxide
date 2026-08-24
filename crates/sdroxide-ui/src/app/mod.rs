@@ -144,10 +144,18 @@ pub struct SdroxideApp {
     /// Auto-fit's timers and the view it last measured — what keeps the
     /// floor/ceiling fitted while the FIT chip is lit.
     fit: spectrum::AutoFit,
-    /// The (mode, dial) the digital sub-band view was last fitted for. In the
-    /// free-roaming digital modes (everything but FT8/FT4/JS8/WSPR) the fit is
-    /// applied only when this changes, so zoom/pan survive between frames.
-    digi_view_fit: Option<(Mode, f64)>,
+    /// The (mode, dial, front-end centre) the digital sub-band view was last
+    /// fitted for. In the free-roaming digital modes (everything but
+    /// FT8/FT4/JS8/WSPR) the fit is applied only when this changes, so zoom/pan
+    /// survive between frames.
+    ///
+    /// The centre is in here because a fit is only meaningful inside the span
+    /// the front end is actually on, and the panadapter clamps it to that span.
+    /// The first frame after startup is drawn before the engine's real state
+    /// has arrived, so a window fitted then is clamped into the *default*
+    /// span and is left stranded when the real one turns up — which is exactly
+    /// what APRS does, being the one mode that moves the dial by itself.
+    digi_view_fit: Option<(Mode, f64, f64)>,
     /// egui time of the last received spectrum frame, for stall detection.
     last_spectrum_at: f64,
     /// Waterfall time-scroll state: wall-clock (UTC secs) of the last tick and

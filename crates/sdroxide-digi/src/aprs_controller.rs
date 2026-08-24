@@ -139,11 +139,11 @@ impl AprsController {
     /// unidentified signal, which is illegal everywhere. Every transmit path
     /// goes through this and gives up quietly when it returns `None`.
     fn mycall(&self) -> Option<Addr> {
-        let call = self.cfg.aprs_mycall.trim();
+        let call = self.cfg.aprs_call();
         if call.is_empty() {
             return None;
         }
-        Addr::new(call).ok()
+        Addr::new(&call).ok()
     }
 
     /// The digipeater path as addresses.
@@ -213,7 +213,7 @@ impl AprsController {
         let at = now_unix();
         self.messages.push(AprsMessage {
             at,
-            from: self.cfg.aprs_mycall.trim().to_ascii_uppercase(),
+            from: self.cfg.aprs_call(),
             to: to.clone(),
             text: text.clone(),
             id: id.clone(),
@@ -390,7 +390,7 @@ impl AprsController {
 
     /// A message frame addressed to somebody — possibly us.
     fn on_message(&mut self, from: &str, m: &sdroxide_aprs::Message, at: i64) {
-        let me = self.cfg.aprs_mycall.trim().to_ascii_uppercase();
+        let me = self.cfg.aprs_call();
         let for_me = !me.is_empty() && m.addressee.eq_ignore_ascii_case(&me);
 
         // An acknowledgement is only ours if it is addressed to us.
@@ -701,7 +701,7 @@ impl DigiEngine for AprsController {
         // CSMA has cleared us: key up through the engine's normal PTT path so
         // the station interlock and the band rails apply.
         if let Some(sent) = self.ch.take_over(&self.cfg) {
-            let me = self.cfg.aprs_mycall.trim().to_ascii_uppercase();
+            let me = self.cfg.aprs_call();
             let via = sdroxide_aprs::parse_path(&self.cfg.aprs_path);
             for f in sent {
                 if let Ok(p) = Packet::parse(&f, None) {
@@ -935,12 +935,81 @@ mod tests {
         assert_eq!(c.ch.queued(), 0, "transmitted with acknowledgements off");
     }
 
+    /// The APRS callsign field is a *refinement* of the station callsign, not
+    /// a second place to type it.
+    ///
+    /// It was neither for one release, and the symptom was the worst kind:
+    /// an operator with their callsign filled in on the General tab pressed
+    /// BEACON and nothing happened at all — no frame, no error, no line in the
+    /// log. Every transmit path here gives up quietly when there is no
+    /// callsign, so "no callsign" must not be something an operator can be in
+    /// without meaning to be.
+    #[test]
+    fn an_empty_aprs_call_falls_back_to_the_station_callsign() {
+        let cfg = DigiConfig {
+            my_call: "oe3jjs".into(),
+            aprs_mycall: String::new(),
+            my_grid: "JN88ec".into(),
+            packet_persist: 255,
+            packet_slottime_ms: 1,
+            ..Default::default()
+        };
+        let mut c = AprsController::new(cfg.clone(), 48_000.0);
+        c.queue_beacon();
+        assert_eq!(c.ch.queued(), 1, "a beacon must go out on the station callsign alone");
+        for _ in 0..4 {
+            c.ch.on_rx_audio(&[0.0; 4800], &cfg);
+        }
+        let sent = c.ch.take_over(&cfg).expect("the beacon never left the queue");
+        let p = Packet::parse(&sent[0], None).unwrap();
+        assert_eq!(p.src().call(), "OE3JJS", "and under that call, upper-cased");
+
+        // ...and the APRS-specific one still wins where it is set, which is
+        // what the SSID convention needs.
+        let cfg = DigiConfig { aprs_mycall: "OE3JJS-9".into(), ..cfg };
+        let mut c = AprsController::new(cfg.clone(), 48_000.0);
+        c.queue_beacon();
+        for _ in 0..4 {
+            c.ch.on_rx_audio(&[0.0; 4800], &cfg);
+        }
+        let sent = c.ch.take_over(&cfg).unwrap();
+        assert_eq!(Packet::parse(&sent[0], None).unwrap().src().call(), "OE3JJS-9");
+    }
+
+    /// A message goes out on the station callsign too, and is filed under it.
+    #[test]
+    fn a_message_uses_the_station_callsign_when_no_aprs_call_is_set() {
+        let cfg = DigiConfig {
+            my_call: "OE3JJS".into(),
+            packet_persist: 255,
+            packet_slottime_ms: 1,
+            ..Default::default()
+        };
+        let mut c = AprsController::new(cfg, 48_000.0);
+        c.queue_message("VK2ABC".into(), "hello".into());
+        assert_eq!(c.messages.len(), 1, "the message was refused");
+        assert_eq!(c.messages[0].from, "OE3JJS");
+        c.poll_outbox(SystemTime::now());
+        assert_eq!(c.ch.queued(), 1);
+        // ...and an acknowledgement addressed to that call is recognised.
+        let id = c.messages[0].id.clone();
+        c.absorb("VK2ABC", "APZSDR", &[], true, format!(":OE3JJS   :ack{id}").as_bytes(), false);
+        assert_eq!(c.messages[0].state, AprsMsgState::Acked);
+    }
+
     /// A station with no callsign must never transmit — not a beacon, not a
     /// message, not an acknowledgement. Empty is the state the config ships
     /// in, so this is the default path rather than an edge case.
     #[test]
     fn a_station_with_no_callsign_never_transmits() {
-        let cfg = DigiConfig { my_grid: "JN88ec".into(), ..Default::default() };
+        // Neither field set — which, since the fallback, is the only way to be
+        // without a callsign.
+        let cfg = DigiConfig {
+            my_grid: "JN88ec".into(),
+            my_call: String::new(),
+            aprs_mycall: String::new(),
+            ..Default::default()
+        };
         let mut c = AprsController::new(cfg, 48_000.0);
         c.queue_beacon();
         c.queue_message("VK2ABC".into(), "hello".into());

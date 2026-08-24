@@ -3035,10 +3035,17 @@ and so is any move you make once you are in the mode. The **⇵ FREQ** chip besi
 the frequency lists the other regions' channels.
 
 Unlike the slotted modes, the waterfall is **not** narrowed to the channel. APRS
-occupies about 12 kHz of a 2 m band you have every reason to be watching, so the
-span stays wherever you had it.
+occupies about 12 kHz of a 2 m band you have every reason to be watching — the
+repeater outputs above it, the simplex calling frequency below — so the view
+opens on 300 kHz around the channel and zoom and pan stay live from there. It is
+re-framed only when you change mode or retune far enough to take the channel off
+the screen.
 
 #### The panel
+
+The panel header carries the channel itself: the receive level, how many
+stations are on the map, whether the channel is busy, and — on the right — the
+beacon interval and the buttons.
 
 **STATIONS** is everything heard, most recent first, each with the icon its
 symbol asks for. A `·` after a callsign means the frame arrived *direct* — no
@@ -3098,10 +3105,14 @@ on your channel is sending a format this build does not read.
 
 - **APRS call** — the callsign this station beacons under, with its SSID:
   `-9` for a car, `-10` for an I-gate, `-5` for a phone, `-7` for a handheld.
-  It is separate from the logbook callsign and from the packet station call on
-  purpose: they are conventionally different SSIDs of the same call. **Empty
-  means this station never transmits** — an APRS frame with no callsign in it is
-  an unidentified transmission.
+  Leave it empty and your station callsign from **Settings → General** is used
+  as it stands; the field exists because an APRS station conventionally carries
+  an SSID that distinguishes it from the operator, not because you should have
+  to type your callsign twice. The dialog shows what will actually go on the
+  air underneath it. With *neither* filled in nothing is transmitted at all —
+  not a beacon, not a message, not an acknowledgement, because an APRS frame
+  with no callsign in it is an unidentified transmission — and the panel says
+  so in red rather than leaving you pressing a button that does nothing.
 - **Symbol** — what you are, as a row of icons for the ones an amateur station
   usually is, with the two characters editable beside them for the other 170. A
   digit or a letter in the first position is an *overlay*, drawn on top of the
@@ -3119,12 +3130,13 @@ on your channel is sending a format this build does not read.
   kilometres across, and saying so is honest). Turn it off to give exact
   coordinates.
 - **Comment** — free text sent with every beacon, up to 43 characters.
-- **Beacon** — minutes between beacons. **Zero, which is the default, never
-  beacons**: selecting a mode must not put a station on the air. Thirty minutes
-  is the convention for a fixed station once you turn it on, and the first goes
-  out one interval from now rather than immediately. **Compressed** sends the
-  compact position format — a third of the air time and more precise — which
-  every receiver since the 1990s reads.
+- **Beacon** — minutes between beacons, the same setting as the interval in the
+  panel header. **`off`, which is the default, never beacons**: selecting a mode
+  must not put a station on the air. Thirty minutes is the convention for a
+  fixed station once you turn it on, oftener for a moving one, and the first
+  goes out one interval from now rather than immediately. **Compressed** sends
+  the compact position format — a third of the air time and more precise —
+  which every receiver since the 1990s reads.
 - **Messages → Acknowledge** — answer messages addressed to you. An
   acknowledgement is a transmission this station makes without you asking, so a
   receive-only setup should turn it off; the beacon then stops claiming to be
@@ -3133,9 +3145,32 @@ on your channel is sending a format this build does not read.
   heard, and what the map's fade is measured against.
 
 **BEACON** in the header sends one position report now, without waiting for the
-timer. It goes through the channel-access rules like everything else: it waits
-for the channel to be clear, so a busy channel delays it rather than doubling on
-somebody.
+timer, and the box beside it is how often to beacon unattended — `off` by
+default. Both go through the channel-access rules like everything else: they
+wait for the channel to be clear, so a busy channel delays a beacon rather than
+doubling on somebody.
+
+#### When nothing is decoding
+
+The bar beside `1200 baud` is the audio actually reaching the modem, and it is
+the first thing to look at. Flat means nothing is arriving at all — the radio's
+data output is not the one sdroxide is listening to. It lights green while the
+modem hears a carrier, and `BUSY` appears beside it for the same reason.
+
+If the bar is moving and the map stays empty, switch the message pane to **RAW**
+and watch the counts beside it. Frames arriving and failing their check sequence
+(`N bad`) mean the modem *is* reading the channel and the signal is marginal.
+Nothing at all, with a healthy level, usually means one of:
+
+- **the squelch is closed.** A transceiver's FM squelch takes a moment to open
+  and eats the start of every burst, which is the whole preamble. Open it fully,
+  or take the audio from the radio's data socket, which is not squelched.
+- **the audio is from the loudspeaker path rather than the data socket**, and
+  something in between — a tone control, a de-emphasis network, an audio
+  processor — is doing to 2200 Hz what it does not do to 1200 Hz.
+- **the rig is not in FM.** APRS is an FM channel; selecting the mode commands
+  FM over CAT, but a radio that is not being commanded (no CAT cable, or a
+  control port nothing answers on) has to be put in FM by hand.
 
 #### What is decoded
 

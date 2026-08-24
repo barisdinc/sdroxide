@@ -185,15 +185,30 @@ impl SdroxideApp {
                         )
                         .on_hover_text(
                             "The callsign this station beacons under, with its SSID — \
-                             OE3JJS-9 for a car, -10 for an I-gate, -5 for a phone. Empty \
-                             means it will never transmit: an APRS frame with no callsign in \
-                             it is an unidentified transmission.",
+                             OE3JJS-9 for a car, -10 for an I-gate, -5 for a phone. Leave it \
+                             empty to use the callsign above.",
                         )
                         .changed()
                         {
                             cfg.aprs_mycall = cfg.aprs_mycall.to_uppercase();
                             changed = true;
                         }
+                        ui.end_row();
+                        ui.label("");
+                        // What will actually go on the air, which is the only
+                        // thing that matters and is not obvious when the field
+                        // above is blank.
+                        let call = cfg.aprs_call();
+                        ui.label(if call.is_empty() {
+                            RichText::new(
+                                "No callsign: this station will not transmit at all — not a \
+                                 beacon, not a message, not an acknowledgement.",
+                            )
+                            .size(10.0)
+                            .color(crate::theme::ALERT())
+                        } else {
+                            RichText::new(format!("Transmits as {call}")).size(10.0).weak()
+                        });
                         ui.end_row();
 
                         ui.label("Symbol");

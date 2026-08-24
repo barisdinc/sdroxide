@@ -85,6 +85,17 @@ impl SdroxideApp {
     }
 
     /// The channel, the beacon and the buttons.
+    ///
+    /// # Why the readouts are painted into fixed slots
+    ///
+    /// Everything in this row that changes on its own does so in a slot of a
+    /// fixed width. Carrier detect follows the channel and flips several times
+    /// a second, and the row is a `horizontal_wrapped`: a label that comes and
+    /// goes changes the row's width, which on a window near the wrap threshold
+    /// tips the whole tail onto a second line and back again. The buttons
+    /// dance sideways, and every pane below the header moves by a row height,
+    /// twice a second. Reserving the space costs a few dozen points of header
+    /// and makes the layout independent of what the channel is doing.
     fn aprs_header(
         &mut self,
         ui: &mut egui::Ui,
@@ -93,86 +104,87 @@ impl SdroxideApp {
         tx_ok: bool,
     ) {
         let transmitting = self.digi_status.as_ref().is_some_and(|s| s.transmitting);
+        // What this station would transmit as, by the same rule the engine
+        // uses. Empty means it cannot transmit at all, which is a thing the
+        // operator has to be told rather than left to discover by pressing a
+        // button that does nothing.
+        let call = self.digi_cfg_edit.aprs_call();
+        let have_call = !call.is_empty();
+        let have_pos = st.my_pos.is_some();
+
         ui.horizontal_wrapped(|ui| {
+            // A floor under the row, so a height that varies by a point with
+            // its content cannot ripple into every pane below it either.
+            ui.set_min_height(22.0);
             ui.label(RichText::new("APRS").size(11.0).strong().color(theme::CYAN()));
             ui.label(RichText::new("1200 baud").weak().size(10.5));
             self.digi_freq_chip(ui, cmds);
-            ui.label(
-                RichText::new(format!("{} stn", st.stations.len()))
-                    .monospace()
-                    .size(10.5)
-                    .color(theme::CYAN_DIM()),
-            )
-            .on_hover_text("Stations heard and still inside the window set in APRS Setup");
-            // The three that come and go, in an id scope of their own.
-            //
-            // Carrier detect follows the channel and flips several times a
-            // second, so the number of widgets in this row is not constant —
-            // and egui derives a widget's id from a counter, so everything
-            // after them would get a new id whenever one appeared. The scope
-            // costs the parent exactly one id however many are drawn inside it.
-            ui.push_id("aprs-channel-state", |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    if st.dcd {
-                        ui.label(RichText::new("BUSY").strong().size(10.5).color(theme::ALERT()))
-                            .on_hover_text(
-                                "Another station is on the channel — nothing will key until it \
-                                 clears",
-                            );
-                    }
-                    if st.bad_frames > 0 {
-                        ui.label(RichText::new(format!("{} bad", st.bad_frames)).weak().size(10.5))
-                            .on_hover_text(
-                                "Frames that arrived but failed their check sequence — a \
-                                 collision, a fade, or a signal too weak to read.",
-                            );
-                    }
-                    if st.tx_queue > 0 {
-                        ui.label(
-                            RichText::new(format!("{} queued", st.tx_queue))
-                                .size(10.5)
-                                .color(theme::YELLOW()),
-                        )
-                        .on_hover_text("Waiting for the channel to clear");
-                    }
-                });
-            });
+            aprs_level_bar(ui, st.level, st.dcd);
+            aprs_channel_slot(ui, st);
+            // The one thing an operator must not have to guess at: this
+            // station cannot transmit, and here is the reason. Static — it
+            // changes only when the operator changes a setting — so it needs
+            // no slot of its own.
+            if !have_call {
+                ui.label(RichText::new("no callsign").strong().size(10.5).color(theme::ALERT()))
+                    .on_hover_text(
+                        "Nothing will be transmitted — no beacon, no message, not even an \
+                         acknowledgement — until this station has a callsign. Set one under \
+                         Settings → General, or an APRS-specific one with its SSID under SETUP.",
+                    );
+            } else if !have_pos {
+                ui.label(RichText::new("no position").size(10.5).color(theme::YELLOW()))
+                    .on_hover_text(
+                        "A beacon needs somewhere to report. Fill in your locator under \
+                         Settings → General, or give coordinates under SETUP.",
+                    );
+            }
+
             crate::chrome::row_tail(ui, |ui| {
-                // Same reasoning as the channel state above: these two come and
-                // go, and the buttons beside them must keep their ids.
-                ui.push_id("aprs-tx-state", |ui| {
-                    ui.horizontal(|ui| {
-                        if let Some(secs) = st.next_beacon_s {
-                            ui.label(
-                                RichText::new(format!("{}:{:02}", secs / 60, secs % 60))
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(theme::CYAN_DIM()),
-                            )
-                            .on_hover_text("Until the next scheduled beacon");
-                        }
-                        if transmitting {
-                            ui.label(RichText::new("● TX").color(theme::ALERT()).strong());
-                        }
-                    });
-                });
                 self.clear_rx_chip(ui, cmds);
                 if crate::chrome::chip(
                     ui,
                     self.show_digi_settings,
                     RichText::new("SETUP").size(9.5),
                 )
+                .on_hover_text("Callsign, symbol, digipeater path, position and beacon")
                 .clicked()
                 {
                     self.show_digi_settings = !self.show_digi_settings;
                 }
-                if tx_gated(ui, tx_ok, |ui| {
-                    // A fixed face, with the countdown beside it rather than
-                    // inside it. A label that changes width re-lays the whole
-                    // row out, and egui then finds the same rectangle carrying
-                    // a different widget between its two passes — which is a
-                    // stream of warnings and a row that twitches once a second.
+                // The beacon interval, here rather than only in the setup
+                // dialog: how often an unattended transmitter keys is the
+                // setting an operator reaches for while watching the channel,
+                // not while in a dialog.
+                let cfg = &mut self.digi_cfg_edit;
+                let before = cfg.aprs_beacon_minutes;
+                let resp = ui
+                    .add_enabled(
+                        // Not gated on having a callsign or a position:
+                        // setting the interval before filling those in is a
+                        // perfectly ordinary order to do things in, and the
+                        // warning to the left already says why nothing is
+                        // going out yet. Only a receiver, which cannot beacon
+                        // at all, greys it.
+                        tx_ok,
+                        egui::DragValue::new(&mut cfg.aprs_beacon_minutes)
+                            .range(0..=120)
+                            .speed(0.25)
+                            .custom_formatter(|n, _| {
+                                if n < 1.0 { "off".into() } else { format!("{n:.0} min") }
+                            }),
+                    )
+                    .on_hover_text(
+                        "How often to beacon your position, unattended. `off` — the default — \
+                         never beacons: selecting a mode must not put a station on the air. \
+                         Thirty minutes is the convention for a fixed station, oftener for a \
+                         moving one, and every beacon is somebody else's channel time.",
+                    );
+                if resp.changed() && cfg.aprs_beacon_minutes != before {
+                    let cfg = cfg.clone();
+                    cmds.push(Command::SetDigiConfig(cfg));
+                }
+                if tx_gated(ui, tx_ok && have_call && have_pos, |ui| {
                     crate::chrome::chip_accent(
                         ui,
                         false,
@@ -180,18 +192,20 @@ impl SdroxideApp {
                         theme::GREEN(),
                         theme::INK_ON_CYAN(),
                     )
-                    .on_hover_text(match st.next_beacon_s {
-                        Some(_) => "Send a position beacon now, without waiting for the timer",
-                        None => {
-                            "Send one position beacon. Set an interval in APRS Setup to beacon \
-                             regularly — it is off until you do."
-                        }
+                    .on_hover_text(if !have_call {
+                        "This station has no callsign — see the warning to the left."
+                    } else if !have_pos {
+                        "This station has no position to report — see the warning to the left."
+                    } else {
+                        "Send one position report now, without waiting for the interval. It \
+                         waits for the channel to be clear like everything else."
                     })
                 })
                 .clicked()
                 {
                     cmds.push(Command::AprsBeacon);
                 }
+                aprs_tx_slot(ui, st, transmitting);
             });
         });
     }
@@ -470,7 +484,10 @@ impl SdroxideApp {
         h: f32,
         tx_ok: bool,
     ) {
-        let me = self.digi_cfg_edit.aprs_mycall.trim().to_ascii_uppercase();
+        // The same rule the engine transmits under, so a message of ours is
+        // shown as ours whichever field the callsign came from.
+        let me = self.digi_cfg_edit.aprs_call();
+        let have_call = !me.is_empty();
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(if self.aprs_show_traffic { "CHANNEL" } else { "MESSAGES" })
@@ -478,6 +495,28 @@ impl SdroxideApp {
                     .strong()
                     .color(theme::CYAN_DIM()),
             );
+            // The two counts that say why a channel is not decoding, beside the
+            // raw view they are about. They were in the panel header and are
+            // not any more: they change on their own, and the header has to
+            // keep a constant width (see `aprs_header`).
+            if self.aprs_show_traffic {
+                if st.bad_frames > 0 {
+                    ui.label(RichText::new(format!("{} bad", st.bad_frames)).size(9.5).weak())
+                        .on_hover_text(
+                            "Frames that arrived and failed their check sequence — a collision, \
+                             a fade, or a signal too weak to read. A count rising with nothing \
+                             decoding means the modem *is* hearing the channel: check the level \
+                             meter, and open the radio's squelch.",
+                        );
+                }
+                if st.non_aprs > 0 {
+                    ui.label(RichText::new(format!("{} other", st.non_aprs)).size(9.5).weak())
+                        .on_hover_text(
+                            "Frames read cleanly off the channel that were not APRS — somebody \
+                             else's packet session, or a format this build does not decode.",
+                        );
+                }
+            }
             crate::chrome::row_tail(ui, |ui| {
                 if crate::chrome::chip(ui, self.aprs_show_traffic, RichText::new("RAW").size(9.5))
                     .on_hover_text(
@@ -529,14 +568,7 @@ impl SdroxideApp {
                     return;
                 }
                 if st.messages.is_empty() {
-                    ui.label(
-                        RichText::new(
-                            "No messages. Pick a station and write to it — a message is \
-                             acknowledged and retried, unlike everything else on this channel.",
-                        )
-                        .weak()
-                        .size(10.5),
-                    );
+                    ui.label(RichText::new("No messages.").weak().size(10.5));
                 }
                 for m in &st.messages {
                     let ours = m.from.eq_ignore_ascii_case(&me) && !me.is_empty();
@@ -556,30 +588,44 @@ impl SdroxideApp {
                         }));
                         ui.label(RichText::new(&m.text).size(10.5));
                         if ours {
+                            // Words, not symbols. The packaged font has no
+                            // glyph for a tick or an up arrow — they come out
+                            // as empty boxes — and the state of a message an
+                            // unattended transmitter is still retrying is not
+                            // something to leave to a font fallback.
                             let (face, colour, tip) = match m.state {
                                 AprsMsgState::Queued => {
-                                    ("…", theme::gray(150), "waiting for the channel")
+                                    ("…".to_string(), theme::gray(150), "waiting for the channel")
                                 }
-                                AprsMsgState::Sent => {
-                                    ("↑", theme::CYAN_DIM(), "sent, waiting to be acknowledged")
-                                }
-                                AprsMsgState::Acked => {
-                                    ("✓", theme::GREEN(), "acknowledged by the far end")
-                                }
-                                AprsMsgState::Rejected => {
-                                    ("✗", theme::ALERT(), "refused by the far end")
-                                }
-                                AprsMsgState::Failed => {
-                                    ("✗", theme::ALERT(), "no answer after every retry")
-                                }
-                                AprsMsgState::Received => ("", theme::gray(150), ""),
+                                AprsMsgState::Sent if m.tries > 1 => (
+                                    format!("sent ×{}", m.tries),
+                                    theme::CYAN_DIM(),
+                                    "sent and retried, still waiting to be acknowledged",
+                                ),
+                                AprsMsgState::Sent => (
+                                    "sent".to_string(),
+                                    theme::CYAN_DIM(),
+                                    "on the air, waiting to be acknowledged",
+                                ),
+                                AprsMsgState::Acked => (
+                                    "ack".to_string(),
+                                    theme::GREEN(),
+                                    "acknowledged by the far end",
+                                ),
+                                AprsMsgState::Rejected => (
+                                    "rejected".to_string(),
+                                    theme::ALERT(),
+                                    "refused by the far end — not retried",
+                                ),
+                                AprsMsgState::Failed => (
+                                    "no ack".to_string(),
+                                    theme::ALERT(),
+                                    "no answer after every retry",
+                                ),
+                                AprsMsgState::Received => (String::new(), theme::gray(150), ""),
                             };
                             if !face.is_empty() {
-                                let mut txt = face.to_string();
-                                if m.state == AprsMsgState::Sent && m.tries > 1 {
-                                    txt = format!("↑{}", m.tries);
-                                }
-                                ui.label(RichText::new(txt).size(10.0).color(colour))
+                                ui.label(RichText::new(face).size(9.5).color(colour))
                                     .on_hover_text(tip);
                             }
                         } else if !m.id.is_empty()
@@ -616,7 +662,7 @@ impl SdroxideApp {
                 send = true;
             }
             let ready = !self.aprs_target.trim().is_empty() && !self.aprs_draft.trim().is_empty();
-            if tx_gated(ui, tx_ok && ready, |ui| {
+            if tx_gated(ui, tx_ok && ready && have_call, |ui| {
                 crate::chrome::chip_accent(
                     ui,
                     false,
@@ -624,17 +670,25 @@ impl SdroxideApp {
                     theme::GREEN(),
                     theme::INK_ON_CYAN(),
                 )
-                .on_hover_text(
+                .on_hover_text(if !have_call {
+                    "This station has no callsign, so nothing can be transmitted. Set one under \
+                     Settings → General, or an APRS-specific one with its SSID under SETUP."
+                } else if !ready {
+                    "Needs a station to address and something to say."
+                } else {
                     "Send it, and keep retrying until the far end acknowledges. Messages are \
-                     the one thing on this channel that is answered.",
-                )
+                     the one thing on this channel that is answered."
+                })
             })
             .clicked()
             {
                 send = true;
             }
         });
+        // Enter in the message box goes through the same gate as the button: a
+        // keystroke must not do what a greyed-out button refuses to.
         if send
+            && have_call
             && !self.aprs_target.trim().is_empty()
             && !self.aprs_draft.trim().is_empty()
             && tx_ok
@@ -646,4 +700,87 @@ impl SdroxideApp {
             self.aprs_draft.clear();
         }
     }
+}
+
+/// Paint `segs` left to right inside `rect`, clipped to it.
+fn paint_segments(ui: &egui::Ui, rect: egui::Rect, segs: &[(String, egui::Color32)]) {
+    let p = ui.painter_at(rect);
+    let font = egui::FontId::proportional(10.5);
+    let mut x = rect.left();
+    for (text, col) in segs {
+        let galley = p.layout_no_wrap(text.clone(), font.clone(), *col);
+        let y = rect.center().y - galley.size().y / 2.0;
+        x += galley.size().x + 6.0;
+        p.galley(egui::pos2(x - galley.size().x - 6.0, y), galley, *col);
+    }
+}
+
+/// The station count and the carrier detect, in a slot of fixed width.
+///
+/// Painted rather than laid out because the width has to be the same whether
+/// the channel is busy or clear — see [`SdroxideApp::aprs_header`].
+fn aprs_channel_slot(ui: &mut egui::Ui, st: &AprsStatus) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(86.0, 15.0), egui::Sense::hover());
+    let mut segs = vec![(format!("{} stn", st.stations.len()), theme::CYAN_DIM())];
+    if st.dcd {
+        segs.push(("BUSY".to_string(), theme::ALERT()));
+    }
+    paint_segments(ui, rect, &segs);
+    resp.on_hover_text(
+        "Stations heard and still inside the window set in APRS Setup, and whether another \
+         station is on the channel right now. Nothing will key while it is busy.",
+    );
+}
+
+/// What the transmitter is doing, in a slot of fixed width: the over in
+/// progress, then the frames waiting for the channel, then the countdown to
+/// the next beacon.
+fn aprs_tx_slot(ui: &mut egui::Ui, st: &AprsStatus, transmitting: bool) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(58.0, 15.0), egui::Sense::hover());
+    let mut segs = Vec::new();
+    if transmitting {
+        segs.push(("● TX".to_string(), theme::ALERT()));
+    } else if st.tx_queue > 0 {
+        segs.push((format!("{} queued", st.tx_queue), theme::YELLOW()));
+    } else if let Some(secs) = st.next_beacon_s {
+        segs.push((format!("{}:{:02}", secs / 60, secs % 60), theme::CYAN_DIM()));
+    }
+    paint_segments(ui, rect, &segs);
+    resp.on_hover_text(
+        "The over in progress, the frames waiting for the channel to clear, or the time until \
+         the next scheduled beacon.",
+    );
+}
+
+/// Receive level, so "nothing is decoding" can be told from "nothing is
+/// arriving".
+///
+/// The first question anyone asks of a silent packet channel is whether the
+/// audio is reaching the modem at all, and without this the panel cannot
+/// answer it: a rig on the wrong connector, a muted data port or a squelch
+/// that never opens all look exactly like a dead band.
+fn aprs_level_bar(ui: &mut egui::Ui, level: f32, dcd: bool) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(48.0, 9.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, theme::gray(20));
+    // Log scale (~ -60..0 dBFS) so a weak but perfectly decodable signal is
+    // still visibly above the floor.
+    let db = 20.0 * level.max(1e-6).log10();
+    let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    let mut fill = rect;
+    fill.set_width(rect.width() * frac);
+    let col = if dcd {
+        theme::GREEN()
+    } else if frac > 0.06 {
+        theme::CYAN_DIM()
+    } else {
+        theme::gray(45)
+    };
+    p.rect_filled(fill, 2.0, col);
+    p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::gray(60)), egui::StrokeKind::Inside);
+    resp.on_hover_text(
+        "Audio reaching the modem. Flat means nothing is arriving at all — check that the \
+         radio's data output is the one sdroxide is listening to. It lights up green while \
+         the modem hears a carrier.",
+    );
 }

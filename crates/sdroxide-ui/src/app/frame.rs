@@ -364,7 +364,26 @@ impl eframe::App for SdroxideApp {
             // are large enough to read on the waterfall. RIFP straddles the
             // dial rather than sitting above it, so its window is symmetric
             // and as wide as the profile's channel.
-            let (sub_lo, sub_hi) = if mode.is_carrier_centered() {
+            let (sub_lo, sub_hi) = if mode.is_aprs() {
+                // APRS is deliberately *not* framed on its own channel.
+                //
+                // Every other digital mode is worked inside a sub-band, so
+                // framing that sub-band is a service. APRS is one channel on a
+                // band an operator has every reason to be watching — the
+                // repeater outputs above it, the simplex calling frequency
+                // below, a satellite passing over the top — and ±8 kHz around
+                // 144.800 would take all of that away in exchange for a view
+                // of a channel whose whole content is already in the panel.
+                //
+                // A window rather than nothing at all, though: this is the one
+                // mode that moves the dial by itself, and after a 130 MHz jump
+                // a view left where it was is a panadapter showing spectrum
+                // from another band entirely. 300 kHz is wide enough to hold
+                // the neighbourhood and is only a starting point — zoom and
+                // pan stay live, and it is re-applied only on a mode change or
+                // a retune that takes the channel off-screen.
+                (dial - 150_000.0, dial + 150_000.0)
+            } else if mode.is_carrier_centered() {
                 let half = (self.state.rx[0].filter_hi - self.state.rx[0].filter_lo).abs() as f64
                     * 0.5
                     * 1.2;
@@ -382,21 +401,21 @@ impl eframe::App for SdroxideApp {
             // off-screen. Tuning that keeps it in view (a drag-tune, a nudge)
             // keeps the operator's zoom.
             let locked = mode.is_slotted() || mode.is_wspr();
-            let mode_changed = self.digi_view_fit.map(|(m, _)| m) != Some(mode);
-            let dial_moved = self.digi_view_fit.map(|(_, d)| d) != Some(dial);
+            let center = self.state.center_hz;
+            let mode_changed = self.digi_view_fit.map(|(m, _, _)| m) != Some(mode);
+            let dial_moved = self.digi_view_fit.map(|(_, d, _)| d) != Some(dial);
+            // A retune moved the span the view has to live inside. Paired
+            // with `!sub_visible` below rather than forcing a fit on its own:
+            // an operator who panned the front end's window somewhere they
+            // wanted to look should keep it, and only a window that no longer
+            // contains the sub-band at all has to be re-fitted.
+            let span_moved = self.digi_view_fit.map(|(_, _, c)| c) != Some(center);
             let sub_visible = self.view.view_lo_hz < sub_hi && self.view.view_hi_hz > sub_lo;
-            // APRS is exempt from all of it. Every other digital mode is worked
-            // inside a sub-band, so framing that sub-band is a service; APRS is
-            // one channel on a band an operator has every reason to be watching
-            // — the repeater outputs above it, the simplex calling frequency
-            // below, a satellite passing over the top. Narrowing the waterfall
-            // to ±8 kHz around 144.800 would take that away in exchange for a
-            // view of a channel whose whole content is already in the panel.
-            if !mode.is_aprs() && (locked || mode_changed || (dial_moved && !sub_visible)) {
+            if locked || mode_changed || ((dial_moved || span_moved) && !sub_visible) {
                 self.view.view_lo_hz = sub_lo;
                 self.view.view_hi_hz = sub_hi;
             }
-            self.digi_view_fit = Some((mode, dial));
+            self.digi_view_fit = Some((mode, dial, center));
             let audio_hz = self.digi_status.as_ref().map(|s| s.audio_hz).unwrap_or(1500.0);
             let is_text = mode.is_text_modem();
             // RTTY shows mark/space tuning lines; Olivia the tone-bank edges;

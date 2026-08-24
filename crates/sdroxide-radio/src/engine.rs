@@ -2011,6 +2011,30 @@ fn engine_thread(
         for rx in &mut state.rx {
             *rx = RxState::with_mode(mode);
         }
+        // The APRS channel rule, which `set_rx_mode` applies when the operator
+        // picks the mode and which has to apply here too: the mode can also
+        // arrive from the command line or from the restored session, and a
+        // station that comes up in APRS on 20 metres is a station receiving
+        // nothing and heard by nobody.
+        //
+        // Left alone if the dial is already on any region's channel — a
+        // traveller who tuned Japan's 144.640 keeps it — and said out loud
+        // rather than done silently, because it is the one mode selection that
+        // moves the dial.
+        if mode.is_aprs() && !sdroxide_types::is_aprs_channel(state.active_freq_hz()) {
+            let hz = sdroxide_types::aprs_dial();
+            info!(
+                from = state.active_freq_hz(),
+                to = hz,
+                region = sdroxide_types::region().number(),
+                "APRS is a shared channel; tuning to this region's"
+            );
+            match state.active_vfo {
+                Vfo::A => state.vfo_a_hz = hz,
+                Vfo::B => state.vfo_b_hz = hz,
+            }
+            state.band = Band::containing(hz);
+        }
     }
     let skim_cfg = sdroxide_config::load_skimmer_config();
     state.skimmer = if audio_mode {
