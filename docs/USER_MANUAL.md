@@ -177,7 +177,7 @@ window is shared with the digital operating panel.
 ![The top control bar modules](images/02-top-bar.jpg)
 
 The control-bar modules, left to right, are: Frequency, S-meter, Band/Mode,
-VFO, RIT/XIT, Receiver, Filter/Noise, Transmit (TX-capable rigs only), Display,
+VFO, RIT/XIT, Receiver + Filter/Noise, Transmit (TX-capable rigs only), Display,
 FFT, and System.
 
 ### 2.3 Tuning
@@ -359,10 +359,21 @@ moves the transmit frequency, and what has to ride under it. See
 
 ### 2.7 Receiver controls
 
-- **AGC** — a drop-down: `Off`, `Slow`, `Med`, `Fast`. Not shown in NFM or
-  WFM, where there is no AGC at all: an FM detector's output level is set by
-  the transmitter's deviation, not by signal strength, so there is nothing to
-  level and an AGC would only pump on the noise between overs.
+The receiver and its filter/noise controls share one box of two rows. Which
+row a button lands on is not fixed: the top row carries the level controls the
+*radio* offers — the volume, a front-end gain rail where there is a gain to
+set, decimation where there is a span to throw away, the AGC where the mode has
+one — and on a rig with few of those, the buttons from the row below move up to
+fill it rather than leave half the box empty and the box itself twice as wide as
+the strip can afford. So the same button can sit on the top row on a CAT rig and
+on the bottom row on an SDR with a gain slider, and it moves when you change
+mode. What is in the box never changes; only where the two rows are cut does.
+
+- **AGC** — a drop-down: `Off`, `Slow`, `Med`, `Fast`. Not shown in NFM, WFM
+  or DRM, where there is no AGC at all: an FM detector's output level is set by
+  the transmitter's deviation, not by signal strength, and a DRM decoder hands
+  you the audio at the level the broadcaster mixed it to, so in both there is
+  nothing to level and an AGC would only pump on the noise between overs.
 - **Man** — the fixed audio gain the receiver runs on while the AGC is `Off`,
   shown only then. Unlevelled audio is whatever the band delivered, and a weak
   SSB signal can sit tens of dB below anything the volume control can reach, so
@@ -406,11 +417,11 @@ moves the transmit frequency, and what has to ride under it. See
   the next block of samples, with no gap in the audio and no risk of a device
   refusing it. The sub receiver still has to live inside the span, so if it was
   parked outside the new one it is moved back in.
-- **MUTE** (Filter/Noise row) — mute the receiver (keyboard shortcut **M**).
-- **REC** / **MONO** (Filter/Noise row) — record what you hear and what you send
+- **MUTE** — mute the receiver (keyboard shortcut **M**).
+- **REC** / **MONO** — record what you hear and what you send
   to an MP3 file, and choose whether it is written in two channels or one. See
   [2.20](#220-recording-the-audio).
-- **SQL** (Filter/Noise module) — squelch; below the open threshold it reads
+- **SQL** — squelch; below the open threshold it reads
   `off`.
 - **NB** — impulse noise blanker on the raw signal (keyboard shortcut **N**).
 - **ANC** — automatic notch: an adaptive filter that cancels **constant tone
@@ -1664,7 +1675,7 @@ are carried by the standard but not shown.
 
 ### 2.20 Recording the audio
 
-**REC**, in the Filter/Noise module beside MUTE, records the session to an MP3
+**REC**, in the receiver box beside MUTE, records the session to an MP3
 file: press it to start, press it again to stop. While it runs, hovering it
 names the file being written. It has no keyboard shortcut by default, but
 **Record on/off** is in the bindable action list, so it can be put on a key, a
@@ -1707,7 +1718,7 @@ them apart:
   nothing to keep apart, so both what you receive and what you send are written
   to both channels and the file plays centred instead of out of one ear.
 
-**MONO**, the chip beside REC, writes a single channel instead, with receive and
+**MONO**, the chip that follows REC, writes a single channel instead, with receive and
 transmit taking turns on it: a smaller file, and the honest format for a
 recording that is going to be played back in mono anyway.
 

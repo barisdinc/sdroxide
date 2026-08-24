@@ -2104,20 +2104,26 @@ impl SdroxideApp {
         });
     }
 
-    /// The Receiver + Filter/Noise box's natural width: the wider of its two
-    /// rows at [`rx_rows_w`], plus the box margins and a little rounding
-    /// slack. Which row leads changes with the rig and the state: the noise
-    /// row usually, the receive row once it carries both a front-end gain rail
-    /// and the manual-gain rail that appears with the AGC off.
-    fn rx_filter_w(&self, ui: &egui::Ui) -> f32 {
-        let (rx_row, noise_row) = rx_rows_w(
+    /// [`rx_rows`] against this radio: what the front end offers, what the
+    /// AGC is set to, and what mode the receiver is in.
+    fn rx_rows(&self, ui: &egui::Ui) -> RxRows {
+        rx_rows(
             ui,
             self.rx_gain().is_some(),
             self.decim_range().is_some(),
             self.state.rx[0].agc == AgcMode::Off,
             self.state.rx[0].mode,
-        );
-        rx_row.max(noise_row) + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0
+        )
+    }
+
+    /// The Receiver + Filter/Noise box's natural width: the wider of its two
+    /// rows once [`rx_rows`] has balanced them, plus the box margins and a
+    /// little rounding slack. Which row leads changes with the rig and the
+    /// state: the noise row usually, the receive row once it carries both a
+    /// front-end gain rail and the manual-gain rail that appears with the AGC
+    /// off.
+    fn rx_filter_w(&self, ui: &egui::Ui) -> f32 {
+        self.rx_rows(ui).w() + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0
     }
 
     /// Combined Receiver + Filter/Noise box: volume, gain and AGC on top, with
@@ -2214,10 +2220,21 @@ impl SdroxideApp {
 
     /// The receiver and filter/noise controls — the body of the RX box, and of
     /// the RX menu. See [`crate::chrome::control_row`] for `narrow`.
+    ///
+    /// Two rows, with the chip run breaking between them wherever [`rx_rows`]
+    /// says rather than at a fixed place: what the receive row carries is the
+    /// rig's business, and a run left whole under the squelch rail makes the
+    /// box wider than the strip can pay for.
     fn rx_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, narrow: bool) {
         let rx_gains = self.rx_gains();
         let rx_gain = rx_gains.first().cloned();
-        // Receiver: volume, RF gain, AGC and the manual gain it falls back to.
+        let chips = rx_chips(self.state.rx[0].mode);
+        // A menu column wraps its rows and is as wide as the menu around it,
+        // so there is nothing to balance there: the run stays whole, under the
+        // squelch rail, in the order it has always had.
+        let lifted = if narrow { 0 } else { self.rx_rows(ui).lifted };
+        // Receiver: volume, RF gain, AGC and the manual gain it falls back to,
+        // then as much of the chip run as this row has been given.
         crate::chrome::control_row(ui, narrow, |ui| {
             let mut vol = self.state.rx[0].volume;
             ui.label("Vol");
@@ -2323,9 +2340,13 @@ impl SdroxideApp {
                     }
                 }
             }
+            for &c in &chips[..lifted] {
+                self.rx_chip(ui, cmds, c, narrow);
+            }
         });
-        // Filter / Noise: squelch and the noise chips, then mute and record —
-        // the two that act on the finished audio rather than on the level.
+        // Filter / Noise: squelch, then whatever is left of the run — the
+        // noise chips, then mute and record, the two that act on the finished
+        // audio rather than on the level.
         crate::chrome::control_row(ui, narrow, |ui| {
             let mut sql = self.state.rx[0].squelch_db;
             ui.label("SQL");
@@ -2346,98 +2367,136 @@ impl SdroxideApp {
                 self.state.rx[0].squelch_db = sql; // optimistic echo
                 cmds.push(Command::SetSquelch { rx: RxId::Main, db: sql });
             }
-            let nb = self.state.noise_blanker;
-            if crate::chrome::chip(ui, nb, "NB").on_hover_text("Impulse noise blanker").clicked() {
-                cmds.push(Command::SetNoiseBlanker(!nb));
+            for &c in &chips[lifted..] {
+                self.rx_chip(ui, cmds, c, narrow);
             }
-            // Auto-notch — cancels constant tones (heterodynes / carriers).
-            let anc = self.state.rx[0].auto_notch;
-            if crate::chrome::chip(ui, anc, "ANC")
-                .on_hover_text("Auto-notch: cancel constant tone elements (heterodynes)")
-                .clicked()
-            {
-                self.state.rx[0].auto_notch = !anc; // optimistic echo
-                cmds.push(Command::SetAutoNotch { rx: RxId::Main, on: !anc });
-            }
-            // Noise reduction. The chip says only whether it is in circuit; the
-            // picker behind it chooses which of the four engines and how hard.
-            // A cycling chip was fine at seven states and two engines; at
-            // thirteen and four it is a dozen clicks to cross, and which engine
-            // to use is a considered choice rather than something to walk past
-            // on the way to the one you wanted.
-            if narrow {
-                // This row is itself inside the RX menu on a compact layout, and
-                // a popup opened from a popup counts as a click outside the
-                // first and closes it (see `sub_mode_picker`). So here the chip
-                // rides the strength and the picker is inlined below.
-                let nr = self.state.rx[0].noise_reduction;
-                let hover = match nr.engine() {
-                    Some(e) => format!(
-                        "Noise reduction: {} — {}\n\nClick to cycle the strength: \
-                         Low / Med / High / Off. The engine is in the rows below.",
-                        nr.label(),
-                        e.name()
-                    ),
-                    None => "Noise reduction, off — click to switch it on, or pick an engine \
-                             in the rows below"
-                        .to_string(),
-                };
-                if crate::chrome::chip(ui, nr.is_on(), "NR").on_hover_text(hover).clicked() {
-                    let next = nr.next();
-                    self.state.rx[0].noise_reduction = next; // optimistic echo
-                    cmds.push(Command::SetNoiseReduction { rx: RxId::Main, level: next });
+        });
+        if narrow {
+            // The engine picker the chip above cannot open from inside a menu.
+            self.nr_controls(ui, cmds);
+        }
+    }
+
+    /// Draw one chip of the RX box's run. Which row it lands on is [`rx_rows`]'s
+    /// business; what the chip does is here. `narrow` is the menu column, where
+    /// the NR chip stands in for a picker that cannot be opened from inside a
+    /// menu.
+    fn rx_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, chip: RxChip, narrow: bool) {
+        match chip {
+            RxChip::Nb => {
+                let nb = self.state.noise_blanker;
+                if crate::chrome::chip(ui, nb, "NB")
+                    .on_hover_text("Impulse noise blanker")
+                    .clicked()
+                {
+                    cmds.push(Command::SetNoiseBlanker(!nb));
                 }
-            } else {
-                self.nr_button(ui, cmds);
             }
-            let muted = self.state.rx[0].muted;
-            if crate::chrome::chip_accent(ui, muted, "MUTE", crate::theme::ALERT(), Color32::WHITE)
-                .clicked()
-            {
-                cmds.push(Command::SetMute { rx: RxId::Main, muted: !muted });
+            RxChip::Anc => {
+                // Auto-notch — cancels constant tones (heterodynes / carriers).
+                let anc = self.state.rx[0].auto_notch;
+                if crate::chrome::chip(ui, anc, "ANC")
+                    .on_hover_text("Auto-notch: cancel constant tone elements (heterodynes)")
+                    .clicked()
+                {
+                    self.state.rx[0].auto_notch = !anc; // optimistic echo
+                    cmds.push(Command::SetAutoNotch { rx: RxId::Main, on: !anc });
+                }
             }
-            // Record both sides of the QSO to an MP3 file (toggling).
-            let recording = self.state.recording;
-            let rec = crate::chrome::chip_accent(
-                ui,
-                recording,
-                "REC",
-                crate::theme::ALERT(),
-                Color32::WHITE,
-            )
-            .on_hover_text(match &self.state.recording_file {
-                Some(f) => format!("Recording to {f} — click to stop"),
-                None => "Record RX and TX audio to MP3".to_string(),
-            });
-            if rec.clicked() {
-                cmds.push(Command::SetRecording(!recording));
-            }
-            // Channel layout for the *next* recording — has no effect on one
-            // already running, hence the disabled look while `recording`.
-            let mono = self.state.recording_mono;
-            let mono_chip = ui
-                .add_enabled_ui(!recording, |ui| {
-                    crate::chrome::chip_accent(
-                        ui,
-                        mono,
-                        "MONO",
-                        crate::theme::ALERT(),
-                        Color32::WHITE,
-                    )
-                })
-                .inner
-                .on_hover_text(if mono {
-                    "Recording mixes RX/TX to one channel — click for two channels"
+            RxChip::Nr => {
+                // Noise reduction. The chip says only whether it is in circuit; the
+                // picker behind it chooses which of the four engines and how hard.
+                // A cycling chip was fine at seven states and two engines; at
+                // thirteen and four it is a dozen clicks to cross, and which engine
+                // to use is a considered choice rather than something to walk past
+                // on the way to the one you wanted.
+                if narrow {
+                    // This row is itself inside the RX menu on a compact layout, and
+                    // a popup opened from a popup counts as a click outside the
+                    // first and closes it (see `sub_mode_picker`). So here the chip
+                    // rides the strength and the picker is inlined below.
+                    let nr = self.state.rx[0].noise_reduction;
+                    let hover = match nr.engine() {
+                        Some(e) => format!(
+                            "Noise reduction: {} — {}\n\nClick to cycle the strength: \
+                             Low / Med / High / Off. The engine is in the rows below.",
+                            nr.label(),
+                            e.name()
+                        ),
+                        None => "Noise reduction, off — click to switch it on, or pick an engine \
+                                 in the rows below"
+                            .to_string(),
+                    };
+                    if crate::chrome::chip(ui, nr.is_on(), "NR").on_hover_text(hover).clicked() {
+                        let next = nr.next();
+                        self.state.rx[0].noise_reduction = next; // optimistic echo
+                        cmds.push(Command::SetNoiseReduction { rx: RxId::Main, level: next });
+                    }
                 } else {
-                    "Recording writes two channels: RX left / TX right while the sub receiver \
-                     is on, the same audio in both otherwise — click for a single mixed channel"
-                });
-            if mono_chip.clicked() {
-                cmds.push(Command::SetRecordingMono(!mono));
+                    self.nr_button(ui, cmds);
+                }
             }
-            // WFM broadcast stereo: lit while a 19 kHz pilot is locked,
-            // click to force mono. Only WFM has a pilot to find.
-            if self.state.rx[0].mode == Mode::Wfm {
+            RxChip::Mute => {
+                let muted = self.state.rx[0].muted;
+                if crate::chrome::chip_accent(
+                    ui,
+                    muted,
+                    "MUTE",
+                    crate::theme::ALERT(),
+                    Color32::WHITE,
+                )
+                .clicked()
+                {
+                    cmds.push(Command::SetMute { rx: RxId::Main, muted: !muted });
+                }
+            }
+            RxChip::Rec => {
+                // Record both sides of the QSO to an MP3 file (toggling).
+                let recording = self.state.recording;
+                let rec = crate::chrome::chip_accent(
+                    ui,
+                    recording,
+                    "REC",
+                    crate::theme::ALERT(),
+                    Color32::WHITE,
+                )
+                .on_hover_text(match &self.state.recording_file {
+                    Some(f) => format!("Recording to {f} — click to stop"),
+                    None => "Record RX and TX audio to MP3".to_string(),
+                });
+                if rec.clicked() {
+                    cmds.push(Command::SetRecording(!recording));
+                }
+            }
+            RxChip::Mono => {
+                // Channel layout for the *next* recording — has no effect on one
+                // already running, hence the disabled look while `recording`.
+                let recording = self.state.recording;
+                let mono = self.state.recording_mono;
+                let mono_chip = ui
+                    .add_enabled_ui(!recording, |ui| {
+                        crate::chrome::chip_accent(
+                            ui,
+                            mono,
+                            "MONO",
+                            crate::theme::ALERT(),
+                            Color32::WHITE,
+                        )
+                    })
+                    .inner
+                    .on_hover_text(if mono {
+                        "Recording mixes RX/TX to one channel — click for two channels"
+                    } else {
+                        "Recording writes two channels: RX left / TX right while the sub receiver \
+                         is on, the same audio in both otherwise — click for a single mixed channel"
+                    });
+                if mono_chip.clicked() {
+                    cmds.push(Command::SetRecordingMono(!mono));
+                }
+            }
+            RxChip::Stereo => {
+                // WFM broadcast stereo: lit while a 19 kHz pilot is locked,
+                // click to force mono. Only WFM has a pilot to find.
                 let want = self.state.rx[0].wfm_stereo;
                 let locked = self.meters.as_ref().is_some_and(|m| m.stereo);
                 let hover = if !want {
@@ -2451,6 +2510,8 @@ impl SdroxideApp {
                     self.state.rx[0].wfm_stereo = !want; // optimistic echo
                     cmds.push(Command::SetWfmStereo { rx: RxId::Main, on: !want });
                 }
+            }
+            RxChip::Rds => {
                 // RDS: what the station says about itself on its 57 kHz data
                 // subcarrier. Lit while data is actually arriving, so the chip
                 // answers "does this station carry it?" without opening
@@ -2467,11 +2528,11 @@ impl SdroxideApp {
                     self.show_rds = !self.show_rds;
                 }
             }
-            // DRM: lit once the decoder is actually producing audio, not merely
-            // holding sync on a carrier, so the chip answers "is this station
-            // being decoded?" at a glance. The window behind it says where the
-            // chain stopped when the answer is no.
-            if self.state.rx[0].mode == Mode::Drm {
+            RxChip::Drm => {
+                // DRM: lit once the decoder is actually producing audio, not merely
+                // holding sync on a carrier, so the chip answers "is this station
+                // being decoded?" at a glance. The window behind it says where the
+                // chain stopped when the answer is no.
                 let d = self.drm.as_ref();
                 let decoding = d.is_some_and(|d| d.decoding());
                 let hover = match d {
@@ -2486,15 +2547,11 @@ impl SdroxideApp {
                     self.show_drm = !self.show_drm;
                 }
             }
-            // CTCSS/DCS: what is coming in, and optionally what has to be
-            // present before the audio opens. Only NFM carries either.
-            if self.state.rx[0].mode == Mode::Nfm {
+            RxChip::Tone => {
+                // CTCSS/DCS: what is coming in, and optionally what has to be
+                // present before the audio opens. Only NFM carries either.
                 self.tone_button(ui, cmds);
             }
-        });
-        if narrow {
-            // The engine picker the chip above cannot open from inside a menu.
-            self.nr_controls(ui, cmds);
         }
     }
 
@@ -3772,19 +3829,117 @@ fn db_rail_w(ui: &egui::Ui) -> f32 {
     RX_DB_RAIL_W + MODULE_ROW_SPACING + value_field_w(ui, "-888.8 dB")
 }
 
-/// The natural width of the RX box's two rows: (receive, noise), gaps
-/// included, each measured against the live style. A free function of the
-/// state that changes them, like [`tx_rows_fixed_w`], so
-/// `the_condensed_rx_box_fits_its_rows` can price every combination without an
-/// app around it.
+/// A chip on the RX box's chip run: everything that follows the SQL rail, in
+/// the order it is drawn.
 ///
-/// This was two hand-priced literals, calibrated once against the rows as they
-/// then stood. The noise row grew — ANC, then MONO — and the figure did not:
-/// by the time it was 40 pt light the box was reserving less than it drew, and
-/// a module that overflows is not clipped to its box. It pushed the boxes
-/// after it along the row, and the System box at the end of the row lost its
-/// last chips over the edge of the window.
-fn rx_rows_w(ui: &egui::Ui, gain: bool, decim: bool, agc_off: bool, mode: Mode) -> (f32, f32) {
+/// One list is measured ([`rx_rows`]) and drawn ([`SdroxideApp::rx_chip`]), so
+/// a chip the box never reserved room for cannot be added to it. The DRM chip
+/// was: the box drew it past its own right edge, pushed the boxes beside it
+/// along the row and cost the System box its last chips over the edge of the
+/// window (issue #152) — exactly what ANC and MONO had done before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RxChip {
+    Nb,
+    Anc,
+    Nr,
+    Mute,
+    Rec,
+    Mono,
+    /// WFM's stereo pilot.
+    Stereo,
+    /// WFM's RDS subcarrier.
+    Rds,
+    /// The DRM decoder's state.
+    Drm,
+    /// NFM's sub-audible tone.
+    Tone,
+}
+
+impl RxChip {
+    /// The widest label the chip ever wears, which is what the box reserves
+    /// for it: a chip whose label follows what it is reading — the tone chip —
+    /// must not change the width of the box around it as signals come and go.
+    fn width_label(self) -> &'static str {
+        match self {
+            Self::Nb => "NB",
+            Self::Anc => "ANC",
+            Self::Nr => "NR",
+            Self::Mute => "MUTE",
+            Self::Rec => "REC",
+            Self::Mono => "MONO",
+            Self::Stereo => "ST",
+            Self::Rds => "RDS",
+            Self::Drm => "DRM",
+            // Armed but silent — the dot marks the tone as a requirement
+            // rather than a decode, and a DCS code reads longer than any
+            // CTCSS tone.
+            Self::Tone => "·D023N",
+        }
+    }
+
+    fn width(self, ui: &egui::Ui) -> f32 {
+        crate::chrome::chip_width(ui, self.width_label(), None)
+    }
+}
+
+/// The RX box's chip run in a mode: the six every mode carries, then whatever
+/// the mode itself brings — a subcarrier to read, a tone to gate on.
+fn rx_chips(mode: Mode) -> Vec<RxChip> {
+    let mut chips =
+        vec![RxChip::Nb, RxChip::Anc, RxChip::Nr, RxChip::Mute, RxChip::Rec, RxChip::Mono];
+    match mode {
+        // Only WFM has a stereo pilot to lock or an RDS subcarrier to decode.
+        Mode::Wfm => chips.extend([RxChip::Stereo, RxChip::Rds]),
+        // Only DRM has a decoder whose state is worth a light of its own.
+        Mode::Drm => chips.push(RxChip::Drm),
+        // Only NFM carries a sub-audible tone.
+        Mode::Nfm => chips.push(RxChip::Tone),
+        _ => {}
+    }
+    chips
+}
+
+/// How the RX box lays itself out: where its chip run breaks between the two
+/// rows, and what each row comes to once it has — gaps included, measured
+/// against the live style.
+#[derive(Debug, Clone, Copy)]
+struct RxRows {
+    /// How many of [`rx_chips`] ride up on the receive row. The rest follow
+    /// the SQL rail on the row below.
+    lifted: usize,
+    receive: f32,
+    noise: f32,
+}
+
+impl RxRows {
+    /// The box is as wide as its wider row.
+    fn w(&self) -> f32 {
+        self.receive.max(self.noise)
+    }
+}
+
+/// Measure the RX box's two rows and pick where the chip run breaks between
+/// them. A free function of the state that changes them, like
+/// [`tx_rows_fixed_w`], so `the_condensed_rx_box_fits_its_rows` can price
+/// every combination without an app around it.
+///
+/// The rows are not a fixed division of the controls, because the receive row
+/// is the one that varies with the *rig*: a front-end gain rail where there is
+/// a gain to set, a decimation chip where there is a span to throw away, the
+/// AGC chip and the manual rail behind it where the mode has an AGC at all. On
+/// an SDR in SSB that row is full; on a CAT rig on a sound card in DRM — no
+/// gain, no decimation, no AGC — it is a volume rail and nothing else, while
+/// the row beneath it carries every chip in the box. The box hugs its wider
+/// row, so that shape spends half of the box on nothing and charges the strip
+/// for it: with the DRM chip on the end of the noise row it ran the RX box
+/// into the boxes beside it and pushed the last of them off the window.
+///
+/// So the chips fill the receive row's tail while that leaves the box
+/// narrower, and the run breaks wherever the wider row is narrowest. A rig
+/// whose receive row is already full lifts nothing and is laid out exactly as
+/// before; a bare one comes out a third narrower, which is often the
+/// difference between the strip packing into two rows and taking a third.
+fn rx_rows(ui: &egui::Ui, gain: bool, decim: bool, agc_off: bool, mode: Mode) -> RxRows {
     let g = MODULE_ROW_SPACING;
     // The Vol and SQL rails, which is what the box's stretch lengthens — so
     // they are priced at the floor they fall back to, not the style width.
@@ -3795,50 +3950,53 @@ fn rx_rows_w(ui: &egui::Ui, gain: bool, decim: bool, agc_off: bool, mode: Mode) 
 
     // Receive: volume, the front-end gain rail where the rig has one, the
     // decimation chip, the AGC chip, and the manual rail behind it.
-    let mut rx_row = label("Vol") + g + rail;
+    let mut receive = label("Vol") + g + rail;
     if gain {
-        rx_row += g + label("Gain") + g + db_rail_w(ui);
+        receive += g + label("Gain") + g + db_rail_w(ui);
     }
     if decim {
         // "DEC off" and "DEC /64" measure much the same, so the chip has one
         // width whatever it is set to — it either rides this row or, on a
         // radio with no span to spare, is not drawn at all.
-        rx_row += g + chip("DEC off").max(chip("DEC /64"));
+        receive += g + chip("DEC off").max(chip("DEC /64"));
     }
     // At the widest of the four settings, so the box does not change width —
     // and the strip does not re-break its rows — as the AGC is cycled. In FM
-    // the chain bypasses the AGC and neither the chip nor the manual rail is
-    // drawn at all (Mode::audio_agc).
+    // and DRM the chain bypasses the AGC and neither the chip nor the manual
+    // rail is drawn at all (Mode::audio_agc).
     if mode.audio_agc() {
-        rx_row += g + AgcMode::ALL
+        receive += g + AgcMode::ALL
             .iter()
             .map(|a| chip(&format!("AGC {}", a.label())))
             .fold(0.0, f32::max);
         if agc_off {
-            rx_row += g + label("Man") + g + db_rail_w(ui);
+            receive += g + label("Man") + g + db_rail_w(ui);
         }
     }
 
     // Filter / noise: the squelch rail and its readout — the deepest threshold
-    // is the longest it reads, "off" at the bottom of the range being shorter
-    // — then the noise, audio and recording chips. The NR chip is a fixed "NR"
-    // whatever engine is running (see [`SdroxideApp::nr_button`]), so this row
-    // is not sized for the widest setting it could be switched to.
+    // is the longest it reads, "off" at the bottom of the range being shorter.
     let sql_readout = format!("{:.0}", sdroxide_types::SQUELCH_OPEN_DB);
-    let mut noise_row = label("SQL") + g + rail + g + value_field_w(ui, &sql_readout);
-    for c in ["NB", "ANC", "NR", "MUTE", "REC", "MONO"] {
-        noise_row += g + chip(c);
-    }
-    match mode {
-        // Only WFM has a stereo pilot to lock or an RDS subcarrier to decode.
-        Mode::Wfm => noise_row += g + chip("ST") + g + chip("RDS"),
-        // Only NFM carries a sub-audible tone. The chip reads a DCS code at
-        // its widest, behind the dot that marks an armed-but-silent squelch.
-        Mode::Nfm => noise_row += g + chip("·D023N"),
-        _ => {}
-    }
+    let noise = label("SQL") + g + rail + g + value_field_w(ui, &sql_readout);
 
-    (rx_row, noise_row)
+    // Then the run itself. Each chip is priced at its widest label, so the box
+    // does not breathe as a decode comes and goes (see [`RxChip::width_label`])
+    // and the run does not re-break under the operator's cursor.
+    let chips: Vec<f32> = rx_chips(mode).iter().map(|c| g + c.width(ui)).collect();
+    let all: f32 = chips.iter().sum();
+    // Ties keep a chip where it is, so the layout every rig has always had —
+    // the whole run under the SQL rail — is what comes back unless lifting a
+    // chip out of it genuinely buys width.
+    let mut best = RxRows { lifted: 0, receive, noise: noise + all };
+    let mut up = 0.0;
+    for (i, w) in chips.iter().enumerate() {
+        up += w;
+        let cand = RxRows { lifted: i + 1, receive: receive + up, noise: noise + all - up };
+        if cand.w() < best.w() {
+            best = cand;
+        }
+    }
+    best
 }
 
 /// The natural width of the RIT/XIT offset row: the chips at their labels and
@@ -5012,8 +5170,8 @@ mod tests {
         let vfo = chip_row_w(ui, &vfo_chip_labels(true)).max(vfo_offsets_w(ui, true))
             + 2.0 * crate::chrome::MODULE_MARGIN_X
             + 4.0;
-        let (rx_row, noise_row) = rx_rows_w(ui, false, false, false, mode);
-        let rx = rx_row.max(noise_row) + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0;
+        let rx =
+            rx_rows(ui, false, false, false, mode).w() + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0;
         let tx = tx_rows_w_for(ui, mode.allows_voice_keyer());
         let display = chip_row_w(ui, &DISPLAY_VIEW_CHIPS).max(chip_row_w(ui, &DISPLAY_TOOL_CHIPS))
             + 2.0 * crate::chrome::MODULE_MARGIN_X;
@@ -5030,7 +5188,8 @@ mod tests {
     }
 
     /// The narrowest window the desktop tier takes still packs the whole strip
-    /// into two rows.
+    /// into two rows — in every mode, including the ones that hang another
+    /// chip or two on the RX box.
     ///
     /// It did not, and that is what [`STRIP_RAIL_W`] is for: with the Vol, SQL,
     /// Drive and Tune rails each reserved at the style's 84 pt, RX + TX +
@@ -5039,6 +5198,14 @@ mod tests {
     /// while the S-meter above sat stretched over 300 pt of slack it had no use
     /// for. A third row costs the waterfall a whole module height; two shorter
     /// rails cost it nothing.
+    ///
+    /// The modes are here for the second half of issue #152. A CAT rig has no
+    /// front-end gain and no decimation, so its receive row is a volume rail
+    /// and — outside SSB, which is the only one of these four with an AGC —
+    /// nothing else, while the chip run underneath grows a DRM light or an
+    /// RDS one. Left whole under the squelch rail that run took the RX box to
+    /// 498 pt and the strip to three rows; [`rx_rows`] breaks it across the
+    /// two rows instead and the box comes back inside 330.
     #[test]
     fn the_desktop_strip_packs_a_cat_rig_into_two_rows() {
         let (ctx, input) = desktop_ctx();
@@ -5049,14 +5216,17 @@ mod tests {
             // desktop; the top panel's 8+8 margin and `angled_frame`'s 10+10
             // come off it before the packer sees it.
             let avail = 1400.0 - 16.0 - 20.0;
-            let boxes = cat_rig_strip_boxes(ui, Mode::Lsb);
-            let widths: Vec<f32> = boxes.iter().map(|b| b.w).collect();
-            assert_eq!(
-                rows_needed(avail, gap, &boxes),
-                2,
-                "the strip wants {rows} rows of a {avail} pt pane; boxes {widths:?}",
-                rows = rows_needed(avail, gap, &boxes),
-            );
+            for mode in [Mode::Lsb, Mode::Nfm, Mode::Wfm, Mode::Drm] {
+                let boxes = cat_rig_strip_boxes(ui, mode);
+                let widths: Vec<f32> = boxes.iter().map(|b| b.w).collect();
+                assert_eq!(
+                    rows_needed(avail, gap, &boxes),
+                    2,
+                    "in {mode:?} the strip wants {rows} rows of a {avail} pt pane; \
+                     boxes {widths:?}",
+                    rows = rows_needed(avail, gap, &boxes),
+                );
+            }
         });
     }
 
@@ -5229,20 +5399,23 @@ mod tests {
 
     /// Lay the condensed RX box's two rows out with the real widgets at
     /// desktop metrics, in every combination of the state that changes them,
-    /// and check each fits the width [`rx_rows_w`] prices for it.
+    /// and check each fits the width [`rx_rows`] prices for it — including the
+    /// break it picked for the chip run.
     ///
     /// The figure this replaced was a literal, and by the time the noise row
     /// had grown an ANC chip and a MONO chip it was 40 pt light. Nothing about
     /// the box said so: it drew its rows past its own right edge, pushing the
     /// TX, Display and System boxes along the row, and the System box — last
     /// on the row on a desktop layout — lost ISM and HELP over the edge of the
-    /// window. That is what this test is here to catch.
+    /// window. The DRM chip did it again (issue #152), which is why the chips
+    /// here come from [`rx_chips`] rather than from a list of their own: a
+    /// chip the box does not know about cannot be drawn into it.
     #[test]
     fn the_condensed_rx_box_fits_its_rows() {
         for gain in [false, true] {
             for decim in [false, true] {
                 for agc_off in [false, true] {
-                    for mode in [Mode::Usb, Mode::Nfm, Mode::Wfm] {
+                    for mode in [Mode::Usb, Mode::Nfm, Mode::Wfm, Mode::Drm] {
                         let (ctx, input) = desktop_ctx();
                         let _ = ctx.run_ui(input, |ui| {
                             ui.spacing_mut().item_spacing =
@@ -5251,14 +5424,30 @@ mod tests {
                             // reserved for them, so the rows are laid out here
                             // at the same figure.
                             ui.spacing_mut().slider_width = STRIP_RAIL_W;
-                            let (room1, room2) = rx_rows_w(ui, gain, decim, agc_off, mode);
+                            let rows = rx_rows(ui, gain, decim, agc_off, mode);
+                            let chips = rx_chips(mode);
                             let (mut vol, mut db) = (0.5f32, -88.8f32);
                             // The deepest threshold, which is the longest the
                             // readout beside the rail reads.
                             let mut sql = sdroxide_types::SQUELCH_OPEN_DB + 1.0;
                             let state = format!(
-                                "gain={gain} decim={decim} agc_off={agc_off} mode={mode:?}"
+                                "gain={gain} decim={decim} agc_off={agc_off} mode={mode:?} \
+                                 lifted={}",
+                                rows.lifted
                             );
+                            // Every chip at the widest label it wears, which is
+                            // what the box reserved for it.
+                            let draw = |ui: &mut egui::Ui, run: &[RxChip]| {
+                                for c in run {
+                                    crate::chrome::chip_accent(
+                                        ui,
+                                        false,
+                                        c.width_label(),
+                                        crate::theme::ALERT(),
+                                        Color32::WHITE,
+                                    );
+                                }
+                            };
 
                             let row1 = ui
                                 .horizontal(|ui| {
@@ -5283,8 +5472,8 @@ mod tests {
                                         crate::chrome::chip(ui, false, "DEC /64");
                                     }
                                     // The widest of the four AGC settings —
-                                    // absent in FM, where the box draws no
-                                    // AGC control (Mode::audio_agc).
+                                    // absent in FM and DRM, where the box draws
+                                    // no AGC control (Mode::audio_agc).
                                     if mode.audio_agc() {
                                         crate::chrome::chip(ui, true, "AGC Slow");
                                         if agc_off {
@@ -5304,6 +5493,7 @@ mod tests {
                                             });
                                         }
                                     }
+                                    draw(ui, &chips[..rows.lifted]);
                                     ui.min_rect().width()
                                 })
                                 .inner;
@@ -5320,37 +5510,12 @@ mod tests {
                                         .show_value(true)
                                         .custom_formatter(|v, _| format!("{v:.0}")),
                                     );
-                                    for l in ["NB", "ANC", "NR"] {
-                                        crate::chrome::chip(ui, false, l);
-                                    }
-                                    for l in ["MUTE", "REC", "MONO"] {
-                                        crate::chrome::chip_accent(
-                                            ui,
-                                            false,
-                                            l,
-                                            crate::theme::ALERT(),
-                                            Color32::WHITE,
-                                        );
-                                    }
-                                    if mode == Mode::Wfm {
-                                        crate::chrome::chip(ui, false, "ST");
-                                        crate::chrome::chip(ui, false, "RDS");
-                                    }
-                                    if mode == Mode::Nfm {
-                                        // Armed but silent: the widest the
-                                        // tone chip reads.
-                                        crate::chrome::chip_accent(
-                                            ui,
-                                            false,
-                                            "·D023N",
-                                            crate::theme::YELLOW(),
-                                            crate::theme::INK_ON_BRIGHT(),
-                                        );
-                                    }
+                                    draw(ui, &chips[rows.lifted..]);
                                     ui.min_rect().width()
                                 })
                                 .inner;
 
+                            let (room1, room2) = (rows.receive, rows.noise);
                             assert!(row1 <= room1 + 0.5, "{state}: row 1 took {row1} of {room1}");
                             assert!(row2 <= room2 + 0.5, "{state}: row 2 took {row2} of {room2}");
                         });
