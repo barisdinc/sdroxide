@@ -2478,6 +2478,10 @@ fn engine_thread(
         for u in updates {
             engine.apply_control(u);
         }
+        // Asked after them, because one of those updates may be the answer:
+        // whether the front end's centre is a dial we can move is not fixed for
+        // every source (see `Self::refresh_center_is_dial`).
+        engine.refresh_center_is_dial();
 
         // Drive the FT8/FT4 slot machine (runs in both RX and TX). Returns
         // owned actions to avoid borrowing `engine.digi` and `engine` at once.
@@ -9782,6 +9786,13 @@ impl Engine {
     /// the price of the exemption: the two readouts disagree, and an over the
     /// engine does not key itself (CW through the rig's own keyer, a mic keyed
     /// at the radio) transmits on the dial that was left behind.
+    ///
+    /// All of which needs a dial that answers. A rig sending I/Q down a sound
+    /// card with no control cable on it does not have one, says so
+    /// ([`Self::refresh_center_is_dial`]), and is tuned inside its span like
+    /// any SDR — otherwise a click relabels the span around spectrum that is
+    /// not arriving, which is a receiver that cannot change station at all
+    /// (issue #155).
     fn follow_dial(&mut self) {
         if self.audio_mode || !self.source.center_is_dial() {
             self.keep_vfo_in_span();
@@ -9794,6 +9805,25 @@ impl Engine {
             self.retune_for_vfo(vfo);
         } else {
             self.good_vfo_hz = vfo;
+        }
+    }
+
+    /// Re-ask the front end whether its centre is the dial, and tell the UIs
+    /// when the answer has changed.
+    ///
+    /// Almost every source answers this once and for ever — an SDR's LO is an
+    /// LO whatever else happens. A transceiver on a sound card does not: its
+    /// dial is ours to command only for as long as something answers on the
+    /// control port, and a radio switched on (or a cable plugged in) after
+    /// sdroxide started hands one back mid-session. `follow_dial` above is the
+    /// whole reason it matters — a stale "yes" leaves every panadapter gesture
+    /// commanding a dial nothing is listening to, and the operator watching the
+    /// span relabel itself around spectrum the radio is not sending.
+    fn refresh_center_is_dial(&mut self) {
+        let is_dial = self.source.center_is_dial();
+        if is_dial != self.caps.center_is_dial {
+            self.caps.center_is_dial = is_dial;
+            let _ = self.event_tx.send(RadioEvent::Capabilities(self.caps.clone()));
         }
     }
 

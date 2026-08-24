@@ -164,6 +164,11 @@ pub struct DeviceCaps {
     /// which has run off the end of the window carry the window with it (issue
     /// #133); see `IqSource::center_is_dial`, which the engine reports here.
     ///
+    /// False too on a transceiver whose control port never answered: there is
+    /// one synthesiser, but nothing this end can say to it, so the I/Q the
+    /// radio is already sending is the whole receiver (issue #155). Re-sent
+    /// whenever that changes, so this is not fixed for the life of a session.
+    ///
     /// Appended last, for the same reason as `shared_lo_rx`.
     #[serde(default)]
     pub center_is_dial: bool,

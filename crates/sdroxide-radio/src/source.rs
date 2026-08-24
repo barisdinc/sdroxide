@@ -354,6 +354,10 @@ pub trait IqSource: Send {
     /// whether there is any IQ at all: a demod-audio rig has no window to tune
     /// within, so it never reaches the distinction this draws.
     ///
+    /// May change while the source is open, and is re-asked every block: a rig
+    /// whose control port has never answered has no dial for this end to move
+    /// (issue #155), and one switched on later gets it back.
+    ///
     /// Default: false — a front end that tunes independently of any rig.
     fn center_is_dial(&self) -> bool {
         false

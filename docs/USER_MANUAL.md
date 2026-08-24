@@ -4167,6 +4167,19 @@ separately from your computer's own speakers and microphone.
   own, so every kind of tuning moves sdroxide's receiver inside it and the
   hardware is only retuned when the frequency would leave the span.
 
+  **With no control cable**, all of the above is off. A radio that never
+  answers on its control port has a dial only its own knob can turn, so
+  sdroxide stops trying to command it and tunes inside the I/Q the radio is
+  already sending instead — a click, the wheel or a drag moves the receiver
+  within that span, exactly as on an SDR, and the window stays where the radio
+  put it. Set the band on the radio itself, then type its dial frequency into
+  the readout here once to line the panadapter's labels up with it; from then
+  on everything inside the span is yours. sdroxide says so on screen when it
+  starts, so if you *do* have a cable, that notice is the sign to check the
+  port, the baud rate and the **CAT family**. Plug the cable in or switch the
+  radio on later and the dial is picked up as soon as the radio answers,
+  without restarting.
+
 **Transmit is the same on both.** The sound format describes what the radio
 *sends*; what it takes back is always audio into its playback device, which the
 radio modulates itself. So the drive level, the mode and the sideband that goes
@@ -9793,6 +9806,12 @@ the full detail.
   MCW, sdroxide keeps the rig on the Digimode-mode sideband (with the recipe
   above: leaves it in U-D), the keyed tone goes out at dial + pitch, and a
   clicked station is answered on its own frequency.
+- **Listening with no control cable:** the G90's I/Q output works on its own —
+  pick **Sound format** `IQ (stereo)` and leave the CAT settings alone. With
+  nothing answering on the control port sdroxide tunes inside the span the
+  rig is sending rather than trying to move its dial; set the band on the
+  radio and type its dial frequency in once to line the labels up. See
+  [6.2.2](#622-cat-radios-serial-control--usb-audio).
 - An over keyed at the rig's own mic is noticed — the family answers the Icom
   `1C 00` PTT read.
 

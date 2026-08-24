@@ -18,6 +18,14 @@
 //! the dial the click left behind. So [`Command::TuneInSpan`] follows the dial
 //! exactly as `SetVfo` does — and on a radio whose window is its own, both
 //! still leave the hardware alone while the VFO stays inside the span.
+//!
+//! All of which needs a dial that answers. A transceiver sending I/Q down a
+//! sound card with no control cable on it has one synthesiser and no way to
+//! command it, so the last two tests here hold the other end of the same
+//! contract: with no link the engine tunes inside the span the radio is
+//! already sending (issue #155 — commanding a dial nothing hears relabelled
+//! the picture and left the receiver unable to change station at all), and a
+//! link that comes up later takes the dial straight back.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,6 +46,10 @@ struct Rig {
     knob: Option<f64>,
     /// Frequencies the engine commanded, in order.
     commanded: Vec<f64>,
+    /// Whether anything answers on the rig's control port. False stands in for
+    /// a transceiver sending I/Q down a sound card with no CAT cable on it —
+    /// one synthesiser still, but not one this end can say anything to.
+    dial_reachable: bool,
 }
 
 /// A stand-in for a CAT rig whose I/Q output is the capture device: the dial is
@@ -59,9 +71,10 @@ impl IqSource for MockIqRig {
         r.commanded.push(hz);
         Ok(())
     }
-    /// The point of this whole fixture: one synthesiser for both jobs.
+    /// The point of this whole fixture: one synthesiser for both jobs — for as
+    /// long as there is a control link to command it through.
     fn center_is_dial(&self) -> bool {
-        true
+        self.rig.lock().unwrap().dial_reachable
     }
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
         std::thread::sleep(Duration::from_millis(5));
@@ -104,7 +117,12 @@ fn iq_rig_caps() -> DeviceCaps {
 
 /// An engine on the mock rig, parked on `DIAL`, plus the rig the test drives.
 fn engine() -> (sdroxide_radio::EngineHandles, Arc<Mutex<Rig>>) {
-    let rig = Arc::new(Mutex::new(Rig { dial: DIAL, ..Rig::default() }));
+    engine_with_link(true)
+}
+
+/// [`engine`], choosing whether the rig's control port answers at all.
+fn engine_with_link(dial_reachable: bool) -> (sdroxide_radio::EngineHandles, Arc<Mutex<Rig>>) {
+    let rig = Arc::new(Mutex::new(Rig { dial: DIAL, dial_reachable, ..Rig::default() }));
     let src = MockIqRig { rig: Arc::clone(&rig) };
     let cfg = EngineConfig { tx_ham_only: false, ..Default::default() };
     let h = start_engine(Box::new(src), iq_rig_caps(), cfg);
@@ -278,5 +296,70 @@ fn an_sdr_still_keeps_its_window_when_the_dial_moves() {
     let state = settle(&h, |s| s.vfo_a_hz == clicked);
     assert_eq!(state.center_hz, DIAL, "a click inside the span keeps the window too");
     assert!(rig.lock().unwrap().commanded.is_empty(), "with no retune for the click either");
+    shutdown(h);
+}
+
+/// A rig sending I/Q with nothing on its control port. Its synthesiser is
+/// still the centre of the baseband — but only its own knob can move it, so
+/// the engine has to tune inside the span it is being sent, exactly as it does
+/// on an SDR.
+///
+/// Field report (issue #155, a Xiegu G90 on I/Q with no CAT cable): commanding
+/// the dial anyway moved sdroxide's idea of the centre and nothing else, so
+/// every click relabelled the span around spectrum the sound card was not
+/// sending and walked the clicked station out of the receiver. What the
+/// operator saw was a frequency that would not change without a hand on the
+/// radio.
+#[test]
+fn a_rig_with_no_control_link_is_tuned_inside_its_span() {
+    let (h, rig) = engine_with_link(false);
+    settle(&h, |s| s.vfo_a_hz == DIAL);
+    rig.lock().unwrap().commanded.clear();
+
+    let clicked = DIAL + 5_000.0;
+    h.cmd_tx.send(Command::TuneInSpan { vfo: Vfo::A, hz: clicked }).unwrap();
+    let state = settle(&h, |s| s.vfo_a_hz == clicked);
+    assert_eq!(state.vfo_a_hz, clicked, "the receiver goes to the clicked signal");
+    assert_eq!(
+        state.center_hz, DIAL,
+        "and the window stays on the spectrum the radio is actually sending"
+    );
+    let rig = rig.lock().unwrap();
+    assert!(rig.commanded.is_empty(), "there is nothing on the control port to command");
+    assert_eq!(rig.dial, DIAL, "so the rig's own synthesiser never moved");
+    shutdown(h);
+}
+
+/// The link comes up after sdroxide did — the operator switched the radio on,
+/// or plugged the cable in. The dial is ours again from that moment, and the
+/// capabilities are re-announced so every attached UI hears about it.
+#[test]
+fn a_control_link_that_comes_up_late_takes_the_dial_back() {
+    let (h, rig) = engine_with_link(false);
+    settle(&h, |s| s.vfo_a_hz == DIAL);
+    rig.lock().unwrap().commanded.clear();
+    rig.lock().unwrap().dial_reachable = true;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut announced = false;
+    while !announced && Instant::now() < deadline {
+        while let Ok(ev) = h.event_rx.try_recv() {
+            if let RadioEvent::Capabilities(c) = ev {
+                announced |= c.center_is_dial;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(announced, "a front end that has got its dial back has to say so");
+
+    let clicked = DIAL + 5_000.0;
+    h.cmd_tx.send(Command::TuneInSpan { vfo: Vfo::A, hz: clicked }).unwrap();
+    let state = settle(&h, |s| s.center_hz == clicked);
+    assert_eq!(state.vfo_a_hz, clicked);
+    assert_eq!(
+        rig.lock().unwrap().commanded.last().copied(),
+        Some(clicked),
+        "with a link to command through, the click moves the radio again"
+    );
     shutdown(h);
 }

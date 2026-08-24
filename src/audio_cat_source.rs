@@ -56,6 +56,12 @@ pub struct AudioCatSource {
     /// [`IqSource::cw_audio_keyed`].
     cw_mcw: bool,
     dial: Dial,
+    /// Whether the rig has ever answered its control port, and so whether its
+    /// dial is something this end can move at all. Seeded from the startup
+    /// query and latched on by the first thing the rig says afterwards, so a
+    /// radio switched on after sdroxide is picked up rather than left out for
+    /// the session. See [`IqSource::center_is_dial`].
+    dial_reachable: bool,
     label: String,
     /// Warning captured at open time (RX device unavailable / mono-for-IQ),
     /// surfaced to the UI. `None` when RX came up cleanly.
@@ -94,7 +100,12 @@ impl AudioCatSource {
         audio_out: Option<&str>,
     ) -> anyhow::Result<Self> {
         // Adopt the rig's current dial/mode before we start commanding it.
-        let (init_freq, _init_mode) = sdroxide_cat::query_once(&cfg).unwrap_or((None, None));
+        // Whether anything answered at all is kept too: it is the only evidence
+        // there is that there *is* a control link, and the whole shape of
+        // tuning hangs on it — see [`IqSource::center_is_dial`].
+        let reply = sdroxide_cat::query_once(&cfg);
+        let dial_reachable = reply.is_some();
+        let (init_freq, _init_mode) = reply.unwrap_or((None, None));
         let center = init_freq.unwrap_or(14_074_000.0);
 
         // A rig with no sound card named falls back to the machine's default
@@ -257,6 +268,29 @@ impl AudioCatSource {
         } else {
             status
         };
+        // A rig that answered nothing on its control port. Said on screen
+        // rather than only in the log, because it changes what the panadapter
+        // does: with no dial to command, the span the radio is already sending
+        // is the whole of the receiver (see [`IqSource::center_is_dial`]), and
+        // an operator who thinks the link is up is left wondering why the
+        // frequency readout no longer agrees with the radio.
+        let status = if matches!(format, SoundFormat::Iq) && !dial_reachable {
+            let note = format!(
+                "No answer from the radio on {} — its dial cannot be commanded from here, so \
+                 tuning stays inside the I/Q it is already sending. Set the band on the radio \
+                 itself and type its dial frequency here to line the panadapter up. If you do \
+                 have a control cable, check the port, baud rate and CAT family under \
+                 Settings → Radio.",
+                sdroxide_cat::link_label(&cfg),
+            );
+            tracing::warn!("{note}");
+            Some(match status {
+                Some(s) => format!("{s}\n{note}"),
+                None => note,
+            })
+        } else {
+            status
+        };
         let cat = sdroxide_cat::spawn(cfg);
 
         Ok(AudioCatSource {
@@ -275,6 +309,7 @@ impl AudioCatSource {
             cat,
             cw_mcw,
             dial: Dial::at(center),
+            dial_reachable,
             label,
             status,
             last_telem: None,
@@ -497,9 +532,26 @@ impl IqSource for AudioCatSource {
     }
 
     /// The rig's synthesiser is the centre of the I/Q it sends us: there is no
-    /// second oscillator to park somewhere and tune away from.
+    /// second oscillator to park somewhere and tune away from — so the dial the
+    /// operator asks for is commanded at the radio and the window follows it
+    /// (`Engine::follow_dial`).
+    ///
+    /// Unless nothing is listening on the control port. A transceiver sending
+    /// I/Q with no CAT cable on it is a receiver whose dial only its own knob
+    /// can move, and commanding a dial that nothing hears is how the panadapter
+    /// came to look **locked**: every click relabelled the span around a
+    /// frequency the sound card was not sending, so the station clicked on
+    /// walked out of the receiver instead of into it, and the only way left to
+    /// change stations was the knob on the radio (issue #155, a Xiegu G90 on
+    /// I/Q with no control cable — the regression arrived with the fix that
+    /// stopped a click and the rig's readout parting company).
+    ///
+    /// With no dial to command, the span the rig *is* sending is the whole of
+    /// the radio, and the engine tunes inside it with its own DDC exactly as it
+    /// does on an SDR. Typing a frequency still moves the centre, which is how
+    /// the operator tells sdroxide where they have left the radio's own dial.
     fn center_is_dial(&self) -> bool {
-        true
+        self.dial_reachable
     }
 
     /// The transceiver in front of us owns its mode, in either sound format.
@@ -631,7 +683,16 @@ impl IqSource for AudioCatSource {
 
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
         let mut out = Vec::new();
-        for u in self.cat.poll() {
+        let updates = self.cat.poll();
+        // Anything at all from the rig is also the answer to "is there a radio
+        // on the control port": a link that only came up later — the operator
+        // switched the radio on, or plugged the cable in, after sdroxide
+        // started — hands its dial back here. Latched rather than tracked,
+        // because a rig that has gone quiet for a poll or two is still a rig
+        // whose dial we own, and flipping the panadapter's whole tuning
+        // behaviour on a missed reply would be worse than either answer.
+        self.dial_reachable |= !updates.is_empty();
+        for u in updates {
             match u {
                 // The dial is not the VFO — it carries RIT, and for the length
                 // of an over it carries XIT/split instead — so a report has to
