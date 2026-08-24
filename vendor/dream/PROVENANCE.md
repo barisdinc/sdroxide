@@ -46,7 +46,10 @@ copied.
 
 ## What is patched
 
-Five files, and no upstream line is edited except as described.
+Ten files, and no upstream line is edited except as described. Five of them are
+there because Dream was written for one receiver on one thread and sdroxide
+runs one per radio, on a thread each, fed by whatever a shortwave broadcast
+happens to contain.
 
 **`src/sound/sound.h`** — one added branch. Under `USE_SDROXIDE_SOUND` the
 `CSoundIn`/`CSoundOut` typedefs resolve to the ring-buffer shims in
@@ -78,6 +81,65 @@ business writing to stderr in a GUI application; sdroxide logs through
 
 **`src/DrmReceiver.cpp`** — one removed `cerr` line that printed every
 enumerated input device name while selecting one.
+
+**`src/sourcedecoders/AudioCodec.{h,cpp}`** — the codec list is per thread, and
+building it is serialised.
+
+Upstream shares one list of codec objects across every `CAudioSourceDecoder` in
+the program, reference-counted with a plain `int` and no lock. Two receivers
+starting at the same moment double-free the vector's storage — reproducible in
+seconds under AddressSanitizer, and a SIGSEGV about once in forty tries in an
+ordinary build. That is only the first thing to go wrong: `GetDecoder` hands
+both receivers the *same* `AacCodec`, which owns one faad2 handle, so one
+receiver's `DecClose` frees the decoder state the other is still decoding
+through. `thread_local` fixes both, because the invariant already holds — a
+Dream receiver may only be touched from the thread that built it, so its audio
+decoder and its codec live and die together on that thread. Construction and
+destruction still take a mutex, because a codec constructor can `dlopen` a
+library and fill a table of *global* function pointers from it. Nothing on the
+decode path takes that lock.
+
+**`src/matlib/MatlibStdToolbox.cpp`** — the FFT plan mutex is a function-local
+static instead of a raw pointer lazily assigned in `CFftPlans`' constructor.
+Two threads building their first plan both saw it null, both allocated, and one
+then locked a mutex the other was not using. C++11 guarantees exactly one
+thread runs a function-local static's initializer, which is the deferred
+construction the original comment ("static initialization of CMutex not working
+on Mac OS X") was reaching for.
+
+**`src/datadecoding/DABMOT.cpp`** — the MOT reassembler is bounded, and one
+out-of-bounds write is fixed.
+
+Every offset it computes is *segment number × segment size*, and both come
+straight off the air: the segment number is a 15-bit field in the segmentation
+header and the segment size is whatever the last packet happened to carry.
+Nothing upstream checks the product. Two things follow. A corrupt header asks
+for an allocation of hundreds of megabytes — and since `CVector::Enlarge` takes
+an `int`, past `INT_MAX` the size wraps negative, the vector *shrinks*, and the
+copy that follows writes far outside it. Separately, `copylast()` grew the
+vector by the last segment's own length while writing at the offset the last
+segment's *number* implies, which only coincides when every earlier segment
+arrived and was exactly full — one short segment and the write runs past the
+end. Both reassemblers (`CReassembler`, `CBitReassembler`) now bound the offset
+and size the vector from the offset. The identical bug in
+`src/util/Reassemble.cpp`'s `CReassemblerN` is left alone: it is only used by
+PFT, which is only reached over an RSCI network input this build never enables.
+
+This matters because it is broadcast data reaching a parser with no bounds
+checks: a station carrying a slideshow or an EPG runs thousands of lines that a
+plain audio-only station never touches, which is exactly the shape of "it works
+on most stations and kills the radio on one".
+
+**`src/datadecoding/DataDecoder.cpp`** — under `SDROXIDE_NO_DATA_FILES`, a
+decoded EPG object is no longer written out, and the `fwrite` of an empty
+object's `front()` is guarded.
+
+This was the only place in the whole receiver that touched the filesystem, and
+it took the filename from the broadcast. With the data directory set to `"."`
+— which is what the shim asks for — a station carrying an EPG would create
+`./EPG/…` in whatever the host's working directory happened to be, under a
+name the transmission chose. sdroxide surfaces no EPG, so there was nothing to
+write in the first place.
 
 **`src/datadecoding/journaline/NML.cpp`** — `#include <zlib.h>` made
 conditional on `HAVE_LIBZ`, which is how its sibling `DABMOT.cpp` already

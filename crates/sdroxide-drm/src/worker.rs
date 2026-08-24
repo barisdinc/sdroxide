@@ -89,7 +89,10 @@ impl DrmWorker {
                             decoder.select_service(want as u8);
                         }
                         if !decoder.process() {
-                            warn!("the DRM receive chain failed; decoding stopped");
+                            warn!(
+                                reason = %crate::last_error(),
+                                "the DRM receive chain failed; decoding stopped"
+                            );
                             break;
                         }
                         let now = Instant::now();

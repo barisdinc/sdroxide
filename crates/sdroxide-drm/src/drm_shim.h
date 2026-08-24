@@ -116,6 +116,21 @@ int32_t sdrx_drm_constellation(sdrx_drm*, int32_t channel, float* out,
 /* "faad2 2.11.2" or "" when no AAC decoder is present. */
 const char* sdrx_drm_codec_version(void);
 
+/* Why the last call failed, on this thread, or "" if none has. No call in this
+   header lets a C++ exception reach the caller — Rust declares them all as
+   plain `extern "C"`, across which an unwind is undefined behaviour and in
+   practice takes the process down. `sdrx_drm_process` returning non-zero is
+   the signal that something threw; this says what. Valid until the next call
+   on the same thread. */
+const char* sdrx_drm_last_error(void);
+
+/* Throw one exception of the given kind from inside the shim, and report
+ * whether it was contained: 0 if nothing escaped, -1 if the guard caught it.
+ * Reaching the caller at all is the assertion — an unwind past this point
+ * aborts the process. Exists only for the test of that property.
+ * 0 = std::bad_alloc, 1 = CGenErr, 2 = std::string, 3 = const char*, else int. */
+int32_t sdrx_drm_test_throw(int32_t kind);
+
 #ifdef __cplusplus
 }
 #endif

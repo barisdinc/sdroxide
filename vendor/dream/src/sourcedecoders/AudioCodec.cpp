@@ -27,6 +27,7 @@
 \******************************************************************************/
 
 #include "AudioCodec.h"
+#include <mutex>
 #include "null_codec.h"
 #include "aac_codec.h"
 #include "opus_codec.h"
@@ -43,15 +44,38 @@ CAudioCodec::~CAudioCodec() {
 
 }
 
-vector<CAudioCodec*>
+/* One codec list per thread, not one per process.
+ *
+ * Upstream shares both the list and the codec objects in it between every
+ * CAudioSourceDecoder in the program, with a plain `int` reference count and no
+ * lock at all. That is safe for a single-receiver console application and for
+ * a Qt GUI, where everything happens on one thread; it is not safe for a host
+ * that runs a receiver per thread, which is what sdroxide does — one for each
+ * radio, plus an overlapping pair for the moment a receiver is being replaced.
+ * Two threads in InitCodecList at once double-free the vector's storage, and
+ * that is only the first thing to go wrong: GetDecoder hands both receivers the
+ * *same* AacCodec, so one receiver's DecClose frees the faad2 handle the other
+ * is decoding through.
+ *
+ * Per-thread lists fix both at once, and the invariant already holds — a Dream
+ * receiver may only be used from the thread that built it, so its decoder and
+ * its codec live and die on that thread together. */
+thread_local vector<CAudioCodec*>
 CAudioCodec::CodecList;
 
-int
+thread_local int
 CAudioCodec::RefCount = 0;
+
+/* Constructing a codec can still dlopen a shared library and fill a table of
+   *global* function pointers with the symbols out of it (see opus_codec.cpp),
+   so construction and destruction are serialised even though the list is not
+   shared. Nothing on the decode path takes this. */
+static std::mutex CodecListMutex;
 
 void
 CAudioCodec::InitCodecList()
 {
+	std::lock_guard<std::mutex> lock(CodecListMutex);
 	if (CodecList.size() == 0)
 	{
 		/* Null codec, MUST be the first */
@@ -72,6 +96,7 @@ CAudioCodec::InitCodecList()
 void
 CAudioCodec::UnrefCodecList()
 {
+	std::lock_guard<std::mutex> lock(CodecListMutex);
 	RefCount --;
 	if (!RefCount)
 	{

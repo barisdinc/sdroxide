@@ -77,8 +77,9 @@ public:
     virtual void writeFile(const std::vector<uint8_t>& audio_frame);
     virtual std::string fileName(const CParameter& Parameters) const = 0;
 private:
-	static std::vector<CAudioCodec*> CodecList;
-	static int RefCount;
+	/* Per thread — see AudioCodec.cpp. */
+	static thread_local std::vector<CAudioCodec*> CodecList;
+	static thread_local int RefCount;
     FILE *pFile;
 };
 

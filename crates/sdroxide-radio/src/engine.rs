@@ -513,6 +513,15 @@ impl RxChain {
             self.ddc = Ddc::new(self.in_rate, target);
             self.ddc.set_offset_hz(self.offset_hz);
         }
+        // Release the old demodulator before building the new one. For most
+        // modes that is housekeeping; for DRM it is the difference between one
+        // Dream receiver and two, because assigning over `self.demod` would
+        // construct the replacement first and only then drop what was there.
+        // Two of them briefly coexisting is a lot of vendored C++ running
+        // twice on two threads for no reason, and `set_rx_mode` does not
+        // early-return when the mode has not actually changed — so a rig
+        // reporting its mode back can trigger it at any moment.
+        self.demod = None;
         // Every mode but this one comes from `make_demod`. DRM's decoder links
         // a vendored C++ receiver, which `sdroxide-dsp` cannot depend on and
         // still build for the browser, so it is constructed here instead — see

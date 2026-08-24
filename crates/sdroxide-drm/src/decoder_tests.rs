@@ -70,6 +70,48 @@ fn two_decoders_do_not_share_a_ring() {
     drop(b);
 }
 
+/// Two decoders may be built at the same time on two threads.
+///
+/// Dream shares its audio codecs through a `static` list with a plain `int`
+/// reference count and no lock, which is safe for the single-threaded console
+/// receiver it was written for and not for a host that runs one receiver per
+/// radio. Two constructors racing double-free the list's storage; worse, both
+/// receivers would then be handed the *same* `AacCodec`, so one's `DecClose`
+/// frees the faad2 handle the other is decoding through. The vendored list is
+/// per-thread now (see `vendor/PROVENANCE.md`).
+///
+/// This is not a hypothetical pair: a split view or a second radio makes it
+/// permanent, and `RxChain::build_for_mode` used to make it momentarily every
+/// time the mode was set — which a CAT rig reporting its own mode back does on
+/// its own schedule.
+///
+/// Like the exception test, a failure here does not report an assertion. The
+/// process dies, or ASan does the reporting.
+#[test]
+fn two_decoders_can_start_at_the_same_time() {
+    use std::sync::{Arc, Barrier};
+
+    // Several rounds: the window is the few milliseconds inside the two
+    // constructors, so one attempt proves very little.
+    for _ in 0..8 {
+        let gate = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    gate.wait();
+                    let w = DrmWorker::new(true, false).expect("start a decoder");
+                    w.push(&noise(4800));
+                    drop(w);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a decoder thread panicked");
+        }
+    }
+}
+
 /// Decode a real off-air recording, when one is available.
 ///
 /// Recordings are 48 kHz *real* signals off a receiver's I.F., which is not the
@@ -131,4 +173,30 @@ fn a_recording_decodes() {
         seconds > expected * 0.5,
         "only {seconds:.1} s of audio came out of a {expected:.1} s recording"
     );
+}
+
+/// Nothing thrown inside the shim may unwind into Rust.
+///
+/// This is the property that matters most for a radio that has to stay up: the
+/// FFI declarations are plain `extern "C"`, and Rust cannot catch a foreign
+/// exception crossing one — it aborts the whole process, `catch_unwind` and
+/// all. Dream's deliberate throws are `CGenErr` and `std::string`, which the
+/// shim always caught; the ones that actually reach the boundary from a real
+/// broadcast are implicit — `std::bad_alloc` and `std::length_error` out of the
+/// `resize()` calls its over-the-air parsers make with lengths the transmission
+/// supplied.
+///
+/// A failure here is not a failed assertion. The test binary dies.
+#[test]
+fn no_exception_escapes_the_c_boundary() {
+    for kind in 0..5 {
+        // SAFETY: the hook exists to be called; it throws and catches inside C++.
+        let rc = unsafe { crate::sys::sdrx_drm_test_throw(kind) };
+        assert_eq!(rc, -1, "kind {kind} was not reported as a failure");
+        assert!(
+            crate::last_error().contains("test throw"),
+            "kind {kind} left no reason behind: {:?}",
+            crate::last_error()
+        );
+    }
 }

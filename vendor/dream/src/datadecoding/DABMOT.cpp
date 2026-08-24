@@ -1169,6 +1169,29 @@ CMOTObjectBase::decodeExtHeader(_BYTE & bParamId, int &iHeaderFieldLen,
 	}
 }
 
+/* An upper bound on a reassembled MOT object, in vector entries.
+ *
+ * Every offset below is `segment number * segment size`, both taken from the
+ * broadcast: the segment number is a 15-bit field and the segment size is
+ * whatever the last packet happened to carry. Nothing upstream checks the
+ * product, so one corrupt segmentation header asks for an allocation of
+ * hundreds of megabytes — and `CVector::Enlarge` takes an `int`, so past
+ * INT_MAX the size wraps negative, the vector *shrinks*, and the copy that
+ * follows writes far outside it.
+ *
+ * 4 Mi entries is generous for anything a DRM multiplex carries — slideshow
+ * images and EPG documents are tens of kilobytes — while being small enough
+ * that the worst case is a wasted allocation rather than a dead radio. Note
+ * that CBitReassembler stores one *bit* per entry, so its objects are eight
+ * times smaller in bytes than this number suggests. */
+static const size_t MAX_REASSEMBLY_SIZE = 4u * 1024u * 1024u;
+
+/* Whether a copy of `bytes` entries at `offset` is worth attempting at all. */
+static bool reassembly_fits(size_t offset, size_t bytes)
+{
+	return bytes <= MAX_REASSEMBLY_SIZE && offset <= MAX_REASSEMBLY_SIZE - bytes;
+}
+
 void
 CReassembler::cachelast(CVector < _BYTE > &vecDataIn, size_t iSegSize)
 {
@@ -1182,9 +1205,11 @@ CReassembler::copyin(CVector < _BYTE > &vecDataIn, size_t iSegNum,
 					 size_t bytes)
 {
 	size_t offset = iSegNum * iSegmentSize;
+	if (!reassembly_fits(offset, bytes))
+		return;
 	size_t iNewSize = offset + bytes;
 	if (size_t(vecData.Size()) < iNewSize)
-		vecData.Enlarge(iNewSize - vecData.Size());
+		vecData.Enlarge(int(iNewSize - size_t(vecData.Size())));
 	for (size_t i = 0; i < bytes; i++)
 		vecData[offset + i] = vecDataIn.Separate(8);
 }
@@ -1247,10 +1272,19 @@ CReassembler::AddSegment(CVector < _BYTE > &vecDataIn,
 void
 CReassembler::copylast()
 {
-	size_t offset = iLastSegmentNum * iSegmentSize;
-	vecData.Enlarge(vecLastSegment.Size());
-	for (size_t i = 0; i < size_t(vecLastSegment.Size()); i++)
-		vecData[offset + i] = vecLastSegment[i];
+	/* Enlarge adds the last segment's own length, which is only the right
+	   amount when every earlier segment arrived and was exactly iSegmentSize
+	   long. Size the vector from the offset instead, so a short or missing
+	   earlier segment cannot put this write past the end. */
+	size_t offset = size_t(iLastSegmentNum) * size_t(iSegmentSize);
+	size_t bytes = size_t(vecLastSegment.Size());
+	if (reassembly_fits(offset, bytes))
+	{
+		if (size_t(vecData.Size()) < offset + bytes)
+			vecData.Enlarge(int(offset + bytes - size_t(vecData.Size())));
+		for (size_t i = 0; i < bytes; i++)
+			vecData[offset + i] = vecLastSegment[i];
+	}
 	vecLastSegment.Init(0);
 }
 
@@ -1269,9 +1303,11 @@ CBitReassembler::copyin(CVector < _BYTE > &vecDataIn, size_t iSegNum,
 {
 	size_t offset = iSegNum * 8 * iSegmentSize;
 	size_t bits = 8 * bytes;
+	if (!reassembly_fits(offset, bits))
+		return;
 	size_t iNewSize = offset + bits;
 	if (size_t(vecData.Size()) < iNewSize)
-		vecData.Enlarge(iNewSize - vecData.Size());
+		vecData.Enlarge(int(iNewSize - size_t(vecData.Size())));
 	for (size_t i = 0; i < bits; i++)
 		vecData[offset + i] = vecDataIn.Separate(1);
 }
@@ -1279,10 +1315,16 @@ CBitReassembler::copyin(CVector < _BYTE > &vecDataIn, size_t iSegNum,
 void
 CBitReassembler::copylast()
 {
-	size_t offset = iLastSegmentNum * 8 * iSegmentSize;
-	vecData.Enlarge(vecLastSegment.Size());
-	for (size_t i = 0; i < size_t(vecLastSegment.Size()); i++)
-		vecData[offset + i] = vecLastSegment[i];
+	/* See CReassembler::copylast. */
+	size_t offset = size_t(iLastSegmentNum) * 8u * size_t(iSegmentSize);
+	size_t bits = size_t(vecLastSegment.Size());
+	if (reassembly_fits(offset, bits))
+	{
+		if (size_t(vecData.Size()) < offset + bits)
+			vecData.Enlarge(int(offset + bits - size_t(vecData.Size())));
+		for (size_t i = 0; i < bits; i++)
+			vecData[offset + i] = vecLastSegment[i];
+	}
 	vecLastSegment.Init(0);
 	vecLastSegment.ResetBitAccess();
 }

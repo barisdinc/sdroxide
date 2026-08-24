@@ -85,8 +85,12 @@ unsafe impl Sync for Ring {}
 
 impl Ring {
     /// Capacities in samples — two per interleaved frame.
+    ///
+    /// A failed allocation leaves a null handle rather than aborting; every
+    /// call below tolerates one, and [`Decoder::new`] then refuses to open.
     pub fn new(in_capacity: usize, out_capacity: usize) -> Self {
-        // SAFETY: allocation only; a null return would already have aborted in C.
+        // SAFETY: allocation only, and the C side returns null rather than
+        // letting `std::bad_alloc` unwind into this frame.
         Ring(unsafe { sys::sdrx_drm_ring_new(in_capacity, out_capacity) })
     }
 
@@ -155,7 +159,7 @@ impl Decoder {
 
     /// One pass of the receive chain. Blocks until a block of input is queued,
     /// or until the ring is stopped. `false` means the chain threw and this
-    /// decoder is finished.
+    /// decoder is finished — [`last_error`] then says what threw.
     pub fn process(&mut self) -> bool {
         // SAFETY: same-thread use of a handle this type owns.
         unsafe { sys::sdrx_drm_process(self.handle) == 0 }
@@ -209,6 +213,21 @@ impl Drop for Decoder {
         // SAFETY: called once, on the thread that built the decoder.
         unsafe { sys::sdrx_drm_free(self.handle) }
     }
+}
+
+/// Why the last call into the decoder failed, on this thread.
+///
+/// The C shim converts every exception into a failure return, because Dream's
+/// over-the-air parsers size buffers from lengths the broadcast supplies and an
+/// unwind across the `extern "C"` boundary would take the whole radio down
+/// rather than the decode. Empty when nothing has failed.
+///
+/// Must be called on the thread whose call failed.
+pub fn last_error() -> String {
+    // SAFETY: a pointer to a thread-local string that outlives this call and is
+    // only invalidated by the next call into the shim on this thread.
+    let s = unsafe { CStr::from_ptr(sys::sdrx_drm_last_error()) };
+    s.to_string_lossy().into_owned()
 }
 
 /// Version string of the linked AAC decoder, for the log.

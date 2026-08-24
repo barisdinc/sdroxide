@@ -239,6 +239,9 @@ fn common_defines(build: &mut cc::Build) {
     build.define("USE_SDROXIDE_SOUND", None);
     build.define("USE_FAAD2_LIBRARY", None);
     build.define("SDROXIDE_NO_AAC_ENCODER", None);
+    // The EPG decoder is the one place in the receiver that writes to disk, and
+    // it names the file from the broadcast. Nothing here reads those files back.
+    build.define("SDROXIDE_NO_DATA_FILES", None);
     // Dream announces every codec library it probes for on stderr; the
     // host has its own logging and a GUI has no terminal to print to.
     build.define("SDROXIDE_QUIET", None);

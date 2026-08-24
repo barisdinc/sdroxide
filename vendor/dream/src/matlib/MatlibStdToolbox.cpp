@@ -29,10 +29,21 @@
 #include "../GlobalDefinitions.h"
 
 /* The mutex need to be application wide,
-   only the execution routines are thread-safe */
-static CMutex* _mutex = nullptr;
-#define MUTEX_LOCK() _mutex->Lock()
-#define MUTEX_UNLOCK() _mutex->Unlock()
+   only the execution routines are thread-safe.
+
+   It used to be a raw pointer lazily assigned in CFftPlans' constructor
+   ("static initialization of CMutex not working on Mac OS X"), which races
+   when two receivers start on two threads: both see it null, both allocate,
+   and one then locks a mutex the other is not using. A function-local static
+   gets the deferred construction that comment wanted, and C++11 guarantees
+   exactly one thread runs the initializer. */
+static CMutex& _fft_mutex()
+{
+	static CMutex m;
+	return m;
+}
+#define MUTEX_LOCK() _fft_mutex().Lock()
+#define MUTEX_UNLOCK() _fft_mutex().Unlock()
 
 # define PLANNER_FLAGS (FFTW_ESTIMATE | FFTW_DESTROY_INPUT)
 /* Warning: for testing purpose only */
@@ -668,9 +679,6 @@ CFftPlans::CFftPlans(const int iFftSize) :
 	FFTPlForw(nullptr), FFTPlBackw(nullptr), pFftwComplexIn(nullptr), pFftwComplexOut(nullptr),
 	bInitialized(false), bFixedSizeInit(false), fftw_n(0)
 {
-	/* Static initialization of CMutex not working on Mac OS X */
-    if (!_mutex) _mutex = new CMutex();
-
 	/* If iFftSize is non zero then proceed to initialization */
 	if (iFftSize)
 		Init(iFftSize);
