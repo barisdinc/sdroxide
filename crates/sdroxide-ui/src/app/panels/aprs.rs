@@ -556,7 +556,7 @@ impl SdroxideApp {
                     self.aprs_target = name.clone();
                 }
                 if s.pos.is_some()
-                    && crate::chrome::chip(ui, false, RichText::new(" CENTRE ").size(10.0))
+                    && crate::chrome::chip(ui, false, RichText::new(" CENTER ").size(10.0))
                         .on_hover_text(
                             "Put this station in the middle of the map. Double-click the map \
                              to hand the view back to the automatic fit.",
