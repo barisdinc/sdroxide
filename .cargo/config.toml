@@ -1,0 +1,15 @@
+# The Windows release is the `x86_64-pc-windows-gnu` target built inside
+# MSYS2/MinGW (see .github/workflows/release.yml for why it is not MSVC), and
+# what MinGW links against by default is a set of DLLs that only exist on a
+# machine with MSYS2 or PothosSDR installed. A user without either gets
+# "libgcc_s_seh-1.dll not found" — or, for the C++ half of the same problem,
+# "libstdc++-6.dll not found" — the moment they double-click sdroxide.exe.
+#
+# So link the compiler runtime in. The C++ side is handled where the only C++
+# in the tree is built (crates/sdroxide-drm/build.rs); this covers libgcc,
+# which rustc leaves to the gcc driver's own defaults.
+#
+# Note that a RUSTFLAGS environment variable, if one is ever set, replaces this
+# wholesale rather than adding to it — CI deliberately sets none.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-static-libgcc"]

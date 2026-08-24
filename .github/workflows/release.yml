@@ -223,6 +223,24 @@ jobs:
             cargo build --release --locked -p sdroxide --features embed-web
           fi
 
+      # MinGW links libstdc++/libgcc/libwinpthread as DLLs by default, and
+      # those exist only on a machine with MSYS2 or PothosSDR installed — a
+      # plain Windows box answers "libstdc++-6.dll not found" the moment the
+      # user double-clicks the .exe. .cargo/config.toml and
+      # crates/sdroxide-drm/build.rs link them in statically instead; this
+      # checks that actually held, because the failure is otherwise invisible
+      # here and only shows up on a user's machine.
+      - name: Check for MinGW runtime DLLs (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          BIN="target/$CARGO_BUILD_TARGET/release/sdroxide.exe"
+          objdump -p "$BIN" | grep -i "DLL Name:" | sort -u
+          if objdump -p "$BIN" \
+               | grep -Eiq "DLL Name:[[:space:]]*(libstdc\+\+|libgcc_s|libwinpthread)"; then
+            echo "::error::sdroxide.exe still needs a MinGW runtime DLL beside it"
+            exit 1
+          fi
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |

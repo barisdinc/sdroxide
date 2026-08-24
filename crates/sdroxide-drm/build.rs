@@ -139,6 +139,18 @@ const DREAM_SOURCES: &[&str] = &[
     "sourcedecoders/caudioreverb.cpp",
 ];
 
+/// Whether the *target* is the MinGW-w64 flavour of Windows — the
+/// `x86_64-pc-windows-gnu` triple the release build uses — rather than MSVC.
+///
+/// Unlike the `cfg!` tests elsewhere in this file this one has to come from the
+/// environment: a build script is compiled for the host, and the Windows CI
+/// host toolchain is the MSVC one while the target it builds is the GNU one.
+fn target_is_windows_gnu() -> bool {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    os == "windows" && env == "gnu"
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -251,6 +263,11 @@ fn build_dream(manifest: &Path, dream: &Path, faad2: &Path) {
         common_defines(build);
     }
     cxx.cpp(true).std("gnu++11");
+    if target_is_windows_gnu() {
+        // Suppresses cc's own `-lstdc++`; `build_shim` links the C++ runtime
+        // statically instead. See the note there.
+        cxx.cpp_link_stdlib(None::<&str>);
+    }
 
     for rel in DREAM_SOURCES {
         if rel.ends_with(".c") {
@@ -292,6 +309,9 @@ fn build_shim(manifest: &Path, dream: &Path, faad2: &Path) {
         .opt_level(2)
         .warnings(false);
     common_defines(&mut build);
+    if target_is_windows_gnu() {
+        build.cpp_link_stdlib(None::<&str>);
+    }
     build.compile("sdroxide_drm_shim");
 
     // cc links the C++ runtime for the objects it builds; the Dream and shim
@@ -306,6 +326,22 @@ fn build_shim(manifest: &Path, dream: &Path, faad2: &Path) {
     }
     if cfg!(unix) && !cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=dylib=dl");
+    }
+    // MinGW keeps its C++ runtime in libstdc++-6.dll and cc asks for it by
+    // name, so the shipped .exe refused to start on any Windows box without
+    // MSYS2 or PothosSDR on PATH ("libstdc++-6.dll not found"). Link it in
+    // instead — this is the only C++ in the tree, so it is the only thing that
+    // pulls the DLL in.
+    //
+    // `static:-bundle` rather than plain `static` is the load-bearing part:
+    // both make rustc bracket the library with `-Wl,-Bstatic` at the final
+    // link, but `static` alone would also try to copy libstdc++.a into this
+    // crate's rlib, and rustc has no `-L` that finds it. libwinpthread follows
+    // because MSYS2 builds libstdc++ against it, and it is the next DLL the
+    // loader would ask for.
+    if target_is_windows_gnu() {
+        println!("cargo:rustc-link-lib=static:-bundle=stdc++");
+        println!("cargo:rustc-link-lib=static:-bundle=winpthread");
     }
     if cfg!(target_os = "windows") {
         println!("cargo:rustc-link-lib=dylib=ws2_32");
