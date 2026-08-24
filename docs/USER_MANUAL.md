@@ -1961,7 +1961,7 @@ The panel has two halves:
 - **QSO** (right) — a **⇵** frequency button when the band has more than one
   agreed frequency for the mode ([3.1](#31-general-considerations)), a world map
   (your location, the station you are working, and
-  a transmit indicator), a station card showing the current step
+  a transmit indicator — see [the world map](#the-world-map) below), a station card showing the current step
   (`Idle`, `Wait CQ`, `Calling CQ`, `Tx Grid`, `Tx Report`, `Tx R+Report`,
   `Tx RR73`, `Tx 73`, `Confirming`, `Done`), and a transcript of the exchange
   (outgoing lines in gold, incoming in green, plus the queued next message).
@@ -1976,6 +1976,32 @@ layout can't carry is sent in the layout that can, and the transcript records
 what actually went on the air — addressing a compound call sends your own
 callsign hashed (`DL/W1AW <AB1CD> RR73`), which drops the signal report, and
 free text is cut to 13 characters.
+
+#### The world map
+
+The map in the QSO pane — and the one on the WSPR and APRS panels, which is the
+same map — is drawn as a dot matrix over the same coastline data the 3D globe
+is textured with, so a grid square lands on the same shoreline in both views.
+On the ground it draws:
+
+- **coastlines**, from a 1/23° land map. The shore is placed *inside* a cell
+  rather than snapped to the grid, so it stays a clean curve rather than a
+  staircase however far you zoom in;
+- **international borders**, which is usually the fastest way to read where a
+  station is — a prefix and a country outline answer the same question;
+- **rivers**, drawn at the width Natural Earth ranks each one at, so the Amazon
+  and the Danube read as rivers and a creek in Siberia stays a hairline;
+- **cities**, biggest first, as many as the map has room for, with their names
+  where a name fits. Zooming in shrinks the view faster than it runs out of
+  cities, so smaller places arrive on their own as you go in.
+
+Borders and rivers are nine-kilometre data, and they **retire when you zoom
+past them** — below roughly a three-degree view they fade out rather than
+turning into wide bands drawn confidently in the wrong place. The coastline is
+twice the resolution and carries on.
+
+Drag (or one finger) to pan, wheel or pinch to zoom about the pointer, and
+double-click to hand the view back to the auto-fit.
 
 #### 3.2.3 Working stations
 
@@ -3061,9 +3087,12 @@ weather if it sends any, how many frames it has sent, and the digipeater path
 the last one came through (a `*` marks a digipeater that actually repeated it).
 Selecting a station also addresses the message box to it.
 
-**The map** places everything with a known position. It auto-frames what it can
-hear; drag to pan, wheel or pinch to zoom, and double-click to hand it back to
-the auto-fit. Icons fade as a station goes stale, over the same window the
+**The map** places everything with a known position, on the same coastlines,
+borders, rivers and cities as the FT8 panel's ([the world map](#the-world-map)) — which
+matters more here than there, because an APRS map is usually zoomed in far
+enough for a river and a town name to be what tells you where a station is. It
+auto-frames what it can hear; drag to pan, wheel or pinch to zoom, and
+double-click to hand it back to the auto-fit. Icons fade as a station goes stale, over the same window the
 station list keeps, so a position that has not been refreshed in an hour visibly
 *is* an hour old. Anything that has moved leaves a trail behind it. A station
 that reported an ambiguous position — the protocol lets a sender blank out the
@@ -8140,11 +8169,17 @@ everyone watching.
 
 ![The solar disk in AIA 171, with sunspot regions, a flare marker and the CME arrival banner](images/3d-sun.jpg)
 
-The Earth carries a higher-resolution version of the same Natural Earth
-coastline data as the FT8 world map, with international borders, lit by the real
-Sun with a soft terminator. Your QTH is the green ring and the yellow dot is the
+The Earth carries a higher-resolution version of the same Natural Earth data as
+the FT8 world map — coastlines, international borders and rivers — lit by the
+real Sun with a soft terminator. Your QTH is the green ring and the yellow dot is the
 point the Sun is directly overhead; both appear once you zoom in far enough for
 a point on the surface to mean anything.
+
+On the night side the **cities light up**, from Natural Earth's built-up urban
+areas: the Ruhr is a sprawl, the Nile is a thread through the desert and the
+Sahara around it is empty, which is what the photographs from orbit show. It is
+the one place on this globe where the map stops being a line drawing, and it can
+afford to be because it is not invented.
 
 The coastlines and borders keep a **faint glow of their own on the night side**,
 fading in across the terminator the way city lights do. It is deliberately
@@ -8857,8 +8892,8 @@ network via [prop.kc2g.com](https://prop.kc2g.com/); satellite element sets from
 [CelesTrak](https://celestrak.org/), propagated with SGP4. Planetary positions
 from JPL's approximate element set, moon orbits fitted to JPL Horizons, and body
 maps from NASA/GSFC's LRO mosaic (Moon) and NASA/JPL-Caltech/SSI's Cassini
-global maps (Jupiter, Saturn); coastlines and borders from
-[Natural Earth](https://www.naturalearthdata.com/).*
+global maps (Jupiter, Saturn); coastlines, borders, rivers, urban areas and
+populated places from [Natural Earth](https://www.naturalearthdata.com/).*
 
 ---
 

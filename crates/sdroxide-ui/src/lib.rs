@@ -10,6 +10,9 @@
 mod app;
 mod aprs_icons;
 mod aprs_map;
+/// The Natural Earth rasters and the city table the flat maps are drawn from,
+/// decoded on the CPU — the same assets the 3D globe is textured with.
+mod basemap;
 pub mod chrome;
 mod colormap;
 mod digi_map;

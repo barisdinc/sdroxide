@@ -1,6 +1,12 @@
 //! A small pixel/dot-matrix world map for the FT8 QSO panel: renders the
-//! continents as glowing dots and marks the home + DX locations with a
-//! great-circle path between them, cyberpunk style.
+//! continents as glowing dots — with their borders, their rivers and the
+//! cities that fit — and marks the home + DX locations with a great-circle
+//! path between them, cyberpunk style.
+//!
+//! The ground under it all comes from [`crate::basemap`], which is the same
+//! Natural Earth data the 3D globe is textured with. That is deliberate: the
+//! two views have to agree about where a shoreline is, and one set of assets
+//! for both is how they do.
 //!
 //! The map is centred on the operator's home grid (the world wraps around it
 //! rather than being shifted) and smoothly auto-zooms to frame home plus every
@@ -13,7 +19,7 @@
 use eframe::egui::{
     Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Response, Sense, Ui, Vec2, pos2, vec2,
 };
-use sdroxide_types::{great_circle_points, land_cell, land_mask_dims};
+use sdroxide_types::great_circle_points;
 
 use crate::theme;
 
@@ -25,9 +31,12 @@ pub const MIN_HEIGHT: f32 = 72.0;
 /// contact doesn't blow the map up to street level.
 const MIN_LON_SPAN: f64 = 30.0;
 /// The floor for a zoom the user asked for by hand — lower than the auto-fit's,
-/// because "show me that corner of Europe" is a real request, but not unlimited:
-/// below this the land bitmap (1/6° per cell) is showing its own pixels.
-const MIN_USER_LON_SPAN: f64 = 5.0;
+/// because "show me that corner of Europe" is a real request. Well past where
+/// the maps stop resolving anything new (the land grid is 1/11° per texel, the
+/// lines 1/12°), which is the point: what a zoom this far buys is *room*
+/// between the markers on a crowded band, and the coastline that carries them
+/// stays a clean curve however far in it is stretched.
+const MIN_USER_LON_SPAN: f64 = 1.0;
 /// Fraction of extra margin left around the outermost contact.
 const PAD: f64 = 1.4;
 /// Per-frame ease toward the target view (0..1); smaller = slower/smoother.
@@ -233,27 +242,114 @@ fn target_view(home: Option<(f64, f64)>, contacts: &[(f64, f64)], aspect: f64) -
     (clat, clon, lon_span)
 }
 
-/// The continents, as a dot grid sized to the available pixels (about one dot
-/// every ~4 px), sampling the high-res land bitmap for crisp coastlines. Each
-/// cell maps to a (lat, lon) in the current view; longitude wraps.
+/// Pitch of the dot matrix, in points. The grid the whole map is drawn on:
+/// coarse enough that the dots read as a stipple rather than as a fill, fine
+/// enough that a border line through them still reads as a line.
+const DOT_PITCH: f32 = 4.0;
+
+/// The smoothstep every ink below is shaped with.
+fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How solid a land dot is, from the coverage under it.
+///
+/// Zoomed out, coverage very nearly *is* the alpha: a cell half full of Denmark
+/// comes out a half-lit dot, and a coast reads as an edge rather than as a
+/// staircase. Zoomed in past the grid the same field is contrast-stretched
+/// about its ½ contour instead — which is where the coastline actually is — so
+/// the shore stays a drawn line instead of dissolving into a gradient. That is
+/// the flat map's version of the `fwidth` stroke `solar_body.wgsl` puts on the
+/// globe, and it is why both show the same shoreline at the same sharpness.
+fn land_ink(cov: f32, mag: f32) -> f32 {
+    ((cov - 0.5) * 1.4 * mag.max(1.0) + 0.5).clamp(0.0, 1.0)
+}
+
+/// How solid a *line* dot is — a border or a river — from the coverage under it.
+///
+/// `gain` undoes the thinning the mip reduction did to it: box-averaging halves
+/// a one-texel line's coverage per level while leaving its length alone, so
+/// without this a border would quietly fade out as the map zoomed away from it
+/// instead of staying the drawn boundary it is.
+///
+/// The window over that is set low, and deliberately: a line landing between
+/// two texels puts half of itself in each, so a threshold at what a *centred*
+/// line reads would break every off-grid stretch into dashes. Better a line a
+/// dot wider than one with holes in it. It does climb with `mag` — with how far
+/// the dots have outrun the texels — because the same generous floor that keeps
+/// a line whole is what turns it into a band once one texel is four dots across.
+fn line_ink(cov: f32, gain: f32, mag: f32, floor: f32) -> f32 {
+    let lo = floor + 0.25 * ((mag - 1.0) / 4.0).clamp(0.0, 1.0);
+    smoothstep(lo, lo + 0.30, (cov * gain).min(1.0))
+}
+
+/// How much of a line layer is worth drawing at this zoom. Both ends of the
+/// range take it away again, for opposite reasons.
+///
+/// Zoomed **in**: borders and rivers are 1/12° — about nine kilometres — and on
+/// a dot grid finer than that they stop being lines. First a band several dots
+/// wide, then, once the interpolation has nothing left to shape a crest with
+/// but the texel lattice itself, a Danube made of right angles drawn with total
+/// confidence in the wrong place. A map that stops claiming to know where the
+/// border runs is telling the truth about its data; the coastline, at twice the
+/// resolution and with a real contour to follow, carries on alone.
+///
+/// Zoomed **out**: `gain` says how many levels down the pyramid the dot grid
+/// landed on, and by four or five of them a texel is more than a degree wide.
+/// Every border in central Europe or west Africa falls in the same handful of
+/// cells, and undoing the reduction in full — which is what keeps a lone border
+/// drawn at a distance — lights all of them at once, until the continent reads
+/// as speckle rather than as a map with lines on it. So the layer thins out
+/// again, and how far in a map has to be before its borders are solid depends
+/// on how big the map is, which is the same bargain the city labels strike.
+fn line_fade(mag: f32, gain: f32) -> f32 {
+    (1.0 - smoothstep(4.0, 9.0, mag)) * (1.0 - smoothstep(8.0, 36.0, gain))
+}
+
+/// The world itself: land, rivers, borders and the cities that fit, as a dot
+/// matrix sized to the available pixels (about one dot every [`DOT_PITCH`]
+/// points). Each cell maps to a (lat, lon) in the current view; longitude
+/// wraps.
+///
+/// The three rasters are the ones the 3D globe is textured with
+/// ([`crate::basemap`]), so a coastline is in the same place in both views.
 ///
 /// Returns the dot radius, which is the scale the callers draw their own
 /// markers against.
-pub(crate) fn draw_land(
+pub(crate) fn draw_base(
     p: &eframe::egui::Painter,
     rect: eframe::egui::Rect,
     clat: f64,
     clon: f64,
     lon_span: f64,
     lat_span: f64,
-    land: Color32,
+    map: &theme::MapPalette,
 ) -> f32 {
-    let (mw, mh) = land_mask_dims();
-    let cols = ((rect.width() / 4.0) as usize).clamp(80, mw);
-    let rows = ((rect.height() / 4.0) as usize).clamp(40, mh);
+    let cols = ((rect.width() / DOT_PITCH) as usize).max(24);
+    let rows = ((rect.height() / DOT_PITCH) as usize).max(12);
     let cell_w = rect.width() / cols as f32;
     let cell_h = rect.height() / rows as f32;
     let dot_r = (cell_w.min(cell_h) * 0.44).max(0.7);
+
+    // One sampler per layer for the whole grid: the zoom is what picks the mip
+    // level, and it is the same for every cell.
+    let world = crate::basemap::world();
+    let cell_deg = lon_span / cols as f64;
+    let land = world.land.sampler(cell_deg);
+    let rivers = world.rivers.sampler(cell_deg);
+    let borders = world.borders.sampler(cell_deg);
+    let land_mag = land.magnification();
+    let (river_mag, border_mag) = (rivers.magnification(), borders.magnification());
+    // Rivers keep only part of their gain: they are rasterised at a width
+    // Natural Earth ranks them by, so how much of a texel one covers *is* how
+    // big a river it is, and undoing the reduction in full would throw that
+    // ranking away and hand the world view every creek in Siberia. Two levels'
+    // worth keeps a mid-zoom river from vanishing while still letting the whole
+    // world thin itself down to the Amazon, the Nile and the Ob.
+    let (river_gain, border_gain) = (rivers.line_gain().min(2.5), borders.line_gain());
+    let (river_fade, border_fade) =
+        (line_fade(river_mag, rivers.line_gain()), line_fade(border_mag, borders.line_gain()));
 
     for row in 0..rows {
         let fy = (row as f64 + 0.5) / rows as f64; // 0 top .. 1 bottom
@@ -261,19 +357,108 @@ pub(crate) fn draw_land(
         if !(-90.0..=90.0).contains(&lat) {
             continue; // beyond a pole → open space, no land
         }
-        let mrow = (((90.0 - lat) / 180.0 * mh as f64) as usize).min(mh - 1);
+        let y = rect.top() + (row as f32 + 0.5) * cell_h;
         for col in 0..cols {
             let fx = (col as f64 + 0.5) / cols as f64; // 0 left .. 1 right
-            let lonw = wrap180(clon + (fx - 0.5) * lon_span);
-            let mcol = ((lonw + 180.0) / 360.0 * mw as f64) as usize % mw;
-            if land_cell(mcol, mrow) {
-                let x = rect.left() + (col as f32 + 0.5) * cell_w;
-                let y = rect.top() + (row as f32 + 0.5) * cell_h;
-                p.circle_filled(pos2(x, y), dot_r, land);
+            let lon = wrap180(clon + (fx - 0.5) * lon_span);
+            let c = pos2(rect.left() + (col as f32 + 0.5) * cell_w, y);
+            let ground = land_ink(land.at(lon, lat), land_mag);
+            if ground > 0.02 {
+                p.circle_filled(c, dot_r, alpha(map.land, 255.0 * ground));
+            }
+            // Rivers under borders: where the two run together — and they often
+            // do, because a border is frequently a river somebody agreed on —
+            // the political line is the one a callsign is looked up in.
+            if river_fade > 0.02 {
+                let a = river_fade * line_ink(rivers.at(lon, lat), river_gain, river_mag, 0.12);
+                if a > 0.02 {
+                    p.circle_filled(c, dot_r, alpha(map.river, 200.0 * a));
+                }
+            }
+            if border_fade > 0.02 {
+                let a = border_fade * line_ink(borders.at(lon, lat), border_gain, border_mag, 0.22);
+                if a > 0.02 {
+                    p.circle_filled(c, dot_r, alpha(map.border, 170.0 * a));
+                }
             }
         }
     }
+    draw_cities(p, rect, clat, clon, lon_span, lat_span, dot_r, map);
     dot_r
+}
+
+/// The cities that fit, biggest first.
+///
+/// [`crate::basemap::cities`] is sorted by population, so "which cities show"
+/// needs no threshold: walk the list, draw what falls inside the view, and stop
+/// once the map holds as many as it has room for. Zooming in shrinks the view
+/// faster than it exhausts the list, so smaller places arrive on their own.
+///
+/// Labels are the part that has to be earned — they cost far more room than the
+/// dot does. One goes on only if the map is big enough to carry text at all and
+/// the name misses every label already placed; the dot stays either way, so a
+/// city crowded out of its name is still a mark on the map.
+#[allow(clippy::too_many_arguments)]
+fn draw_cities(
+    p: &eframe::egui::Painter,
+    rect: eframe::egui::Rect,
+    clat: f64,
+    clon: f64,
+    lon_span: f64,
+    lat_span: f64,
+    dot_r: f32,
+    map: &theme::MapPalette,
+) {
+    // How many cities the map has room for, by area: a 600×300 panel map takes
+    // twenty, a full-window one a hundred and forty.
+    let budget = ((rect.width() * rect.height()) / 9000.0) as usize;
+    let budget = budget.clamp(6, 150);
+    // Under this there is no room for a name next to the dot, and a map of
+    // unlabelled specks says less than one without them.
+    let label = rect.width() >= 260.0 && rect.height() >= 140.0;
+    let font = FontId::proportional(9.5);
+
+    let mut placed: Vec<Pos2> = Vec::with_capacity(budget);
+    let mut labels: Vec<eframe::egui::Rect> = Vec::new();
+    for city in crate::basemap::cities() {
+        if placed.len() >= budget {
+            break;
+        }
+        let dlon = wrap180(city.lon - clon);
+        if dlon.abs() > lon_span / 2.0 || (city.lat - clat).abs() > lat_span / 2.0 {
+            continue;
+        }
+        let c = pos2(
+            rect.left() + (0.5 + (dlon / lon_span) as f32) * rect.width(),
+            rect.top() + (0.5 - ((city.lat - clat) / lat_span) as f32) * rect.height(),
+        );
+        // Two cities a few points apart are one smudge; the bigger one wins.
+        if placed.iter().any(|q| q.distance(c) < 7.0) {
+            continue;
+        }
+        placed.push(c);
+        // The dot grows with the place, by decade of population: a map that
+        // draws Tokyo and a county town the same size has thrown away the one
+        // thing it knows about both. Capitals get a ring instead of a size —
+        // a capital is not necessarily big, and this is the mark that says so.
+        let r = dot_r.max(1.0) + 0.35 * ((city.pop.max(1) as f32).log10() - 4.0).clamp(0.0, 3.5);
+        p.circle_filled(c, r + 1.2, alpha(map.city, 45.0));
+        p.circle_filled(c, r, map.city);
+        if city.capital {
+            p.circle_stroke(c, r + 2.0, (0.7, alpha(map.city, 150.0)));
+        }
+        if !label {
+            continue;
+        }
+        let galley = p.layout_no_wrap(city.name.to_owned(), font.clone(), map.city_label);
+        let at = pos2(c.x + r + 3.0, c.y - galley.size().y / 2.0);
+        let area = eframe::egui::Rect::from_min_size(at, galley.size()).expand(1.0);
+        if !rect.contains_rect(area) || labels.iter().any(|l| l.intersects(area)) {
+            continue;
+        }
+        labels.push(area);
+        p.galley(at, galley, map.city_label);
+    }
 }
 
 /// Draw the map filling the available width (2:1 aspect). `view` carries the
@@ -396,7 +581,7 @@ pub fn show(
         }
     }
 
-    let dot_r = draw_land(&p, rect, clat, clon, lon_span, lat_span, map.land);
+    let dot_r = draw_base(&p, rect, clat, clon, lon_span, lat_span, map);
 
     // Project (lat, lon) to screen using the current view; longitude wraps.
     let project = |lat: f64, lon: f64| -> Pos2 {
@@ -515,6 +700,47 @@ mod tests {
     /// Aspect of a typical map: half as tall as it is wide.
     const ASPECT: f64 = 0.5;
 
+    /// Coverage is the alpha while the map is zoomed out, so a coast is an edge
+    /// rather than a staircase — and becomes a hard line at the ½ contour once
+    /// the dots have outrun the texels, so it does not dissolve into a gradient
+    /// instead.
+    #[test]
+    fn the_coast_sharpens_as_the_map_zooms_in() {
+        assert!((land_ink(0.5, 0.2) - 0.5).abs() < 1e-6);
+        assert!(land_ink(0.75, 0.2) > 0.7 && land_ink(0.25, 0.2) < 0.3);
+        assert!(land_ink(0.55, 20.0) > 0.99, "the coast blurred out at full zoom");
+        assert!(land_ink(0.45, 20.0) < 0.01);
+        // Open sea is never lit and solid ground always is, at any zoom.
+        for mag in [0.05, 1.0, 30.0] {
+            assert_eq!(land_ink(0.0, mag), 0.0);
+            assert_eq!(land_ink(1.0, mag), 1.0);
+        }
+    }
+
+    /// The same border reads at the same strength three mip levels down, which
+    /// is what keeps it a drawn line rather than something that fades out as
+    /// the map pulls back from it.
+    #[test]
+    fn a_line_survives_the_mip_reduction() {
+        let near = line_ink(0.5, 1.0, 1.0, 0.22);
+        let far = line_ink(0.0625, 8.0, 0.9, 0.22);
+        assert!((near - far).abs() < 0.05, "{near} at full size, {far} eight levels down");
+        assert!(near > 0.5, "a line at half coverage should be drawn: {near}");
+        // Ground with no line through it stays ground, however much gain is on.
+        assert_eq!(line_ink(0.0, 16.0, 1.0, 0.22), 0.0);
+    }
+
+    /// Borders and rivers are drawn over the middle of the zoom range and
+    /// retire at both ends of it: too far in for nine-kilometre data to mean
+    /// anything, and too far out for one cell to hold fewer than three borders.
+    #[test]
+    fn the_line_layers_retire_at_both_ends() {
+        assert!(line_fade(1.0, 1.0) > 0.99, "the range they exist for");
+        assert!(line_fade(0.9, 4.0) > 0.9, "a continent-sized view keeps them");
+        assert!(line_fade(12.0, 1.0) < 0.01, "zoomed past what the data knows");
+        assert!(line_fade(0.9, 64.0) < 0.01, "the whole world in one small panel");
+    }
+
     /// What the point at rect fraction (fx, fy) is over, in (lat, lon).
     fn under(v: &MapView, fx: f64, fy: f64, aspect: f64) -> (f64, f64) {
         (v.clat + (0.5 - fy) * v.lat_span(aspect), wrap180(v.clon + (fx - 0.5) * v.lon_span))
@@ -565,7 +791,7 @@ mod tests {
         }
         assert!(
             (v.lon_span - MIN_USER_LON_SPAN).abs() < 1e-9,
-            "zoomed in past the mask: {}",
+            "zoomed in past the floor: {}",
             v.lon_span
         );
     }
