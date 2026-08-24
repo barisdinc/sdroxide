@@ -532,6 +532,7 @@ impl IqSource for EladSource {
                 sdroxide_cat::CatUpdate::Swr(_)
                 | sdroxide_cat::CatUpdate::Alc(_)
                 | sdroxide_cat::CatUpdate::Po(_)
+                | sdroxide_cat::CatUpdate::FwdW(_)
                 | sdroxide_cat::CatUpdate::Signal(_) => {}
             }
         }

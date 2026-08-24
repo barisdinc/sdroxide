@@ -4,8 +4,8 @@ SDRoxide is a PowerSDR/Thetis-style software-defined-radio transceiver. It gives
 you a panadapter and waterfall, dual VFOs, a full set of receive and transmit
 controls, FT8/FT4/FT2 digital modes with an integrated logbook, a wideband CW
 skimmer, and the ability to drive either a SoapySDR device or a CAT-controlled
-radio (such as a Xiegu, Icom, Yaesu, Kenwood, Elecraft, or ELAD) with audio over a USB
-sound card. The
+radio (such as a Xiegu, Icom, Yaesu, Kenwood, Elecraft, ELAD, or a QRP Labs QMX)
+with audio over a USB sound card. The
 same interface runs as a native desktop application, streams to a web browser,
 or connects to a remote sdroxide server.
 
@@ -3110,7 +3110,7 @@ per band, and they serve both sets of decoders at once.
 On an **RX-888**, 868 MHz is reached through its VHF tuner, and its wideband
 downconverter delivers 2.025 Msps at the default panadapter width — enough for
 the whole channel plan, but only just, which is why the centre frequency
-matters there. A wider panadapter width ([15.19](#1519-rx-888--rx-888-mk2))
+matters there. A wider panadapter width ([15.20](#1520-rx-888--rx-888-mk2))
 covers it with room to spare.
 
 ### 5.2 Reading the device list
@@ -3736,7 +3736,8 @@ release PTT teaches you nothing and lets you carry on transmitting into it. See
 trip; in `config.toml` the pair are `swr_guard` and `swr_limit`.
 
 It needs a rig that measures SWR and reports it over CAT or TCI — the Icom CI-V
-dialect, the Yaesu/Kenwood/Elecraft/ELAD dialects, `rigctld`, flrig, and TCI. On anything
+dialect, the Yaesu/Kenwood/Elecraft/ELAD/QRP Labs dialects, `rigctld`, flrig, and
+TCI. On anything
 that never sends a figure (any IQ radio: HackRF, Pluto, RTL-SDR, an HPSDR
 board) the setting is simply inert, which is why it costs nothing to leave on.
 
@@ -3859,7 +3860,7 @@ radio. Everything below the selector changes to match the choice:
   Mk2 the built-in R828D tuner is driven too, so the receiver covers VHF and UHF
   as well as HF and switches between its two antenna ports on its own. Both the
   ADC clock and how much of the digitised band the panadapter shows at once are
-  selectable — up to all of it. See [15.19](#1519-rx-888--rx-888-mk2).
+  selectable — up to all of it. See [15.20](#1520-rx-888--rx-888-mk2).
 - **Airspy HF+ (USB)** — an Airspy HF+ Dual, Discovery or Ranger, driven by
   sdroxide's own USB driver with no SoapySDR and no libairspyhf involved. See
   [6.2.9](#629-airspy-hf-usb).
@@ -4274,6 +4275,16 @@ ignored.
 If signals end up at *twice* the offset from where they belong, the sign is the
 other way round for your radio — enter `-8000` instead. Receive only, as above.
 
+A **QMX** is the other kind of case, and sdroxide fills this field in for you:
+its receiver is a superhet with a 12 kHz I.F., so its synthesiser sits 12 kHz
+*below* the dial and everything on the sound card is 12 kHz *above* the middle
+of the span. Picking the `QRP Labs` family with the sound format on `IQ` sets
+this to `-12000` and the sample rate to 48 kHz, which is the only rate that
+card runs at. One thing the single figure cannot follow: in CW the radio moves
+that I.F. by a further ~700 Hz so that zero-beat stays zero-beat, so if you run
+the panadapter with the radio in CW, add it by hand. In Digi — where a radio
+used as an I/Q front end normally sits — there is nothing to add.
+
 The offset can be set up to half the **I/Q sample rate** either way, which is as
 far as the digitised window reaches: past that the dial is outside what the card
 is recording at all. Raising the rate raises that ceiling with it.
@@ -4334,12 +4345,12 @@ only.
 - **Serial port** — the radio's CAT serial port. On Linux, USB-style ports
   (`/dev/ttyACM*`, `/dev/ttyUSB*`) are listed first.
 - **CAT family** — `Xiegu`, `Icom`, `Yaesu`, `Kenwood`, `Elecraft`, `ELAD`,
-  `Hamlib rigctld (network)`, or `flrig (network)`. The six native profiles
-  drive one manufacturer's rigs each; the last two talk to an already-running
-  daemon — Hamlib's `rigctld`, or flrig — and cover everything else (see
-  **rigctld address** and **flrig address** below).
+  `QRP Labs`, `Hamlib rigctld (network)`, or `flrig (network)`. The seven native
+  profiles drive one manufacturer's rigs each; the last two talk to an
+  already-running daemon — Hamlib's `rigctld`, or flrig — and cover everything
+  else (see **rigctld address** and **flrig address** below).
 
-  Four of the native ones speak ASCII commands ending in `;` and look
+  Five of the native ones speak ASCII commands ending in `;` and look
   interchangeable, but they are not. A Kenwood driven as a Yaesu rejects every
   retune and *keys up without unkeying*, because `TX0;` — Yaesu's unkey — is a transmit command on
   a Kenwood. An Elecraft driven as a Kenwood tunes and keys correctly and then
@@ -4347,7 +4358,9 @@ only.
   *mode* there (`MD6`/`MD9`) rather than a flag beside one. An ELAD driven as a
   Kenwood tunes and keys and then reads every meter wrong, because its S-meter,
   its SWR and its power control are all ELAD's own commands on ELAD's own
-  scales. Pick the right one.
+  scales. A QMX driven as a Kenwood has its power *meter* written to as though
+  it were the power control, and `MD8` — a mode on a Kenwood — puts it into SWR
+  Tune. Pick the right one.
 - **rigctld address** (Hamlib rigctld only) — `host:port` of a running Hamlib
   `rigctld`. `127.0.0.1:4532` is the daemon's own default, on this machine.
   Start one with, for example, `rigctld -m 2028 -r /dev/ttyUSB0 -s 38400`, where
@@ -4392,6 +4405,12 @@ only.
   covers: the K3 command set, which the K3S, KX3, KX2 and K4 all answer. How
   many watts the **Drive** slider spans is read from the rig itself when the
   port opens, so there is nothing to choose.
+- **Radio** (QRP Labs only) — likewise: QMX, QMX+ and the QDX-series radios that
+  share their command set all answer the one profile, and the radio names itself
+  and its firmware version when the port opens. Two notes sit under it: the
+  **Baud** setting below is ignored (a QMX serves its own virtual COM ports over
+  USB, so the rate means nothing at either end), and with **Sound format** on
+  `IQ` a third says that I/Q mode is switched on at the radio for you.
 - **Baud**, **Data bits**, **Parity**, **Stop bits** — the serial line settings
   (for example 19200 8N1 for a Xiegu X6100).
 - **Force RTS** / **Force DTR** — hold a control line high or low (some
@@ -4554,6 +4573,7 @@ Which radios can report it, and how:
 | Hamlib `rigctld` | `t` | Whatever the daemon's own backend supports. |
 | flrig | `rig.get_ptt` | Whatever flrig's own driver for the rig supports. |
 | ELAD | — | No such read; an over keyed at the radio goes unnoticed. |
+| QRP Labs | `TQ;` | A command of its own, like Elecraft's. |
 
 **These reads need to be verified against real radios.** Each is taken
 from the manufacturer's published command reference, and the end-to-end
@@ -4587,14 +4607,16 @@ What that needs on the radio:
   every mode except CW — so sdroxide sends it only once the rig has reported
   that it is in CW, rather than risk turning VOX on under a live sound card. If
   you key CW with **Mode control** set to `Radio controlled`, turn break-in on
-  at the radio yourself. Elecraft needs none of this: a `KY` message keys the
-  transmitter itself there, the way a recorded message does.
-- **The panel's WPM is sent to the rig's keyer** (Yaesu, Kenwood and Elecraft
-  `KS`, Icom keyer speed),
+  at the radio yourself. Elecraft and QRP Labs need none of this: a `KY` message
+  keys the transmitter itself there, the way a recorded message does.
+- **The panel's WPM is sent to the rig's keyer** (Yaesu, Kenwood, Elecraft and
+  QRP Labs `KS`, Icom keyer speed),
   so the speed button in the CW panel is the speed on the air. Farnsworth spacing
   is the sidetone keyer's and has no equivalent in a rig's keyer, so it does not
   apply on this route. Elecraft's keyer stops at 8 and 50 WPM, so the panel's
-  ends are clamped to those.
+  ends are clamped to those. A QMX's bottom end is held at 5 WPM for a different
+  reason: on that radio *zero* words per minute is not a slow keyer, it is
+  Straight Key mode.
 - **A longer break-in delay, and consider SEND ON RETURN.** The rig takes the
   text a message at a time and switches to transmit for each one, so how often
   it drops back to receive is set by two things sdroxide does not control: your
@@ -4605,9 +4627,9 @@ What that needs on the radio:
   sentence.
 - **Yaesu only: keyer memory 1 is used as scratch.** Yaesu has no streaming
   keying command — text can only be stored and played back — so sending CW
-  overwrites whatever you had stored in CW memory 1. Kenwood and Elecraft stream
-  the text straight to the keyer (`KY`), 24 characters at a time, and leave your
-  stored messages alone.
+  overwrites whatever you had stored in CW memory 1. Kenwood, Elecraft and QRP
+  Labs stream the text straight to the keyer (`KY`), 24 characters at a time, and
+  leave your stored messages alone.
 
   A Yaesu keyer holds two kinds of memory on the same five channels: the ones
   recorded from the paddle, and the ones written as text. Which playback command
@@ -4703,6 +4725,9 @@ what does the selecting.
 >   filter edges are, so they map across directly. Index tables are carried for
 >   the TS-480, TS-590S/SG and TS-2000; on any other model, and in AM and FM,
 >   the rig's filter is left alone.
+> - **QRP Labs** — nothing. A QMX reports the width its mode implies (`FW;` —
+>   3.2 kHz in Digi, 300 Hz in CW) and has no command to change it, so the
+>   panel's filter edges shape the display only.
 > - **Yaesu** — `SH`, an index into a table the *model* holds, so the rig is
 >   asked what it is (`ID;`) at connect. Tables are carried for the FT-891,
 >   FT-991/991A, FTDX10, FTDX101D/MP and FT-710. On any other model, and in AM
@@ -4772,6 +4797,48 @@ what does the selecting.
 > whole radio at once — a real wideband panadapter instead of an audio-band
 > slice — and covers this CAT link itself. This family is for a DUO reached by
 > its CAT cable alone. Neither has been verified against a radio.
+
+> **Note (QRP Labs):** this family is the QMX, the QMX+ and the QDX-series
+> radios that share their command set. The **Baud** setting does not apply — the
+> radio serves its own virtual COM ports over USB, so the rate means nothing at
+> either end — but *which* port does: a QMX offers up to three, and only one of
+> them is the CAT port you want. If nothing answers, try the next one.
+>
+> ⚠️ **Never open a terminal program on the same port.** A QMX takes a carriage
+> return as an instruction to leave CAT and become a terminal, for the rest of
+> the session. sdroxide never sends one; a terminal emulator will, on the first
+> Enter you press.
+>
+> **The transmit power is set at the radio.** There is no CAT command for it, so
+> the **Drive** slider only reaches the level of the audio going into the sound
+> card, and in Digi that does not change the power at all — the radio measures
+> the *frequency* of what you send it and synthesises the carrier itself. What
+> the radio *does* report while transmitting is the SWR and the forward power it
+> has measured, in real watts, and both appear on the meter.
+>
+> **Modes.** The radio's DIGI-U and DIGI-L are what sdroxide's digital modes go
+> out on (`MD6` and `MD9`); CW and CW-R are both CW; LSB, USB and AM are
+> themselves. `MD8` is not a mode — it is SWR Tune, a carrier into the radio's
+> own bridge — so sdroxide never asks for it, and a radio sitting in it is
+> reported as being in no mode rather than in some sideband it is not on. A QMX
+> has no FM position at all.
+>
+> **CW** goes to the radio's own keyer (`KY`), 24 characters at a time, at the
+> speed the CW panel is set to (`KS`). Do not set that speed to zero: on a QMX
+> zero words per minute is not a slow keyer, it is Straight Key mode, and
+> sdroxide holds the bottom of the range at 5 for exactly that reason.
+>
+> **SWR protection.** On firmware 1.04.004 and later sdroxide reads the radio's
+> protection latch (`SR`). If it has tripped, the radio will not transmit until
+> it is reset *at the radio* — sdroxide says so in the log and deliberately does
+> not reset it for you, because clearing a protection trip is a decision about an
+> antenna.
+>
+> **What the profile leaves alone:** the receive filter (the radio reports the
+> width its mode implies — 3.2 kHz in Digi, 300 Hz in CW — and offers nothing to
+> change it with), and the RF and audio gains, which live in the radio's own
+> menus. Written from QRP Labs' published CAT and operating manuals; not yet
+> verified against a radio.
 
 > **Note:** RIT, XIT and split are driven over the same serial link, by moving
 > the radio's dial — see [2.6](#26-rit-and-xit). Set them in sdroxide rather than
@@ -9693,8 +9760,8 @@ you are tuning a manual ATU.
 On the **Radio** tab, set **Mode control** to **CAT**. For FT8/FT4/FT2, set
 **Digimode mode** to **USB** or **DIGI** as your rig expects. Check the serial
 port, baud, and (for Icom/Xiegu) the **Radio ID**. Check **CAT family** as well:
-Kenwood, Yaesu and Elecraft look alike on the wire and none of them obeys the
-others' commands.
+Kenwood, Yaesu, Elecraft and QRP Labs look alike on the wire and none of them
+obeys the others' commands.
 
 **The CAT radio follows my dial but ignores frequency changes from sdroxide.**
 Take the radio out of memory mode: most rigs answer a frequency *read* from a
@@ -9721,6 +9788,38 @@ audio sdroxide transmits.
 **The Kenwood transmits on the wrong band.**
 On a TS-2000, set **Send command** back to `TS-2000 style (TX;)`. `TX1;` is
 DATA SEND on a TS-590 but *transmit on the sub-band* on a TS-2000.
+
+**The QMX stopped answering, and now nothing on its CAT port works.**
+Something sent it a carriage return, which a QMX takes as an instruction to
+leave CAT and become a terminal for the rest of the session — a terminal
+emulator left open on the same port does it on the first Enter. Close whatever
+else is on the port, then power the radio off and on. sdroxide never sends one.
+
+**The QMX answers nothing at all.**
+Try its other ports. A QMX offers up to three virtual COM ports over USB and
+only one of them is the CAT port; **Baud** has no bearing on it either way,
+since the port is not a real UART.
+
+**The QMX's Drive slider does not change the power.**
+It cannot: there is no CAT command that sets a QMX's output power, so the slider
+only reaches the level of the audio going into the sound card — and in Digi even
+that changes nothing, because the radio measures the *frequency* of what you send
+it and synthesises the carrier itself. Set the power at the radio.
+
+**The QMX will not transmit, and the log says its SWR protection has tripped.**
+It has latched, and only the radio can clear it — sdroxide deliberately does not,
+because clearing a protection trip is a decision about an antenna. Check the
+antenna, then reset it at the radio.
+
+**The QMX's panadapter is 12 kHz off, or it is nothing but noise.**
+Two different faults. Everything sitting 12 kHz from where it belongs is the
+**I/Q centre offset**: it should be `-12000`, which sdroxide fills in when you
+pick the `QRP Labs` family with **Sound format** on `IQ` — a config carried over
+from before that will still have `0`. (In CW, expect a further ~700 Hz: the radio
+moves its I.F. by the pitch, and one figure cannot follow that.) A panadapter
+that is noise from edge to edge with the format on `Demod audio` is the other
+way round — the radio is still in its own I/Q mode from something else, and
+sdroxide switches it back off at connect, so reconnect.
 
 **The radio transmits at a power the Drive slider does not show — often much
 less — and moving the slider changes nothing.**
@@ -10044,7 +10143,53 @@ All in [§6.2.16](#6216-elad-fdm-duo--fdm-s-usb):
   WinUSB via Zadig (which hides it from FDM-SW2 until the driver is put
   back).
 
-### 15.10 SunSDR / ExpertSDR3 / Thetis (TCI)
+### 15.10 QRP Labs QMX / QMX+ / QDX
+
+All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
+
+- **CAT family** `QRP Labs`, not `Kenwood`. The command set is a subset of the
+  TS-480's with a good deal added, and two of the differences bite: `PC` is the
+  power **meter** here rather than the power control, so a Kenwood-driven QMX has
+  its meter read written to as if it were a setting; and `MD8`, a mode on a
+  Kenwood, is **SWR Tune** — a carrier into the radio's own bridge.
+- **Baud does not apply.** The radio serves its own virtual COM ports over USB.
+  It offers up to three of them and only one is the CAT port; if nothing answers,
+  try the next.
+- ⚠️ **Never open a terminal program on the CAT port.** A QMX takes a carriage
+  return as an instruction to leave CAT and become a terminal for the rest of the
+  session. sdroxide never sends one; a terminal emulator sends one on the first
+  Enter.
+- **I/Q output:** set **Sound format** to `IQ` and sdroxide switches the radio's
+  own I/Q mode on for you (`Q9`) and fills in the two numbers that go with it —
+  **I/Q centre offset** `-12000` and **I/Q sample rate** 48 kHz. The offset is
+  the radio's 12 kHz I.F.: its synthesiser sits 12 kHz *below* the dial, so the
+  band arrives 12 kHz above the middle of the span. In CW the radio adds a
+  further ~700 Hz, which one figure cannot follow — add it by hand if you run the
+  panadapter with the radio in CW. Switch the format back to `Demod audio` and
+  the radio's I/Q mode is switched off again, so the audio path is not left
+  carrying quadrature.
+- **The transmit power is set at the radio** — there is no CAT command for it.
+  The **Drive** slider only reaches the audio level, and in Digi that changes
+  nothing at all, because the radio measures the *frequency* of what you send it
+  and synthesises the carrier itself. Transmit audio is asserted to come from the
+  host's sound card (`SS0`) when the port opens, so a radio left on its
+  microphone or its internal two-tone generator is put back.
+- **Meters:** the S-meter is the radio's own, in dB above its S0 (−127 dBm); the
+  SWR and the **forward power in real watts** are read while transmitting, so the
+  SWR guard has a measured wattage to vet its readings against.
+- **CW** keys directly (`KY`, no break-in setup), 24 characters at a time. Do not
+  ask for 0 WPM: on a QMX that is Straight Key mode, so the panel's bottom end is
+  held at 5.
+- **SWR protection** (firmware 1.04.004 and later) is read (`SR`). Once it has
+  tripped the radio will not transmit until it is reset at the radio — sdroxide
+  says so in the log and does not reset it for you.
+- The receive filter is the radio's: it reports the width its mode implies
+  (3.2 kHz in Digi, 300 Hz in CW) and offers nothing to change it with.
+- Written from QRP Labs' published CAT and operating manuals and exercised
+  end-to-end against a simulator written from the same documents. **Not yet
+  verified against a radio.**
+
+### 15.11 SunSDR / ExpertSDR3 / Thetis (TCI)
 
 All in [§6.2.4](#624-tci-network-expertsdr3-and-thetis):
 
@@ -10059,7 +10204,7 @@ All in [§6.2.4](#624-tci-network-expertsdr3-and-thetis):
   machine: port 50001 is likely already taken by ExpertSDR3 or Thetis — pick
   another (50002).
 
-### 15.11 Hermes Lite 2 (and other HPSDR)
+### 15.12 Hermes Lite 2 (and other HPSDR)
 
 All in [§6.2.3](#623-hpsdr-network-radios):
 
@@ -10078,7 +10223,7 @@ All in [§6.2.3](#623-hpsdr-network-radios):
   only; a Protocol 2 board gives a second band to a second radio tab on
   DDC2.
 
-### 15.12 FlexRadio (FLEX-6000 / FLEX-8000, SmartSDR)
+### 15.13 FlexRadio (FLEX-6000 / FLEX-8000, SmartSDR)
 
 All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
 
@@ -10090,7 +10235,7 @@ All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
 - The radio remembers a client by its **Station name** — renaming makes it
   treat sdroxide as a brand-new client.
 
-### 15.13 RTL-SDR dongles (Blog V3 / V4 and generic)
+### 15.14 RTL-SDR dongles (Blog V3 / V4 and generic)
 
 [§6.2.5](#625-rtl-sdr-usb-dongles) and, remotely,
 [§6.2.11](#6211-rtl-sdr-over-rtl_tcp-network-dongles):
@@ -10110,7 +10255,7 @@ All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
 - **Bias tee:** ~4.5 V DC onto the feedline — never with a transceiver, a
   DC-grounded antenna, or a preamp powered from the far end.
 
-### 15.14 SDRplay RSP (RSP1/1A/1B/2, RSPduo, RSPdx)
+### 15.15 SDRplay RSP (RSP1/1A/1B/2, RSPduo, RSPdx)
 
 All in [§6.2.8](#628-sdrplay-rsp-usb):
 
@@ -10129,7 +10274,7 @@ All in [§6.2.8](#628-sdrplay-rsp-usb):
 - Above 6.048 Msps the ADC trades bit depth for speed — worth knowing before
   picking 10 Msps for weak-signal work.
 
-### 15.15 Airspy HF+, Airspy R2 / Mini and HydraSDR RFOne
+### 15.16 Airspy HF+, Airspy R2 / Mini and HydraSDR RFOne
 
 Two different receivers, plus a fork of the second: different silicon, USB ids,
 protocols, and udev rules — [§6.2.9](#629-airspy-hf-usb),
@@ -10157,7 +10302,7 @@ substitutes for another.
   a build turns out not to carry them. Production boards are `38af:0001`;
   prototypes share the Airspy's `1d50:60a1`.
 
-### 15.16 HackRF One / Pro
+### 15.17 HackRF One / Pro
 
 All in [§6.2.12](#6212-hackrf-one--pro-usb):
 
@@ -10177,7 +10322,7 @@ All in [§6.2.12](#6212-hackrf-one--pro-usb):
   half/extended-precision gateware modes are not driven — a Pro left in one
   by `hackrf_debug -P` shows noise until unplugged.
 
-### 15.17 PlutoSDR (ADALM-Pluto, Pluto+, LibreSDR)
+### 15.18 PlutoSDR (ADALM-Pluto, Pluto+, LibreSDR)
 
 All in [§6.2.7](#627-plutosdr-adalm-pluto):
 
@@ -10197,7 +10342,7 @@ All in [§6.2.7](#627-plutosdr-adalm-pluto):
   signal is where the dial says. A steady carrier where modulation should be
   means the AD9361's own tone generators won — report it.
 
-### 15.18 LimeSDR + LimeRFE
+### 15.19 LimeSDR + LimeRFE
 
 All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
 
@@ -10247,7 +10392,7 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
 - **Rescan is not free** — LimeSuite opens each candidate board, which can
   disturb one another program is using.
 
-### 15.19 RX-888 / RX-888 Mk2
+### 15.20 RX-888 / RX-888 Mk2
 
 - Firmware is bundled and uploaded automatically. On a Mk2 the built-in
   R828D tuner is driven too, so it covers VHF/UHF as well as HF and switches

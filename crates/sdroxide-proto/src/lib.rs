@@ -594,7 +594,18 @@ use sdroxide_types::{
 /// A field appended to the radio configuration, which rides in both a command
 /// and an event, so a v86 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying.
-pub const PROTO_VERSION: u16 = 87;
+///
+/// **88** — QRP Labs radios (QMX, QMX+, QDX) are a CAT family of their own
+/// (issue #95). [`sdroxide_types::CatFamily`] gained a trailing `QrpLabs`
+/// variant.
+///
+/// Nothing moved: postcard numbers variants by declaration index and the new
+/// one went on the end, so every existing family keeps its number and a v87
+/// peer's own configuration still round-trips. What forces the bump is the
+/// other direction — a v87 client handed `QrpLabs` has no such variant to put
+/// it in, and postcard is not self-describing, so it does not fail on the field
+/// but on everything after it. Same reasoning as v72's `IsmProtocol` append.
+pub const PROTO_VERSION: u16 = 88;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

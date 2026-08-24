@@ -49,13 +49,21 @@ pub(in crate::app) fn settings_cat_tab(
     use sdroxide_types::{
         CAT_SCOPE_MIN_BAUD, CatFamily, CwKeying, DigiMode, Direction, ELAD_CAT_BAUDS,
         ELAD_DEFAULT_CAT_BAUD, EladAntenna, EladTxInput, IcomModel, IcomScopeSpan, KenwoodSend,
-        LineState, ModeControl, Parity, PttMethod, SoundFormat, StopBits,
+        LineState, ModeControl, Parity, PttMethod, QMX_IQ_OFFSET_HZ, QMX_IQ_RATE_HZ, SoundFormat,
+        StopBits,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
         return;
     };
     egui::Grid::new("cat-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        // What the sound format and the family were before this frame's combo
+        // boxes ran. A QMX's I/Q is not centred on its dial and its card runs
+        // at one rate, and both are filled in when the operator arrives at that
+        // combination — see where they are applied, below the family picker.
+        let format_before = cfg.cat.format;
+        let family_before = cfg.cat.family;
+
         ui.label("Sound format");
         enum_combo(ui, "sfmt", &mut cfg.cat.format, &SoundFormat::ALL, SoundFormat::label);
         ui.end_row();
@@ -186,6 +194,26 @@ pub(in crate::app) fn settings_cat_tab(
         ui.label("CAT family");
         enum_combo(ui, "fam", &mut cfg.cat.family, &CatFamily::ALL, CatFamily::label);
         ui.end_row();
+
+        // A QMX's I/Q is a superhet's, not a direct-conversion receiver's: the
+        // synthesiser sits 12 kHz below the dial, so everything on the sound
+        // card is 12 kHz above the middle of the span, and the card itself runs
+        // at one rate and no other. Both are filled in the moment the operator
+        // arrives at that combination — the same treatment the Icom model gives
+        // the CI-V address, and for the same reason: the right value is a fact
+        // about the radio, not a preference, and an operator who has to find it
+        // out by watching signals land in the wrong place has been let down.
+        //
+        // Only on a *change*, so somebody who has deliberately moved either one
+        // — a converter in front of the radio, a card that will not do 48 k —
+        // does not have it put back every time this dialog is drawn.
+        let arrived_at_qmx_iq = cfg.cat.family == CatFamily::QrpLabs
+            && matches!(cfg.cat.format, SoundFormat::Iq)
+            && (cfg.cat.family != family_before || cfg.cat.format != format_before);
+        if arrived_at_qmx_iq {
+            cfg.cat.iq_offset_hz = QMX_IQ_OFFSET_HZ;
+            cfg.cat.iq_rate_hz = QMX_IQ_RATE_HZ;
+        }
 
         // A network family reaches the radio over a socket, so every serial
         // setting below is about a port nothing will open. Drawing them would
@@ -504,6 +532,69 @@ pub(in crate::app) fn settings_cat_tab(
                  over CAT.",
             );
             ui.end_row();
+        }
+
+        if cfg.cat.family == CatFamily::QrpLabs {
+            ui.label("Radio");
+            ui.label(RichText::new("QMX · QMX+ · QDX").weak()).on_hover_text(
+                "One profile covers the range: QRP Labs' own command set, which \
+                 is a subset of the Kenwood TS-480's with a good deal added. \
+                 There is nothing to pick here — the radio names itself and its \
+                 firmware version when the port opens, and the version is what \
+                 decides whether the SWR-protection read is asked for at all.\n\n\
+                 Not the Kenwood profile: on a QMX the PC command is the power \
+                 METER rather than the power control, so a radio driven as a \
+                 Kenwood would have its meter read written to as if it were a \
+                 setting, and MD8 — a Kenwood mode — is SWR Tune here.\n\n\
+                 The transmit power is set at the radio. There is no CAT command \
+                 for it, so the Drive slider only reaches the level of the audio \
+                 going into the sound card.\n\n\
+                 The receive filter is the radio's too: it reports the width its \
+                 mode implies (3.2 kHz in Digi, 300 Hz in CW) and offers nothing \
+                 to change it with.",
+            );
+            ui.end_row();
+
+            ui.label("");
+            ui.label(RichText::new("Baud rate is ignored — the port is USB").weak()).on_hover_text(
+                "A QMX serves its own virtual COM ports over USB, so the rate \
+                 set above has no effect on either end. It offers up to three of \
+                 them; if the radio answers nothing, the most likely reason is \
+                 the wrong one.\n\n\
+                 One thing does matter about the port: a carriage return sent to \
+                 it switches the radio into terminal mode for the rest of the \
+                 session. sdroxide never sends one — but a terminal program left \
+                 open on the same port will, and CAT stops working the moment it \
+                 does.",
+            );
+            ui.end_row();
+
+            if matches!(cfg.cat.format, SoundFormat::Iq) {
+                ui.label("");
+                ui.label(RichText::new("I/Q mode is switched on at the radio").weak())
+                    .on_hover_text(
+                        "The radio's sound card carries either demodulated audio \
+                         or the raw I/Q its ADC sees, and sdroxide asserts \
+                         whichever the Sound format above asks for when the port \
+                         opens (the radio's Q9 command, the \"IQ mode\" menu \
+                         entry).\n\n\
+                         The centre offset and sample rate above have been set to \
+                         what a QMX needs: its receiver is a superhet with a \
+                         12 kHz I.F., so the synthesiser sits 12 kHz below the \
+                         dial and everything on the card is 12 kHz above the \
+                         middle of the span. The card runs at 48 kHz, which makes \
+                         the panadapter 48 kHz wide.\n\n\
+                         In CW the radio moves that I.F. by a further ~700 Hz, \
+                         which one figure cannot follow — add it by hand if you \
+                         run the panadapter with the radio in CW. In Digi, where \
+                         a radio used as an I/Q front end normally sits, there is \
+                         nothing to add.\n\n\
+                         QRP Labs note that I/Q mode is not suitable for WSJT-X \
+                         and other programs that expect demodulated audio; here \
+                         the demodulation happens on this side, so it is.",
+                    );
+                ui.end_row();
+            }
         }
 
         if cfg.cat.family == CatFamily::Icom {

@@ -350,16 +350,30 @@ pub enum CatFamily {
     /// index inside [`RadioConfig`], so a new variant may only go at the end.
     /// Where it appears in the picker is [`CatFamily::ALL`]'s business.
     Flrig,
+    /// QMX, QMX+ and the QDX-series radios that share their command set.
+    ///
+    /// A third Kenwood dialect — QRP Labs describe it as "a subset of the
+    /// Kenwood TS-480/TS-440 CAT command set" — and the one that diverges
+    /// furthest. `PC` is the power *meter* here rather than the power control,
+    /// so a radio driven as a Kenwood would be told to transmit at whatever
+    /// wattage the slider asked for and would answer with a meter reading;
+    /// `MD8` is SWR Tune rather than a mode; and the USB sound card is either
+    /// demodulated audio or raw I/Q depending on a setting (`Q9`) that only
+    /// this profile knows to assert.
+    ///
+    /// Appended after [`CatFamily::Flrig`] for the reason given there.
+    QrpLabs,
 }
 
 impl CatFamily {
-    pub const ALL: [CatFamily; 8] = [
+    pub const ALL: [CatFamily; 9] = [
         CatFamily::Xiegu,
         CatFamily::Icom,
         CatFamily::Yaesu,
         CatFamily::Kenwood,
         CatFamily::Elecraft,
         CatFamily::Elad,
+        CatFamily::QrpLabs,
         CatFamily::Rigctld,
         CatFamily::Flrig,
     ];
@@ -377,6 +391,7 @@ impl CatFamily {
             CatFamily::Kenwood => "Kenwood",
             CatFamily::Elecraft => "Elecraft",
             CatFamily::Elad => "ELAD",
+            CatFamily::QrpLabs => "QRP Labs",
             CatFamily::Rigctld => "Hamlib rigctld (network)",
             CatFamily::Flrig => "flrig (network)",
         }
@@ -995,6 +1010,34 @@ pub const CAT_IQ_RATES: [u32; 4] = [48_000, 96_000, 192_000, 384_000];
 fn default_iq_rate_hz() -> u32 {
     48_000
 }
+
+/// Where a QMX's I/Q sits relative to its dial, in Hz — the value
+/// [`CatConfig::iq_offset_hz`] is prefilled with when [`CatFamily::QrpLabs`] is
+/// chosen with [`SoundFormat::Iq`].
+///
+/// Negative, and the sign is the whole of the point. A QMX is a superhet with a
+/// 12 kHz I.F.: the synthesiser sits 12 kHz *below* the operating frequency, so
+/// the signal the operator tuned appears 12 kHz *above* the middle of the
+/// stream. `iq_offset_hz` is measured the other way round — positive means the
+/// centre is above the dial — hence −12000.
+///
+/// It is not a guess at the sign. QRP Labs' own operating manual pins it: "the
+/// image response is 24kHz down the band", which only holds for a local
+/// oscillator 12 kHz below the signal, and the receiver's image sweep is run
+/// from −30.5 kHz to +7 kHz for the same reason.
+///
+/// ⚠️ In CW the radio adds a further ~700 Hz to that offset (the pitch, so that
+/// zero-beat stays zero-beat), which this single number cannot follow. An
+/// operator running the panadapter with the radio in CW can add it by hand; in
+/// Digi — where a radio being used as an I/Q front end normally sits — there is
+/// nothing to add.
+pub const QMX_IQ_OFFSET_HZ: f64 = -12_000.0;
+
+/// What a QMX's USB codec runs at: "24-bit 48 ksps USB sound card", and the ADC
+/// behind it "digitizes the I and Q channels at 48 ksps". There is no other
+/// rate to ask for, so the panadapter is 48 kHz wide and that is the whole of
+/// the band this radio can show at once.
+pub const QMX_IQ_RATE_HZ: u32 = 48_000;
 
 /// Whether a rig's I/Q is corrected unless the operator says otherwise. On:
 /// see [`CatConfig::iq_correction`].
@@ -5524,14 +5567,18 @@ mod tests {
     /// disappears from the dialog instead of failing to build.
     #[test]
     fn every_cat_family_is_offered_and_labelled() {
-        assert_eq!(CatFamily::ALL.len(), 8);
+        assert_eq!(CatFamily::ALL.len(), 9);
         for f in CatFamily::ALL {
             assert!(!f.label().is_empty(), "{f:?}");
         }
         assert!(CatFamily::ALL.contains(&CatFamily::Elad));
+        assert!(CatFamily::ALL.contains(&CatFamily::QrpLabs));
         // ELAD is a serial family: the FDM-DUO's CAT port is an FTDI bridge,
         // not a socket.
         assert!(!CatFamily::Elad.is_network());
+        // A QMX is one too — its control port is a virtual COM port the radio
+        // itself serves over USB.
+        assert!(!CatFamily::QrpLabs.is_network());
         // flrig is the other daemon: a socket, never a serial port.
         assert!(CatFamily::Flrig.is_network());
     }

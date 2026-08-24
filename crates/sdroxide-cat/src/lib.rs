@@ -15,6 +15,7 @@ pub mod elad;
 mod elecraft;
 mod flrig;
 mod kenwood;
+mod qrplabs;
 mod rigctld;
 mod yaesu;
 
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use sdroxide_types::{
     CatConfig, CatFamily, CwKeying, DigiMode, LineState, Mode, ModeControl, Parity, PttMethod,
-    StopBits, TxTelemetry,
+    SoundFormat, StopBits, TxTelemetry,
 };
 use tracing::{info, warn};
 
@@ -162,6 +163,16 @@ pub enum CatUpdate {
     /// TX power-output reading as a `0.0..=1.0` fraction of the rig's full
     /// scale (routed to the telemetry channel, like [`CatUpdate::Swr`]).
     Po(f32),
+    /// TX forward power the rig has actually *measured*, in watts (routed
+    /// alongside [`CatUpdate::Po`]).
+    ///
+    /// Kept apart from [`CatUpdate::Po`] because the two are different claims,
+    /// the same way [`TxTelemetry::fwd_w`] and [`TxTelemetry::po`] are: a
+    /// needle position on the rig's own scale is not a wattage, and turning one
+    /// into the other invents a calibration the radio never offered. Only a
+    /// family whose meter answers in watts sends this — QRP Labs' `PC`, which
+    /// on every other ASCII family here is the power *control* instead.
+    FwdW(f32),
     /// RX S-meter reading in dBm, from the rig's own meter (routed to the
     /// signal channel, not the control channel).
     Signal(f32),
@@ -841,6 +852,10 @@ fn make_protocol(cfg: &CatConfig) -> Box<dyn Protocol> {
         CatFamily::Kenwood => Box::new(kenwood::Kenwood::new(cfg.kenwood_send)),
         CatFamily::Elecraft => Box::new(elecraft::Elecraft::new()),
         CatFamily::Elad => Box::new(elad::Elad::new(cfg.elad_tx_input)),
+        // The one family whose framing depends on the *sound* settings: a QMX's
+        // USB codec carries either demodulated audio or raw I/Q, and which one
+        // it must carry is asserted at the radio when the port opens.
+        CatFamily::QrpLabs => Box::new(qrplabs::QrpLabs::new(cfg.format == SoundFormat::Iq)),
         CatFamily::Rigctld => Box::new(rigctld::Rigctld::new()),
         CatFamily::Flrig => Box::new(flrig::Flrig::new(cfg.flrig_addr.trim().to_string())),
     }
@@ -1035,6 +1050,7 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
                 CatUpdate::Swr(_)
                 | CatUpdate::Alc(_)
                 | CatUpdate::Po(_)
+                | CatUpdate::FwdW(_)
                 | CatUpdate::Signal(_)
                 | CatUpdate::Power(_)
                 | CatUpdate::Antenna(_)
@@ -1630,6 +1646,7 @@ fn serial_thread(
     let mut last_swr: Option<f32> = None;
     let mut last_alc: Option<f32> = None;
     let mut last_po: Option<f32> = None;
+    let mut last_fwd: Option<f32> = None;
     // See `commanded_mode` for the app-mode → rig-mode policy.
     let mode_cmd = |app_mode: Mode| -> Option<Mode> { commanded_mode(&cfg, app_mode) };
 
@@ -1950,6 +1967,7 @@ fn serial_thread(
                             last_swr = None;
                             last_alc = None;
                             last_po = None;
+                            last_fwd = None;
                             // Clear the readings so the meters drop on unkey,
                             // here as well as at the receiver: a stale SWR held
                             // locally would be re-sent beside the next over's
@@ -2274,22 +2292,31 @@ fn serial_thread(
                 // it reads `None` as "the rig has not said anything yet" and would sit at that
                 // forever, never tripping. Both are therefore held here and sent together, so every
                 // message carries the latest of each.
-                let send = |swr, alc, po| {
-                    let _ = telem_tx.send(TxTelemetry { fwd_w: None, swr, alc, po });
+                let send = |swr, alc, po, fwd_w| {
+                    let _ = telem_tx.send(TxTelemetry { fwd_w, swr, alc, po });
                 };
                 if let CatUpdate::Swr(v) = u {
                     last_swr = Some(v);
-                    send(last_swr, last_alc, last_po);
+                    send(last_swr, last_alc, last_po, last_fwd);
                     continue;
                 }
                 if let CatUpdate::Alc(v) = u {
                     last_alc = Some(v);
-                    send(last_swr, last_alc, last_po);
+                    send(last_swr, last_alc, last_po, last_fwd);
                     continue;
                 }
                 if let CatUpdate::Po(v) = u {
                     last_po = Some(v);
-                    send(last_swr, last_alc, last_po);
+                    send(last_swr, last_alc, last_po, last_fwd);
+                    continue;
+                }
+                // Watts the rig measured, on the families whose meter answers
+                // in them. Held beside the rest for the same reason they are:
+                // it arrives in its own reply, and the consumer keeps only the
+                // last message sent.
+                if let CatUpdate::FwdW(v) = u {
+                    last_fwd = Some(v);
+                    send(last_swr, last_alc, last_po, last_fwd);
                     continue;
                 }
                 if let CatUpdate::Signal(dbm) = u {
@@ -2366,6 +2393,7 @@ fn serial_thread(
                     CatUpdate::Swr(_)
                     | CatUpdate::Alc(_)
                     | CatUpdate::Po(_)
+                    | CatUpdate::FwdW(_)
                     | CatUpdate::Signal(_)
                     | CatUpdate::Power(_)
                     | CatUpdate::Antenna(_)
@@ -2546,7 +2574,13 @@ mod tests {
     fn only_elecraft_re_asserts_the_dial_after_a_mode_change() {
         let family = |f| make_protocol(&CatConfig { family: f, ..CatConfig::default() });
         assert!(family(CatFamily::Elecraft).mode_moves_dial());
-        for f in [CatFamily::Icom, CatFamily::Xiegu, CatFamily::Yaesu, CatFamily::Kenwood] {
+        for f in [
+            CatFamily::Icom,
+            CatFamily::Xiegu,
+            CatFamily::Yaesu,
+            CatFamily::Kenwood,
+            CatFamily::QrpLabs,
+        ] {
             assert!(!family(f).mode_moves_dial(), "{f:?}");
         }
     }
@@ -2783,16 +2817,7 @@ mod tests {
     /// two, and the dial half is the frequency read on its own.
     #[test]
     fn the_mode_does_not_ride_along_with_every_dial_poll() {
-        for f in [
-            CatFamily::Icom,
-            CatFamily::Xiegu,
-            CatFamily::Yaesu,
-            CatFamily::Kenwood,
-            CatFamily::Elecraft,
-            CatFamily::Elad,
-            CatFamily::Rigctld,
-            CatFamily::Flrig,
-        ] {
+        for f in CatFamily::ALL {
             let p = make_protocol(&CatConfig { family: f, ..CatConfig::default() });
             let (full, dial) = (p.poll_requests(), p.dial_requests());
             // The dial poll is strictly smaller, and it is the front of the
@@ -2828,6 +2853,7 @@ mod tests {
             CatFamily::Yaesu,
             CatFamily::Kenwood,
             CatFamily::Elecraft,
+            CatFamily::QrpLabs,
             CatFamily::Rigctld,
             CatFamily::Flrig,
         ] {
