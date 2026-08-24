@@ -289,40 +289,109 @@ impl SdroxideApp {
                             ui.end_row();
                         }
 
+                        // Where the beacon says this station is.
+                        //
+                        // The coordinate rows are always drawn, greyed while
+                        // the locator is in charge and showing what it works
+                        // out to. Hiding them behind the tick-box left an
+                        // operator who wanted to type a position with no sign
+                        // that they could, and no way to see what was going
+                        // out instead.
+                        let from_grid = sdroxide_aprs::position_from_grid(&cfg.my_grid);
                         ui.label("Position");
                         ui.horizontal(|ui| {
+                            let was = cfg.aprs_use_grid;
                             changed |= ui
                                 .checkbox(&mut cfg.aprs_use_grid, "From my grid")
                                 .on_hover_text(
                                     "Beacon the centre of the locator above, reported with the \
                                      ambiguity a locator actually has — a six-character one is \
-                                     a couple of kilometres across, and saying so is honest.",
+                                     a couple of kilometres across, and saying so is honest. \
+                                     Untick to give exact coordinates instead.",
                                 )
                                 .changed();
+                            // Taking the coordinates over starts from where the
+                            // locator had you, rather than from Null Island.
+                            if was
+                                && !cfg.aprs_use_grid
+                                && let Some(q) = from_grid
+                            {
+                                cfg.aprs_lat = (q.lat * 1e6).round() / 1e6;
+                                cfg.aprs_lon = (q.lon * 1e6).round() / 1e6;
+                            }
                         });
                         ui.end_row();
-                        if !cfg.aprs_use_grid {
-                            ui.label("Latitude");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.aprs_lat)
-                                        .range(-90.0..=90.0)
-                                        .speed(0.0001)
-                                        .max_decimals(6)
-                                        .suffix(" °N"),
-                                )
-                                .changed();
-                            ui.end_row();
-                            ui.label("Longitude");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut cfg.aprs_lon)
-                                        .range(-180.0..=180.0)
-                                        .speed(0.0001)
-                                        .max_decimals(6)
-                                        .suffix(" °E"),
-                                )
-                                .changed();
+
+                        let grid_lat = from_grid.map_or(0.0, |q| q.lat);
+                        let grid_lon = from_grid.map_or(0.0, |q| q.lon);
+                        // Text boxes, not spinners: a coordinate is something
+                        // an operator reads off a map and pastes, and a spinner
+                        // has to be discovered to be typeable at all.
+                        for (label, value, buf, shown, limit, hemi) in [
+                            (
+                                "Latitude",
+                                &mut cfg.aprs_lat,
+                                &mut self.aprs_lat_buf,
+                                grid_lat,
+                                90.0,
+                                "south",
+                            ),
+                            (
+                                "Longitude",
+                                &mut cfg.aprs_lon,
+                                &mut self.aprs_lon_buf,
+                                grid_lon,
+                                180.0,
+                                "west",
+                            ),
+                        ] {
+                            ui.label(label);
+                            ui.horizontal(|ui| {
+                                if cfg.aprs_use_grid {
+                                    // The locator's own answer, read-only:
+                                    // editing it here would set a figure the
+                                    // beacon then ignores. The buffer is kept
+                                    // in step so switching over starts here.
+                                    *buf = format!("{shown:.6}");
+                                    ui.add_enabled(
+                                        false,
+                                        egui::TextEdit::singleline(buf).desired_width(96.0),
+                                    );
+                                    ui.label(RichText::new("from the locator").size(9.5).weak());
+                                    return;
+                                }
+                                // Seed once, so the box is never blank.
+                                if buf.is_empty() {
+                                    *buf = format!("{:.6}", *value);
+                                }
+                                let parsed = buf
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .filter(|d| d.is_finite() && d.abs() <= limit);
+                                let edit = egui::TextEdit::singleline(buf)
+                                    .desired_width(96.0)
+                                    .text_color_opt(parsed.is_none().then(crate::theme::ALERT));
+                                if crate::chrome::field(ui, edit)
+                                    .on_hover_text(format!(
+                                        "Decimal degrees, negative for {hemi}. Paste one \
+                                         straight off a map."
+                                    ))
+                                    .changed()
+                                    && let Some(d) = parsed
+                                    && (d - *value).abs() > f64::EPSILON
+                                {
+                                    *value = d;
+                                    changed = true;
+                                }
+                                if parsed.is_none() {
+                                    ui.label(
+                                        RichText::new("not a coordinate")
+                                            .size(9.5)
+                                            .color(crate::theme::ALERT()),
+                                    );
+                                }
+                            });
                             ui.end_row();
                         }
 
@@ -534,73 +603,80 @@ impl SdroxideApp {
                     // templates. APRS has none of them — it is a broadcast
                     // channel with a beacon on it — so the rows would be
                     // controls that do nothing under a dialog titled after it.
-                    if mode.is_aprs() {
-                        return;
-                    }
-                    ui.label("TX period");
-                    ui.horizontal(|ui| {
-                        changed |= ui.selectable_value(&mut cfg.tx_even, true, "Even").changed();
-                        changed |= ui.selectable_value(&mut cfg.tx_even, false, "Odd").changed();
-                    });
-                    ui.end_row();
-                    ui.label("Auto-sequence");
-                    changed |= crate::chrome::checkbox(ui, &mut cfg.auto_seq, "").changed();
-                    ui.end_row();
-                    ui.label("Auto TX frequency");
-                    changed |= ui
-                        .checkbox(&mut cfg.auto_tx_freq, "")
-                        .on_hover_text(
-                            "Choose the transmit frequency automatically: the quietest spot in \
+                    //
+                    // A conditional block rather than an early `return`, and
+                    // deliberately: this dialog edits a copy and sends it to
+                    // the engine *once*, at the end. A `return` skips that, so
+                    // every setting the operator typed is discarded the moment
+                    // the window closes — which is what happened when this
+                    // was written the other way (issue #150).
+                    if !mode.is_aprs() {
+                        ui.label("TX period");
+                        ui.horizontal(|ui| {
+                            changed |=
+                                ui.selectable_value(&mut cfg.tx_even, true, "Even").changed();
+                            changed |=
+                                ui.selectable_value(&mut cfg.tx_even, false, "Odd").changed();
+                        });
+                        ui.end_row();
+                        ui.label("Auto-sequence");
+                        changed |= crate::chrome::checkbox(ui, &mut cfg.auto_seq, "").changed();
+                        ui.end_row();
+                        ui.label("Auto TX frequency");
+                        changed |= ui
+                            .checkbox(&mut cfg.auto_tx_freq, "")
+                            .on_hover_text(
+                                "Choose the transmit frequency automatically: the quietest spot in \
                              the period you transmit in, rather than the frequency of the \
                              station you are answering. Off does NOT hold it — it answers on \
                              the frequency of the station being called. To hold, use Hold TX.",
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Hold TX frequency");
-                    changed |= ui
-                        .checkbox(&mut cfg.hold_tx_freq, "")
-                        .on_hover_text(
-                            "Pin the transmit tone where it is. Nothing moves it: not \
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label("Hold TX frequency");
+                        changed |= ui
+                            .checkbox(&mut cfg.hold_tx_freq, "")
+                            .on_hover_text(
+                                "Pin the transmit tone where it is. Nothing moves it: not \
                              answering a station, not the call queue, not calling CQ, not a \
                              click on a decode or the waterfall. Overrides Auto TX frequency. \
                              Changing band is the one exception: the offset you last set on \
                              the new band comes back with it. For where your licence is \
                              narrower than the band plan — on a UK 60 m dial of 5357 kHz the \
                              allocation ends at 5358.0, so the tone must stay under 1000 Hz.",
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("TX watchdog");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut cfg.tx_watchdog_min)
-                                .range(0..=60)
-                                .suffix(" min"),
-                        )
-                        .on_hover_text(
-                            "Stop transmitting after this long with no reply and no action \
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label("TX watchdog");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.tx_watchdog_min)
+                                    .range(0..=60)
+                                    .suffix(" min"),
+                            )
+                            .on_hover_text(
+                                "Stop transmitting after this long with no reply and no action \
                              from you. 0 disables it.",
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Give up after");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut cfg.max_tx_repeats)
-                                .range(0..=30)
-                                .suffix(" calls"),
-                        )
-                        .on_hover_text(
-                            "Unanswered calls to one station before moving on. Calling CQ is \
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label("Give up after");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.max_tx_repeats)
+                                    .range(0..=30)
+                                    .suffix(" calls"),
+                            )
+                            .on_hover_text(
+                                "Unanswered calls to one station before moving on. Calling CQ is \
                              exempt. 0 disables it.",
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("DXpedition");
-                    ui.horizontal(|ui| {
-                        for m in sdroxide_types::DxpedMode::ALL {
-                            changed |= ui
+                            )
+                            .changed();
+                        ui.end_row();
+                        ui.label("DXpedition");
+                        ui.horizontal(|ui| {
+                            for m in sdroxide_types::DxpedMode::ALL {
+                                changed |= ui
                                 .selectable_value(&mut cfg.dxped_mode, m, m.label())
                                 .on_hover_text(match m {
                                     sdroxide_types::DxpedMode::Normal => "Ordinary FT8 operation.",
@@ -616,12 +692,12 @@ impl SdroxideApp {
                                     }
                                 })
                                 .changed();
-                        }
-                    });
-                    ui.end_row();
-                    if cfg.dxped_mode == sdroxide_types::DxpedMode::Fox {
-                        ui.label("Fox signals");
-                        changed |= ui
+                            }
+                        });
+                        ui.end_row();
+                        if cfg.dxped_mode == sdroxide_types::DxpedMode::Fox {
+                            ui.label("Fox signals");
+                            changed |= ui
                             .add(
                                 egui::DragValue::new(&mut cfg.fox_slots)
                                     .range(1..=sdroxide_types::FOX_MAX_SLOTS)
@@ -632,33 +708,35 @@ impl SdroxideApp {
                                  transmitter's power, so more signals means each is weaker.",
                             )
                             .changed();
-                        ui.end_row();
+                            ui.end_row();
+                        }
                     }
                 });
-                if mode.is_aprs() {
-                    return;
+                if !mode.is_aprs() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Message templates  {MYCALL} {MYGRID} {DX} {REPORT}")
+                            .size(10.5)
+                            .color(crate::theme::gray(150)),
+                    );
+                    egui::Grid::new("digi-msgs").num_columns(2).show(ui, |ui| {
+                        for (label, field) in [
+                            ("CQ", &mut cfg.msg_cq),
+                            ("Grid", &mut cfg.msg_grid),
+                            ("Report", &mut cfg.msg_report),
+                            ("R+Report", &mut cfg.msg_rreport),
+                            ("RR73", &mut cfg.msg_rr73),
+                            ("73", &mut cfg.msg_73),
+                        ] {
+                            ui.label(label);
+                            changed |= crate::chrome::field(ui, egui::TextEdit::singleline(field))
+                                .changed();
+                            ui.end_row();
+                        }
+                    });
                 }
-                ui.separator();
-                ui.label(
-                    RichText::new("Message templates  {MYCALL} {MYGRID} {DX} {REPORT}")
-                        .size(10.5)
-                        .color(crate::theme::gray(150)),
-                );
-                egui::Grid::new("digi-msgs").num_columns(2).show(ui, |ui| {
-                    for (label, field) in [
-                        ("CQ", &mut cfg.msg_cq),
-                        ("Grid", &mut cfg.msg_grid),
-                        ("Report", &mut cfg.msg_report),
-                        ("R+Report", &mut cfg.msg_rreport),
-                        ("RR73", &mut cfg.msg_rr73),
-                        ("73", &mut cfg.msg_73),
-                    ] {
-                        ui.label(label);
-                        changed |=
-                            crate::chrome::field(ui, egui::TextEdit::singleline(field)).changed();
-                        ui.end_row();
-                    }
-                });
+                // The one place this dialog's edits leave it. Nothing above may
+                // return early past it.
                 if changed {
                     cmds.push(Command::SetDigiConfig(cfg.clone()));
                 }

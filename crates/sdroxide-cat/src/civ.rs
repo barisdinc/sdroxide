@@ -128,7 +128,22 @@ pub fn set_mode_frames(radio: u8, m: Mode, data_sub: Option<u8>) -> Vec<Vec<u8>>
         // Filter 1 alongside the switch, which is the same filter the mode
         // command above selects — so the pair leave the rig somewhere
         // consistent rather than in the mode's filter and the data mode's.
-        let on = m.is_digital() && !m.is_carrier_centered();
+        //
+        // Every digital mode, including the ones that key the carrier rather
+        // than a sideband. On Icom the DATA switch is *not* a sideband
+        // selector — it is the mode's `-D` variant, and FM has one: FM-D takes
+        // its modulation from the data source with the audio flat.
+        //
+        // This used to exclude the carrier-centred modes, on the theory that
+        // the switch chose a sideband data path they did not use. It does not,
+        // and the cost was exactly what the note above this function describes:
+        // a packet or APRS over went out through the microphone path with the
+        // rig's speech processing and FM pre-emphasis on it. Pre-emphasis
+        // alone tilts a Bell 202 tone pair by about 6 dB, which sounds like
+        // packet to a listener and is unreadable to a modem. Kenwood's map has
+        // always answered DATA-FM here (`mode_digit`); this is Icom agreeing
+        // with it.
+        let on = m.is_digital();
         out.push(frame(radio, 0x1A, &[sub, on as u8, 0x01]));
     }
     out
@@ -876,11 +891,16 @@ mod tests {
         assert_eq!(mode(Mode::Ft8, None).len(), 1);
         assert_eq!(mode(Mode::Ft8, None)[0], set_mode_frame(0x94, Mode::Ft8));
 
-        // A carrier-centred mode is data over FM, not over a sideband: the rig
-        // goes to FM and the DATA switch stays off, because the switch selects
-        // a *sideband* data path the mode does not use.
-        assert_eq!(mode(Mode::Rifp, Some(0x06))[1][6], 0x00);
-        assert_eq!(mode(Mode::Rifp, Some(0x06))[0][5], 0x05); // FM
+        // A carrier-centred mode is data over FM: the rig goes to FM *and* the
+        // DATA switch goes on, which on an Icom is the mode's `-D` variant
+        // rather than a sideband selector. FM-D takes its modulation from the
+        // data source with the audio flat; plain FM puts the microphone path's
+        // speech processing and pre-emphasis on it, and a Bell 202 tone pair
+        // tilted 6 dB is unreadable to every modem on the channel.
+        for m in [Mode::Rifp, Mode::Packet, Mode::Aprs] {
+            assert_eq!(mode(m, Some(0x06))[0][5], 0x05, "{} is not FM", m.label());
+            assert_eq!(mode(m, Some(0x06))[1][6], 0x01, "{} left DATA off", m.label());
+        }
     }
 
     /// Icom's filter is an index, but unlike Yaesu's it comes from a formula

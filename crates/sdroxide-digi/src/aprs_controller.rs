@@ -1218,6 +1218,56 @@ mod tests {
         assert_eq!(c.bad_frames, 0);
     }
 
+    /// The bytes on the air, checked against what every other APRS station
+    /// puts there.
+    ///
+    /// Nothing in this codebase reads the command/response bits of a UI frame,
+    /// so a wrong pairing decodes perfectly here and forever — which is
+    /// exactly why it is worth pinning. A frame that does not look like the
+    /// rest of the channel's is one some digipeater firmware is entitled to
+    /// drop, and the operator would only ever see it as silence from the
+    /// network.
+    #[test]
+    fn a_beacon_looks_like_every_other_aprs_frame_on_the_wire() {
+        let cfg = DigiConfig {
+            my_call: "OE3JJS-9".into(),
+            my_grid: "JN88ec".into(),
+            packet_persist: 255,
+            packet_slottime_ms: 1,
+            ..Default::default()
+        };
+        let mut c = AprsController::new(cfg.clone(), 48_000.0);
+        c.queue_beacon();
+        for _ in 0..4 {
+            c.ch.on_rx_audio(&[0.0; 4800], &cfg);
+        }
+        let sent = c.ch.take_over(&cfg).expect("no beacon");
+        let f = &sent[0];
+
+        // Destination, then source, then the path — 7 bytes each, the last
+        // address marked by bit 0 of its SSID byte.
+        let ssid_byte = |n: usize| f[n * 7 + 6];
+        // A *command*: destination C bit set, source C bit clear. The other
+        // pairing is a response, which a broadcast is not.
+        assert_eq!(ssid_byte(0) & 0x80, 0x80, "destination C bit: this is a command");
+        assert_eq!(ssid_byte(1) & 0x80, 0x00, "source C bit: this is a command");
+        // The two reserved bits are unused and stay set on every address.
+        for n in 0..4 {
+            assert_eq!(ssid_byte(n) & 0x60, 0x60, "address {n} has a reserved bit clear");
+        }
+        // Only the last address ends the field.
+        assert_eq!(ssid_byte(0) & 1, 0);
+        assert_eq!(ssid_byte(1) & 1, 0);
+        assert_eq!(ssid_byte(2) & 1, 0, "WIDE1-1 is not the last address");
+        assert_eq!(ssid_byte(3) & 1, 1, "WIDE2-1 must end the address field");
+        // Nothing has repeated it yet, so no H bit is set in the path.
+        assert_eq!(ssid_byte(2) & 0x80, 0, "WIDE1-1 is marked as already repeated");
+        assert_eq!(ssid_byte(3) & 0x80, 0, "WIDE2-1 is marked as already repeated");
+        // UI, no layer 3.
+        assert_eq!(f[28], 0x03, "control field must be UI");
+        assert_eq!(f[29], 0xf0, "PID must be `no layer 3`");
+    }
+
     /// A station nobody has heard from inside the window drops off the map.
     #[test]
     fn a_stale_station_is_dropped() {

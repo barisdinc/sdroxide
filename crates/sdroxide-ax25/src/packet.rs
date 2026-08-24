@@ -254,6 +254,15 @@ impl Packet {
     pub fn ui_via<T: Into<Vec<u8>>>(src: Addr, dst: Addr, via: Vec<Addr>, payload: T) -> Self {
         let mut p = Self::ui(src, dst, payload);
         p.digipeater = via;
+        // Sent as a command, which is what every APRS station on the channel
+        // sends: destination C bit set, source C bit clear. `Packet::ui` builds
+        // the other pairing — a *response* — which is right for a connected
+        // session answering an I-frame and wrong for a broadcast nobody asked
+        // for. The bits are one each and no decoder here cares, but a frame
+        // that does not look like everyone else's is a frame some digipeater
+        // firmware is entitled to ignore.
+        p.command_response = true;
+        p.command_response_la = false;
         p
     }
 

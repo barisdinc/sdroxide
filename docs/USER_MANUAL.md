@@ -3129,8 +3129,12 @@ on your channel is sending a format this build does not read.
   in the outback.
 - **Position** — from your Maidenhead locator by default, reported with the
   ambiguity a locator actually has (a six-character one is a couple of
-  kilometres across, and saying so is honest). Turn it off to give exact
-  coordinates.
+  kilometres across, and saying so is honest). The **Latitude** and
+  **Longitude** boxes below it always show what will go out; while the locator
+  is in charge they are greyed and read *from the locator*. Untick **From my
+  grid** and they become yours to type — decimal degrees, negative for south
+  and west, and they start from wherever the locator had you so you are never
+  editing from zero.
 - **Comment** — free text sent with every beacon, up to 43 characters.
 - **Beacon** — minutes between beacons, the same setting as the interval in the
   panel header. **`off`, which is the default, never beacons**: selecting a mode
@@ -3180,6 +3184,12 @@ Nothing at all, with a healthy level, usually means one of:
 - **the rig is not in FM.** APRS is an FM channel; selecting the mode commands
   FM over CAT, but a radio that is not being commanded (no CAT cable, or a
   control port nothing answers on) has to be put in FM by hand.
+- **the radio is not in its data mode.** sdroxide asks for FM-D (or whatever
+  the rig calls FM with DATA on) over CAT, because plain FM puts the
+  microphone path's speech processing and pre-emphasis on the way out — and
+  pre-emphasis alone tilts the 1200 and 2200 Hz tones about 6 dB apart, which
+  sounds like packet to a listener and is unreadable to a modem. A rig nothing
+  is commanding has to be put in it by hand.
 
 If your *transmissions* are the ones nobody can decode, the log line to look for
 is `digital transmit audio is being rate-matched to the radio`. Some radios

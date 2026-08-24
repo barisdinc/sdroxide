@@ -437,6 +437,13 @@ pub struct SdroxideApp {
     aprs_show_traffic: bool,
     /// APRS: filter for the station list; matches a callsign or a comment.
     aprs_filter: String,
+    /// APRS: what is typed in the latitude and longitude boxes.
+    ///
+    /// Buffers rather than formatting the config value each frame: half a
+    /// typed number does not parse, and a field that reverted to the stored
+    /// value on every keystroke could not be typed into at all.
+    aprs_lat_buf: String,
+    aprs_lon_buf: String,
     /// The last decode the user clicked (not REPLY): its call and map
     /// location, shown as a faint preview marker distinct from the active DX.
     digi_preview: Option<(String, (f64, f64))>,
@@ -1049,6 +1056,8 @@ impl SdroxideApp {
             aprs_draft: String::new(),
             aprs_show_traffic: false,
             aprs_filter: String::new(),
+            aprs_lat_buf: String::new(),
+            aprs_lon_buf: String::new(),
             digi_cfg_seeded: false,
             digi_tx_hz_edit: String::new(),
             digi_preview: None,
