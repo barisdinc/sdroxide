@@ -36,6 +36,12 @@ struct Heard {
 /// and so is any CAT rig on a sound card.
 struct SoundCardRig {
     heard: Arc<Mutex<Heard>>,
+    /// What this radio receives at, and what it plays transmit audio at. They
+    /// are not always the same number: an Icom on its 12 kHz IF output hands
+    /// back a stream decimated to 24 kHz while taking transmit audio at the
+    /// session's 48. See `rx_and_tx_rates_may_differ`.
+    rx_rate: f64,
+    tx_rate: f64,
     /// A little noise on the receive side. Not decoration: the packet channel
     /// counts its CSMA slots on the receive sample clock, so a source that
     /// hands back nothing at all is a station that can never decide to key.
@@ -44,7 +50,7 @@ struct SoundCardRig {
 
 impl IqSource for SoundCardRig {
     fn sample_rate(&self) -> f64 {
-        48_000.0
+        self.rx_rate
     }
     fn center_hz(&self) -> f64 {
         DIAL_HZ
@@ -78,8 +84,8 @@ impl IqSource for SoundCardRig {
     fn commands_tx_power(&self) -> bool {
         true
     }
-    fn tx_begin(&mut self, _center_hz: f64, rate: f64) -> Result<f64> {
-        Ok(rate)
+    fn tx_begin(&mut self, _center_hz: f64, _rate: f64) -> Result<f64> {
+        Ok(self.tx_rate)
     }
     fn tx_write_audio(&mut self, audio: &[f32]) -> Result<()> {
         let mut h = self.heard.lock().unwrap();
@@ -132,8 +138,13 @@ fn station() -> DigiConfig {
 
 /// Run `cmds` on an APRS station and return every sample the rig was given.
 fn over_for(audio_mode: bool, cmds: Vec<Command>) -> Vec<f32> {
+    over_at(audio_mode, 48_000.0, 48_000.0, cmds)
+}
+
+/// The same on a radio whose receive and transmit rates differ.
+fn over_at(audio_mode: bool, rx_rate: f64, tx_rate: f64, cmds: Vec<Command>) -> Vec<f32> {
     let heard = Arc::new(Mutex::new(Heard::default()));
-    let src = SoundCardRig { heard: Arc::clone(&heard), rng: 0x1234_5678 };
+    let src = SoundCardRig { heard: Arc::clone(&heard), rng: 0x1234_5678, rx_rate, tx_rate };
     // A ring nothing reads. Without somewhere to play audio the engine never
     // builds the main receive chain, and the digital-mode tap it feeds is what
     // a packet station counts its channel-access slots on — so an engine with
@@ -189,7 +200,11 @@ fn over_for(audio_mode: bool, cmds: Vec<Command>) -> Vec<f32> {
 /// Demodulate what the rig was given and return every frame that survived its
 /// check sequence.
 fn frames_in(audio: &[f32]) -> Vec<Vec<u8>> {
-    let mut modem = AfskRx::new(48_000.0, AfskProfile::Vhf1200);
+    frames_in_at(audio, 48_000.0)
+}
+
+fn frames_in_at(audio: &[f32], rate: f64) -> Vec<Vec<u8>> {
+    let mut modem = AfskRx::new(rate, AfskProfile::Vhf1200);
     let mut deframer = Deframer::new();
     let (mut levels, mut frames) = (Vec::new(), Vec::new());
     for chunk in audio.chunks(480) {
@@ -292,4 +307,46 @@ fn a_packet_beacon_reaches_the_rig() {
     );
     let secs = audio.len() as f32 / 48_000.0;
     assert!(secs > 0.5, "the over reached the rig as only {secs:.3} s of audio");
+}
+
+/// A radio that receives at one rate and transmits at another (issue #150).
+///
+/// An IC-705 on its 12 kHz IF output is exactly this: the IF arrives decimated
+/// to 24 kHz, so the digital modes are built at 24 kHz — a `DigiEngine` keeps
+/// one clock for both directions — while transmit audio goes back at the
+/// session's 48. Field report: the burst was structurally perfect, half as
+/// long, at twice the baud rate, and no receiver on the channel could read it.
+/// Confirmed off the air with a recording: 2400 and 4400 Hz where Bell 202
+/// wants 1200 and 2200.
+#[test]
+fn a_beacon_is_rate_matched_when_the_radio_transmits_at_another_rate() {
+    let rx_rate = 24_000.0;
+    let tx_rate = 48_000.0;
+    let audio = over_at(
+        false,
+        rx_rate,
+        tx_rate,
+        vec![
+            Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
+            Command::SetDigiConfig(station()),
+            Command::AprsBeacon,
+        ],
+    );
+    // Read back at the rate the *radio* plays, which is the whole point: the
+    // frame has to be right in the radio's own time base, not the modem's.
+    let secs = audio.len() as f32 / tx_rate as f32;
+    assert!(
+        secs > 0.5,
+        "the over lasted {secs:.3} s in the radio's time base — half length is the fault this \
+         test exists for"
+    );
+    let frames = frames_in_at(&audio, tx_rate);
+    assert_eq!(
+        frames.len(),
+        1,
+        "{secs:.3} s reached the radio at {tx_rate} Hz and {} frames came back out of it",
+        frames.len()
+    );
+    let p = Packet::parse(&frames[0], None).expect("the frame does not parse");
+    assert_eq!(p.src().call(), "OE3JJS");
 }

@@ -1492,6 +1492,19 @@ struct Engine {
     mem_folders: Vec<MemoryFolder>,
     mic: Option<MicParams>,
     mic_resampler: Option<MonoResampler>,
+    /// The rate the digital-mode engine synthesises at — the receive tap's
+    /// rate, because a `DigiEngine` keeps one clock for both directions.
+    digi_rate: f64,
+    /// Rate-matching for the digital modes' transmit audio, when the radio
+    /// consumes it at a different rate from the one it was synthesised at.
+    /// `None` when the two agree, which is the usual case.
+    digi_tx_rs: Option<MonoResampler>,
+    /// Resampled transmit audio waiting to be handed to the radio, and whether
+    /// the modem behind it has finished. The over is over when both are done:
+    /// unkeying on the modem alone would cut off whatever is still queued.
+    digi_tx_fifo: Vec<f32>,
+    digi_tx_scratch: Vec<f32>,
+    digi_tx_done: bool,
     mic_fifo: Vec<f32>,
     /// Voice-only parametric EQ on the microphone audio, ahead of whatever
     /// modulates it. Here rather than in [`TxChain`] because a rig that
@@ -2201,6 +2214,11 @@ fn engine_thread(
         mem_folders,
         mic: engine_cfg.mic,
         mic_resampler: None,
+        digi_rate: 48_000.0,
+        digi_tx_rs: None,
+        digi_tx_fifo: Vec::new(),
+        digi_tx_scratch: Vec::new(),
+        digi_tx_done: false,
         mic_fifo: Vec::new(),
         tx_eq: ParametricEq::new(),
         // Deliberately not the restored EQ state: `apply_tx_eq` compares this
@@ -4255,6 +4273,7 @@ impl Engine {
             _ => {}
         }
 
+        self.digi_rate = tap_rate;
         if want && !have {
             self.start_digi(mode, tap_rate);
             self.sync_audio_tap();
@@ -8968,6 +8987,36 @@ impl Engine {
             let begin_rate = if self.audio_mode { self.radio_fs } else { self.state.sample_rate };
             match self.source.tx_begin(txf, begin_rate) {
                 Ok(tx_rate) => {
+                    // Rate-match the digital modes to whatever this radio
+                    // actually plays.
+                    //
+                    // A `DigiEngine` keeps one clock for both directions and
+                    // synthesises at the *receive* tap's rate; on some radios
+                    // that is not the rate the transmit stream runs at. An Icom
+                    // on its 12 kHz IF output is the case that found it (issue
+                    // #150): the IF arrives decimated to 24 kHz while transmit
+                    // audio goes back at the session's 48, so a packet burst
+                    // went out at exactly twice its baud rate — structurally
+                    // perfect, half as long, and undecodable by anything.
+                    //
+                    // The target differs by path. Where the radio modulates the
+                    // audio we hand it, that is the rate it consumes. Where we
+                    // modulate it ourselves, `TxChain`'s upconverter is built
+                    // for 48 kHz and the device rate is downstream of it.
+                    let want =
+                        if self.audio_mode || self.caps.tx_audio { tx_rate } else { 48_000.0 };
+                    self.digi_tx_fifo.clear();
+                    self.digi_tx_done = false;
+                    self.digi_tx_rs = if (want - self.digi_rate).abs() < 0.5 {
+                        None
+                    } else {
+                        info!(
+                            from = self.digi_rate,
+                            to = want,
+                            "digital transmit audio is being rate-matched to the radio"
+                        );
+                        MonoResampler::new(self.digi_rate, want)
+                    };
                     // No modulator/DUC when the device transmits raw audio (a CAT
                     // rig, or a TCI rig with wideband-IQ RX + audio TX).
                     if !self.audio_mode && !self.caps.tx_audio {
@@ -9324,6 +9373,49 @@ impl Engine {
         self.emit_voice_status();
     }
 
+    /// One block of transmit audio from the digital mode, at the rate the radio
+    /// consumes and with the modem's own headroom already divided out.
+    ///
+    /// Returns true when the over is finished. Where a rate matcher is in play
+    /// that means the modem has finished *and* its resampled audio has drained:
+    /// unkeying on the modem alone would cut off whatever is still queued, and
+    /// the tail of a packet frame is its check sequence.
+    fn fill_digi_tx_block(&mut self, out: &mut [f32]) -> bool {
+        let gain = self.digi.as_ref().map_or(1.0, |d| digi_tx_gain(d.tx_peak()));
+        let done = match self.digi_tx_rs.take() {
+            // The usual case: the modem already speaks the radio's rate.
+            None => self.digi.as_mut().is_none_or(|d| d.fill_tx_block(out)),
+            Some(mut rs) => {
+                // Pull whole modem blocks, resample into a queue, and hand out
+                // exactly what the radio asked for.
+                while self.digi_tx_fifo.len() < out.len() && !self.digi_tx_done {
+                    let mut src = vec![0.0f32; out.len()];
+                    let finished = self.digi.as_mut().is_none_or(|d| d.fill_tx_block(&mut src));
+                    self.digi_tx_scratch.clear();
+                    rs.push(&src, &mut self.digi_tx_scratch);
+                    self.digi_tx_fifo.extend_from_slice(&self.digi_tx_scratch);
+                    self.digi_tx_done = finished;
+                }
+                let take = self.digi_tx_fifo.len().min(out.len());
+                out[..take].copy_from_slice(&self.digi_tx_fifo[..take]);
+                out[take..].fill(0.0);
+                self.digi_tx_fifo.drain(..take);
+                let done = self.digi_tx_done && self.digi_tx_fifo.is_empty();
+                self.digi_tx_rs = Some(rs);
+                done
+            }
+        };
+        // The modem's own headroom, divided back out (`DigiEngine::tx_peak`) so
+        // the radio is handed a full-scale modulating signal and a full Drive is
+        // a full transmitter (issue #131).
+        if gain != 1.0 {
+            for a in out.iter_mut() {
+                *a = (*a * gain).clamp(-1.0, 1.0);
+            }
+        }
+        done
+    }
+
     /// Top up the 48 kHz TX FIFO from whichever source owns this over — the
     /// voice keyer, a TCI client's audio stream, or the local microphone — and
     /// bound the queue.
@@ -9573,32 +9665,24 @@ impl Engine {
     /// write it out. Unkeys and advances the QSO when the burst finishes.
     fn tx_block_digi(&mut self) -> crate::Result<()> {
         self.feed_digi_mic();
-        let Some(tx) = self.tx.as_mut() else { return Ok(()) };
-
-        let mut audio = [0.0f32; TX_AUDIO_BLOCK];
-        let mut digi_gain = 1.0;
-        let done = match self.digi.as_mut() {
-            Some(d) => {
-                digi_gain = digi_tx_gain(d.tx_peak());
-                d.fill_tx_block(&mut audio)
-            }
-            None => true,
-        };
-        // The modem's own headroom, divided back out (`DigiEngine::tx_peak`) so
-        // the modulator is handed a full-scale modulating signal and a full
-        // Drive is a full transmitter. Here rather than on the modulated
-        // samples below, because on a sideband mode the two are the same thing
-        // but on FM they are not: there the level is the deviation, and scaling
-        // the modulator's constant envelope would raise the power while leaving
-        // a packet over half as wide as the channel expects it to be.
-        if digi_gain != 1.0 {
-            for a in &mut audio {
-                *a = (*a * digi_gain).clamp(-1.0, 1.0);
-            }
+        if self.tx.is_none() {
+            return Ok(());
         }
+        // The headroom is divided out inside `fill_digi_tx_block`, before the
+        // modulator rather than on the modulated samples below: on a sideband
+        // mode the two are the same thing, but on FM they are not — there the
+        // level is the deviation, and scaling the modulator's constant envelope
+        // would raise the power while leaving a packet over half as wide as the
+        // channel expects it to be.
+        //
+        // Ahead of borrowing the transmit chain, because filling the block
+        // needs the engine itself.
+        let mut audio = [0.0f32; TX_AUDIO_BLOCK];
+        let done = self.fill_digi_tx_block(&mut audio);
         if let Some(mixer) = self.mixer.as_mut() {
             mixer.push_tx(&audio);
         }
+        let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         tx.mod_buf.clear();
         // Every mode that reaches here rides single sideband, so the chain has
@@ -9676,29 +9760,15 @@ impl Engine {
 
         if self.digi_tx {
             self.feed_digi_mic();
-            let mut digi_gain = 1.0;
-            digi_done = self
-                .digi
-                .as_mut()
-                .map(|d| {
-                    digi_gain = digi_tx_gain(d.tx_peak());
-                    d.fill_tx_block(&mut audio)
-                })
-                .unwrap_or(true);
             // Full scale into the rig, as the tune tone below goes out on a
             // radio with its own power control — and for the same reason. That
             // power control cannot make up 6 dB the audio never had: a
             // half-scale burst asks for a quarter of the power a TUNE at the
             // same slider setting gets out of the same radio, and the Drive
             // slider looks dead, because what the output is riding on is the
-            // audio and not the power register (issue #131). A rig without a
-            // power control has its level set at the radio, where every other
-            // digital-mode program's full-scale audio expects to meet it.
-            if digi_gain != 1.0 {
-                for a in &mut audio {
-                    *a = (*a * digi_gain).clamp(-1.0, 1.0);
-                }
-            }
+            // audio and not the power register (issue #131). `tx_peak` is what
+            // divides it back out, inside `fill_digi_tx_block`.
+            digi_done = self.fill_digi_tx_block(&mut audio);
         } else if self.state.tx.tune {
             // An audio-modulated rig (CAT/TCI) needs a tone to produce a carrier;
             // silence would key up with no output. On a rig with its own power

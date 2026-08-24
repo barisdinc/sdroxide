@@ -3181,6 +3181,15 @@ Nothing at all, with a healthy level, usually means one of:
   FM over CAT, but a radio that is not being commanded (no CAT cable, or a
   control port nothing answers on) has to be put in FM by hand.
 
+If your *transmissions* are the ones nobody can decode, the log line to look for
+is `digital transmit audio is being rate-matched to the radio`. Some radios
+receive at one sample rate and transmit at another — an Icom on its 12 kHz IF
+output receives a stream decimated to 24 kHz while taking transmit audio at 48 —
+and the modems are built for the receive rate, because a digital mode keeps one
+clock for both directions. sdroxide rate-matches the transmit audio for you and
+says so once per over; before it did, a packet burst went out at exactly twice
+its baud rate, which is structurally perfect and readable by nothing.
+
 #### What is decoded
 
 Everything a station is likely to send: uncompressed and compressed positions,
