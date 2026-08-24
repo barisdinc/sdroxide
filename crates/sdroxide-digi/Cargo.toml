@@ -15,6 +15,7 @@ license = "GPL-3.0-or-later"
 sdroxide-types.workspace = true
 sdroxide-dsp.workspace = true
 sdroxide-ax25.workspace = true
+sdroxide-aprs.workspace = true
 sdroxide-deepcw.workspace = true
 sdroxide-rade.workspace = true
 # The JS8 candidate loop hands complex baseband between mfsk-core primitives.

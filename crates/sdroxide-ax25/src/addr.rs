@@ -111,6 +111,18 @@ impl Addr {
         Ok(a)
     }
 
+    /// The high bit of the SSID byte.
+    ///
+    /// It means two different things depending on where the address sits. In
+    /// the source and destination it is half of the command/response pair. In
+    /// a *digipeater* address it is the "has been repeated" flag — which is
+    /// what an APRS monitor prints as the asterisk in `WIDE1-1*`, and the only
+    /// way to tell which hop of a path a frame actually came through.
+    #[must_use]
+    pub fn highbit(&self) -> bool {
+        self.highbit
+    }
+
     /// Get just the callsign & SSID as a string, not the extra bits.
     #[must_use]
     pub fn call(&self) -> &str {

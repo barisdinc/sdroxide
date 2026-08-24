@@ -17,128 +17,22 @@
 //! one variant with a config field would have to thread that field into every
 //! one of them.
 //!
-//! # Two rules measured rather than assumed
-//!
-//! 1. **The modem must not hear its own transmission.** Full-duplex hardware
-//!    keeps receiving through an over, and in audio mode `on_rx_audio` is fed
-//!    unconditionally. For a keyboard mode that is cosmetic; for AX.25 it is
-//!    fatal, because the link layer would see its own I-frames and acknowledge
-//!    itself. Hence [`PacketController::keyed`].
-//! 2. **A CSMA slot timer may never be clocked from [`DigiEngine::poll`].**
-//!    `poll` runs once per source block while receiving — measured at 341 ms on
-//!    a sound-card rig with the real buffer size, against the 10 ms a slot
-//!    wants. Slot countdown and DCD hold are therefore counted on the audio
-//!    clock inside `on_rx_audio`. See
-//!    `crates/sdroxide-radio/tests/tx_turnaround.rs` for the measurement.
+//! The modem, the framing and the two rules that make a packet station behave
+//! on a shared channel live in [`crate::ax25_channel`], which
+//! [`crate::AprsController`] runs as well.
 
-use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sdroxide_ax25::{
-    Addr, Deframer, Discard, Framer, Packet, PacketType, PortEndpoint, PortEvent, PortRequest,
-    state,
-};
-use sdroxide_dsp::{AFSK_TX_PEAK, AfskProfile, AfskRx, AfskTx, G3RUH_TX_PEAK, G3ruhRx, G3ruhTx};
+use sdroxide_ax25::{Addr, Packet, PacketType, PortEndpoint, PortEvent, PortRequest, state};
+use sdroxide_dsp::AfskProfile;
 use sdroxide_types::{
     DigiConfig, DigiStatus, Mode, PACKET_HEARD_MAX, PacketBaud, PacketHeard, PacketStatus, QsoStep,
     TranscriptLine,
 };
 
 use crate::DigiEngine;
+use crate::ax25_channel::Ax25Channel;
 use crate::controller::DigiAction;
-
-/// The modem for the configured speed. Both arms emit line levels; everything
-/// above them is shared.
-enum Modem {
-    Afsk(Box<AfskRx>),
-    G3ruh(Box<G3ruhRx>),
-}
-
-impl Modem {
-    fn new(baud: PacketBaud, rate: f64) -> Modem {
-        match baud {
-            PacketBaud::Hf300 => Modem::Afsk(Box::new(AfskRx::new(rate, AfskProfile::Hf300))),
-            PacketBaud::Vhf1200 => Modem::Afsk(Box::new(AfskRx::new(rate, AfskProfile::Vhf1200))),
-            PacketBaud::Vhf9600 => Modem::G3ruh(Box::new(G3ruhRx::new(rate))),
-        }
-    }
-
-    fn process(&mut self, audio: &[f32], out: &mut Vec<bool>) {
-        match self {
-            Modem::Afsk(m) => m.process(audio, out),
-            Modem::G3ruh(m) => m.process(audio, out),
-        }
-    }
-
-    /// How convincingly a signal is present, 0..1.
-    fn separation(&self) -> f32 {
-        match self {
-            Modem::Afsk(m) => m.separation(),
-            Modem::G3ruh(m) => m.separation(),
-        }
-    }
-
-    fn magnitude(&self) -> f32 {
-        match self {
-            Modem::Afsk(m) => m.magnitude(),
-            Modem::G3ruh(m) => m.magnitude(),
-        }
-    }
-}
-
-/// The transmit half, matching [`Modem`].
-enum TxModem {
-    Afsk(Box<AfskTx>),
-    G3ruh(Box<G3ruhTx>),
-}
-
-impl TxModem {
-    fn new(baud: PacketBaud, rate: f64) -> TxModem {
-        match baud {
-            PacketBaud::Hf300 => TxModem::Afsk(Box::new(AfskTx::new(rate, AfskProfile::Hf300))),
-            PacketBaud::Vhf1200 => TxModem::Afsk(Box::new(AfskTx::new(rate, AfskProfile::Vhf1200))),
-            PacketBaud::Vhf9600 => TxModem::G3ruh(Box::new(G3ruhTx::new(rate))),
-        }
-    }
-
-    fn push_bits(&mut self, bits: &[bool]) {
-        match self {
-            TxModem::Afsk(m) => m.push_bits(bits),
-            TxModem::G3ruh(m) => m.push_bits(bits),
-        }
-    }
-
-    fn next_block(&mut self, out: &mut [f32]) -> usize {
-        match self {
-            TxModem::Afsk(m) => m.next_block(out),
-            TxModem::G3ruh(m) => m.next_block(out),
-        }
-    }
-
-    fn idle(&self) -> bool {
-        match self {
-            TxModem::Afsk(m) => m.idle(),
-            TxModem::G3ruh(m) => m.idle(),
-        }
-    }
-
-    /// The loudest sample this modem produces. The two differ: the AFSK tone is
-    /// exactly its half-scale amplitude, while the 9600 baseband rings past its
-    /// symbol level wherever the shaping filter meets a run of transitions.
-    fn peak(&self) -> f32 {
-        match self {
-            TxModem::Afsk(_) => AFSK_TX_PEAK,
-            TxModem::G3ruh(_) => G3RUH_TX_PEAK,
-        }
-    }
-}
-
-/// Above this the channel counts as busy, and CSMA will not key.
-///
-/// Well clear of the idle-noise figure — an unmodulated channel sits near zero,
-/// because the two tone branches see the same noise — and well below what a
-/// real signal produces, so it does not need tuning per band.
-const DCD_THRESHOLD: f32 = 0.35;
 
 /// The speed the modem is built for, given the mode and the operator's choice.
 ///
@@ -160,26 +54,9 @@ pub struct PacketController {
     cfg: DigiConfig,
     tap_rate: f64,
 
-    baud: PacketBaud,
-    modem: Modem,
-    deframer: Deframer,
+    /// The modem, the framing and CSMA.
+    ch: Ax25Channel,
 
-    /// True while our own transmitter is on the air. Rule 1 above: the modem is
-    /// deaf by construction for as long as this is set, whatever the hardware
-    /// hands us.
-    keyed: bool,
-
-    tx_modem: TxModem,
-    /// Frames waiting for the channel, oldest first.
-    pending: VecDeque<Vec<u8>>,
-    /// Set by CSMA once the channel is clear and the dice have been thrown;
-    /// `poll` turns it into a key-up request.
-    want_tx: bool,
-    /// Samples left in the current CSMA slot. Counted here, on the audio clock,
-    /// and never in `poll` — see rule 2.
-    slot_left: u32,
-    /// Samples in one slot at the current tap rate.
-    slot_samples: u32,
     /// When the next beacon is due. `None` disables it.
     next_beacon: Option<SystemTime>,
 
@@ -191,10 +68,6 @@ pub struct PacketController {
 
     heard: Vec<PacketHeard>,
     bad_frames: u32,
-    dcd: bool,
-
-    levels: Vec<bool>,
-    frames: Vec<Vec<u8>>,
 
     queued: Vec<DigiAction>,
     status_dirty: bool,
@@ -204,33 +77,16 @@ pub struct PacketController {
 impl PacketController {
     pub fn new(mode: Mode, cfg: DigiConfig, tap_rate: f64) -> Self {
         let baud = baud_for(mode, &cfg);
-        let cfg_slot = cfg.clone();
         PacketController {
             mode,
+            ch: Ax25Channel::new(baud, &cfg, tap_rate),
             cfg,
             tap_rate,
-            baud,
-            modem: Modem::new(baud, tap_rate),
-            deframer: Deframer::new(),
-            keyed: false,
-            tx_modem: TxModem::new(baud, tap_rate),
-            pending: VecDeque::new(),
-            want_tx: false,
-            // A full slot, not zero. Zero means the first audio block after a
-            // frame is queued keys immediately, without the wait that stops two
-            // stations pouncing together — and the window for it is exactly the
-            // case of queueing something before any audio has arrived, which is
-            // what a beacon at startup does.
-            slot_left: slot_samples(&cfg_slot, tap_rate),
-            slot_samples: slot_samples(&cfg_slot, tap_rate),
             next_beacon: None,
             link: None,
             air_frames: Vec::new(),
             heard: Vec::new(),
             bad_frames: 0,
-            dcd: false,
-            levels: Vec::new(),
-            frames: Vec::new(),
             queued: Vec::new(),
             status_dirty: true,
             last_status: None,
@@ -239,11 +95,7 @@ impl PacketController {
 
     /// Rebuild the modem, after a speed change or a new tap rate.
     fn rebuild(&mut self) {
-        self.baud = baud_for(self.mode, &self.cfg);
-        self.modem = Modem::new(self.baud, self.tap_rate);
-        self.tx_modem = TxModem::new(self.baud, self.tap_rate);
-        self.deframer = Deframer::new();
-        self.slot_samples = slot_samples(&self.cfg, self.tap_rate);
+        self.ch.rebuild(baud_for(self.mode, &self.cfg), &self.cfg, self.tap_rate);
         self.status_dirty = true;
     }
 
@@ -253,7 +105,7 @@ impl PacketController {
     /// separation is the point: a caller that could transmit directly would be
     /// able to key on top of another station.
     pub fn queue_frame(&mut self, frame: Vec<u8>) {
-        self.pending.push_back(frame);
+        self.ch.queue(frame);
         self.status_dirty = true;
     }
 
@@ -410,69 +262,6 @@ impl PacketController {
         self.queue_frame(p.serialize(false));
     }
 
-    /// One CSMA step, called once per received sample block.
-    ///
-    /// Standard KISS p-persistence: while the channel is busy the slot timer is
-    /// held at zero, so the countdown only begins once the channel clears; each
-    /// time a slot elapses, transmit with probability `persist/256`, otherwise
-    /// wait another slot. The randomness is what stops two stations that were
-    /// both waiting out the same transmission from colliding the instant it
-    /// ends.
-    fn csma(&mut self, samples: usize) {
-        if self.pending.is_empty() || self.keyed || self.want_tx {
-            self.slot_left = self.slot_samples;
-            return;
-        }
-        if self.dcd {
-            // Busy. Restart the countdown so we wait a full slot after it
-            // clears rather than pouncing on the first quiet sample.
-            self.slot_left = self.slot_samples;
-            return;
-        }
-        let n = samples as u32;
-        if self.slot_left > n {
-            self.slot_left -= n;
-            return;
-        }
-        self.slot_left = self.slot_samples;
-        if roll() < self.cfg.packet_persist {
-            self.want_tx = true;
-            self.status_dirty = true;
-        }
-    }
-
-    /// Render everything queued into the transmit modem: flags for TXDELAY,
-    /// the frames, then a short tail.
-    ///
-    /// Frames share a single flag between them rather than each paying its own
-    /// preamble — on a link with several frames outstanding that is the
-    /// difference between one over and several.
-    fn build_over(&mut self) {
-        let bits_per_flag = 8.0;
-        let baud = self.baud.baud();
-        let flags =
-            |ms: u16| ((ms as f64 / 1000.0) * baud / bits_per_flag).ceil().max(1.0) as usize;
-
-        let mut framer = Framer::new();
-        framer.push_flags(flags(self.cfg.packet_txdelay_ms));
-        let mut sent = Vec::new();
-        while let Some(f) = self.pending.pop_front() {
-            framer.push_frame(&f);
-            framer.push_flags(1);
-            sent.push(f);
-        }
-        framer.push_flags(flags(self.cfg.packet_txtail_ms));
-        let bits = framer.take();
-        self.tx_modem.push_bits(&bits);
-
-        // Our own traffic belongs in the monitor too: an operator watching a
-        // session needs both halves of it, and a beacon that never appears
-        // looks exactly like a beacon that was never sent.
-        for f in sent {
-            self.note_frame(&f, true);
-        }
-    }
-
     fn note(&mut self, entry: PacketHeard) {
         if self.heard.len() >= PACKET_HEARD_MAX {
             self.heard.remove(0);
@@ -538,9 +327,9 @@ impl PacketController {
 
     fn packet_status(&self) -> PacketStatus {
         PacketStatus {
-            baud: self.baud,
-            dcd: self.dcd,
-            level: self.modem.magnitude().clamp(0.0, 1.0),
+            baud: self.ch.baud(),
+            dcd: self.ch.dcd,
+            level: self.ch.level(),
             heard: self.heard.clone(),
             bad_frames: self.bad_frames,
             link: self
@@ -561,7 +350,7 @@ impl PacketController {
             tx_pending_msg: None,
             audio_hz: self.audio_hz(),
             tx_even: false,
-            transmitting: self.keyed,
+            transmitting: self.ch.keyed,
             tx_watchdog: false,
             transcript: Vec::<TranscriptLine>::new(),
             config: self.cfg.clone(),
@@ -571,6 +360,7 @@ impl PacketController {
             fsq_messages: Vec::new(),
             rade: None,
             packet: Some(self.packet_status()),
+            aprs: None,
             js8: None,
             fox_queue: Vec::new(),
             call_queue: Vec::new(),
@@ -639,26 +429,6 @@ impl Link {
     }
 }
 
-/// Samples in one CSMA slot at `rate`.
-fn slot_samples(cfg: &DigiConfig, rate: f64) -> u32 {
-    ((cfg.packet_slottime_ms.max(1) as f64 / 1000.0) * rate).round().max(1.0) as u32
-}
-
-/// A random byte for the persistence test.
-///
-/// Falls back to the clock when there is no entropy source. That is weaker than
-/// it looks but not dangerous here: the worst case is two stations picking the
-/// same slot and colliding, which the link layer already has to survive.
-fn roll() -> u8 {
-    let mut b = [0u8; 1];
-    if getrandom::fill(&mut b).is_err() {
-        let nanos =
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-        return (nanos >> 7) as u8;
-    }
-    b[0]
-}
-
 /// The frame type as a monitor prints it, and whatever text it carried.
 fn describe(p: &Packet) -> (String, String) {
     let text = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches('\n').to_string();
@@ -692,19 +462,8 @@ impl DigiEngine for PacketController {
     /// front end genuinely is receiving, and the panadapter wants it. It is this
     /// mode that must not listen, so this is where the refusal belongs.
     fn on_rx_audio(&mut self, tap: &[f32]) {
-        if self.keyed {
-            return;
-        }
-        let mut levels = std::mem::take(&mut self.levels);
-        levels.clear();
-        self.modem.process(tap, &mut levels);
-
-        let mut frames = std::mem::take(&mut self.frames);
-        frames.clear();
-        for lvl in levels.drain(..) {
-            self.deframer.push_level(lvl, &mut frames);
-        }
-        for f in frames.drain(..) {
+        let r = self.ch.on_rx_audio(tap, &self.cfg);
+        for f in r.frames {
             // Keep a copy for any KISS host before the codec gets an opinion:
             // a host is entitled to frames we cannot parse, which is most of
             // the point of offering the modem rather than the decoder.
@@ -713,24 +472,13 @@ impl DigiEngine for PacketController {
             }
             self.on_frame(&f);
         }
-        for d in self.deframer.take_discards() {
-            if d == Discard::BadFcs {
-                self.bad_frames = self.bad_frames.saturating_add(1);
-                self.status_dirty = true;
-            }
-        }
-
-        // Carrier detect and the CSMA slot clock, both on the audio clock and
-        // never on `poll` — see rule 2.
-        let dcd = self.modem.separation() > DCD_THRESHOLD;
-        if dcd != self.dcd {
-            self.dcd = dcd;
+        if r.bad > 0 {
+            self.bad_frames = self.bad_frames.saturating_add(r.bad);
             self.status_dirty = true;
         }
-        self.csma(tap.len());
-
-        self.levels = levels;
-        self.frames = frames;
+        if r.dcd_changed {
+            self.status_dirty = true;
+        }
     }
 
     fn poll(&mut self, now_in: SystemTime, _dial_hz: f64) -> Vec<DigiAction> {
@@ -759,13 +507,14 @@ impl DigiEngine for PacketController {
         }
 
         // CSMA has cleared us to transmit: key up through the engine's normal
-        // PTT path so the station interlock and the band rails apply. If they
-        // refuse, `abort_tx` puts the frames back on the queue rather than
-        // dropping them.
-        if self.want_tx && !self.keyed {
-            self.want_tx = false;
-            self.keyed = true;
-            self.build_over();
+        // PTT path so the station interlock and the band rails apply.
+        if let Some(sent) = self.ch.take_over(&self.cfg) {
+            // Our own traffic belongs in the monitor too: an operator watching
+            // a session needs both halves of it, and a beacon that never
+            // appears looks exactly like a beacon that was never sent.
+            for f in sent {
+                self.note_frame(&f, true);
+            }
             self.status_dirty = true;
             actions.push(DigiAction::KeyTx);
         }
@@ -784,7 +533,7 @@ impl DigiEngine for PacketController {
     }
 
     fn tx_burst_active(&self) -> bool {
-        self.keyed
+        self.ch.keyed
     }
 
     /// Whichever modem this speed uses, its own headroom — the shaped 9600
@@ -792,32 +541,20 @@ impl DigiEngine for PacketController {
     /// tone's figure for both would drive the shaping peaks into the limiter
     /// and close the eye.
     fn tx_peak(&self) -> f32 {
-        self.tx_modem.peak()
+        self.ch.tx_peak()
     }
 
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {
-        let n = self.tx_modem.next_block(out);
-        // Anything the modem did not fill is silence, and a block it filled
-        // nothing of means the over is played out. Returning `true` ends it:
-        // holding a packet channel open with dead carrier is the one thing a
-        // packet station must never do.
-        if n == 0 {
-            out.fill(0.0);
-            return true;
-        }
-        self.tx_modem.idle() && n < out.len()
+        self.ch.fill_tx_block(out)
     }
 
     fn on_burst_done(&mut self) {
-        self.keyed = false;
+        self.ch.on_burst_done();
         self.status_dirty = true;
     }
 
     fn abort(&mut self) {
-        self.keyed = false;
-        self.want_tx = false;
-        self.pending.clear();
-        self.tx_modem = TxModem::new(self.baud, self.tap_rate);
+        self.ch.abort();
         self.status_dirty = true;
     }
 
@@ -827,14 +564,12 @@ impl DigiEngine for PacketController {
     /// radio holds the station interlock — and throwing the frames away would
     /// turn a moment's contention into lost traffic. CSMA will try again.
     fn abort_tx(&mut self) {
-        self.keyed = false;
-        self.want_tx = false;
-        self.tx_modem = TxModem::new(self.baud, self.tap_rate);
+        self.ch.abort_tx();
         self.status_dirty = true;
     }
 
     fn set_config(&mut self, cfg: DigiConfig) {
-        let was = self.baud;
+        let was = self.ch.baud();
         self.cfg = cfg;
         if let Some(l) = self.link.as_mut() {
             l.data.set_accept_incoming(self.cfg.packet_accept_incoming);
@@ -851,7 +586,7 @@ impl DigiEngine for PacketController {
     fn set_audio_hz(&mut self, _hz: f32) {}
 
     fn audio_hz(&self) -> f32 {
-        match self.baud {
+        match self.ch.baud() {
             // Centred on the carrier: there is no audio offset to report.
             _ if self.mode == Mode::Packet => 0.0,
             PacketBaud::Hf300 => AfskProfile::Hf300.centre_hz() as f32,
@@ -893,13 +628,16 @@ mod tests {
     /// Rule 1, pinned from the first commit rather than after the first
     /// mysterious self-acknowledgement on the air. The moment a transmitter
     /// lands behind this gate the bug it prevents is silent.
+    ///
+    /// The gate itself lives in [`Ax25Channel`] and is tested there; this is
+    /// the controller half — that nothing reaches the monitor either.
     #[test]
     fn a_keyed_station_does_not_listen_to_itself() {
         let mut c = PacketController::new(Mode::Packet, DigiConfig::default(), 48_000.0);
-        c.keyed = true;
+        c.ch.keyed = true;
         c.on_rx_audio(&[0.5; 480]);
         assert!(c.heard.is_empty(), "a keyed station decoded something");
-        assert!(!c.dcd, "a keyed station must not read its own signal as a busy channel");
+        assert!(!c.ch.dcd, "a keyed station must not read its own signal as a busy channel");
     }
 
     /// An idle packet station holds the channel for nobody.
@@ -927,7 +665,7 @@ mod tests {
     fn hf_ignores_a_vhf_speed_left_in_the_config() {
         let cfg = DigiConfig { packet_baud: PacketBaud::Vhf9600, ..Default::default() };
         let c = PacketController::new(Mode::PacketHf, cfg, 48_000.0);
-        assert_eq!(c.baud, PacketBaud::Hf300);
+        assert_eq!(c.ch.baud(), PacketBaud::Hf300);
         assert_eq!(c.status().packet.unwrap().baud, PacketBaud::Hf300);
     }
 
@@ -936,7 +674,7 @@ mod tests {
     fn vhf_falls_back_when_the_config_says_hf() {
         let cfg = DigiConfig { packet_baud: PacketBaud::Hf300, ..Default::default() };
         let c = PacketController::new(Mode::Packet, cfg, 48_000.0);
-        assert_eq!(c.baud, PacketBaud::Vhf1200);
+        assert_eq!(c.ch.baud(), PacketBaud::Vhf1200);
     }
 
     /// A station with no callsign must not transmit. Unidentified transmission
@@ -952,7 +690,7 @@ mod tests {
         };
         let mut c = PacketController::new(Mode::Packet, cfg, 48_000.0);
         c.queue_beacon();
-        assert!(c.pending.is_empty(), "beaconed without a callsign");
+        assert_eq!(c.ch.queued(), 0, "beaconed without a callsign");
     }
 
     /// ...and with one, the beacon is a real frame addressed from that call.
@@ -962,12 +700,20 @@ mod tests {
             packet_beacon_text: "sdroxide test".into(),
             packet_beacon_minutes: 1,
             packet_mycall: "OE3JJS-10".into(),
+            packet_persist: 255,
+            packet_slottime_ms: 1,
             ..Default::default()
         };
-        let mut c = PacketController::new(Mode::Packet, cfg, 48_000.0);
+        let mut c = PacketController::new(Mode::Packet, cfg.clone(), 48_000.0);
         c.queue_beacon();
-        let frame = c.pending.front().expect("no beacon queued");
-        let p = Packet::parse(frame, None).expect("beacon does not parse");
+        // Out through the channel the way it actually goes, rather than by
+        // reading a private queue: a clear channel, a few blocks of audio, and
+        // the over the CSMA lets through.
+        for _ in 0..4 {
+            c.ch.on_rx_audio(&[0.0; 480], &cfg);
+        }
+        let sent = c.ch.take_over(&cfg).expect("no beacon queued");
+        let p = Packet::parse(&sent[0], None).expect("beacon does not parse");
         assert_eq!(p.src().call(), "OE3JJS-10");
         assert_eq!(p.dst().call(), "BEACON");
         match p.packet_type() {
@@ -976,63 +722,13 @@ mod tests {
         }
     }
 
-    /// CSMA must not key while another station is transmitting. This is the
-    /// whole reason the slot clock exists, and the failure mode is doubling on
-    /// somebody mid-frame.
-    #[test]
-    fn csma_holds_off_while_the_channel_is_busy() {
-        let cfg = DigiConfig { packet_persist: 255, ..Default::default() };
-        let mut c = PacketController::new(Mode::Packet, cfg, 48_000.0);
-        c.queue_frame(vec![0u8; 20]);
-        c.dcd = true;
-        // Far longer than a slot: with persistence at maximum it would fire
-        // instantly if the busy check were missing.
-        for _ in 0..50 {
-            c.csma(4800);
-        }
-        assert!(!c.want_tx, "keyed on top of another station");
-
-        c.dcd = false;
-        for _ in 0..50 {
-            c.csma(4800);
-        }
-        assert!(c.want_tx, "never keyed on a clear channel");
-    }
-
-    /// A slot must actually elapse. With persistence at maximum and a clear
-    /// channel it is tempting to key immediately, but the wait is what keeps
-    /// two stations that were both holding off from colliding the instant the
-    /// channel clears.
-    #[test]
-    fn csma_waits_at_least_one_slot() {
-        let cfg = DigiConfig { packet_persist: 255, packet_slottime_ms: 100, ..Default::default() };
-        let mut c = PacketController::new(Mode::Packet, cfg, 48_000.0);
-        c.queue_frame(vec![0u8; 20]);
-        // 100 ms at 48 kHz is 4800 samples; one short block is not a slot.
-        c.csma(480);
-        assert!(!c.want_tx, "keyed before a slot had elapsed");
-    }
-
-    /// A refused key-up must not lose the traffic. Another radio holding the
-    /// station interlock is temporary; the frames should still go when it lets
-    /// go.
-    #[test]
-    fn a_refused_key_keeps_the_queue() {
-        let mut c = PacketController::new(Mode::Packet, DigiConfig::default(), 48_000.0);
-        c.queue_frame(vec![0u8; 20]);
-        c.want_tx = true;
-        c.abort_tx();
-        assert_eq!(c.pending.len(), 1, "a refused key-up threw the frame away");
-    }
-
     /// Changing speed rebuilds the modem. Without this the operator picks 9600,
     /// nothing decodes, and there is no clue as to why.
     #[test]
     fn a_speed_change_rebuilds_the_modem() {
         let mut c = PacketController::new(Mode::Packet, DigiConfig::default(), 48_000.0);
-        assert_eq!(c.baud, PacketBaud::Vhf1200);
+        assert_eq!(c.ch.baud(), PacketBaud::Vhf1200);
         c.set_config(DigiConfig { packet_baud: PacketBaud::Vhf9600, ..Default::default() });
-        assert_eq!(c.baud, PacketBaud::Vhf9600);
-        assert!(matches!(c.modem, Modem::G3ruh(_)));
+        assert_eq!(c.ch.baud(), PacketBaud::Vhf9600);
     }
 }

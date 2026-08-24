@@ -243,6 +243,20 @@ impl Packet {
             packet_type: PacketType::Ui(Ui { pid: 0xf0, push: false, payload: payload.into() }),
         }
     }
+    /// Construct a UI frame with a digipeater path.
+    ///
+    /// Upstream's [`Packet::ui`] builds a direct frame, which is all a
+    /// connected-mode station needs — a link is negotiated with a fixed path
+    /// and the state machine carries it. APRS is the opposite: the path is
+    /// chosen per transmission, it is the only thing deciding how far the
+    /// frame goes, and it is what `WIDE1-1,WIDE2-1` means.
+    #[must_use]
+    pub fn ui_via<T: Into<Vec<u8>>>(src: Addr, dst: Addr, via: Vec<Addr>, payload: T) -> Self {
+        let mut p = Self::ui(src, dst, payload);
+        p.digipeater = via;
+        p
+    }
+
     /// Get the packet type.
     #[must_use]
     pub fn packet_type(&self) -> &PacketType {

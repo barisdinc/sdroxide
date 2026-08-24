@@ -62,7 +62,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Wfm => "WFM",
         // Data over FM rather than over a sideband: the carrier is the signal's
         // centre, not one edge of it.
-        Mode::Rifp | Mode::Packet => "PKTFM",
+        Mode::Rifp | Mode::Packet | Mode::Aprs => "PKTFM",
         Mode::Digl => "PKTLSB",
         Mode::Digu
         | Mode::Ft8

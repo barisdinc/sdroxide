@@ -37,7 +37,7 @@ pub(in crate::app) mod spectrum;
 pub(in crate::app) mod speech;
 pub(in crate::app) mod spots;
 pub(in crate::app) mod top_bar;
-pub(in crate::app) mod util;
+pub(crate) mod util;
 pub(in crate::app) mod windows;
 pub(in crate::app) mod winlink;
 
@@ -416,6 +416,19 @@ pub struct SdroxideApp {
     fsq_rx_images: Vec<egui::TextureHandle>,
     /// Picked-image inbox for FSQ image transmit (raw file bytes).
     fsq_img_inbox: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// APRS: the station icons, decoded once and kept as textures.
+    aprs_icons: crate::aprs_icons::AprsIcons,
+    /// APRS: the map's centre, zoom and selected station.
+    aprs_map: crate::aprs_map::AprsMapState,
+    /// APRS: who the message box is addressed to.
+    aprs_target: String,
+    /// APRS: what is typed in the message box but not yet sent.
+    aprs_draft: String,
+    /// APRS: which pane of the message column is showing — the conversation or
+    /// the raw frames on the channel.
+    aprs_show_traffic: bool,
+    /// APRS: filter for the station list; matches a callsign or a comment.
+    aprs_filter: String,
     /// The last decode the user clicked (not REPLY): its call and map
     /// location, shown as a faint preview marker distinct from the active DX.
     digi_preview: Option<(String, (f64, f64))>,
@@ -1022,6 +1035,12 @@ impl SdroxideApp {
             fsq_show_contacts: false,
             fsq_rx_images: Vec::new(),
             fsq_img_inbox: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            aprs_icons: crate::aprs_icons::AprsIcons::default(),
+            aprs_map: crate::aprs_map::AprsMapState::default(),
+            aprs_target: String::new(),
+            aprs_draft: String::new(),
+            aprs_show_traffic: false,
+            aprs_filter: String::new(),
             digi_cfg_seeded: false,
             digi_tx_hz_edit: String::new(),
             digi_preview: None,

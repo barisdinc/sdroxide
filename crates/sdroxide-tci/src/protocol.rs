@@ -306,7 +306,7 @@ pub fn mode_to_tci(mode: Mode) -> &'static str {
         Mode::Sam => "sam",
         // RIFP centres on the dial and swings ±4 kHz, and VHF packet
         // frequency-modulates it too: FM, not a sideband.
-        Mode::Nfm | Mode::Rifp | Mode::Packet => "nfm",
+        Mode::Nfm | Mode::Rifp | Mode::Packet | Mode::Aprs => "nfm",
         Mode::Wfm => "wfm",
         Mode::Digu
         | Mode::Ft8

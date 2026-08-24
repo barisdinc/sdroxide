@@ -385,7 +385,14 @@ impl eframe::App for SdroxideApp {
             let mode_changed = self.digi_view_fit.map(|(m, _)| m) != Some(mode);
             let dial_moved = self.digi_view_fit.map(|(_, d)| d) != Some(dial);
             let sub_visible = self.view.view_lo_hz < sub_hi && self.view.view_hi_hz > sub_lo;
-            if locked || mode_changed || (dial_moved && !sub_visible) {
+            // APRS is exempt from all of it. Every other digital mode is worked
+            // inside a sub-band, so framing that sub-band is a service; APRS is
+            // one channel on a band an operator has every reason to be watching
+            // — the repeater outputs above it, the simplex calling frequency
+            // below, a satellite passing over the top. Narrowing the waterfall
+            // to ±8 kHz around 144.800 would take that away in exchange for a
+            // view of a channel whose whole content is already in the panel.
+            if !mode.is_aprs() && (locked || mode_changed || (dial_moved && !sub_visible)) {
                 self.view.view_lo_hz = sub_lo;
                 self.view.view_hi_hz = sub_hi;
             }
@@ -575,6 +582,8 @@ impl eframe::App for SdroxideApp {
                                     self.image_panel(ui, &mut cmds, mode);
                                 } else if mode.is_rf_paint() {
                                     self.rf_paint_panel(ui, &mut cmds, panel_h);
+                                } else if mode.is_aprs() {
+                                    self.aprs_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_packet() {
                                     self.packet_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_fsq() {

@@ -12,6 +12,8 @@
 //! That crate is the only AGPL in the tree; see its manifest for what §13 means
 //! for anything that links it.
 
+pub mod aprs_controller;
+pub(crate) mod ax25_channel;
 pub mod clock;
 pub mod controller;
 pub mod cw_controller;
@@ -37,6 +39,7 @@ pub mod wefax_controller;
 pub mod wspr;
 pub mod wspr_controller;
 
+pub use aprs_controller::AprsController;
 pub use clock::ClockMonitor;
 pub use controller::{DigiAction, DigiController};
 pub use cw_controller::CwController;
@@ -180,6 +183,11 @@ pub trait DigiEngine: Send {
     /// Packet: transmit a frame on a KISS host's behalf. Subject to CSMA like
     /// everything else — a host asks for the channel, it does not take it.
     fn packet_send_frame(&mut self, _frame: Vec<u8>) {}
+    /// APRS: send one position beacon now. Still subject to CSMA — the
+    /// operator asks for the channel, they do not take it.
+    fn aprs_beacon_now(&mut self) {}
+    /// APRS: send a message, and keep retrying it until it is acknowledged.
+    fn aprs_send_message(&mut self, _to: String, _text: String) {}
     /// Packet: frames heard since the last call, for a KISS host. Drained
     /// rather than pushed, so a controller need not know a socket exists.
     fn packet_take_air_frames(&mut self) -> Vec<Vec<u8>> {
@@ -241,6 +249,8 @@ mod dispatch_tests {
             "wefax"
         } else if mode.is_rifp() {
             "rifp"
+        } else if mode.is_aprs() {
+            "aprs"
         } else if mode.is_packet() {
             "packet"
         } else if mode.is_rf_paint() {
@@ -284,6 +294,13 @@ mod dispatch_tests {
         // the operator would get a PSK decoder listening to AX.25.
         assert_eq!(pick(Mode::Packet), "packet");
         assert_eq!(pick(Mode::PacketHf), "packet");
+        // APRS is the same trap one level down: it is AX.25 over the same
+        // 1200 baud modem, so the packet branch would decode the channel
+        // perfectly and hand the operator a monitor with no map, no messages
+        // and no beacon. `Mode::is_packet` deliberately excludes it, and this
+        // is what says so.
+        assert_eq!(pick(Mode::Aprs), "aprs");
+        assert!(!Mode::Aprs.is_packet(), "APRS must not reach the packet controller");
         // CW is not a digital mode at all, so it has to be picked off before
         // the chain rather than by it — the fall-through would hand it an FT8
         // decoder, which would sit there decoding nothing for ever.

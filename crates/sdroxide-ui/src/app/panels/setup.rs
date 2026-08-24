@@ -21,7 +21,9 @@ impl SdroxideApp {
         // Per-mode parameters (RTTY/Olivia/THOR/FSQ) now live in each panel's
         // header, so this dialog only carries the shared identity + the
         // message templates the slotted QSO modes share.
-        let title = if mode.is_packet() {
+        let title = if mode.is_aprs() {
+            "APRS Setup".to_string()
+        } else if mode.is_packet() {
             "Packet Setup".to_string()
         } else if mode.is_text_modem() || mode.is_hell() || mode.is_js8() {
             format!("{} Setup", mode.label())
@@ -175,6 +177,214 @@ impl SdroxideApp {
                         ui.end_row();
                     }
 
+                    if mode.is_aprs() {
+                        ui.label("APRS call");
+                        if crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut cfg.aprs_mycall),
+                        )
+                        .on_hover_text(
+                            "The callsign this station beacons under, with its SSID — \
+                             OE3JJS-9 for a car, -10 for an I-gate, -5 for a phone. Empty \
+                             means it will never transmit: an APRS frame with no callsign in \
+                             it is an unidentified transmission.",
+                        )
+                        .changed()
+                        {
+                            cfg.aprs_mycall = cfg.aprs_mycall.to_uppercase();
+                            changed = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Symbol");
+                        ui.horizontal(|ui| {
+                            // A picker over the whole 190-entry table would be
+                            // a dialog of its own. These are the ones an
+                            // amateur station actually is, and the two
+                            // characters are editable beside them for the rest.
+                            for (table, code, label) in APRS_COMMON_SYMBOLS {
+                                let sym = sdroxide_types::AprsSymbol::new(*table, *code);
+                                let on = cfg.aprs_symbol == sym;
+                                let (r, resp) = ui.allocate_exact_size(
+                                    egui::vec2(19.0, 19.0),
+                                    egui::Sense::click(),
+                                );
+                                let tint = if on {
+                                    crate::theme::YELLOW()
+                                } else {
+                                    crate::theme::CYAN_DIM()
+                                };
+                                self.aprs_icons.paint(ui, r, sym.kind(), tint);
+                                if resp.on_hover_text(*label).clicked() {
+                                    cfg.aprs_symbol = sym;
+                                    changed = true;
+                                }
+                            }
+                            let mut text = cfg.aprs_symbol.text();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut text)
+                                        .desired_width(30.0)
+                                        .char_limit(2)
+                                        .font(egui::TextStyle::Monospace),
+                                )
+                                .on_hover_text(
+                                    "The two characters as the protocol carries them: a table \
+                                     (`/` or `\\`) and a symbol code. A digit or a letter in \
+                                     the first position is an overlay, drawn on top of the \
+                                     alternate table's icon.",
+                                )
+                                .changed()
+                            {
+                                let mut c = text.chars();
+                                if let (Some(t), Some(k)) = (c.next(), c.next()) {
+                                    cfg.aprs_symbol = sdroxide_types::AprsSymbol::new(t, k);
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("Path");
+                        ui.horizontal(|ui| {
+                            changed |= crate::chrome::field(
+                                ui,
+                                egui::TextEdit::singleline(&mut cfg.aprs_path)
+                                    .hint_text("WIDE1-1,WIDE2-1")
+                                    .desired_width(150.0),
+                            )
+                            .on_hover_text(
+                                "How far you ask to be repeated. This is the single most \
+                                 consequential setting on the channel: every hop multiplies \
+                                 the transmissions the whole network makes on one shared \
+                                 frequency.",
+                            )
+                            .changed();
+                        });
+                        ui.end_row();
+                        // Advice, not enforcement: local practice varies, and a
+                        // path that is wasteful in a European city is
+                        // reasonable in the outback. Nothing here refuses to
+                        // transmit.
+                        if let Some(note) =
+                            sdroxide_aprs::path_advice(&sdroxide_aprs::parse_path(&cfg.aprs_path))
+                        {
+                            ui.label("");
+                            ui.label(RichText::new(note).size(10.0).color(crate::theme::YELLOW()));
+                            ui.end_row();
+                        }
+
+                        ui.label("Position");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .checkbox(&mut cfg.aprs_use_grid, "From my grid")
+                                .on_hover_text(
+                                    "Beacon the centre of the locator above, reported with the \
+                                     ambiguity a locator actually has — a six-character one is \
+                                     a couple of kilometres across, and saying so is honest.",
+                                )
+                                .changed();
+                        });
+                        ui.end_row();
+                        if !cfg.aprs_use_grid {
+                            ui.label("Latitude");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut cfg.aprs_lat)
+                                        .range(-90.0..=90.0)
+                                        .speed(0.0001)
+                                        .max_decimals(6)
+                                        .suffix(" °N"),
+                                )
+                                .changed();
+                            ui.end_row();
+                            ui.label("Longitude");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut cfg.aprs_lon)
+                                        .range(-180.0..=180.0)
+                                        .speed(0.0001)
+                                        .max_decimals(6)
+                                        .suffix(" °E"),
+                                )
+                                .changed();
+                            ui.end_row();
+                        }
+
+                        ui.label("Comment");
+                        changed |= crate::chrome::field(
+                            ui,
+                            egui::TextEdit::singleline(&mut cfg.aprs_comment)
+                                .hint_text("sent with every beacon")
+                                .char_limit(43),
+                        )
+                        .changed();
+                        ui.end_row();
+
+                        ui.label("Beacon");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut cfg.aprs_beacon_minutes)
+                                        .range(0..=120)
+                                        .suffix(" min"),
+                                )
+                                .on_hover_text(
+                                    "0 — the default — never beacons on a timer. Thirty minutes \
+                                     is the convention for a fixed station; a moving one \
+                                     beacons oftener, but every beacon is somebody else's \
+                                     channel time.",
+                                )
+                                .changed();
+                            changed |= ui
+                                .checkbox(&mut cfg.aprs_compressed, "Compressed")
+                                .on_hover_text(
+                                    "The compressed position format: a third of the air time \
+                                     and more precise. Every receiver since the 1990s reads it.",
+                                )
+                                .changed();
+                        });
+                        ui.end_row();
+                        if cfg.aprs_beacon_minutes > 0 {
+                            ui.label("");
+                            ui.label(
+                                RichText::new(
+                                    "The first goes out one interval from now, not immediately.",
+                                )
+                                .size(10.0)
+                                .weak(),
+                            );
+                            ui.end_row();
+                        }
+
+                        ui.label("Messages");
+                        changed |= ui
+                            .checkbox(&mut cfg.aprs_ack_messages, "Acknowledge")
+                            .on_hover_text(
+                                "Answer messages addressed to you. An acknowledgement is a \
+                                 transmission this station makes without being asked, so a \
+                                 receive-only setup should turn it off — and the beacon then \
+                                 stops claiming to be reachable too.",
+                            )
+                            .changed();
+                        ui.end_row();
+
+                        ui.label("Keep stations");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.aprs_station_ttl_min)
+                                    .range(5..=1440)
+                                    .suffix(" min"),
+                            )
+                            .on_hover_text(
+                                "How long a station stays on the map after it was last heard. \
+                                 Also what the map's fade is measured against, so a short \
+                                 window shows only what is live.",
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+
                     if mode.is_js8() {
                         let turbo = cfg.js8_speed == sdroxide_types::Js8Speed::Turbo;
                         ui.label("Auto-reply");
@@ -281,6 +491,14 @@ impl SdroxideApp {
                         .changed();
                         ui.end_row();
                     }
+                    // Everything from here down belongs to the QSO modes: a
+                    // transmit period, a sequencer, a watchdog and the message
+                    // templates. APRS has none of them — it is a broadcast
+                    // channel with a beacon on it — so the rows would be
+                    // controls that do nothing under a dialog titled after it.
+                    if mode.is_aprs() {
+                        return;
+                    }
                     ui.label("TX period");
                     ui.horizontal(|ui| {
                         changed |= ui.selectable_value(&mut cfg.tx_even, true, "Even").changed();
@@ -379,6 +597,9 @@ impl SdroxideApp {
                         ui.end_row();
                     }
                 });
+                if mode.is_aprs() {
+                    return;
+                }
                 ui.separator();
                 ui.label(
                     RichText::new("Message templates  {MYCALL} {MYGRID} {DX} {REPORT}")
@@ -410,3 +631,29 @@ impl SdroxideApp {
         self.show_digi_settings = open;
     }
 }
+
+/// The symbols an amateur station actually is, as a row of pickable icons.
+///
+/// The full table is 190 entries and picking from it belongs in a dialog of
+/// its own; everything else is reachable by typing the two characters beside
+/// these.
+const APRS_COMMON_SYMBOLS: &[(char, char, &str)] = &[
+    ('/', '-', "Home station"),
+    ('/', '>', "Car"),
+    ('/', 'k', "Truck"),
+    ('/', 'v', "Van"),
+    ('/', '<', "Motorcycle"),
+    ('/', 'b', "Bicycle"),
+    ('/', '[', "Person on foot"),
+    ('/', 'R', "Motorhome"),
+    ('/', 's', "Boat"),
+    ('/', 'Y', "Yacht"),
+    ('/', '\'', "Light aircraft"),
+    ('/', 'O', "Balloon"),
+    ('/', '#', "Digipeater"),
+    ('/', '&', "I-gate"),
+    ('/', 'r', "Repeater"),
+    ('/', '_', "Weather station"),
+    ('/', 'h', "Hospital"),
+    ('/', ';', "Portable / campsite"),
+];

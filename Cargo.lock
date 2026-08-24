@@ -5003,6 +5003,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdroxide-aprs"
+version = "1.5.0"
+dependencies = [
+ "sdroxide-types",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "sdroxide-audio"
 version = "1.5.0"
 dependencies = [
@@ -5072,6 +5080,7 @@ dependencies = [
  "mfsk-core",
  "num-complex",
  "rayon",
+ "sdroxide-aprs",
  "sdroxide-ax25",
  "sdroxide-deepcw",
  "sdroxide-dsp",
@@ -5534,6 +5543,7 @@ dependencies = [
  "pollster",
  "rfd",
  "ron",
+ "sdroxide-aprs",
  "sdroxide-config",
  "sdroxide-midi",
  "sdroxide-proto",

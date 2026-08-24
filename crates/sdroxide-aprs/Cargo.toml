@@ -1,0 +1,17 @@
+[package]
+name = "sdroxide-aprs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "APRS codec: the information field of an AX.25 UI frame, both directions — positions (uncompressed, compressed and Mic-E), objects, items, status, weather, telemetry and messages."
+
+# Pure parsing and formatting: no I/O, no threads, no clock. The AX.25 frame
+# around it belongs to `sdroxide-ax25` and the modem to `sdroxide-dsp`; what is
+# here is only the bytes between the address field and the FCS.
+#
+# Every format is written from the APRS Protocol Reference 1.0.1 (and its
+# addenda 1.1 and 1.2 where they change one), with the section cited beside it.
+
+[dependencies]
+sdroxide-types.workspace = true
+thiserror.workspace = true

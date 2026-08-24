@@ -14,9 +14,9 @@ use tracing::{debug, info, warn};
 
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
-    CwController, DigiAction, DigiController, DigiEngine, FsqController, HellController,
-    Js8Controller, PacketController, RadeController, RfPaintController, RifpController,
-    SstvController, TextModemController, WefaxController, WsprController,
+    AprsController, CwController, DigiAction, DigiController, DigiEngine, FsqController,
+    HellController, Js8Controller, PacketController, RadeController, RfPaintController,
+    RifpController, SstvController, TextModemController, WefaxController, WsprController,
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
@@ -4010,6 +4010,12 @@ impl Engine {
             Box::new(WefaxController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_rifp() {
             Box::new(RifpController::new(self.digi_config.clone(), tap_rate))
+        } else if mode.is_aprs() {
+            // Ahead of `is_packet`, which APRS is deliberately not a member
+            // of: the two share a modem and nothing else. A controller picked
+            // by the packet branch would decode the channel perfectly and show
+            // it in a monitor pane with no map, no messages and no beacon.
+            Box::new(AprsController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_packet() {
             // Both packet modes, one controller: HF and VHF differ in the radio
             // underneath, not in the link layer. Ahead of `is_text_modem` and
@@ -5456,6 +5462,14 @@ impl Engine {
                 self.emit_winlink_status();
                 return;
             }
+            AprsBeacon => match self.digi.as_mut() {
+                Some(d) if self.state.rx[0].mode.is_aprs() => d.aprs_beacon_now(),
+                _ => {}
+            },
+            AprsSendMessage { to, text } => match self.digi.as_mut() {
+                Some(d) if self.state.rx[0].mode.is_aprs() => d.aprs_send_message(to, text),
+                _ => {}
+            },
             PacketBeacon => {
                 match self.digi.as_mut() {
                     Some(d) if self.state.rx[0].mode.is_packet() => d.packet_beacon_now(),
@@ -7047,6 +7061,30 @@ impl Engine {
     }
 
     fn set_rx_mode(&mut self, rx: RxId, mode: Mode) {
+        // APRS is a channel, not a band, and which channel is a property of
+        // the operator's region: 144.800 in Region 1, 144.390 in the Americas,
+        // 145.175 in Australia and New Zealand. A receiver anywhere else is
+        // not receiving APRS at all, so selecting the mode tunes there.
+        //
+        // Every other mode leaves the dial alone, and this is careful not to
+        // become an exception to that: it only fires on the *main* receiver,
+        // only when the mode is actually changing, and only when the dial is
+        // not already on one of the channels — so a traveller who has tuned
+        // Japan's 144.640 by hand keeps it, and so does anyone who moves off
+        // frequency and back within the mode.
+        if rx == RxId::Main
+            && mode.is_aprs()
+            && !self.state.rx[0].mode.is_aprs()
+            && !sdroxide_types::is_aprs_channel(self.state.active_freq_hz())
+        {
+            let hz = sdroxide_types::aprs_dial();
+            match self.state.active_vfo {
+                Vfo::A => self.state.vfo_a_hz = hz,
+                Vfo::B => self.state.vfo_b_hz = hz,
+            }
+            self.state.band = Band::containing(hz);
+            self.follow_dial();
+        }
         // Changing modes under a running keyer message would leave it playing
         // into a transmit chain that has just been rebuilt (or into a digital
         // mode that has no use for it).
@@ -10036,9 +10074,9 @@ fn rig_mode_class(m: Mode) -> u8 {
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
         Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => 2,
         Mode::Cw => 3,
-        // RIFP and VHF packet are data on an FM carrier, so a rig reporting
-        // plain FM is still where we left it.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet => 5,
+        // RIFP, VHF packet and APRS are data on an FM carrier, so a rig
+        // reporting plain FM is still where we left it.
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => 5,
     }
 }
 

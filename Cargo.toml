@@ -102,6 +102,7 @@ sdroxide-ax25 = { path = "crates/sdroxide-ax25" }
 sdroxide-kiss = { path = "crates/sdroxide-kiss" }
 sdroxide-deepcw = { path = "crates/sdroxide-deepcw" }
 sdroxide-ism = { path = "crates/sdroxide-ism" }
+sdroxide-aprs = { path = "crates/sdroxide-aprs" }
 
 serde = { version = "1", features = ["derive"] }
 num-complex = "0.4"

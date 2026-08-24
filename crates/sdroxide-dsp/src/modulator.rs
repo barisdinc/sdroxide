@@ -62,8 +62,9 @@ pub fn make_modulator(mode: Mode, rate: f64, passband: (f32, f32)) -> Option<Box
         Mode::Rifp => Some(Box::new(CpfskMod::new(rate))),
         // VHF packet frequency-modulates the carrier, at both bauds — the
         // modem hands over audio and this integrates it, exactly as a rig's
-        // FM modulator would.
-        Mode::Packet => Some(Box::new(PacketFmMod::new(rate))),
+        // FM modulator would. APRS is 1200 baud packet on a shared channel and
+        // modulates identically.
+        Mode::Packet | Mode::Aprs => Some(Box::new(PacketFmMod::new(rate))),
         // CW has none, deliberately. A manual PTT in CW keys a carrier — that
         // is what a straight key does — and modulating the microphone instead
         // would put speech on the air in a CW segment. The panel's keyer needs

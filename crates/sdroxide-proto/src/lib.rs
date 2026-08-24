@@ -605,7 +605,19 @@ use sdroxide_types::{
 /// other direction — a v87 client handed `QrpLabs` has no such variant to put
 /// it in, and postcard is not self-describing, so it does not fail on the field
 /// but on everything after it. Same reasoning as v72's `IsmProtocol` append.
-pub const PROTO_VERSION: u16 = 88;
+///
+/// **89** — APRS is a mode of its own (issue #150). Three appends, all at the
+/// tail of their type: [`sdroxide_types::Mode`] gained `Aprs`,
+/// [`sdroxide_types::Command`] gained `AprsBeacon` and `AprsSendMessage`, and
+/// [`sdroxide_types::DigiStatus`] gained an `aprs` field carrying the map, the
+/// messages and the channel.
+///
+/// The `Mode` append is the one that forces the bump, and it is the same trap
+/// as v88's: postcard numbers variants by declaration index, so every existing
+/// mode keeps its number — but a v88 client handed `Aprs` has no variant to
+/// decode it into and desynchronises on everything after it, rather than
+/// failing on the field itself.
+pub const PROTO_VERSION: u16 = 89;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

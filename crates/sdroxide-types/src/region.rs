@@ -115,6 +115,9 @@ pub(crate) mod mask {
     /// Regions 1 and 3 together. Only the 13 cm FT8 split falls this way: the
     /// Americas work the 2304 segment and both of the others the 2320 one.
     pub(crate) const R13: u8 = 1 | 4;
+    /// Regions 1 and 2 together — where the Australian and New Zealand APRS
+    /// channel is worth naming but is nobody's default.
+    pub(crate) const R12: u8 = 1 | 2;
 }
 
 /// The station's region, as a discriminant index into [`Region::ALL`].

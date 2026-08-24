@@ -144,8 +144,9 @@ pub fn make_demod(mode: Mode, channel_rate: f64) -> Option<Box<dyn Demodulator>>
         | Mode::PacketHf
         | Mode::Rade => Some(Box::new(SsbDemod::new(channel_rate, lo, hi))),
         // VHF packet frequency-modulates the carrier, so like RIFP it wants a
-        // discriminator — but a flat one, not the voice NFM path.
-        Mode::Packet => Some(Box::new(PacketFmDemod::new(channel_rate, lo, hi))),
+        // discriminator — but a flat one, not the voice NFM path. APRS is the
+        // same waveform on a channel of its own and takes the same path.
+        Mode::Packet | Mode::Aprs => Some(Box::new(PacketFmDemod::new(channel_rate, lo, hi))),
         // RIFP is the one digital mode that is not sideband audio: its CPFSK
         // carrier sits on the dial, so it wants a discriminator, not a
         // sideband filter.

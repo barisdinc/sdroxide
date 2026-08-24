@@ -71,7 +71,7 @@ pub fn mode_to_civ(m: Mode) -> u8 {
         // RIFP is FSK on the carrier, and VHF packet frequency-modulates it,
         // so a CAT rig has to be in FM for the dial to mean what they mean by
         // it.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet => 0x05,
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => 0x05,
         Mode::Spec => 0x01,
     }
 }
@@ -493,7 +493,7 @@ pub fn set_filter_frame(radio: u8, mode: Mode, lo_hz: f32, hi_hz: f32) -> Option
     let want = (hi_hz - lo_hz).abs().round().max(0.0) as u32;
     let index = match mode {
         // No filter-width setting: the mode itself picks the filter.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet => return None,
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => return None,
         Mode::Am | Mode::Sam | Mode::Dsb => {
             // 200 Hz .. 10 kHz in 200 Hz steps, rounded up so the passband is
             // never quietly narrower than the one on screen.

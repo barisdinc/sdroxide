@@ -31,7 +31,11 @@ pub(in crate::app) fn time_str(unix: i64) -> String {
 }
 
 /// Compact age of a spot: `"12s"`, `"3m"`, `"1h"`.
-pub(in crate::app) fn fmt_age(secs: i64) -> String {
+///
+/// `pub(crate)` rather than `pub(in crate::app)`: the APRS map is a sibling of
+/// the panels and shows exactly the same thing — how long ago something was
+/// heard — so it uses the same words for it.
+pub(crate) fn fmt_age(secs: i64) -> String {
     let s = secs.max(0);
     if s < 60 {
         format!("{s}s")

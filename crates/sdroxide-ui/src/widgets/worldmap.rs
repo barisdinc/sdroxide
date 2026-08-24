@@ -36,13 +36,13 @@ const EASE: f64 = 0.0375;
 /// Persistent, animated view state (centre + longitudinal span, in degrees).
 /// Owned by the caller so the zoom eases across frames.
 pub struct MapView {
-    clat: f64,
-    clon: f64,
-    lon_span: f64,
-    initialized: bool,
+    pub(crate) clat: f64,
+    pub(crate) clon: f64,
+    pub(crate) lon_span: f64,
+    pub(crate) initialized: bool,
     /// The user has panned or zoomed by hand: the auto-fit stops moving the
     /// view under them until they double-click to hand it back.
-    manual: bool,
+    pub(crate) manual: bool,
 }
 
 impl Default for MapView {
@@ -54,14 +54,14 @@ impl Default for MapView {
 impl MapView {
     /// The latitude window this zoom covers on a map of the given aspect
     /// (height/width) — the projection is linear in both axes.
-    fn lat_span(&self, aspect: f64) -> f64 {
+    pub(crate) fn lat_span(&self, aspect: f64) -> f64 {
         self.lon_span * aspect
     }
 
     /// Keep the view legal: the zoom inside its limits, and the latitude window
     /// inside the poles so a pan cannot drift off into empty space above the
     /// map. Longitude wraps instead of clamping — the world repeats sideways.
-    fn clamp(&mut self, aspect: f64) {
+    pub(crate) fn clamp(&mut self, aspect: f64) {
         self.lon_span = self.lon_span.clamp(MIN_USER_LON_SPAN, 360.0);
         let lat_span = self.lat_span(aspect);
         self.clat = if lat_span >= 180.0 {
@@ -78,6 +78,18 @@ impl MapView {
         self.clon = wrap180(self.clon - dx_frac * self.lon_span);
         self.clat += dy_frac * self.lat_span(aspect);
         self.clamp(aspect);
+    }
+
+    /// Put a place in the middle and hold it there.
+    ///
+    /// Holding it is the point: the auto-fit frames everything on the map,
+    /// which is the opposite of what somebody who asked to centre on one
+    /// station wants. A double-click hands the view back.
+    pub(crate) fn centre_on(&mut self, lat: f64, lon: f64) {
+        self.clat = lat;
+        self.clon = wrap180(lon);
+        self.initialized = true;
+        self.manual = true;
     }
 
     /// Zoom by `factor` (below 1 zooms *in*) about a point given as a fraction
@@ -99,12 +111,12 @@ impl MapView {
 
 /// `c` at `a`/255 opacity — the halo behind a marker, or a station dot faded
 /// by age. Takes the alpha as a float because every caller is scaling one.
-fn alpha(c: Color32, a: f32) -> Color32 {
+pub(crate) fn alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a.clamp(0.0, 255.0) as u8)
 }
 
 /// Wrap a longitude delta into [-180, 180).
-fn wrap180(mut d: f64) -> f64 {
+pub(crate) fn wrap180(mut d: f64) -> f64 {
     d = (d + 180.0).rem_euclid(360.0) - 180.0;
     d
 }
@@ -125,7 +137,7 @@ fn centroid(pts: &[(f64, f64)]) -> Option<(f64, f64)> {
 /// pinch zoom about the pointer, double-click hands the view back to the
 /// auto-fit. Returns true while the user is actually moving it, so the caller
 /// can keep the frames coming.
-fn interact(ui: &Ui, view: &mut MapView, resp: &Response, aspect: f64) -> bool {
+pub(crate) fn interact(ui: &Ui, view: &mut MapView, resp: &Response, aspect: f64) -> bool {
     let rect = resp.rect;
     let mut touched = false;
     let frac = |p: Pos2| {
@@ -219,6 +231,49 @@ fn target_view(home: Option<(f64, f64)>, contacts: &[(f64, f64)], aspect: f64) -
         clat.clamp(-90.0 + lat_span / 2.0, 90.0 - lat_span / 2.0)
     };
     (clat, clon, lon_span)
+}
+
+/// The continents, as a dot grid sized to the available pixels (about one dot
+/// every ~4 px), sampling the high-res land bitmap for crisp coastlines. Each
+/// cell maps to a (lat, lon) in the current view; longitude wraps.
+///
+/// Returns the dot radius, which is the scale the callers draw their own
+/// markers against.
+pub(crate) fn draw_land(
+    p: &eframe::egui::Painter,
+    rect: eframe::egui::Rect,
+    clat: f64,
+    clon: f64,
+    lon_span: f64,
+    lat_span: f64,
+    land: Color32,
+) -> f32 {
+    let (mw, mh) = land_mask_dims();
+    let cols = ((rect.width() / 4.0) as usize).clamp(80, mw);
+    let rows = ((rect.height() / 4.0) as usize).clamp(40, mh);
+    let cell_w = rect.width() / cols as f32;
+    let cell_h = rect.height() / rows as f32;
+    let dot_r = (cell_w.min(cell_h) * 0.44).max(0.7);
+
+    for row in 0..rows {
+        let fy = (row as f64 + 0.5) / rows as f64; // 0 top .. 1 bottom
+        let lat = clat + (0.5 - fy) * lat_span;
+        if !(-90.0..=90.0).contains(&lat) {
+            continue; // beyond a pole → open space, no land
+        }
+        let mrow = (((90.0 - lat) / 180.0 * mh as f64) as usize).min(mh - 1);
+        for col in 0..cols {
+            let fx = (col as f64 + 0.5) / cols as f64; // 0 left .. 1 right
+            let lonw = wrap180(clon + (fx - 0.5) * lon_span);
+            let mcol = ((lonw + 180.0) / 360.0 * mw as f64) as usize % mw;
+            if land_cell(mcol, mrow) {
+                let x = rect.left() + (col as f32 + 0.5) * cell_w;
+                let y = rect.top() + (row as f32 + 0.5) * cell_h;
+                p.circle_filled(pos2(x, y), dot_r, land);
+            }
+        }
+    }
+    dot_r
 }
 
 /// Draw the map filling the available width (2:1 aspect). `view` carries the
@@ -341,35 +396,7 @@ pub fn show(
         }
     }
 
-    // Render a dot grid sized to the available pixels (about one dot every
-    // ~4 px), sampling the high-res land bitmap for crisp coastlines. Each cell
-    // maps to a (lat, lon) in the current view; longitude wraps around home.
-    let (mw, mh) = land_mask_dims();
-    let cols = ((rect.width() / 4.0) as usize).clamp(80, mw);
-    let rows = ((rect.height() / 4.0) as usize).clamp(40, mh);
-    let cell_w = rect.width() / cols as f32;
-    let cell_h = rect.height() / rows as f32;
-    let dot_r = (cell_w.min(cell_h) * 0.44).max(0.7);
-    let land = map.land;
-
-    for row in 0..rows {
-        let fy = (row as f64 + 0.5) / rows as f64; // 0 top .. 1 bottom
-        let lat = clat + (0.5 - fy) * lat_span;
-        if !(-90.0..=90.0).contains(&lat) {
-            continue; // beyond a pole → open space, no land
-        }
-        let mrow = (((90.0 - lat) / 180.0 * mh as f64) as usize).min(mh - 1);
-        for col in 0..cols {
-            let fx = (col as f64 + 0.5) / cols as f64; // 0 left .. 1 right
-            let lonw = wrap180(clon + (fx - 0.5) * lon_span);
-            let mcol = ((lonw + 180.0) / 360.0 * mw as f64) as usize % mw;
-            if land_cell(mcol, mrow) {
-                let x = rect.left() + (col as f32 + 0.5) * cell_w;
-                let y = rect.top() + (row as f32 + 0.5) * cell_h;
-                p.circle_filled(pos2(x, y), dot_r, land);
-            }
-        }
-    }
+    let dot_r = draw_land(&p, rect, clat, clon, lon_span, lat_span, map.land);
 
     // Project (lat, lon) to screen using the current view; longitude wraps.
     let project = |lat: f64, lon: f64| -> Pos2 {

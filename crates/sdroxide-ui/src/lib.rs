@@ -8,6 +8,8 @@
 //! targets.
 
 mod app;
+mod aprs_icons;
+mod aprs_map;
 pub mod chrome;
 mod colormap;
 mod digi_map;

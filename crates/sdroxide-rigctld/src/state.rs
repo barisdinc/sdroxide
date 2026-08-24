@@ -116,7 +116,7 @@ pub fn to_hamlib_mode(m: Mode) -> &'static str {
         Mode::Sam => "SAM",
         Mode::Nfm => "FM",
         // RIFP and VHF packet are data on an FM carrier, not on a sideband.
-        Mode::Rifp | Mode::Packet => "PKTFM",
+        Mode::Rifp | Mode::Packet | Mode::Aprs => "PKTFM",
         Mode::Wfm => "WFM",
         Mode::Digu => "PKTUSB",
         Mode::Digl => "PKTLSB",

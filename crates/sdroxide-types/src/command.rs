@@ -690,4 +690,22 @@ pub enum Command {
     SetDrmConstellation {
         channel: Option<crate::DrmChannel>,
     },
+
+    /// APRS: send one position beacon now, rather than waiting for the timer.
+    ///
+    /// Still subject to CSMA and to every transmit rail: the operator asks for
+    /// the channel, they do not take it. Appended for the usual reason —
+    /// postcard numbers variants by position.
+    AprsBeacon,
+
+    /// APRS: send a message to a station, and keep retrying until it is
+    /// acknowledged.
+    ///
+    /// The identifier is minted engine-side rather than by the client, for the
+    /// same reason a Winlink MID is: it has to be unique against the messages
+    /// already in flight, which only the engine can see.
+    AprsSendMessage {
+        to: String,
+        text: String,
+    },
 }

@@ -351,6 +351,11 @@ pub struct DigiStatus {
     /// AX.25 packet: channel and link state, when that mode is active.
     #[serde(default)]
     pub packet: Option<PacketStatus>,
+    /// APRS: the stations on the map, the messages, and the channel. `None`
+    /// in every other mode, so the panel that draws it is its own "are we in
+    /// APRS?" test — the same rule [`DigiStatus::js8`] follows.
+    #[serde(default)]
+    pub aprs: Option<Box<crate::AprsStatus>>,
     /// JS8: heard list, reassembled conversation and transmit-queue progress.
     /// `None` in every other mode, so the panel that renders it is its own
     /// "are we in JS8?" test.
@@ -571,6 +576,7 @@ impl DigiStatus {
             fsq_messages: Vec::new(),
             rade: None,
             packet: None,
+            aprs: None,
             js8: None,
             fox_queue: Vec::new(),
             call_queue: Vec::new(),
@@ -1216,6 +1222,70 @@ pub struct DigiConfig {
     #[serde(default)]
     pub packet_beacon_minutes: u32,
 
+    // ── APRS ──
+    //
+    // Separate from the packet settings above rather than shared with them.
+    // The two modes run the same modem, but an operator's packet station and
+    // their APRS station are conventionally different SSIDs of the same call,
+    // beacon different things at different intervals, and are configured on
+    // different days. One set of fields would mean changing the mailbox SSID
+    // every time the tracker's did.
+    /// The callsign this station beacons under, with its SSID. Empty means it
+    /// will not transmit at all: an APRS frame with no callsign in it is an
+    /// unidentified transmission.
+    #[serde(default)]
+    pub aprs_mycall: String,
+    /// The digipeater path, as an operator writes it — `WIDE1-1,WIDE2-1`.
+    ///
+    /// The single most consequential setting on the whole channel: it decides
+    /// how many times the network as a whole repeats each of your frames. See
+    /// `sdroxide_aprs::path_advice`, which is what the setup dialog shows.
+    #[serde(default = "default_aprs_path")]
+    pub aprs_path: String,
+    /// What this station is: the two characters that pick its map icon.
+    #[serde(default)]
+    pub aprs_symbol: crate::AprsSymbol,
+    /// The comment sent with each beacon — free text, and the only place a
+    /// position report says anything an operator wrote.
+    #[serde(default)]
+    pub aprs_comment: String,
+    /// Minutes between beacons; zero — the default — disables them.
+    ///
+    /// Off rather than on, for the reason every unattended transmitter here is
+    /// off by default: selecting a mode must not put a station on the air.
+    /// Thirty minutes is the convention for a fixed station once it is on.
+    #[serde(default)]
+    pub aprs_beacon_minutes: u32,
+    /// Take the beacon's position from the station locator
+    /// ([`DigiConfig::my_grid`]) rather than from the coordinates below.
+    ///
+    /// On by default because the locator is already filled in, and a six
+    /// character one is good to a couple of kilometres — honest for a fixed
+    /// station, and reported with the ambiguity that says so.
+    #[serde(default = "yes")]
+    pub aprs_use_grid: bool,
+    /// Latitude to beacon, degrees north, when not using the locator.
+    #[serde(default)]
+    pub aprs_lat: f64,
+    /// Longitude to beacon, degrees east, when not using the locator.
+    #[serde(default)]
+    pub aprs_lon: f64,
+    /// Send the compressed position format: a third the air time of the
+    /// uncompressed one and more precise, which is why it is the default.
+    #[serde(default = "yes")]
+    pub aprs_compressed: bool,
+    /// Acknowledge messages addressed to us.
+    ///
+    /// On by default and worth its own switch: an acknowledgement is a
+    /// transmission this station makes without the operator asking, and a
+    /// receive-only setup — a screen with no antenna on transmit — must be
+    /// able to turn it off.
+    #[serde(default = "yes")]
+    pub aprs_ack_messages: bool,
+    /// Drop a station from the map this many minutes after it was last heard.
+    #[serde(default = "default_aprs_ttl")]
+    pub aprs_station_ttl_min: u32,
+
     // ── WSPR ──
     /// WSPR: percentage of two-minute slots to transmit in, 0–100.
     ///
@@ -1385,6 +1455,17 @@ impl Default for DigiConfig {
             packet_accept_incoming: false,
             packet_beacon_text: String::new(),
             packet_beacon_minutes: 0,
+            aprs_mycall: String::new(),
+            aprs_path: default_aprs_path(),
+            aprs_symbol: crate::AprsSymbol::default(),
+            aprs_comment: String::new(),
+            aprs_beacon_minutes: 0,
+            aprs_use_grid: true,
+            aprs_lat: 0.0,
+            aprs_lon: 0.0,
+            aprs_compressed: true,
+            aprs_ack_messages: true,
+            aprs_station_ttl_min: default_aprs_ttl(),
             rifp_session_timeout_s: 300,
             wspr_tx_percent: 0,
             wspr_power_dbm: wspr_default_power(),
@@ -2249,4 +2330,12 @@ fn default_packet_slottime_ms() -> u16 {
 }
 fn default_packet_kiss_port() -> u16 {
     8001
+}
+/// One local fill-in hop and one wide one — the path that reaches almost
+/// anywhere without asking the whole network to repeat you three times.
+fn default_aprs_path() -> String {
+    "WIDE1-1,WIDE2-1".to_string()
+}
+fn default_aprs_ttl() -> u32 {
+    60
 }

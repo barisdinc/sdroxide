@@ -15,7 +15,7 @@ or connects to a remote sdroxide server.
 
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
-3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR)](#3-digital-modes)
+3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
@@ -46,8 +46,10 @@ or connects to a remote sdroxide server.
   **FT2**, the
   keyboard modes **PSK31**, **RTTY**, **Olivia**, **THOR** and **FSQ**, the image
   modes **SSTV**, **weather fax** and **RIFP** (draft-dulaunoy-rifp-00, a packetised image
-  protocol on its own FSK modem), and the transmit-only **RF Paint**
-  (spectrum-painting) mode.
+  protocol on its own FSK modem), the transmit-only **RF Paint**
+  (spectrum-painting) mode, AX.25 **packet** on HF and VHF, and **APRS** — with
+  a live map of every station heard, drawn with its own symbol, and messages you
+  can send and answer.
 - **Receive controls:** AGC (Off/Slow/Med/Fast), volume, mute, squelch, an
   impulse noise blanker, an adaptive auto-notch (constant-tone canceller),
   noise reduction (four engines, three strengths each), front-end decimation
@@ -3006,6 +3008,144 @@ transmission, and a band the radio cannot reach is skipped silently.
 
 Both are on the **Spots** tab of the Settings dialog as well as the panel, and
 both use the callsign and grid from the General tab.
+
+### 3.12 APRS
+
+Choose **APRS** from the DIGITAL row. This is the Automatic Packet Reporting
+System: 1200 baud AX.25 on one shared FM channel per region, carrying positions,
+weather, telemetry, objects and short messages. It is not a QSO mode — almost
+everything on the channel is a broadcast that nobody answers — so the panel is a
+map, a station list and a message pane rather than a sequencer.
+
+![The APRS panel: the station list, the map and the messages](images/aprs-panel.jpg)
+
+**The frequency is chosen for you.** APRS is a channel, not a band segment, and
+which channel depends on where you are. Selecting the mode tunes to your
+region's:
+
+| Region | Channel |
+| --- | --- |
+| 1 — Europe, Africa, Middle East, Northern Asia | 144.800 MHz (70 cm: 432.500) |
+| 2 — the Americas | 144.390 MHz (70 cm: 445.925) |
+| 3 — Asia-Pacific | 145.175 MHz (Japan and China: 144.640; South-East Asia: 144.390) |
+
+Set your region under **Settings → General**. If the dial is already on any
+region's APRS channel — you tuned Japan's 144.640 by hand — it is left alone,
+and so is any move you make once you are in the mode. The **⇵ FREQ** chip beside
+the frequency lists the other regions' channels.
+
+Unlike the slotted modes, the waterfall is **not** narrowed to the channel. APRS
+occupies about 12 kHz of a 2 m band you have every reason to be watching, so the
+span stays wherever you had it.
+
+#### The panel
+
+**STATIONS** is everything heard, most recent first, each with the icon its
+symbol asks for. A `·` after a callsign means the frame arrived *direct* — no
+digipeater repeated it — which on a channel where almost everything is
+digipeated is how you tell who is actually within range. Type in the **filter**
+box to narrow the list by callsign or comment.
+
+Click a station and its card opens underneath: what it is, what it said, where
+it is, how far away and on what bearing, its course, speed and altitude, its
+weather if it sends any, how many frames it has sent, and the digipeater path
+the last one came through (a `*` marks a digipeater that actually repeated it).
+Selecting a station also addresses the message box to it.
+
+**The map** places everything with a known position. It auto-frames what it can
+hear; drag to pan, wheel or pinch to zoom, and double-click to hand it back to
+the auto-fit. Icons fade as a station goes stale, over the same window the
+station list keeps, so a position that has not been refreshed in an hour visibly
+*is* an hour old. Anything that has moved leaves a trail behind it. A station
+that reported an ambiguous position — the protocol lets a sender blank out the
+last digits of its coordinates on purpose — is drawn inside the square it
+actually described rather than as a point in the middle of it.
+
+Objects and items (a net control point, a storm, an event, put on the map by
+some other station) are drawn in a different colour and named after themselves.
+An object its owner has cancelled is greyed rather than removed: an object
+vanishing without trace looks like a receiver problem.
+
+**MESSAGES** is the one part of APRS that is a conversation. Pick a station, or
+type a callsign in the **to** box, write in the message box and press **SEND**
+or Enter. A message carries an identifier, so the far end acknowledges it and
+sdroxide retries until it does — five attempts, thirty seconds apart to begin
+with and doubling, because the far end is usually a mobile behind a hill rather
+than somebody who is slow to answer. The mark beside your message says where it
+has got to:
+
+| Mark | Meaning |
+| --- | --- |
+| `…` | Queued, waiting for the channel to clear. |
+| `↑` / `↑3` | On the air, waiting for an acknowledgement (and which attempt). |
+| `✓` | Acknowledged by the far end. |
+| `✗` | Refused, or no answer after every retry. |
+
+Messages addressed to you are answered with an acknowledgement automatically —
+switch that off under Setup if this station has no antenna on transmit.
+Bulletins (addressed `BLN…`) are shown and never acknowledged: a hundred
+stations acknowledging one bulletin would take the channel down. Other people's
+messages stay out of this pane and go in the raw log instead.
+
+**RAW** swaps the pane for every frame on the channel as it arrived, with what
+the decoder made of each — `position`, `weather`, `message`, `object`, or the
+reason it made nothing of it. That last one is how you find out that something
+on your channel is sending a format this build does not read.
+
+#### Setup
+
+**SETUP** in the panel header opens the APRS settings.
+
+- **APRS call** — the callsign this station beacons under, with its SSID:
+  `-9` for a car, `-10` for an I-gate, `-5` for a phone, `-7` for a handheld.
+  It is separate from the logbook callsign and from the packet station call on
+  purpose: they are conventionally different SSIDs of the same call. **Empty
+  means this station never transmits** — an APRS frame with no callsign in it is
+  an unidentified transmission.
+- **Symbol** — what you are, as a row of icons for the ones an amateur station
+  usually is, with the two characters editable beside them for the other 170. A
+  digit or a letter in the first position is an *overlay*, drawn on top of the
+  icon: `S` over a digipeater is a digipeater that also runs an I-gate.
+- **Path** — how far you ask to be repeated, and the most consequential setting
+  on the whole channel. `WIDE1-1,WIDE2-1` — one local fill-in hop then one wide
+  one — reaches almost anywhere. Every extra hop multiplies the transmissions
+  the *whole network* makes on one shared frequency, so a long path does not get
+  you further out; past three hops it stops other people being heard. sdroxide
+  says so in the dialog if you ask for one, and transmits it anyway: local
+  practice varies, and a path that is wasteful in a European city is reasonable
+  in the outback.
+- **Position** — from your Maidenhead locator by default, reported with the
+  ambiguity a locator actually has (a six-character one is a couple of
+  kilometres across, and saying so is honest). Turn it off to give exact
+  coordinates.
+- **Comment** — free text sent with every beacon, up to 43 characters.
+- **Beacon** — minutes between beacons. **Zero, which is the default, never
+  beacons**: selecting a mode must not put a station on the air. Thirty minutes
+  is the convention for a fixed station once you turn it on, and the first goes
+  out one interval from now rather than immediately. **Compressed** sends the
+  compact position format — a third of the air time and more precise — which
+  every receiver since the 1990s reads.
+- **Messages → Acknowledge** — answer messages addressed to you. An
+  acknowledgement is a transmission this station makes without you asking, so a
+  receive-only setup should turn it off; the beacon then stops claiming to be
+  reachable too.
+- **Keep stations** — how long a station stays on the map after it was last
+  heard, and what the map's fade is measured against.
+
+**BEACON** in the header sends one position report now, without waiting for the
+timer. It goes through the channel-access rules like everything else: it waits
+for the channel to be clear, so a busy channel delays it rather than doubling on
+somebody.
+
+#### What is decoded
+
+Everything a station is likely to send: uncompressed and compressed positions,
+**Mic-E** (the format every commercial APRS radio transmits, which hides half
+the position in the AX.25 destination address), objects and items, status
+reports, Maidenhead grid reports, telemetry, queries, weather both attached to a
+position and standing alone, and messages, acknowledgements, rejections and
+bulletins. Weather is converted from the miles per hour, degrees Fahrenheit and
+hundredths of an inch the protocol carries.
 
 ---
 
@@ -10511,6 +10651,8 @@ using. Bind them under **Speech** on the Controls tab:
 | SSTV | Slow-scan TV image mode (Scottie, Martin, Robot). |
 | RIFP | Radio Image Framing Protocol (draft-dulaunoy-rifp-00): packetised images over continuous-phase FSK. Centred on the dial, ~25 kHz wide — 70 cm, 2 m/6 m all-modes, or 10 m FM. |
 | RFPAINT | RF Paint — transmit-only spectrum painting of text and images onto the waterfall. |
+| PACKET / PACKET-HF | AX.25 packet radio: 1200 baud Bell 202 or 9600 baud G3RUH on VHF/UHF FM, 300 baud AFSK on HF sideband. Carries Winlink sessions and offers the modem as a KISS TNC. See [11](#11-winlink-radio-email). |
+| APRS | Automatic Packet Reporting System — 1200 baud AX.25 on the region's shared channel, with a live map of every station heard, its own symbol per station, and messages you can send and answer. See [3.12](#312-aprs). |
 
 ### Bands
 

@@ -626,6 +626,65 @@ pub const FSQ_DIALS: &[f64] = &[
     28_105_000.0,
 ];
 
+/// APRS channels (Hz), tagged with the regions each belongs to.
+///
+/// The one mode here with no worldwide frequency at all: APRS is a single
+/// shared channel, and which channel is a regional decision that predates any
+/// attempt to harmonise it. A station tuned to the wrong one hears nothing and
+/// is heard by nobody, so the region's own channel is what a band button lands
+/// on and the neighbours are offered beside it with a note saying where they
+/// are used.
+///
+/// - **144.800** — Region 1, everywhere: the IARU Region 1 channel.
+/// - **144.390** — the Americas, and also the working channel across much of
+///   South-East Asia, which is why Region 3 is offered it as well.
+/// - **144.640** — Japan (and China), which sit on their own channel.
+/// - **145.175** — Australia and New Zealand, the unannotated Region 3 entry.
+/// - **432.500 / 445.925** — the 70 cm channels of Region 1 and Region 2.
+///   There is no Region 3 UHF convention settled enough to put here, and
+///   inventing one would send an operator to beacon on an empty frequency.
+pub const APRS_DIALS: &[(f64, &str, u8)] = &[
+    (144_390_000.0, "", mask::R2),
+    (144_390_000.0, "South-East Asia", mask::R3),
+    (144_390_000.0, "the Americas", mask::R1),
+    (144_640_000.0, "Japan, China", mask::R3),
+    (144_800_000.0, "", mask::R1),
+    (144_800_000.0, "Region 1", mask::R23),
+    (145_175_000.0, "", mask::R3),
+    (145_175_000.0, "Australia, New Zealand", mask::R12),
+    (432_500_000.0, "70 cm", mask::R1),
+    (445_925_000.0, "70 cm", mask::R2),
+];
+
+/// The APRS channel for the station's configured region — the frequency an
+/// APRS station is expected to be sitting on.
+///
+/// Every other digital mode leaves the dial where the operator put it, because
+/// every other digital mode is worked across a segment. APRS is a channel: a
+/// receiver 10 kHz away from it is not receiving APRS at all, so selecting the
+/// mode is worth acting on.
+#[must_use]
+pub fn aprs_dial() -> f64 {
+    aprs_dial_in(crate::region())
+}
+
+/// The same for `region`.
+#[must_use]
+pub fn aprs_dial_in(region: Region) -> f64 {
+    APRS_DIALS
+        .iter()
+        .find(|&&(_, note, m)| note.is_empty() && region.in_mask(m))
+        .map_or(144_800_000.0, |&(hz, _, _)| hz)
+}
+
+/// True when `hz` is one of the APRS channels — any region's, not just the
+/// configured one. A traveller who has tuned Japan's 144.640 by hand is on an
+/// APRS channel and must not be moved off it.
+#[must_use]
+pub fn is_aprs_channel(hz: f64) -> bool {
+    APRS_DIALS.iter().any(|&(f, _, _)| (f - hz).abs() < 500.0)
+}
+
 /// One conventional operating frequency for a digital mode.
 ///
 /// "Conventional" rather than "legal": these are the spots the mode's own
@@ -682,7 +741,7 @@ fn wideband_by_design(mode: crate::Mode) -> bool {
     // VHF packet is a 25 kHz FM channel and belongs nowhere near a narrow-data
     // sub-segment. HF packet is the opposite — 300 baud in a few hundred hertz
     // is narrow data by any measure — so it is deliberately not listed.
-    matches!(mode, crate::Mode::Sstv | crate::Mode::Rifp | crate::Mode::Packet)
+    matches!(mode, crate::Mode::Sstv | crate::Mode::Rifp | crate::Mode::Packet | crate::Mode::Aprs)
 }
 
 /// The conventional dial frequencies for `mode` in the station's configured
@@ -730,6 +789,7 @@ pub fn digi_channels_for(mode: crate::Mode, region: Region) -> Vec<DigiChannel> 
         Mode::Fsq => plain(FSQ_DIALS),
         Mode::Sstv => tagged(SSTV_DIALS),
         Mode::Rifp => plain(RIFP_CALLING),
+        Mode::Aprs => tagged(APRS_DIALS),
         _ => Vec::new(),
     };
     v.sort_by(|a, b| a.dial_hz.total_cmp(&b.dial_hz));
@@ -781,6 +841,43 @@ pub fn is_rtty_segment_in(hz: f64, region: Region) -> bool {
 mod tests {
     use super::*;
     use crate::Band;
+
+    /// The one mode with no worldwide frequency: selecting APRS tunes to the
+    /// region's own channel, and getting that wrong means a receiver that
+    /// hears nothing and a transmitter nobody hears.
+    #[test]
+    fn each_region_gets_its_own_aprs_channel() {
+        assert_eq!(aprs_dial_in(Region::R1), 144_800_000.0);
+        assert_eq!(aprs_dial_in(Region::R2), 144_390_000.0);
+        assert_eq!(aprs_dial_in(Region::R3), 145_175_000.0);
+    }
+
+    /// A traveller who has tuned another region's channel by hand is on an
+    /// APRS channel and must not be moved off it — which is what
+    /// `is_aprs_channel` is for, so it has to accept every region's.
+    #[test]
+    fn every_regions_channel_counts_as_an_aprs_channel() {
+        for &(hz, _, _) in APRS_DIALS {
+            assert!(is_aprs_channel(hz), "{hz} is in the table but not recognised");
+        }
+        assert!(!is_aprs_channel(145_500_000.0), "the 2 m calling frequency is not APRS");
+    }
+
+    /// Each region's picker offers exactly one unannotated entry — the one a
+    /// band button lands on — and the neighbours with a note saying where they
+    /// are used.
+    #[test]
+    fn every_region_has_exactly_one_default_aprs_channel() {
+        for region in Region::ALL {
+            let plain = APRS_DIALS
+                .iter()
+                .filter(|&&(_, note, m)| note.is_empty() && region.in_mask(m))
+                .count();
+            assert_eq!(plain, 1, "{} has {plain} unannotated APRS channels", region.label());
+            let offered = digi_channels_for(crate::Mode::Aprs, region);
+            assert!(offered.len() > 1, "{} is offered no alternatives", region.label());
+        }
+    }
 
     #[test]
     fn classification() {

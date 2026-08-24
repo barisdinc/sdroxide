@@ -232,7 +232,8 @@ impl Yaesu {
             | Mode::Sam
             | Mode::Dsb
             | Mode::Rifp
-            | Mode::Packet => (&[], None),
+            | Mode::Packet
+            | Mode::Aprs => (&[], None),
             _ => (self.caps.ssb_widths, narrow.map(|(_, ssb)| ssb)),
         }
     }
@@ -274,7 +275,7 @@ fn mode_digit(m: Mode) -> char {
         Mode::Nfm | Mode::Wfm => '4',
         // RIFP keys the carrier itself and VHF packet frequency-modulates it:
         // data over FM (DATA-FM), not over a sideband.
-        Mode::Rifp | Mode::Packet => 'A',
+        Mode::Rifp | Mode::Packet | Mode::Aprs => 'A',
         Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => '5',
         Mode::Digl => '8',
         Mode::Digu

@@ -109,6 +109,19 @@ pub enum Mode {
     /// and 10 kHz occupancies are symmetric about the channel's reference
     /// frequency. Appended for the same reason as [`Mode::Hell`].
     Drm,
+    /// APRS — the Automatic Packet Reporting System: 1200 baud Bell 202 AX.25
+    /// UI frames on one shared FM channel per region, carrying positions,
+    /// weather, telemetry, objects and short messages.
+    ///
+    /// The waveform, the framing and the modem are [`Mode::Packet`]'s, and a
+    /// config field could in principle have covered it. It is a `Mode` of its
+    /// own because everything *around* the link layer differs: APRS is a
+    /// single agreed channel rather than a band segment ([`crate::Region`]
+    /// picks which), the payload has a protocol above AX.25 that produces a
+    /// map and a message pane rather than a monitor, and the panel an operator
+    /// wants is not the packet one. Appended for the same reason as
+    /// [`Mode::Hell`].
+    Aprs,
 }
 
 /// The bands on which analog SSTV rides the lower sideband, as (low, high) Hz.
@@ -123,7 +136,7 @@ const SSTV_LSB_BANDS: [(f64, f64); 3] =
 impl Mode {
     /// Every mode, in the order they cycle and appear in the picker — which is
     /// deliberately *not* the enum's declaration order (see [`Mode::Hell`]).
-    pub const ALL: [Mode; 30] = [
+    pub const ALL: [Mode; 31] = [
         Mode::Lsb,
         Mode::Usb,
         Mode::Cw,
@@ -145,6 +158,7 @@ impl Mode {
         Mode::Rtty,
         Mode::Packet,
         Mode::PacketHf,
+        Mode::Aprs,
         Mode::Sstv,
         Mode::Rifp,
         Mode::Wefax,
@@ -160,7 +174,7 @@ impl Mode {
     /// slotted FT8/FT4 modes, the continuous keyboard modes, Hell, SSTV, RIFP,
     /// packet, RF Paint). All are USB underneath except RIFP and VHF packet,
     /// which frequency-modulate the carrier.
-    pub const DIGITAL: [Mode; 18] = [
+    pub const DIGITAL: [Mode; 19] = [
         Mode::Ft8,
         Mode::Ft4,
         Mode::Ft2,
@@ -179,6 +193,7 @@ impl Mode {
         Mode::Rade,
         Mode::Packet,
         Mode::PacketHf,
+        Mode::Aprs,
     ];
 
     /// True for modes that use a dedicated decode/QSO layer over USB.
@@ -203,22 +218,34 @@ impl Mode {
                 | Mode::Wefax
                 | Mode::Packet
                 | Mode::PacketHf
+                | Mode::Aprs
         )
     }
 
     /// True for AX.25 packet, on either band. Both variants run the same link
     /// layer and the same controller; what differs is the radio underneath.
+    ///
+    /// Deliberately not true for [`Mode::Aprs`], which is AX.25 over the same
+    /// modem but reaches its own controller and its own panel: every caller of
+    /// this wants the connected-mode station — the KISS server, the Winlink
+    /// route, the packet monitor — and APRS is none of those.
     pub fn is_packet(self) -> bool {
         matches!(self, Mode::Packet | Mode::PacketHf)
+    }
+
+    /// True for APRS.
+    pub fn is_aprs(self) -> bool {
+        matches!(self, Mode::Aprs)
     }
 
     /// True for the modes whose transmit waveform is not single-sideband audio
     /// on the carrier, so the dial is the signal's centre rather than its lower
     /// edge: RIFP's CPFSK profile keys the carrier itself, and VHF packet
     /// frequency-modulates it. HF packet is *not* one of these — 300 baud is
-    /// audio on a sideband like any other keyboard mode.
+    /// audio on a sideband like any other keyboard mode. APRS is VHF packet
+    /// under another name, so it is.
     pub fn is_carrier_centered(self) -> bool {
-        matches!(self, Mode::Rifp | Mode::Packet)
+        matches!(self, Mode::Rifp | Mode::Packet | Mode::Aprs)
     }
 
     /// True for the continuous keyboard text modes (PSK31 / RTTY / Olivia / Thor
@@ -405,6 +432,7 @@ impl Mode {
             Mode::Rifp => "RIFP",
             Mode::Packet => "PACKET",
             Mode::PacketHf => "PACKET-HF",
+            Mode::Aprs => "APRS",
             Mode::Wefax => "WEFAX",
             Mode::Js8 => "JS8",
             Mode::Wspr => "WSPR",
@@ -475,7 +503,9 @@ impl Mode {
             // Bell 202 at ±3 kHz deviation occupies about 10 kHz by Carson,
             // 9600 G3RUH about 16 kHz, and both fit inside a 25 kHz channel
             // with the usual margin for a rig a little off frequency.
-            Mode::Packet => (-8_000.0, 8_000.0),
+            // APRS shares the channel and therefore the passband; it is
+            // 1200 Bell 202 on FM whatever the region.
+            Mode::Packet | Mode::Aprs => (-8_000.0, 8_000.0),
             // HF packet is 300 baud AFSK on a sideband, tones around
             // 1600/1800 Hz — an ordinary keyboard-mode passband.
             Mode::PacketHf => (150.0, 2850.0),
@@ -611,7 +641,8 @@ impl Mode {
             | Mode::RfPaint
             | Mode::Rade
             | Mode::Packet
-            | Mode::PacketHf => C::Data,
+            | Mode::PacketHf
+            | Mode::Aprs => C::Data,
         }
     }
 
@@ -667,7 +698,7 @@ impl Mode {
             // occupies about 10 kHz and 9600 G3RUH about 16 kHz, so the
             // operator wants the narrower one when running 1200 on a busy
             // channel. Labelled by occupied bandwidth, like NFM's.
-            Mode::Packet => &[("12k", -6000.0, 6000.0), ("20k", -10_000.0, 10_000.0)],
+            Mode::Packet | Mode::Aprs => &[("12k", -6000.0, 6000.0), ("20k", -10_000.0, 10_000.0)],
             // The six spectrum occupancies of the DRM standard, as the
             // carrier tables actually place them: the two half-channel
             // modes sit entirely above the reference, 9 and 10 kHz are
@@ -1149,6 +1180,7 @@ mod tests {
             (Mode::Packet, 27),
             (Mode::PacketHf, 28),
             (Mode::Drm, 29),
+            (Mode::Aprs, 30),
         ];
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
@@ -1193,7 +1225,7 @@ mod tests {
         // `Mode::ALL`'s length is checked by the array type; what needs
         // checking is that it is a permutation of the enum, with nothing
         // dropped and nothing listed twice.
-        let last = Mode::Drm as u8;
+        let last = Mode::Aprs as u8;
         for i in 0..=last {
             let present = Mode::ALL.iter().filter(|m| **m as u8 == i).count();
             assert_eq!(present, 1, "discriminant {i} appears {present} times in Mode::ALL");

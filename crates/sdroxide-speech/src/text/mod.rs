@@ -140,6 +140,8 @@ impl<'a> Speaker<'a> {
             Mode::Rifp => "R I F P",
             Mode::Packet => "packet",
             Mode::PacketHf => "H F packet",
+            // A word, not four letters: nobody says "A P R S" out loud.
+            Mode::Aprs => "aprs",
             Mode::Wefax => "wefax",
             Mode::Js8 => "J S eight",
             // Pronounced "whisper" — the joke the name is built on.
