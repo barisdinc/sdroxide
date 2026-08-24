@@ -365,6 +365,23 @@ impl IqSource for PanadapterSource {
         self.audio_q.clear();
     }
 
+    /// This pairing is the reason the hook exists. The lent receiver is a
+    /// different radio from the one being keyed and has no idea an over is
+    /// happening: it fills its ring at the full sample rate for the length of
+    /// one, and with `blank_on_tx` set — the default — nothing drains it. Every
+    /// SDR that can serve as a panadapter counts that as an overrun otherwise,
+    /// so the plainest setup in the program is the one that logs a fault every
+    /// two seconds of transmit and tells the operator to lower a sample rate
+    /// that was never the problem.
+    ///
+    /// The transceiver is told as well: it may be a wideband source in its own
+    /// right, and it is the engine's business which half is keyed, not this
+    /// one's. A rig that stops its own receiver for the over ignores it.
+    fn set_rx_paused(&mut self, paused: bool) {
+        self.rx.set_rx_paused(paused);
+        self.ctrl.set_rx_paused(paused);
+    }
+
     /// Wideband, so there is no audio-band window to map.
     fn display_bandwidth(&self) -> Option<f64> {
         None

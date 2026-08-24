@@ -282,6 +282,17 @@ impl IqSource for HpsdrSource {
         }
     }
 
+    /// The board's own MOX already covers this radio transmitting on its own
+    /// DDC — the protocol threads watch it directly. This covers the other
+    /// case: an HPSDR receiver lent to a different rig as a panadapter, where
+    /// nothing on this connection is keyed and the ring still goes unread for
+    /// somebody else's over. See [`IqSource::set_rx_paused`].
+    fn set_rx_paused(&mut self, paused: bool) {
+        if let Some(rx) = self.rx.as_ref() {
+            rx.set_rx_paused(paused);
+        }
+    }
+
     /// See [`sdroxide_types::HpsdrConfig::tx_latency_ms`]: this board holds no
     /// transmit buffer of its own to widen, so raising this only widens the
     /// cushion the engine leaves before the board's TX ring on this side of

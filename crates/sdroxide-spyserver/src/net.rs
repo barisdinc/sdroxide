@@ -97,6 +97,7 @@ pub(crate) fn spawn(cfg: &SpyServerConfig, center_hz: f64, vfo: bool) -> Result<
         iq_center_milli_hz: AtomicI64::new((client.center * 1000.0) as i64),
         gain_index: AtomicU32::new(client.gain_index),
         sync_seq: AtomicU64::new(0),
+        rx_paused: AtomicBool::new(false),
     });
 
     let (rx_prod, rx_cons) = ring_for(client.iq_rate);
@@ -815,7 +816,7 @@ fn on_message(
             if pairs > 0 {
                 client.note_sequence(h.sequence, stats);
                 stats.on_iq(pairs);
-                push_iq(rx, iq_scratch, stats);
+                push_iq(rx, iq_scratch, stats, shared.rx_paused.load(Ordering::Relaxed));
                 shared.last_rx_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             }
         }

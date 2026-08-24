@@ -194,6 +194,13 @@ pub(crate) struct Shared {
     /// tells every chain but the one that asked when the shared LO moves.
     pub lo_watch: Mutex<Vec<(u8, Sender<f64>)>>,
     pub trace: Trace,
+    /// Set while the engine is transmitting and therefore not reading this
+    /// receiver — see `IqSource::set_rx_paused`. Read by the receive thread on
+    /// every buffer so a ring that fills during an over is accounted for as the
+    /// cost of transmitting rather than as an overrun. Only ever true when this
+    /// Pluto is somebody else's panadapter: keying its own transmitter closes
+    /// the receive buffer outright (`rx_enabled`), leaving nothing to discard.
+    pub rx_paused: AtomicBool,
 }
 
 impl Shared {
@@ -523,6 +530,7 @@ impl PlutoRig {
             addr,
             rx_shutdown: Mutex::new(None),
             rx_enabled: AtomicBool::new(true),
+            rx_paused: AtomicBool::new(false),
             rx_active: AtomicBool::new(false),
             tx_enabled: AtomicBool::new(false),
             tx_active: AtomicBool::new(false),
@@ -1024,6 +1032,15 @@ impl PlutoRx {
         }
     }
 
+    /// Tell the receive thread that the engine has stopped reading for an over,
+    /// and then that it has started again — see `IqSource::set_rx_paused`. Only
+    /// reached when this Pluto is somebody else's panadapter: keying its own
+    /// transmitter closes the receive buffer, so there is nothing to account
+    /// for.
+    pub fn set_rx_paused(&self, paused: bool) {
+        self.rig.shared.rx_paused.store(paused, Ordering::Relaxed);
+    }
+
     /// How long this stream has gone without samples, measured from the last
     /// buffer decoded for its chain or — if none arrived yet — from when it
     /// attached. A stream that never starts is the failure that matters most
@@ -1149,6 +1166,9 @@ impl PlutoHandle {
     }
     pub fn discard_pending_rx(&mut self) {
         self.rx0.discard_pending_rx();
+    }
+    pub fn set_rx_paused(&self, paused: bool) {
+        self.rx0.set_rx_paused(paused);
     }
     pub fn silent_for(&self) -> Duration {
         self.rx0.silent_for()

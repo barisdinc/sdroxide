@@ -845,8 +845,21 @@ impl NetThread {
                                     slot.kicked_at = None;
                                     iq_scratch.clear();
                                     p::decode_f32_payload(&b, &h, &mut iq_scratch);
-                                    for &s in &iq_scratch {
-                                        let _ = slot.ring.push(s);
+                                    // Whole I/Q pairs or nothing. Pushing float
+                                    // by float and letting the ring refuse
+                                    // wherever it happens to fill leaves it an
+                                    // odd number of floats deep, and from then
+                                    // on every pair is one float out of step —
+                                    // I read as Q for the rest of the session,
+                                    // a mirrored and unusable spectrum. The
+                                    // ring reliably does fill: the engine stops
+                                    // reading for the length of an over.
+                                    for pair in iq_scratch.chunks_exact(2) {
+                                        if slot.ring.slots() < 2 {
+                                            break;
+                                        }
+                                        let _ = slot.ring.push(pair[0]);
+                                        let _ = slot.ring.push(pair[1]);
                                     }
                                 }
                             }

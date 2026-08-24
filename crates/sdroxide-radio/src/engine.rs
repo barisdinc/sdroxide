@@ -8927,6 +8927,16 @@ impl Engine {
                     // out, so even a short over starts corrected.
                     self.update_sat_tx_nco();
                     self.tx_active = true;
+                    // From here to the unkey below, the receive read at the top
+                    // of this loop is skipped for a half-duplex source. A
+                    // receiver that is not the transmitter keeps streaming into
+                    // a buffer nobody drains, so tell it that what it is about
+                    // to throw away is an over and not an overrun. Full duplex
+                    // is left alone: it is still being read, so anything it
+                    // drops there it really did drop.
+                    if !self.caps.full_duplex {
+                        self.source.set_rx_paused(true);
+                    }
                     // A front end that keeps receiving through the over on a
                     // *different* radio from the one keyed (an attached
                     // panadapter receiver) hears our own transmitter; silence
@@ -8981,6 +8991,13 @@ impl Engine {
             // stopped us polling it. Drop the backlog instead of replaying
             // it as fresh RX on the next read.
             self.source.discard_pending_rx();
+            // Strictly after the drain, which is what makes a backlog latch
+            // unnecessary: the buffer is empty again before the backend is told
+            // to resume counting, so the discards either side of the unkey land
+            // on the right side of the line without anyone having to guess.
+            if !self.caps.full_duplex {
+                self.source.set_rx_paused(false);
+            }
             self.tx = None;
             self.tx_active = false;
             // A burst belongs to the over that was carrying it; an over cut

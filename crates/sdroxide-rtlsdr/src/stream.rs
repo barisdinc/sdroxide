@@ -54,6 +54,7 @@ pub(crate) fn spawn(cfg: &RtlSdrConfig, center_hz: f64) -> Result<RtlSdrHandle> 
         last_rx_ms: AtomicU64::new(0),
         rate_milli_hz: AtomicU64::new(0),
         effective_gain_tenth_db: AtomicI64::new(-1),
+        rx_paused: AtomicBool::new(false),
     });
 
     // The ring is sized for the configured rate; the achieved rate differs by
@@ -237,7 +238,7 @@ fn pump(
                     convert(bytes, &lut, &mut odd_carry, &mut scratch);
                     if !scratch.is_empty() {
                         stats.on_iq(scratch.len() / 2);
-                        push_iq(rx, &scratch, &mut stats);
+                        push_iq(rx, &scratch, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
                         shared
                             .last_rx_ms
                             .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);

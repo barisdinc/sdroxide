@@ -480,7 +480,11 @@ pub(crate) fn run(ctx: ThreadCtx) {
     // arriving either way — the radio streams as long as it runs — so with no
     // stream attached the samples fall on the floor and the status bytes are
     // still read.
-    let mut slot: Option<(rtrb::Producer<f32>, crate::net::RxClock)> = None;
+    let mut slot: Option<(
+        rtrb::Producer<f32>,
+        crate::net::RxClock,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    )> = None;
     let dest = SocketAddr::new(radio, PORT);
     let speed = speed_code(rate_hz);
     let hermes_lite = board_is_hermes_lite(&board);
@@ -548,11 +552,11 @@ pub(crate) fn run(ctx: ThreadCtx) {
         // 1) Control messages.
         while let Ok(msg) = ctrl.try_recv() {
             match msg {
-                Ctrl::Attach { ddc, ring, last_rx_ms } => {
+                Ctrl::Attach { ddc, ring, last_rx_ms, rx_paused } => {
                     // The device refuses any DDC but 0 on a Protocol 1 board;
                     // this arm is belt and braces.
                     if ddc == 0 {
-                        slot = Some((ring, last_rx_ms));
+                        slot = Some((ring, last_rx_ms, rx_paused));
                         tracing::info!("HPSDR P1: receiver attached");
                     }
                 }
@@ -627,7 +631,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
                     }
                     let pairs = rx_scratch.len() / 2;
                     stats.on_iq(pairs);
-                    if let Some((_, clock)) = slot.as_ref() {
+                    if let Some((_, clock, _)) = slot.as_ref() {
                         clock.store(opened_at.elapsed().as_millis() as u64, Ordering::Relaxed);
                     }
                     stats.on_lost(seq_in.observe(info.seq) as u64);
@@ -693,7 +697,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
                             );
                         }
                     }
-                    if let Some((ring, _)) = slot.as_mut() {
+                    if let Some((ring, _, rx_paused)) = slot.as_mut() {
                         // Protocol 1 has one receiver and it owns the
                         // transmitter, so `regs.ptt` is exactly "the reader of
                         // this ring is keyed". It stays true a moment longer
@@ -702,7 +706,11 @@ pub(crate) fn run(ctx: ThreadCtx) {
                         // those last discards belong to the over that just
                         // ended, not to a host that fell behind. A datagram
                         // taken is the proof the reader is back.
-                        let keyed = regs.ptt || tx_backlog;
+                        // Or the engine simply is not reading: this board can
+                        // be lent to another rig as a panadapter, and then
+                        // nothing on this connection is keyed while the ring
+                        // still goes unread for somebody else's over.
+                        let keyed = regs.ptt || rx_paused.load(Ordering::Relaxed) || tx_backlog;
                         tx_backlog = !push_iq(ring, &rx_scratch, &mut stats, keyed) && keyed;
                     }
                 } else {

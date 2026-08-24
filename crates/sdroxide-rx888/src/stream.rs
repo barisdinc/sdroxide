@@ -112,6 +112,7 @@ pub fn spawn(settings: &Settings, center_hz: f64) -> Result<Rx888Handle> {
         att_tenth_db: AtomicI64::new(i64::MIN),
         dropped: AtomicU64::new(0),
         wide: Mutex::new(None),
+        rx_paused: AtomicBool::new(false),
     });
 
     let out_rate =
@@ -544,7 +545,8 @@ fn convert_loop(
                 // sideband is the other one.
                 inter.push(if conjugate { -v.im } else { v.im });
             }
-            let dropped = push_iq(&mut rx, &inter, &mut stats);
+            let dropped =
+                push_iq(&mut rx, &inter, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
             if dropped > 0 {
                 shared.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
             }

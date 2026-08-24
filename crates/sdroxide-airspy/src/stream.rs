@@ -302,7 +302,12 @@ fn pump(
                             interleaved.push(s.im);
                         }
                         stats.on_iq(samples.len());
-                        push_iq(rx, &interleaved, &mut stats);
+                        push_iq(
+                            rx,
+                            &interleaved,
+                            &mut stats,
+                            shared.rx_paused.load(Ordering::Relaxed),
+                        );
                         shared
                             .last_rx_ms
                             .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);

@@ -214,6 +214,32 @@ pub trait IqSource: Send {
     /// after [`Self::tx_end`] returns fresh data instead of a stale backlog.
     /// Default no-op: most sources have no such buffer.
     fn discard_pending_rx(&mut self) {}
+    /// Tell a receiver that nobody is going to read it for the length of an
+    /// over, and then that somebody is again.
+    ///
+    /// The engine does not read a half-duplex source while it transmits
+    /// ([`DeviceCaps::full_duplex`] false), but a receiver that is not the
+    /// transmitter carries on regardless — a network rig streaming its DDC, a
+    /// separate SDR lent to a rig as a panadapter, an FDM-DUO whose USB
+    /// receiver knows nothing about the PTT line its CAT port just asserted.
+    /// Its buffer therefore fills within its own depth of key-down and stays
+    /// full until [`Self::discard_pending_rx`] empties it, and every sample
+    /// the device delivers in between is discarded. That is the ordinary cost
+    /// of transmitting, at exactly the receive rate, for as long as the
+    /// operator holds the key — not a host that cannot keep up. Backends that
+    /// count discards as overruns need to know which of the two they are
+    /// looking at, or a healthy station reports a fault per over and its
+    /// running total ends up measuring time on the air.
+    ///
+    /// Called with `true` on key-down and `false` on key-up, after the backlog
+    /// has been discarded. Not called at all for a full-duplex source, which
+    /// the engine keeps reading through the over and whose overruns are
+    /// therefore all real.
+    ///
+    /// Default no-op: a source that stops its receiver for the over (every
+    /// half-duplex radio that transmits on its own front end) has nothing to
+    /// account for, and neither has one that keeps no statistics.
+    fn set_rx_paused(&mut self, _paused: bool) {}
     fn set_tx_gain_element(&mut self, _name: &str, _db: f64) -> Result<()> {
         Ok(())
     }
@@ -835,6 +861,20 @@ impl IqSource for ConvertedSource {
 
     fn tx_end(&mut self) -> Result<()> {
         self.inner.tx_end()
+    }
+
+    /// Both of these are about the receiver behind the converter, which is the
+    /// one doing the buffering — a converter shifts frequencies and holds no
+    /// samples of its own. Forwarded rather than left to the trait defaults
+    /// because the defaults are no-ops: an operator who set a transverter up
+    /// would otherwise have every over replayed as stale receive, and their
+    /// backend would report the whole transmission as an overrun.
+    fn discard_pending_rx(&mut self) {
+        self.inner.discard_pending_rx();
+    }
+
+    fn set_rx_paused(&mut self, paused: bool) {
+        self.inner.set_rx_paused(paused);
     }
 
     fn set_tx_gain_element(&mut self, name: &str, db: f64) -> Result<()> {

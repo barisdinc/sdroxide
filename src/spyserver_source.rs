@@ -131,6 +131,15 @@ impl SpyServerSource {
 }
 
 impl IqSource for SpyServerSource {
+    /// The engine is transmitting and has stopped reading, or has started
+    /// again. Passed straight through to the stream thread, which keeps
+    /// receiving either way — this only decides whether a full ring is
+    /// reported as an overrun or as the ordinary cost of an over. See
+    /// [`IqSource::set_rx_paused`].
+    fn set_rx_paused(&mut self, paused: bool) {
+        self.handle.set_rx_paused(paused);
+    }
+
     /// The I/Q rate, in both interfaces — never the FFT span.
     ///
     /// The full-band strip's own widget says why: this number is read as the

@@ -97,6 +97,7 @@ pub(crate) fn spawn(cfg: &RtlTcpConfig, center_hz: f64) -> Result<RtlSdrHandle> 
         last_rx_ms: AtomicU64::new(0),
         rate_milli_hz: AtomicU64::new(0),
         effective_gain_tenth_db: AtomicI64::new(-1),
+        rx_paused: AtomicBool::new(false),
     });
 
     let (rx_prod, rx_cons) = ring_for(cfg.sample_rate_hz);
@@ -583,7 +584,7 @@ fn pump(
         convert_stream(format, &head, &lut, &mut carry, &mut scratch);
         if !scratch.is_empty() {
             stats.on_iq(scratch.len() / 2);
-            push_iq(rx, &scratch, &mut stats);
+            push_iq(rx, &scratch, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
         }
     }
 
@@ -616,7 +617,7 @@ fn pump(
                 convert_stream(format, &buf[..n], &lut, &mut carry, &mut scratch);
                 if !scratch.is_empty() {
                     stats.on_iq(scratch.len() / 2);
-                    push_iq(rx, &scratch, &mut stats);
+                    push_iq(rx, &scratch, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
                     shared
                         .last_rx_ms
                         .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);

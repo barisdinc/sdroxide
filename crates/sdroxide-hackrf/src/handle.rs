@@ -158,9 +158,14 @@ pub(crate) struct RxStats {
     since: Instant,
     win_samples: u64,
     win_dropped: u64,
+    /// Discarded while the engine was not reading this receiver because the
+    /// station was transmitting. Counted apart from `win_dropped` because it
+    /// is not a fault: see [`RxStats::on_dropped_keyed`].
+    win_keyed: u64,
     win_errors: u64,
     total_samples: u64,
     total_dropped: u64,
+    total_keyed: u64,
     total_errors: u64,
     stalls: u64,
 }
@@ -173,9 +178,11 @@ impl RxStats {
             since: Instant::now(),
             win_samples: 0,
             win_dropped: 0,
+            win_keyed: 0,
             win_errors: 0,
             total_samples: 0,
             total_dropped: 0,
+            total_keyed: 0,
             total_errors: 0,
             stalls: 0,
         }
@@ -194,6 +201,38 @@ impl RxStats {
     pub(crate) fn on_dropped(&mut self, pairs: usize) {
         self.win_dropped += pairs as u64;
         self.total_dropped += pairs as u64;
+    }
+
+    /// Record `pairs` complex samples discarded because the ring was full while
+    /// the station was transmitting.
+    ///
+    /// Not this radio's own over — a HackRF gives up its receive endpoint
+    /// before it keys, so nothing arrives to discard. This is the case where it
+    /// is somebody else's panadapter: the engine stops reading a half-duplex
+    /// source for the length of an over and empties the ring on unkey, while
+    /// this receiver, which is not the transmitter, carries on streaming
+    /// throughout. The ring fills within its own depth of key-down and
+    /// everything after that is discarded: expected, at exactly the sample
+    /// rate, for as long as the operator transmits. Counting it as an overrun
+    /// turns an ordinary over into a warning that blames the DSP thread and
+    /// advises a lower sample rate. See `IqSource::set_rx_paused`.
+    pub(crate) fn on_dropped_keyed(&mut self, pairs: usize) {
+        self.win_keyed += pairs as u64;
+        self.total_keyed += pairs as u64;
+    }
+
+    /// What this receiver threw away while the station was transmitting,
+    /// phrased so it cannot be read as a fault. Empty when the operator did not
+    /// key up, so it costs nothing on a receive-only session.
+    fn keyed_note(&self) -> String {
+        if self.win_keyed == 0 {
+            return String::new();
+        }
+        format!(
+            "; {} sample(s) discarded while keyed (expected — this receiver is not read \
+             during an over); {} discarded while keyed in total",
+            self.win_keyed, self.total_keyed,
+        )
     }
 
     pub(crate) fn on_error(&mut self) {
@@ -251,28 +290,32 @@ impl RxStats {
             let line = format!(
                 "HackRF RX: {} samples ({ksps:.1} ksps) over {:.2}s; \
                  {} sample(s) DROPPED (RX ring full — the DSP thread is not keeping up; \
-                 try a lower sample rate), {} transfer error(s); totals {} dropped / {} errors",
+                 try a lower sample rate), {} transfer error(s); \
+                 totals {} dropped / {} errors{}",
                 self.win_samples,
                 dt.as_secs_f64(),
                 self.win_dropped,
                 self.win_errors,
                 self.total_dropped,
                 self.total_errors,
+                self.keyed_note(),
             );
             tracing::warn!("{line}");
             trace.note(line);
         } else {
             tracing::debug!(
-                "HackRF RX: {} samples ({ksps:.1} ksps) over {:.2}s; total {}; {}",
+                "HackRF RX: {} samples ({ksps:.1} ksps) over {:.2}s; total {}; {}{}",
                 self.win_samples,
                 dt.as_secs_f64(),
                 self.total_samples,
                 self.clock_error(),
+                self.keyed_note(),
             );
         }
         self.since = Instant::now();
         self.win_samples = 0;
         self.win_dropped = 0;
+        self.win_keyed = 0;
         self.win_errors = 0;
     }
 }
@@ -283,10 +326,19 @@ impl RxStats {
 /// Pushing what fits would leave the ring one byte out of step, swapping I with
 /// Q for the rest of the session — a mirrored, unusable spectrum that reads like
 /// a driver bug rather than the overrun it is.
-pub(crate) fn push_iq(ring: &mut Producer<u8>, iq: &[u8], stats: &mut RxStats) {
+///
+/// `paused` says whether the engine has stopped reading for an over, which
+/// decides how a full ring is accounted for — a fault, or the normal cost of
+/// transmitting. It is deliberately not a reason to skip the push: the samples
+/// are still offered, and it is the reader's business whether it wants them.
+pub(crate) fn push_iq(ring: &mut Producer<u8>, iq: &[u8], stats: &mut RxStats, paused: bool) {
     debug_assert_eq!(iq.len() % BYTES_PER_SAMPLE, 0, "a partial sample must never reach the ring");
     let Ok(mut chunk) = ring.write_chunk(iq.len()) else {
-        stats.on_dropped(iq.len() / BYTES_PER_SAMPLE);
+        if paused {
+            stats.on_dropped_keyed(iq.len() / BYTES_PER_SAMPLE);
+        } else {
+            stats.on_dropped(iq.len() / BYTES_PER_SAMPLE);
+        }
         return;
     };
     let (head, tail) = chunk.as_mut_slices();
@@ -311,6 +363,11 @@ pub(crate) struct Shared {
     pub lna_mdb: AtomicI64,
     pub vga_mdb: AtomicI64,
     pub txvga_mdb: AtomicI64,
+    /// Set while the engine is transmitting and therefore not reading this
+    /// receiver — see `IqSource::set_rx_paused`. Read by the stream thread on
+    /// every block so a ring that fills during an over is accounted for as the
+    /// cost of transmitting rather than as an overrun.
+    pub rx_paused: AtomicBool,
 }
 
 impl Shared {
@@ -323,6 +380,7 @@ impl Shared {
             lna_mdb: AtomicI64::new(0),
             vga_mdb: AtomicI64::new(0),
             txvga_mdb: AtomicI64::new(0),
+            rx_paused: AtomicBool::new(false),
         }
     }
 
@@ -388,6 +446,15 @@ pub struct HackRfHandle {
 }
 
 impl HackRfHandle {
+    /// Tell the stream thread that the engine has stopped reading for an over,
+    /// and then that it has started again — see `IqSource::set_rx_paused`. The
+    /// receiver itself is left running: the samples keep arriving and keep
+    /// being offered, this only decides whether the ones that no longer fit are
+    /// reported as a fault.
+    pub fn set_rx_paused(&self, paused: bool) {
+        self.shared.rx_paused.store(paused, Ordering::Relaxed);
+    }
+
     /// Open a radio and start receiving.
     ///
     /// The device is opened and configured on the stream thread, not here, so
@@ -777,10 +844,10 @@ mod tests {
     fn push_iq_drops_whole_blocks_rather_than_splitting_a_pair() {
         let (mut prod, mut cons) = RingBuffer::<u8>::new(8);
         let mut stats = RxStats::new(2.0e6);
-        push_iq(&mut prod, &[1, 2, 3, 4], &mut stats);
+        push_iq(&mut prod, &[1, 2, 3, 4], &mut stats, false);
         assert_eq!(cons.slots(), 4);
         // Six more bytes into four free slots: nothing goes in.
-        push_iq(&mut prod, &[0; 6], &mut stats);
+        push_iq(&mut prod, &[0; 6], &mut stats, false);
         assert_eq!(cons.slots(), 4);
         assert_eq!(stats.total_dropped, 3);
         assert_eq!(cons.pop(), Ok(1));
@@ -797,5 +864,28 @@ mod tests {
         s.restart_clock();
         assert_eq!(s.total_samples, 0);
         assert!(s.summary().contains("measuring"), "{}", s.summary());
+    }
+
+    /// A ring that fills because the engine stopped reading for an over is not
+    /// the DSP thread falling behind. A HackRF gives up its receive endpoint
+    /// before keying its own transmitter, so this is the case where it is
+    /// somebody else's panadapter and the over belongs to another radio.
+    #[test]
+    fn a_full_ring_while_paused_is_not_an_overrun() {
+        let (mut prod, mut cons) = RingBuffer::<u8>::new(4);
+        let mut stats = RxStats::new(2.0e6);
+
+        push_iq(&mut prod, &[1, 2, 3, 4], &mut stats, true);
+        push_iq(&mut prod, &[5, 6], &mut stats, true);
+        assert_eq!(stats.total_dropped, 0, "a paused receiver reports no overruns");
+        assert_eq!(stats.total_keyed, 1, "the discarded sample is accounted for as keyed");
+
+        push_iq(&mut prod, &[7, 8], &mut stats, false);
+        assert_eq!(stats.total_dropped, 1);
+        assert_eq!(stats.total_keyed, 1);
+
+        while cons.pop().is_ok() {}
+        push_iq(&mut prod, &[9, 10], &mut stats, false);
+        assert_eq!(cons.slots() % BYTES_PER_SAMPLE, 0);
     }
 }

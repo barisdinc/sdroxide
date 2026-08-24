@@ -9556,6 +9556,26 @@ IQ requires a two-channel (stereo) capture device. A mono USB adapter cannot
 carry I and Q. Use a stereo line-input interface for IQ, or switch **Sound
 format** to **Demod audio**.
 
+**The log warns about dropped samples and a lower sample rate, but only while I
+am transmitting.**
+It is not a fault, and is no longer reported as one. Most front
+ends are read only while they are receiving, so for the length of an over the
+receiver is streaming into a buffer nobody is emptying; it fills, and everything
+after that is discarded until the backlog is dropped at key-up. That is the
+ordinary cost of transmitting, at exactly the sample rate, for as long as you
+hold the key — nothing to do with the computer keeping up, and lowering the
+sample rate does not change it. It is now counted separately and said in the
+same breath as "discarded while keyed", at debug level rather than as a warning.
+A drop count that appears while you are *receiving* is the real thing, and the
+advice there still stands.
+
+This is most visible with a panadapter pairing
+([§6.2.15](#6215-panadapter-borrowing-another-radios-receiver)), where the lent
+receiver is a different radio from the one being keyed and knows nothing about
+the over; **Blank on transmit**, on by default, is what stops it being read.
+Turn that off and the receiver keeps being read through the over, in which case
+anything dropped really was dropped.
+
 **Transmit was cut off, and now every key-up is refused.**
 The SWR guard has tripped ([§2.10](#210-transmit)): the radio reported an SWR at
 or above the limit, so the over was stopped and transmit is latched out until

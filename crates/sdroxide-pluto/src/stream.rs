@@ -105,8 +105,13 @@ struct Stats {
     win_buffers: u64,
     win_samples: u64,
     win_dropped: u64,
+    /// Discarded while the engine was not reading this receiver because the
+    /// station was transmitting. Counted apart from `win_dropped` because it
+    /// is not a fault: see [`Stats::on_dropped_keyed`].
+    win_keyed: u64,
     total_samples: u64,
     total_dropped: u64,
+    total_keyed: u64,
 }
 
 impl Stats {
@@ -120,8 +125,10 @@ impl Stats {
             win_buffers: 0,
             win_samples: 0,
             win_dropped: 0,
+            win_keyed: 0,
             total_samples: 0,
             total_dropped: 0,
+            total_keyed: 0,
         }
     }
 
@@ -132,6 +139,7 @@ impl Stats {
         self.win_buffers = 0;
         self.win_samples = 0;
         self.win_dropped = 0;
+        self.win_keyed = 0;
     }
 
     /// The buffer just closed: bank the part-window that will never be
@@ -149,6 +157,38 @@ impl Stats {
     fn on_dropped(&mut self, pairs: usize) {
         self.win_dropped += pairs as u64;
         self.total_dropped += pairs as u64;
+    }
+
+    /// Record `pairs` complex samples discarded because the ring was full while
+    /// the station was transmitting.
+    ///
+    /// Not this radio's own over: a half-duplex Pluto closes its receive buffer
+    /// for the length of one, so nothing arrives to discard. This is the case
+    /// where it is somebody else's panadapter — the engine stops reading the
+    /// keyed radio's source and empties the ring on unkey, while this receiver,
+    /// which is not the transmitter, carries on streaming throughout. The ring
+    /// fills within its own depth of key-down and everything after that is
+    /// discarded: expected, at exactly the sample rate, for as long as the
+    /// operator transmits. Counting it as an overrun turns an ordinary over
+    /// into a warning that blames the DSP thread and advises a lower sample
+    /// rate. See `IqSource::set_rx_paused`.
+    fn on_dropped_keyed(&mut self, pairs: usize) {
+        self.win_keyed += pairs as u64;
+        self.total_keyed += pairs as u64;
+    }
+
+    /// What this receiver threw away while the station was transmitting,
+    /// phrased so it cannot be read as a fault. Empty when the operator did not
+    /// key up, so it costs nothing on a receive-only session.
+    fn keyed_note(&self) -> String {
+        if self.win_keyed == 0 {
+            return String::new();
+        }
+        format!(
+            "; {} sample(s) discarded while keyed (expected — this receiver is not read \
+             during an over); {} discarded while keyed in total",
+            self.win_keyed, self.total_keyed,
+        )
     }
 
     /// The device's sample clock measured against the host's, in ppm, once
@@ -201,22 +241,24 @@ impl Stats {
             tracing::warn!(
                 "PlutoSDR {}: {} buffers, {} samples ({ksps:.1} ksps) over {:.2}s; \
                  {} sample(s) DROPPED (ring full — the DSP thread is not keeping up; \
-                 try a lower sample rate); {} dropped in total",
+                 try a lower sample rate); {} dropped in total{}",
                 self.what,
                 self.win_buffers,
                 self.win_samples,
                 dt.as_secs_f64(),
                 self.win_dropped,
                 self.total_dropped,
+                self.keyed_note(),
             );
         } else {
             tracing::debug!(
-                "PlutoSDR {}: {} buffers, {} samples ({ksps:.1} ksps) over {:.2}s; {}",
+                "PlutoSDR {}: {} buffers, {} samples ({ksps:.1} ksps) over {:.2}s; {}{}",
                 self.what,
                 self.win_buffers,
                 self.win_samples,
                 dt.as_secs_f64(),
                 self.clock_error(),
+                self.keyed_note(),
             );
         }
         self.active += dt;
@@ -224,6 +266,7 @@ impl Stats {
         self.win_buffers = 0;
         self.win_samples = 0;
         self.win_dropped = 0;
+        self.win_keyed = 0;
     }
 }
 
@@ -232,9 +275,18 @@ impl Stats {
 /// what fits would leave the ring one float out of step, which swaps I with Q
 /// for the rest of the session — a mirrored, unusable spectrum that reads as a
 /// protocol bug rather than the overrun it is.
-fn push_iq(ring: &mut Producer<f32>, iq: &[f32], stats: &mut Stats) {
+///
+/// `paused` says whether the engine has stopped reading for an over, which
+/// decides how a full ring is accounted for — a fault, or the normal cost of
+/// transmitting. It is deliberately not a reason to skip the push: the samples
+/// are still offered, and it is the reader's business whether it wants them.
+fn push_iq(ring: &mut Producer<f32>, iq: &[f32], stats: &mut Stats, paused: bool) {
     let Ok(mut chunk) = ring.write_chunk(iq.len()) else {
-        stats.on_dropped(iq.len() / 2);
+        if paused {
+            stats.on_dropped_keyed(iq.len() / 2);
+        } else {
+            stats.on_dropped(iq.len() / 2);
+        }
         return;
     };
     let (head, tail) = chunk.as_mut_slices();
@@ -447,7 +499,8 @@ pub(crate) fn rx_thread(mut conn: Connection, shared: Arc<Shared>, mut ring: Pro
                 iq1.push(phy.rx_scan[3].decode(&raw[off..off + q2]));
             }
         }
-        push_iq(&mut ring, &iq, &mut stats);
+        let paused = shared.rx_paused.load(Ordering::Relaxed);
+        push_iq(&mut ring, &iq, &mut stats, paused);
         // Stamped by this thread rather than by the reader, so an over — during
         // which nothing drains the ring — is not read as a dead radio.
         shared.stamp_rx();
@@ -457,7 +510,7 @@ pub(crate) fn rx_thread(mut conn: Connection, shared: Arc<Shared>, mut ring: Pro
             // which is what "nobody is listening" should cost.
             let mut slot = shared.ring1.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(r1) = slot.as_mut() {
-                push_iq(r1, &iq1, &mut stats);
+                push_iq(r1, &iq1, &mut stats, paused);
                 shared.stamp_rx1();
             }
         }

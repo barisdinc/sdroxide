@@ -323,6 +323,24 @@ impl EladSource {
 }
 
 impl IqSource for EladSource {
+    /// The engine is transmitting and has stopped reading, or has started
+    /// again. Passed straight through to the stream thread, which keeps
+    /// receiving either way — this only decides whether a full ring is
+    /// reported as an overrun or as the ordinary cost of an over. See
+    /// [`IqSource::set_rx_paused`].
+    /// The DDC keeps streaming for the whole over — `tx_start` only asserts a
+    /// PTT line over CAT, and the receiver on the other USB interface knows
+    /// nothing about it — so without this the engine's first read after an
+    /// unkey replays a whole transmission's worth of stale I/Q as if it had
+    /// just arrived.
+    fn discard_pending_rx(&mut self) {
+        self.handle.discard_pending_rx();
+    }
+
+    fn set_rx_paused(&mut self, paused: bool) {
+        self.handle.set_rx_paused(paused);
+    }
+
     fn sample_rate(&self) -> f64 {
         self.handle.sample_rate_hz
     }

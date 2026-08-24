@@ -1180,13 +1180,21 @@ impl DataThread {
                         }
                         iq.clear();
                         p::decode_dax_iq(payload, &mut iq);
-                        for &s in &iq {
-                            // A full ring means the engine is not keeping up;
-                            // dropping the newest sample keeps the I/Q phase
-                            // aligned, which overwriting would not.
-                            if self.rx.push(s).is_err() {
+                        // Whole I/Q pairs or nothing. Stopping wherever the
+                        // ring happens to fill would leave it an odd number of
+                        // floats deep, and from then on every pair is one float
+                        // out of step — I read as Q for the rest of the
+                        // session, a mirrored and unusable spectrum. Dropping
+                        // the newest pair, not overwriting the oldest, is still
+                        // the right failure; it is the granularity that was
+                        // wrong. The ring reliably does fill: the engine stops
+                        // reading for the length of an over.
+                        for pair in iq.chunks_exact(2) {
+                            if self.rx.slots() < 2 {
                                 break;
                             }
+                            let _ = self.rx.push(pair[0]);
+                            let _ = self.rx.push(pair[1]);
                         }
                     } else if h.class_code == p::pcc::METER {
                         raw_meters.clear();

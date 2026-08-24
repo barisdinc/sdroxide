@@ -333,6 +333,17 @@ impl IqSource for PlutoSource {
         }
     }
 
+    /// Only ever reached with `full_duplex` off — the engine does not call this
+    /// otherwise — and then only when this Pluto is somebody else's panadapter:
+    /// keying its own transmitter closes the receive buffer for the length of
+    /// the over, so there is nothing arriving to account for. See
+    /// [`IqSource::set_rx_paused`].
+    fn set_rx_paused(&mut self, paused: bool) {
+        if let Some(rx) = self.rx.as_ref() {
+            rx.set_rx_paused(paused);
+        }
+    }
+
     fn open_status(&self) -> Option<String> {
         self.rig.as_deref().and_then(PlutoRig::open_status)
     }

@@ -244,7 +244,7 @@ fn pump(
 
                     if !samples.is_empty() {
                         stats.on_iq(samples.len() / 2);
-                        push_iq(rx, &samples, &mut stats);
+                        push_iq(rx, &samples, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
                         shared
                             .last_rx_ms
                             .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);

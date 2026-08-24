@@ -689,7 +689,7 @@ fn service_rx(
                     let (pairs, tail) = split_pairs(bytes, carry);
                     if !pairs.is_empty() {
                         stats.on_iq(pairs.len() / BYTES_PER_SAMPLE);
-                        push_iq(rx, pairs, stats);
+                        push_iq(rx, pairs, stats, shared.rx_paused.load(Ordering::Relaxed));
                         shared
                             .last_rx_ms
                             .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);

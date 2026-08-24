@@ -541,7 +541,8 @@ unsafe extern "C" fn stream_cb(
             st.scratch[2 * i] = xi[i] as f32 * SCALE;
             st.scratch[2 * i + 1] = xq[i] as f32 * SCALE;
         }
-        let dropped = push_iq(&mut st.ring, &st.scratch[..2 * n], &mut st.stats);
+        let paused = ctx.shared.rx_paused.load(Ordering::Relaxed);
+        let dropped = push_iq(&mut st.ring, &st.scratch[..2 * n], &mut st.stats, paused);
         if dropped > 0 {
             ctx.shared.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
         }

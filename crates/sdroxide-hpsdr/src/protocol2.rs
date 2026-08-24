@@ -7,7 +7,8 @@
 //! trusting on-air behavior; see the notes on individual builders.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
@@ -281,6 +282,11 @@ struct P2Slot {
     /// moment belong to the over rather than to a host that fell behind. A
     /// datagram taken is the proof the reader is back.
     tx_backlog: bool,
+    /// Set while this DDC's own engine is transmitting and therefore not
+    /// reading it — see `HpsdrRx::set_rx_paused`. Separate from `self.ptt`,
+    /// which is this *board* keying: a DDC lent to another rig as a panadapter
+    /// goes unread for an over that MOX here knows nothing about.
+    rx_paused: Arc<AtomicBool>,
 }
 
 struct P2Thread {
@@ -443,7 +449,7 @@ impl P2Thread {
             let mut freq_changed = false;
             while let Ok(msg) = self.ctrl.try_recv() {
                 match msg {
-                    Ctrl::Attach { ddc, ring, last_rx_ms } => {
+                    Ctrl::Attach { ddc, ring, last_rx_ms, rx_paused } => {
                         self.slots.insert(
                             ddc,
                             P2Slot {
@@ -452,6 +458,7 @@ impl P2Thread {
                                 freq_hz: 7_100_000.0,
                                 seq_in: SeqTracker::new(),
                                 tx_backlog: false,
+                                rx_paused,
                             },
                         );
                         // The whole table, freshly stated — never an edit.
@@ -563,7 +570,8 @@ impl P2Thread {
                                 let seq = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
                                 stats.on_lost(slot.seq_in.observe(seq) as u64);
                             }
-                            let keyed = ptt || slot.tx_backlog;
+                            let keyed =
+                                ptt || slot.rx_paused.load(Ordering::Relaxed) || slot.tx_backlog;
                             slot.tx_backlog =
                                 !push_iq(&mut slot.ring, &rx_scratch, &mut stats, keyed) && keyed;
                         } else {

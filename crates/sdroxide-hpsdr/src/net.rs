@@ -377,6 +377,12 @@ pub(crate) enum Ctrl {
         ddc: u8,
         ring: Producer<f32>,
         last_rx_ms: RxClock,
+        /// Set while *this stream's* engine is transmitting and therefore not
+        /// reading it — see `IqSource::set_rx_paused`. Per DDC rather than per
+        /// connection: a second radio tab on another DDC is a different engine
+        /// keying at a different time, and one of them being on the air says
+        /// nothing about whether the other's ring is being drained.
+        rx_paused: Arc<AtomicBool>,
     },
     /// A DDC stream going away (its radio tab closed, or its source is being
     /// rebuilt).
@@ -740,12 +746,21 @@ impl HpsdrBoard {
         // DDC 0's stream owns the transmitter; there is exactly one TX feed.
         let tx =
             if ddc == 0 { self.inner.tx_endpoint.lock().expect("tx lock").take() } else { None };
+        let rx_paused = Arc::new(AtomicBool::new(false));
         let _ = self.inner.ctrl.send(Ctrl::Attach {
             ddc,
             ring: ring_prod,
             last_rx_ms: last_rx_ms.clone(),
+            rx_paused: Arc::clone(&rx_paused),
         });
-        Ok(HpsdrRx { dev: Arc::clone(&self.inner), ddc, ring: ring_cons, tx, last_rx_ms })
+        Ok(HpsdrRx {
+            dev: Arc::clone(&self.inner),
+            ddc,
+            ring: ring_cons,
+            tx,
+            last_rx_ms,
+            rx_paused,
+        })
     }
 }
 
@@ -761,6 +776,8 @@ pub struct HpsdrRx {
     /// This stream's liveness clock (ms since the connection opened at the
     /// last datagram, stamped by the network thread).
     last_rx_ms: RxClock,
+    /// See [`Ctrl::Attach::rx_paused`].
+    rx_paused: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for HpsdrRx {
@@ -961,6 +978,20 @@ impl HpsdrRx {
     /// replay a stale backlog after `tx_end`.
     pub fn discard_pending_rx(&mut self) {
         while self.ring.pop().is_ok() {}
+    }
+
+    /// Tell the network thread that the engine has stopped reading this stream
+    /// for an over, and then that it has started again — see
+    /// `IqSource::set_rx_paused`.
+    ///
+    /// Distinct from the board's own MOX, which the protocol threads already
+    /// watch: that says *this* radio is transmitting, and covers the ordinary
+    /// case where the DDC being keyed is the one being read. This covers the
+    /// other one — an HPSDR receiver lent to a different rig as a panadapter,
+    /// where nothing on this connection is keyed at all and the ring still goes
+    /// unread for the length of somebody else's over.
+    pub fn set_rx_paused(&self, paused: bool) {
+        self.rx_paused.store(paused, Ordering::Relaxed);
     }
 }
 
