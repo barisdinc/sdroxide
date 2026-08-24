@@ -1290,6 +1290,25 @@ pub struct DigiConfig {
     #[serde(default = "default_aprs_ttl")]
     pub aprs_station_ttl_min: u32,
 
+    /// How loud the digital modes' transmit audio is handed to a radio that
+    /// modulates it itself — a CAT rig on a sound card, an Icom on its network
+    /// port. 0.05 to 1.0, and 1.0 is what a radio we modulate ourselves always
+    /// gets.
+    ///
+    /// **On FM this is the deviation.** A sideband rig turns audio level into
+    /// power and its own ALC catches the rest, which is why full scale is right
+    /// there (issue #131). An FM rig turns it into frequency swing, and there
+    /// is no ALC: 1200 baud packet wants about 3 kHz where voice wants 5, so a
+    /// full-scale burst into a data input set for voice over-deviates, and a
+    /// signal that over-deviates sounds completely normal to a listener and
+    /// decodes for nobody.
+    ///
+    /// Full scale by default, which is what every digital mode did before this
+    /// existed. The radio's own input level is the other half of it and only
+    /// the operator can set that.
+    #[serde(default = "one")]
+    pub tx_audio_level: f32,
+
     // ── WSPR ──
     /// WSPR: percentage of two-minute slots to transmit in, 0–100.
     ///
@@ -1470,6 +1489,7 @@ impl Default for DigiConfig {
             aprs_compressed: true,
             aprs_ack_messages: true,
             aprs_station_ttl_min: default_aprs_ttl(),
+            tx_audio_level: 1.0,
             rifp_session_timeout_s: 300,
             wspr_tx_percent: 0,
             wspr_power_dbm: wspr_default_power(),
@@ -2321,6 +2341,11 @@ mod tests {
 /// `#[serde(default)]` helper: a bool that defaults to true.
 fn yes() -> bool {
     true
+}
+
+/// `#[serde(default)]` helper: full scale.
+fn one() -> f32 {
+    1.0
 }
 
 /// `#[serde(default)]` helper for [`DigiConfig::js8_assembly_timeout_s`].

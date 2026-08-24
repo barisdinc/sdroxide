@@ -3154,6 +3154,14 @@ on your channel is sending a format this build does not read.
   network buffers more on top of that. Too little and the far end never locks —
   the transmission is on the air and nothing decodes it. Shared with the packet
   mode, since it is a property of the radio rather than of the protocol.
+- **TX audio** — how loud the burst is handed to a radio that modulates it
+  itself, and **on FM that is the deviation**. An FM transmitter turns audio
+  level into frequency swing and has no ALC to catch it: 1200 baud packet wants
+  about 3 kHz where voice wants 5, so full scale into a data input set for voice
+  over-deviates. An over that over-deviates sounds completely normal to anyone
+  listening and decodes for nobody, so this is the first thing to try when your
+  frames are clean and still nothing acknowledges them. Full scale by default;
+  the radio's own input level is the other half of it.
 - **Keep stations** — how long a station stays on the map after it was last
   heard, and what the map's fade is measured against.
 
@@ -3191,7 +3199,21 @@ Nothing at all, with a healthy level, usually means one of:
   sounds like packet to a listener and is unreadable to a modem. A rig nothing
   is commanding has to be put in it by hand.
 
-If your *transmissions* are the ones nobody can decode, the log line to look for
+If your *transmissions* are the ones nobody can decode, the audio itself can be
+ruled in or out without another operator. Record an over (the **REC** button
+captures transmit audio as well as receive), extract the right-hand channel, and
+run it through an independent decoder:
+
+```text
+ffmpeg -i <recording>.mp3 -af "pan=mono|c0=c1" -ar 44100 tx.wav
+atest tx.wav          # from Direwolf
+```
+
+A frame printed there is a frame that left sdroxide correctly, and anything
+still wrong is between the radio's modulation input and the air — the **TX
+audio** level above, the radio's own input level, or its data-mode setting.
+
+The log line to look for
 is `digital transmit audio is being rate-matched to the radio`. Some radios
 receive at one sample rate and transmit at another — an Icom on its 12 kHz IF
 output receives a stream decimated to 24 kHz while taking transmit audio at 48 —

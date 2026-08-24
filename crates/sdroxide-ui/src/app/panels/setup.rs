@@ -476,6 +476,30 @@ impl SdroxideApp {
                         });
                         ui.end_row();
 
+                        ui.label("TX audio");
+                        ui.horizontal(|ui| {
+                            let mut pct = (cfg.tx_audio_level * 100.0).round();
+                            if ui
+                                .add(egui::DragValue::new(&mut pct).range(5.0..=100.0).suffix(" %"))
+                                .on_hover_text(
+                                    "How loud the burst is handed to a radio that modulates it \
+                                     itself — and on FM that is the deviation, because an FM \
+                                     transmitter turns audio level into frequency swing and has \
+                                     no ALC to catch it. 1200 baud packet wants about 3 kHz \
+                                     where voice wants 5, so full scale into a data input set \
+                                     for voice over-deviates — which sounds completely normal \
+                                     to a listener and decodes for nobody. Turn it down until \
+                                     other stations report you, or set the level at the radio.",
+                                )
+                                .changed()
+                            {
+                                cfg.tx_audio_level = (pct as f32 / 100.0).clamp(0.05, 1.0);
+                                changed = true;
+                            }
+                            ui.label(RichText::new("deviation, on FM").size(9.5).weak());
+                        });
+                        ui.end_row();
+
                         ui.label("Keep stations");
                         changed |= ui
                             .add(

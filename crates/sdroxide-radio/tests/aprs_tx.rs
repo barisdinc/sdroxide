@@ -6,6 +6,10 @@
 //! stop at `DigiEngine::fill_tx_block`, and what reaches a radio is what the
 //! engine does with those blocks afterwards.
 //!
+//! ⚠️ `SetDigiConfig` makes the engine save, and `SDROXIDE_CONFIG_DIR` is
+//! process-global: see [`isolate_config`]. A test here that forgets it writes
+//! its fixtures over the operator's real station settings.
+//!
 //! So this stands the whole engine up on an audio-modulated rig — the shape an
 //! IC-705 on its LAN or USB connector presents — captures every sample handed
 //! to `tx_write_audio`, and puts it back through a real Bell 202 modem and
@@ -136,6 +140,23 @@ fn station() -> DigiConfig {
     }
 }
 
+/// Point the whole process at a config directory of its own, once.
+///
+/// `SetDigiConfig` makes the engine *save* — and `SDROXIDE_CONFIG_DIR` is
+/// process-global, so a test that does not set it writes into the operator's
+/// real configuration. This one sends a digi config on every over, so without
+/// this it would overwrite a live station's callsign, position and channel
+/// settings with its own fixtures. It has done exactly that once.
+fn isolate_config() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let root = std::env::temp_dir().join(format!("sdroxide-aprs-tx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("SDROXIDE_CONFIG_DIR", &root) };
+    });
+}
+
 /// Run `cmds` on an APRS station and return every sample the rig was given.
 fn over_for(audio_mode: bool, cmds: Vec<Command>) -> Vec<f32> {
     over_at(audio_mode, 48_000.0, 48_000.0, cmds)
@@ -143,6 +164,7 @@ fn over_for(audio_mode: bool, cmds: Vec<Command>) -> Vec<f32> {
 
 /// The same on a radio whose receive and transmit rates differ.
 fn over_at(audio_mode: bool, rx_rate: f64, tx_rate: f64, cmds: Vec<Command>) -> Vec<f32> {
+    isolate_config();
     let heard = Arc::new(Mutex::new(Heard::default()));
     let src = SoundCardRig { heard: Arc::clone(&heard), rng: 0x1234_5678, rx_rate, tx_rate };
     // A ring nothing reads. Without somewhere to play audio the engine never
@@ -349,4 +371,70 @@ fn a_beacon_is_rate_matched_when_the_radio_transmits_at_another_rate() {
     );
     let p = Packet::parse(&frames[0], None).expect("the frame does not parse");
     assert_eq!(p.src().call(), "OE3JJS");
+}
+
+/// The transmit audio level reaches the radio, and only where the radio is the
+/// thing doing the modulating.
+///
+/// On FM that level is the deviation and nothing else sets it: an over that
+/// over-deviates sounds completely normal and decodes for nobody, which is a
+/// failure with no symptom an operator can act on. Full scale stays the
+/// default, so this changes nothing for anyone who does not reach for it.
+#[test]
+fn the_transmit_audio_level_scales_what_the_radio_is_given() {
+    let peak_at = |level: f32| {
+        let audio = over_for(
+            true,
+            vec![
+                Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
+                Command::SetDigiConfig(DigiConfig { tx_audio_level: level, ..station() }),
+                Command::AprsBeacon,
+            ],
+        );
+        audio.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    };
+    let full = peak_at(1.0);
+    let half = peak_at(0.5);
+    assert!(full > 0.9, "the default is full scale into the radio: {full}");
+    assert!(
+        (half / full - 0.5).abs() < 0.08,
+        "half the level should be half the amplitude: {half} against {full}"
+    );
+    // ...and what came out at half level is still a frame, not a fainter mess.
+    let audio = over_for(
+        true,
+        vec![
+            Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
+            Command::SetDigiConfig(DigiConfig { tx_audio_level: 0.5, ..station() }),
+            Command::AprsBeacon,
+        ],
+    );
+    assert_eq!(frames_in(&audio).len(), 1, "turning the level down broke the frame");
+}
+
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn measure_headroom() {
+    for (name, rx, tx) in [("48k straight", 48_000.0, 48_000.0), ("24k -> 48k", 24_000.0, 48_000.0)]
+    {
+        let audio = over_at(
+            false,
+            rx,
+            tx,
+            vec![
+                Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
+                Command::SetDigiConfig(station()),
+                Command::AprsBeacon,
+            ],
+        );
+        let loud: Vec<f32> = audio.iter().copied().filter(|s| s.abs() > 0.05).collect();
+        let peak = loud.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        let at_full = loud.iter().filter(|s| s.abs() >= 0.999).count();
+        let rms = (loud.iter().map(|s| s * s).sum::<f32>() / loud.len() as f32).sqrt();
+        eprintln!(
+            "{name}: peak={peak:.4} rms/peak={:.4} at_full={:.2}%",
+            rms / peak,
+            100.0 * at_full as f32 / loud.len() as f32
+        );
+    }
 }

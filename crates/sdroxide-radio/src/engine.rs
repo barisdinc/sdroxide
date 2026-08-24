@@ -9408,7 +9408,20 @@ impl Engine {
         // The modem's own headroom, divided back out (`DigiEngine::tx_peak`) so
         // the radio is handed a full-scale modulating signal and a full Drive is
         // a full transmitter (issue #131).
-        if gain != 1.0 {
+        //
+        // ...and then the operator's own level, but only where the *radio*
+        // modulates what we send it. On FM that level is the deviation and
+        // nothing else sets it: a full-scale burst into a data input set for
+        // voice over-deviates, which sounds entirely normal and decodes for
+        // nobody. Where we modulate it ourselves the modulator and Drive
+        // already own the level, so this stays out of it.
+        let level = if self.audio_mode || self.caps.tx_audio {
+            self.digi_config.tx_audio_level.clamp(0.05, 1.0)
+        } else {
+            1.0
+        };
+        let gain = gain * level;
+        if (gain - 1.0).abs() > f32::EPSILON {
             for a in out.iter_mut() {
                 *a = (*a * gain).clamp(-1.0, 1.0);
             }
