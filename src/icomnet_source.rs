@@ -711,7 +711,14 @@ impl IqSource for IcomNetSource {
             m => m,
         };
         self.mode_cmd = Some((civ::mode_to_civ(mode), Instant::now()));
-        self.send(civ::set_mode_frame(self.civ_addr, mode));
+        // The mode *and* the DATA switch beside it, which is the pair the
+        // serial CAT path has always sent. The plain mode command clears the
+        // switch, so sending it alone took a rig the operator had put in FM-D
+        // straight back to FM — and it is sent before every over, so a beacon
+        // could never go out through the data path at all (issue #150).
+        for f in civ::set_mode_frames(self.civ_addr, mode, self.dev.info().model.data_mode_sub) {
+            self.send(f);
+        }
         Ok(())
     }
 
@@ -1047,6 +1054,43 @@ mod tests {
         src.set_control_mode(Mode::Lsb).unwrap();
         wait_for("a set-mode frame selecting LSB", || {
             sim.civ_frames().iter().any(|f| f.get(4) == Some(&0x06) && f.get(5) == Some(&0x00))
+        });
+    }
+
+    /// Issue #150: an IC-705 on APRS transmitted, sounded like packet, and was
+    /// decoded by nobody — and a rig the operator had put into FM-D by hand
+    /// dropped back to plain FM the moment a beacon went out.
+    ///
+    /// The plain set-mode command *clears* the DATA switch, and this backend
+    /// sent only that while the serial CAT path had always sent the pair. So
+    /// every over went out through the microphone path, with the rig's speech
+    /// processing and — on FM — its pre-emphasis, which tilts a Bell 202 tone
+    /// pair about 6 dB. Structurally perfect, audibly normal, unreadable.
+    #[test]
+    fn a_digital_mode_is_commanded_with_the_data_switch_beside_it() {
+        let sim = Sim::start(SimOptions { scope: false, ..Default::default() }).unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+
+        // APRS: FM (0x05) *and* the DATA switch on.
+        src.set_control_mode(Mode::Aprs).unwrap();
+        wait_for("FM for APRS", || {
+            sim.civ_frames().iter().any(|f| f.get(4) == Some(&0x06) && f.get(5) == Some(&0x05))
+        });
+        wait_for("the DATA switch turned on for APRS", || {
+            sim.civ_frames()
+                .iter()
+                .any(|f| f.get(4) == Some(&0x1A) && f.get(5) == Some(&0x06) && f.get(6) == Some(&1))
+        });
+
+        // ...and a voice mode turns it off again, or a rig left in a data mode
+        // by the last over would stay there.
+        let sim = Sim::start(SimOptions { scope: false, ..Default::default() }).unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+        src.set_control_mode(Mode::Nfm).unwrap();
+        wait_for("the DATA switch turned off for plain FM", || {
+            sim.civ_frames()
+                .iter()
+                .any(|f| f.get(4) == Some(&0x1A) && f.get(5) == Some(&0x06) && f.get(6) == Some(&0))
         });
     }
 

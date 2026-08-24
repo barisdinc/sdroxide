@@ -849,6 +849,18 @@ pub struct Model {
     pub lan_mod_input: Option<(u16, u16, u8)>,
     /// `1A 05 nn nn` sub-command for LAN AF/IF Output → Output Select.
     pub lan_afif_select: Option<u16>,
+    /// `1A nn` sub-command carrying the DATA switch — the mode's `-D` variant.
+    ///
+    /// `0x06` on everything modern; the IC-7200's is `0x04` and an IC-7000 has
+    /// none, but neither has a network port so neither reaches this backend.
+    ///
+    /// It matters because the plain mode command *clears* the switch: a rig
+    /// left in FM-D by hand drops back to FM the moment anything sets the
+    /// mode, which is before every over. Without the switch a digital over
+    /// goes out through the microphone path with the rig's speech processing
+    /// and — on FM — its pre-emphasis, which tilts a Bell 202 tone pair about
+    /// 6 dB and makes packet unreadable while still sounding like packet.
+    pub data_mode_sub: Option<u8>,
 }
 
 /// Everything a model we do not recognise still gets: the common command set,
@@ -859,6 +871,12 @@ pub const UNKNOWN_MODEL: Model = Model {
     scope_bins: 475,
     lan_mod_input: None,
     lan_afif_select: None,
+    // The one field an unrecognised model still gets a value for. `1A 06` is
+    // the DATA switch on every Icom with a network port, and a rig that does
+    // not have the sub-command answers NG and is left as it was — a cheaper
+    // failure than a digital mode that quietly transmits through the
+    // microphone path.
+    data_mode_sub: Some(0x06),
 };
 
 /// Models whose `1A 05` numbering has been read out of the manufacturer's CI-V
@@ -873,6 +891,7 @@ pub const MODELS: &[Model] = &[
         lan_mod_input: Some((0x0084, 0x0085, 0x05)),
         // 1A 05 00 79 = LAN AF/IF Output → Output Select, `00=AF, 01=IF`.
         lan_afif_select: Some(0x0079),
+        data_mode_sub: Some(0x06),
     },
     Model {
         civ_address: 0xA4,
@@ -888,6 +907,7 @@ pub const MODELS: &[Model] = &[
         // 01 09 is the *USB* one — the same setting on the other port, and the
         // wrong one to write for a network session.
         lan_afif_select: Some(0x0114),
+        data_mode_sub: Some(0x06),
     },
 ];
 
