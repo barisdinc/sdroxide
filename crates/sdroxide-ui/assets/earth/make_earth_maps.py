@@ -19,6 +19,13 @@ at the same coordinates and a QTH marker lands on the same shoreline in both.
     cities.bin   ~180 kB               — the populated-places *table* (name,
                                           position, population), for the flat
                                           maps, which have room to label them
+    lines.bin    ~1.6 MB                — the borders and rivers again, as the
+                                          *polylines* they were digitised as,
+                                          simplified into five levels of
+                                          detail. What the flat maps draw:
+                                          a line from its own geometry is one
+                                          dot wide at any zoom, which no
+                                          threshold on a raster can manage
 
 Coverage, not a 1-bit mask, is the whole point of the land map. The shader
 draws the shoreline as the field's half-way contour and strokes it a fixed
@@ -346,6 +353,152 @@ def build_places() -> bytes:
     return CITY_MAGIC + struct.pack("<I", len(out)) + b"".join(rec for _, rec in out)
 
 
+# ── The line layers, as lines ───────────────────────────────────────────────
+
+LINE_MAGIC = b"SDXLINE1"
+
+# Simplification tolerance per level, in degrees, coarsest last. Each is four
+# times the one before, and a map takes the level whose tolerance is under half
+# a dot cell — so the simplification is always finer than the grid it is drawn
+# on and never something the eye can find. The five span the whole zoom range,
+# from a one-degree view of a valley to the whole world in a panel.
+LINE_LEVELS = [0.003, 0.012, 0.05, 0.2, 0.8]
+
+# One delta step, in degrees. 11 m: far finer than the finest tolerance above,
+# and it leaves an i16 a range of ±3.2°, which all but a handful of simplified
+# segments fit inside.
+LINE_STEP = 1e-4
+
+
+def douglas_peucker(pts, eps: float):
+    """Drop every vertex that sits within `eps` of the line it lies on.
+
+    Iterative rather than recursive: a river with forty thousand vertices in
+    one part will blow a recursion limit, and this reads no worse.
+    """
+    if len(pts) < 3:
+        return pts
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        (x0, y0), (x1, y1) = pts[a], pts[b]
+        dx, dy = x1 - x0, y1 - y0
+        norm = (dx * dx + dy * dy) ** 0.5 or 1e-12
+        far, at = eps, None
+        for i in range(a + 1, b):
+            x, y = pts[i]
+            d = abs(dy * (x - x0) - dx * (y - y0)) / norm
+            if d > far:
+                far, at = d, i
+        if at is not None:
+            keep[at] = True
+            stack.append((a, at))
+            stack.append((at, b))
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def encode_part(pts, rank: int) -> bytes:
+    """One polyline: an absolute first point and 16-bit steps after it.
+
+    A step of 11 m leaves an i16 a range of 3.2°, which every segment of the
+    finer levels is well inside; the coarse ones do produce the odd longer one,
+    and those are subdivided rather than split off into a part of their own —
+    the extra vertices are exactly on the line they came from, so nothing about
+    the geometry changes and the reader stays a straight loop.
+    """
+    if len(pts) < 2:
+        return b""
+    reach = 30000 * LINE_STEP
+    dense = [pts[0]]
+    for (lat0, lon0), (lat1, lon1) in zip(pts, pts[1:]):
+        steps = int(max(abs(lat1 - lat0), abs(lon1 - lon0)) / reach) + 1
+        for k in range(1, steps + 1):
+            f = k / steps
+            dense.append((lat0 + (lat1 - lat0) * f, lon0 + (lon1 - lon0) * f))
+    lat0, lon0 = dense[0]
+    body = struct.pack("<BHii", rank, len(dense), round(lat0 * 1e5), round(lon0 * 1e5))
+    prev = (round(lat0 / LINE_STEP), round(lon0 / LINE_STEP))
+    for lat, lon in dense[1:]:
+        cur = (round(lat / LINE_STEP), round(lon / LINE_STEP))
+        body += struct.pack("<hh", cur[0] - prev[0], cur[1] - prev[1])
+        prev = cur
+    return body
+
+
+def build_lines() -> bytes:
+    """Borders and rivers as polylines, simplified into levels.
+
+    The rasters these come from stay — the globe is textured with them — but a
+    flat map cannot use one. A border is a line one texel wide, and once a map
+    is zoomed in far enough for a texel to cover several of its dots, *no*
+    threshold on the interpolated coverage recovers a line: set it low and the
+    border comes out a band four dots wide, set it high and the same border
+    breaks into fragments wherever it happens to fall between two texels. The
+    geometry has no such problem — a line drawn from the vertices it was
+    digitised from is one dot wide at every zoom, and in the right place.
+
+    Cheaper, too: the two rasters cost 12 MB of CPU pyramids for detail they
+    could not deliver, and the vectors are under a megabyte and a half for
+    detail bounded only by Natural Earth's own.
+    """
+    layers = []
+    for name, ranked in (("borders", False), ("rivers", True)):
+        shp = fetch(name, LAYERS[name], CACHE)
+        if ranked:
+            rows = list(dbf(fetch(name, LAYERS[name], CACHE, "dbf"), {"strokeweig"}))
+            # 0.15…2.0 of stroke weight over the sixteen ranks a nibble holds.
+            ranks = [
+                min(15, max(0, round((float(r["strokeweig"] or 0.2) - 0.15) * 8.0)))
+                for r in rows
+            ]
+        else:
+            ranks = None
+        parts = []
+        for i, rings in enumerate(shapes(shp)):
+            rank = ranks[i] if ranks else 0
+            for ring in rings:
+                if len(ring) >= 2:
+                    for run in split_dateline([(lat, lon) for lon, lat in ring]):
+                        parts.append((rank, run))
+        levels = []
+        for eps in LINE_LEVELS:
+            encoded, count = [], 0
+            for rank, pts in parts:
+                # The coarser levels are for a map showing a continent at a
+                # time, where a creek is a smudge and a border is the point.
+                if eps >= 0.05 and rank and rank < (2 if eps < 0.2 else 5):
+                    continue
+                # A part smaller than the tolerance is a dot at this level, and
+                # nine thousand of them are what a coarse level would otherwise
+                # spend most of its bytes on: the borders alone leave three
+                # thousand islands and enclaves behind at continental zoom.
+                span = max(
+                    max(p[0] for p in pts) - min(p[0] for p in pts),
+                    max(p[1] for p in pts) - min(p[1] for p in pts),
+                )
+                if span < 2.0 * eps:
+                    continue
+                blob = encode_part(douglas_peucker(pts, eps), rank)
+                if blob:
+                    encoded.append(blob)
+                    count += 1
+            # The tolerance travels with the level: what picks a level at
+            # draw time is "which of these is finer than half a dot cell", and
+            # a reader that had to be told the list separately could be told a
+            # stale one.
+            levels.append(
+                struct.pack("<fI", eps, count) + b"".join(encoded)
+            )
+            print(
+                f"  {name} @{eps}°: {count} parts, {len(levels[-1]) / 1024:.0f} kB",
+                file=sys.stderr,
+            )
+        layers.append(struct.pack("<B", len(levels)) + b"".join(levels))
+    return LINE_MAGIC + struct.pack("<B", len(layers)) + b"".join(layers)
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(CACHE, exist_ok=True)
@@ -356,6 +509,7 @@ def main():
         ("rivers.png", build_rivers),
         ("cities.png", build_cities),
         ("cities.bin", build_places),
+        ("lines.bin", build_lines),
     )
     for name, build in outputs:
         if only and name not in only:

@@ -814,7 +814,7 @@ const fn map_from(p: &Palette) -> MapPalette {
         sea: p.input_bg,
         land: c(0x1c4458),
         border: c(0x6d8b98),
-        river: c(0x1c5f8f),
+        river: c(0x2a7fbe),
         city: c(0xc79a4e),
         city_label: c(0x9a8560),
         station: Color32::WHITE,

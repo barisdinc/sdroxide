@@ -8,25 +8,26 @@
 //! shoreline whichever one is open — and the flat maps get the country borders
 //! and rivers the globe has had all along.
 //!
-//! Three things are sampled here, all as *coverage* — the fraction of a cell
-//! the feature fills, not a yes/no bit:
+//! Three things, in the form each one is actually good in:
 //!
-//! - **land**, whose ½ contour is the coastline. Coverage is what lets a coast
-//!   be drawn to a fraction of a cell instead of stepping along the grid, which
-//!   is the same trick `solar_body.wgsl` plays on the globe;
-//! - **borders**, the international boundaries;
-//! - **rivers**, drawn at the width Natural Earth ranks each one at, so how
-//!   much of a texel a river covers *is* how big a river it is.
+//! - [`land`] is a *coverage* raster — the fraction of each cell that is
+//!   ground. A region is what a coverage field is good at: its ½ contour is the
+//!   coastline, placed to a fraction of a cell rather than stepped along the
+//!   grid, which is the same trick `solar_body.wgsl` plays on the globe.
+//! - [`lines`] — the borders and the rivers — are the *polylines* they were
+//!   digitised as. The globe is textured with rasters of them, but a flat map
+//!   cannot use one: a border is a texel wide there, and once a map is zoomed
+//!   in far enough for a texel to cover several dots, no threshold on the
+//!   interpolated coverage gives a line back. Geometry has no such limit.
+//! - [`cities`] is a table, because a flat map has room for a name and no
+//!   texture can carry one.
 //!
-//! Plus [`cities`], which is not a raster at all: a flat map has room for a
-//! name, and no texture can carry one.
-//!
-//! Everything is decoded on first use and never freed. That costs 17 MB and
-//! about sixty milliseconds, once, for a program that then never touches the
-//! assets again — and only for a session that actually opens a map. Sixty
-//! milliseconds is four dropped frames on the frame that first draws one,
-//! which is exactly the frame somebody is looking at, so a native session
-//! [`prime`]s it on a thread at startup instead.
+//! Everything is read on first use and never freed. That costs about 26 MB and
+//! fifty milliseconds — nearly all of it the land pyramid — once, for a program
+//! that then never touches the assets again, and only for a session that
+//! actually opens a map. Fifty milliseconds is three dropped frames on the
+//! frame that first draws one, which is exactly the frame somebody is looking
+//! at, so a native session [`prime`]s it on a thread at startup instead.
 
 use std::sync::OnceLock;
 
@@ -54,21 +55,25 @@ pub(crate) const RIVER_PNG: &[u8] = include_bytes!("../assets/earth/rivers.png")
 /// sampled here: a flat map has room for a name, and uses [`cities`] instead.
 pub(crate) const CITY_PNG: &[u8] = include_bytes!("../assets/earth/cities.png");
 const CITY_BIN: &[u8] = include_bytes!("../assets/earth/cities.bin");
+/// The borders and rivers as polylines rather than as pixels — see [`lines`].
+const LINE_BIN: &[u8] = include_bytes!("../assets/earth/lines.bin");
 
-/// The finest grid kept on the CPU, as an edge length.
+/// The finest land grid kept on the CPU, as an edge length.
 ///
-/// The globe uploads land at the asset's full 8192×4096 because its camera can
-/// fly down to the surface. A panel map cannot: its dots are four points apart,
-/// so from about 1/11° down it is the *dot grid* that limits what can be seen
-/// and not the texels — while one level up costs four times the memory (45 MB
-/// against 11), which is why land arrives here one level down.
+/// Natively the asset's full 8192×4096 — 1/22.75°, about 4.9 km — which is
+/// what the globe uploads and what the flat maps now hold too: 22 MB of
+/// nibble-packed pyramid, and the only raster the CPU keeps at all now that the
+/// borders and the rivers are [`lines`] rather than pixels. It is the map's
+/// resolution in the plainest sense, so it goes up whole.
 ///
-/// It is set at the *line* layers' own 4320 rather than at land's 4096, so
-/// those are kept whole. They are one texel wide by construction, and halving
-/// one costs half its contrast as well as half its resolution: a border that
-/// filled a texel comes back filling half of one, dimmer and twice as broad as
-/// what was drawn.
-const MAX_DIM: usize = 4320;
+/// The browser takes it one level down. Halving an edge quarters the memory,
+/// and a tab that also holds the same asset on the GPU, decodes it on the one
+/// thread it has and rarely shows a map more than a panel wide is the wrong
+/// place to spend 22 MB on islands nobody is zoomed in on.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_DIM: usize = 8192;
+#[cfg(target_arch = "wasm32")]
+const MAX_DIM: usize = 4096;
 
 /// Coverage as one nibble per cell, 0…15.
 ///
@@ -173,7 +178,6 @@ impl Layer {
             hi: &self.levels[hi],
             t,
             mag: ((360.0 / self.levels[lo].w as f64) / deg) as f32,
-            gain: (self.levels[0].w / self.levels[lo].w) as f32,
         }
     }
 }
@@ -185,7 +189,6 @@ pub struct Sampler<'a> {
     hi: &'a Level,
     t: f32,
     mag: f32,
-    gain: f32,
 }
 
 impl Sampler<'_> {
@@ -200,13 +203,6 @@ impl Sampler<'_> {
     /// interpolation rather than from anything measured.
     pub fn magnification(&self) -> f32 {
         self.mag
-    }
-
-    /// How much a one-texel line has been thinned by the reduction to this
-    /// level. Box-averaging halves a line's coverage per level while leaving
-    /// its length alone, so this is what undoes that.
-    pub fn line_gain(&self) -> f32 {
-        self.gain
     }
 }
 
@@ -227,21 +223,148 @@ fn halve(w: usize, h: usize, src: &[u8]) -> (usize, usize, Vec<u8>) {
     (nw, nh, out)
 }
 
-/// Everything the flat maps draw the world from.
-pub struct World {
-    pub land: Layer,
-    pub borders: Layer,
-    pub rivers: Layer,
+/// The land field, decoded on the first map frame and kept for the session.
+///
+/// The one raster the flat maps sample. Land is a *region*, and a region is
+/// what a coverage field is good at: the ½ contour of it is the coastline, to a
+/// fraction of a cell. The borders and the rivers are lines, which it is not —
+/// see [`lines`].
+pub fn land() -> &'static Layer {
+    static LAND: OnceLock<Layer> = OnceLock::new();
+    LAND.get_or_init(|| Layer::build("land.png", LAND_PNG, MAX_DIM))
 }
 
-/// The decoded rasters, built on the first map frame and kept for the session.
-pub fn world() -> &'static World {
-    static WORLD: OnceLock<World> = OnceLock::new();
-    WORLD.get_or_init(|| World {
-        land: Layer::build("land.png", LAND_PNG, MAX_DIM),
-        borders: Layer::build("borders.png", BORDER_PNG, MAX_DIM),
-        rivers: Layer::build("rivers.png", RIVER_PNG, MAX_DIM),
-    })
+// ── The line layers ─────────────────────────────────────────────────────────
+
+/// One polyline: a run of points, with the box it lives in and how big a thing
+/// it is.
+pub struct Part {
+    /// 0 for a border, 1…15 for a river by the width Natural Earth ranks it at.
+    pub rank: u8,
+    /// Bounds as a centre and a half-extent, in degrees, which is the form a
+    /// wrapping longitude test wants: `wrap180(centre - view_centre)` against
+    /// the two half-widths, with no cases to get wrong at the date line.
+    pub mid: (f64, f64),
+    pub half: (f64, f64),
+    /// (lat, lon), in degrees.
+    pub pts: Vec<(f32, f32)>,
+}
+
+/// The same lines at one level of detail.
+pub struct LineLevel {
+    /// How far a dropped vertex was allowed to sit from the line it was on,
+    /// in degrees. What picks a level: the finest one under half a dot cell.
+    pub eps: f64,
+    pub parts: Vec<Part>,
+}
+
+/// A whole line layer — the borders, or the rivers — at every level.
+pub struct LineLayer {
+    /// Finest first.
+    levels: Vec<LineLevel>,
+}
+
+impl LineLayer {
+    /// The coarsest level still finer than half a `deg`-wide dot cell, so what
+    /// was thrown away is always smaller than the grid it is drawn on.
+    pub fn level(&self, deg: f64) -> &LineLevel {
+        self.levels.iter().rev().find(|l| l.eps <= deg * 0.5).unwrap_or(&self.levels[0])
+    }
+}
+
+/// The borders and the rivers, as the polylines they were digitised as.
+pub struct Lines {
+    pub borders: LineLayer,
+    pub rivers: LineLayer,
+}
+
+/// Parsed on the first map frame and kept for the session (about 4 MB).
+///
+/// Lines rather than a raster because of what a flat map does with them. A
+/// border is one texel wide in `borders.png`, and once a map is zoomed in far
+/// enough for that texel to cover several dots, no threshold on the
+/// interpolated coverage gives a line back: a low one draws the interpolation's
+/// skirt as well and the border comes out a band, a high one breaks the same
+/// border into fragments wherever it falls between two texels. Geometry has
+/// neither problem — a line walked from its own vertices is one dot wide at
+/// every zoom, and in the place it was digitised at.
+pub fn lines() -> &'static Lines {
+    static LINES: OnceLock<Lines> = OnceLock::new();
+    LINES.get_or_init(|| parse_lines(LINE_BIN))
+}
+
+/// See `make_earth_maps.py`'s `build_lines`: a magic, then one layer after
+/// another, each a run of levels, each a run of parts, each an absolute first
+/// point and 16-bit steps from there.
+fn parse_lines(blob: &'static [u8]) -> Lines {
+    /// One step of a delta, in degrees — `LINE_STEP` in the baker.
+    const STEP: f64 = 1e-4;
+    let mut layers = Vec::new();
+    let mut rest = match blob.strip_prefix(b"SDXLINE1") {
+        Some(rest) => rest,
+        None => {
+            eprintln!("sdroxide: lines.bin is not a line table");
+            &[]
+        }
+    };
+    let take = |n: usize, rest: &mut &'static [u8]| -> &'static [u8] {
+        let (head, tail) = rest.split_at_checked(n).unwrap_or((&[], &[]));
+        *rest = tail;
+        head
+    };
+    let n_layers = take(1, &mut rest).first().copied().unwrap_or(0);
+    for _ in 0..n_layers {
+        let n_levels = take(1, &mut rest).first().copied().unwrap_or(0);
+        let mut levels = Vec::with_capacity(n_levels as usize);
+        for _ in 0..n_levels {
+            let head = take(8, &mut rest);
+            if head.len() < 8 {
+                break;
+            }
+            let eps = f32::from_le_bytes(head[0..4].try_into().expect("4 bytes"));
+            let n_parts = u32::from_le_bytes(head[4..8].try_into().expect("4 bytes"));
+            let mut parts = Vec::with_capacity(n_parts as usize);
+            for _ in 0..n_parts {
+                let head = take(11, &mut rest);
+                if head.len() < 11 {
+                    break;
+                }
+                let n = u16::from_le_bytes(head[1..3].try_into().expect("2 bytes")) as usize;
+                let num =
+                    |a: usize| i32::from_le_bytes(head[a..a + 4].try_into().expect("4 bytes"));
+                let (mut lat, mut lon) = (f64::from(num(3)) / 1e5, f64::from(num(7)) / 1e5);
+                let (mut lat0, mut lat1, mut lon0, mut lon1) = (lat, lat, lon, lon);
+                let mut pts = Vec::with_capacity(n);
+                pts.push((lat as f32, lon as f32));
+                let steps = take(4 * n.saturating_sub(1), &mut rest);
+                for step in steps.chunks_exact(4) {
+                    let d = |a: usize| {
+                        f64::from(i16::from_le_bytes(step[a..a + 2].try_into().expect("2 bytes")))
+                    };
+                    lat += d(0) * STEP;
+                    lon += d(2) * STEP;
+                    pts.push((lat as f32, lon as f32));
+                    (lat0, lat1) = (lat0.min(lat), lat1.max(lat));
+                    (lon0, lon1) = (lon0.min(lon), lon1.max(lon));
+                }
+                parts.push(Part {
+                    rank: head[0],
+                    mid: ((lat0 + lat1) * 0.5, (lon0 + lon1) * 0.5),
+                    half: ((lat1 - lat0) * 0.5, (lon1 - lon0) * 0.5),
+                    pts,
+                });
+            }
+            levels.push(LineLevel { eps: f64::from(eps), parts });
+        }
+        layers.push(LineLayer { levels });
+    }
+    // A file that arrived short leaves empty layers rather than none at all,
+    // so the map draws what it has instead of panicking on the way past.
+    while layers.len() < 2 {
+        layers.push(LineLayer { levels: vec![LineLevel { eps: 1.0, parts: Vec::new() }] });
+    }
+    let mut it = layers.into_iter();
+    Lines { borders: it.next().expect("two layers"), rivers: it.next().expect("two layers") }
 }
 
 /// Start the decode on a thread of its own, so the first map frame does not
@@ -254,7 +377,8 @@ pub fn world() -> &'static World {
 pub fn prime() {
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(|| {
-        world();
+        land();
+        lines();
         cities();
     });
 }
@@ -264,7 +388,7 @@ pub fn prime() {
 /// Read off the finest grid kept, so it agrees with the coastline the maps
 /// draw rather than approximating it from a coarser one.
 pub fn is_land(lon: f64, lat: f64) -> bool {
-    world().land.levels[0].bilinear(lon, lat) >= 0.5
+    land().levels[0].bilinear(lon, lat) >= 0.5
 }
 
 // ── Cities ──────────────────────────────────────────────────────────────────
@@ -341,7 +465,7 @@ mod tests {
     /// texel — a gap would make `sampler` read past the end at some zoom.
     #[test]
     fn the_pyramids_run_all_the_way_down() {
-        for layer in [&world().land, &world().borders, &world().rivers] {
+        for layer in [land()] {
             let mut prev: Option<&Level> = None;
             for l in &layer.levels {
                 assert_eq!(l.cov.len(), (l.w * l.h).div_ceil(2));
@@ -360,11 +484,10 @@ mod tests {
     /// walks off either end of the pyramid.
     #[test]
     fn zoom_picks_a_level_and_stays_inside_the_pyramid() {
-        let land = &world().land;
+        let land = land();
         // Zoomed further in than the data goes: the base level, undiluted.
         let s = land.sampler(1e-6);
         assert!(std::ptr::eq(s.lo, &land.levels[0]));
-        assert_eq!(s.line_gain(), 1.0);
         assert!(s.magnification() > 1.0);
         // ...and further out than the whole world.
         let s = land.sampler(720.0);
@@ -380,7 +503,7 @@ mod tests {
     /// shoreline from.
     #[test]
     fn coverage_is_a_fraction() {
-        let s = world().land.sampler(0.01);
+        let s = land().sampler(0.01);
         assert!(s.at(100.0, 45.0) > 0.99, "central Asia: {}", s.at(100.0, 45.0));
         assert!(s.at(-140.0, 0.0) < 0.01, "mid-Pacific: {}", s.at(-140.0, 0.0));
         // Longitude wraps rather than clamping, so ±180 is one place.
@@ -390,18 +513,70 @@ mod tests {
 
     /// What the decoded world costs, held for the session.
     ///
-    /// Asserted rather than measured in passing, because the number is a
-    /// decision — `MAX_DIM` — and a decision that is easy to change without
-    /// noticing: one level up on the land pyramid is 45 MB rather than 11, and
-    /// it would be handed to a browser tab as readily as to a workstation.
+    /// Asserted rather than measured in passing, because both numbers are
+    /// decisions that are easy to change without noticing: `MAX_DIM` one level
+    /// up is 45 MB of land pyramid rather than 22, and a finer line level is
+    /// another megabyte of vertices — either would be handed to a browser tab
+    /// as readily as to a workstation.
     #[test]
     fn the_world_fits_in_its_budget() {
-        let w = world();
-        let bytes: usize = [&w.land, &w.borders, &w.rivers]
+        let raster: usize = land().levels.iter().map(|v| v.cov.len()).sum();
+        assert!(raster < 32 << 20, "the land pyramid grew to {} MB", raster >> 20);
+        let vectors: usize = [&lines().borders, &lines().rivers]
             .iter()
-            .map(|l| l.levels.iter().map(|v| v.cov.len()).sum::<usize>())
+            .flat_map(|l| l.levels.iter())
+            .flat_map(|l| l.parts.iter())
+            .map(|p| p.pts.len() * std::mem::size_of::<(f32, f32)>())
             .sum();
-        assert!(bytes < 20 << 20, "the map pyramids grew to {} MB", bytes >> 20);
+        assert!(vectors < 8 << 20, "the line layers grew to {} MB", vectors >> 20);
+    }
+
+    /// The lines are the geometry they were digitised as: five levels of it,
+    /// each coarser than the last, all of them on the planet.
+    #[test]
+    fn the_lines_are_lines() {
+        for layer in [&lines().borders, &lines().rivers] {
+            assert!(layer.levels.len() >= 4, "only {} levels", layer.levels.len());
+            let mut prev = 0.0;
+            for level in &layer.levels {
+                assert!(level.eps > prev, "levels are not finest-first");
+                prev = level.eps;
+                assert!(!level.parts.is_empty());
+                for part in &level.parts {
+                    assert!(part.pts.len() >= 2, "a line needs two ends");
+                    assert!(part.pts.iter().all(|p| (-90.0..=90.0).contains(&p.0)));
+                    assert!(part.pts.iter().all(|p| (-180.5..=180.5).contains(&p.1)));
+                }
+            }
+            // Simplification only ever drops vertices.
+            let counts: Vec<usize> =
+                layer.levels.iter().map(|l| l.parts.iter().map(|p| p.pts.len()).sum()).collect();
+            assert!(counts.windows(2).all(|w| w[0] > w[1]), "{counts:?}");
+        }
+        // A border runs along the Rio Grande, so both layers have something
+        // within a degree of it — which is the coarse test that the two layers
+        // did not come back swapped or empty.
+        for layer in [&lines().borders, &lines().rivers] {
+            let near = layer.levels[0]
+                .parts
+                .iter()
+                .any(|p| (p.mid.0 - 29.0).abs() < 3.0 && (p.mid.1 + 101.0).abs() < 4.0);
+            assert!(near, "nothing on the Rio Grande");
+        }
+        // Rivers are ranked by size and borders are not.
+        assert!(lines().borders.levels[0].parts.iter().all(|p| p.rank == 0));
+        assert!(lines().rivers.levels[0].parts.iter().any(|p| p.rank > 8));
+    }
+
+    /// A dot grid picks the level that is finer than it, never a coarser one.
+    #[test]
+    fn the_level_follows_the_zoom() {
+        let b = &lines().borders;
+        let finest = b.levels[0].eps;
+        assert!(b.level(finest).eps <= finest, "the finest grid gets the finest level");
+        assert!(std::ptr::eq(b.level(1e-6), &b.levels[0]), "past the data, stay at the finest");
+        let coarse = b.level(90.0);
+        assert!(std::ptr::eq(coarse, b.levels.last().expect("a level")));
     }
 
     /// The table is sorted, spelled in ASCII, and has the places in it a

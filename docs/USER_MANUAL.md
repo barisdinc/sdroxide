@@ -1984,21 +1984,22 @@ same map — is drawn as a dot matrix over the same coastline data the 3D globe
 is textured with, so a grid square lands on the same shoreline in both views.
 On the ground it draws:
 
-- **coastlines**, from a 1/23° land map. The shore is placed *inside* a cell
-  rather than snapped to the grid, so it stays a clean curve rather than a
-  staircase however far you zoom in;
+- **coastlines**, from a 1/23° land map — about five kilometres. The shore is
+  placed *inside* a cell rather than snapped to the grid, so it stays a clean
+  curve rather than a staircase however far you zoom in;
 - **international borders**, which is usually the fastest way to read where a
   station is — a prefix and a country outline answer the same question;
-- **rivers**, drawn at the width Natural Earth ranks each one at, so the Amazon
-  and the Danube read as rivers and a creek in Siberia stays a hairline;
+- **rivers**, drawn brighter the bigger Natural Earth ranks each one, so the
+  Amazon and the Danube read as rivers while a creek in Siberia stays a
+  hairline — and only the big ones survive a whole-world view;
 - **cities**, biggest first, as many as the map has room for, with their names
   where a name fits. Zooming in shrinks the view faster than it runs out of
   cities, so smaller places arrive on their own as you go in.
 
-Borders and rivers are nine-kilometre data, and they **retire when you zoom
-past them** — below roughly a three-degree view they fade out rather than
-turning into wide bands drawn confidently in the wrong place. The coastline is
-twice the resolution and carries on.
+The borders and rivers are drawn from the **geometry** they were surveyed as,
+not from a picture of it, so they are one dot wide at every zoom — a frontier
+stays a hairline in the right place whether the map is showing a hemisphere or
+a valley, instead of swelling into a band as you go in.
 
 Drag (or one finger) to pan, wheel or pinch to zoom about the pointer, and
 double-click to hand the view back to the auto-fit.

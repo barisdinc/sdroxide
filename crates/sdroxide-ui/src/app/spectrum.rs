@@ -750,7 +750,6 @@ mod tests {
         assert!(!refit_on_window_growth(true, 0.0, 200_000.0, 4_000.0));
     }
 
-
     /// The measured fault: an IC-705 over its LAN port on the 12 kHz IF runs
     /// the engine at 24 kHz, where the 32768 chip covers 1.365 s of signal and
     /// hands the waterfall 1.46 new pictures a second. Capped to 2048 it covers
