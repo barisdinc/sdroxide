@@ -138,11 +138,17 @@ pub fn list() -> Vec<SdrPlayDevice> {
 }
 
 /// Select the device `serial` names (empty = the first one found) and hand
-/// its API handle over. RSPduo devices are put in single-tuner mode on the
-/// requested tuner — the choice the API fixes at selection time.
+/// its API handle over.
+///
+/// An RSPduo is put in single-tuner mode on the requested tuner, or — with
+/// `dual` — in dual-tuner mode on both. Either way the choice is fixed here,
+/// at selection time, which is why changing it costs a reopen. Dual-tuner
+/// mode also fixes the ADC clock, and that number goes in the device record
+/// rather than in the parameter block: `SelectDevice` is what programs it.
 pub(crate) fn select(
     serial: &str,
     duo_tuner: SdrPlayDuoTuner,
+    dual: bool,
 ) -> Result<(Arc<ffi::Api>, ffi::DeviceT)> {
     let mut s = state().lock().expect("sdrplay api state poisoned");
     let api = ensure_open(&mut s)?;
@@ -179,13 +185,19 @@ pub(crate) fn select(
 
         let model = SdrPlayModel::from_hw_ver(dev.hw_ver);
         if model == SdrPlayModel::RspDuo {
-            dev.tuner = match duo_tuner {
-                SdrPlayDuoTuner::Tuner1 => ffi::TUNER_A,
-                SdrPlayDuoTuner::Tuner2 => ffi::TUNER_B,
-            };
-            dev.rsp_duo_mode = ffi::RSPDUO_MODE_SINGLE_TUNER;
-            // Single-tuner mode lets the ADC clock follow the sample rate.
-            dev.rsp_duo_sample_freq = 0.0;
+            if dual {
+                dev.tuner = ffi::TUNER_BOTH;
+                dev.rsp_duo_mode = ffi::RSPDUO_MODE_DUAL_TUNER;
+                dev.rsp_duo_sample_freq = crate::device::DUAL_FS_HZ;
+            } else {
+                dev.tuner = match duo_tuner {
+                    SdrPlayDuoTuner::Tuner1 => ffi::TUNER_A,
+                    SdrPlayDuoTuner::Tuner2 => ffi::TUNER_B,
+                };
+                dev.rsp_duo_mode = ffi::RSPDUO_MODE_SINGLE_TUNER;
+                // Single-tuner mode lets the ADC clock follow the sample rate.
+                dev.rsp_duo_sample_freq = 0.0;
+            }
         }
 
         let err = unsafe { (api.select_device)(&mut dev) };

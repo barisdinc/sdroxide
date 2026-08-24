@@ -22,6 +22,16 @@
 //! service: every callback body is wrapped in `catch_unwind`, and a panic
 //! marks the session dead (the engine reopens it) instead of corrupting the
 //! service's stack.
+//!
+//! # Two tuners
+//!
+//! An RSPduo asked for diversity runs in the API's dual-tuner mode, where both
+//! stream callbacks fire and each carries one tuner. Everything below then
+//! happens twice: two parameter blocks are configured, and every
+//! `sdrplay_api_Update` is issued once per tuner, because the call names the
+//! tuner it applies to and `Tuner_Both` is a selection, not an addressee. The
+//! samples are put back together in [`crate::pair`] before they reach the
+//! ring.
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -30,14 +40,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
-use rtrb::Producer;
-use sdroxide_types::{SdrPlayConfig, SdrPlayModel};
+use rtrb::{Consumer, Producer};
+use sdroxide_types::{SdrPlayConfig, SdrPlayDuoTuner, SdrPlayModel};
 
 use crate::api;
 use crate::device;
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::handle::{Ctrl, Pending, RxStats, SdrPlayHandle, Shared, push_iq, ring_for};
+use crate::pair::{Pairer, QUAD, Side};
 
 /// 16-bit wire samples to full-scale ±1.0.
 const SCALE: f32 = 1.0 / 32768.0;
@@ -60,16 +71,13 @@ pub fn spawn(cfg: &SdrPlayConfig, center_hz: f64) -> Result<SdrPlayHandle> {
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<DeviceInfo>>(1);
 
     let shared = Arc::new(Shared::new());
-    let (fs, decim) = device::fs_and_decim(cfg.sample_rate_hz);
-    let effective = fs / decim as f64;
-    let (rx_prod, rx_cons) = ring_for(effective);
 
     let cfg = cfg.clone();
     let thread_shared = Arc::clone(&shared);
     let join = std::thread::Builder::new()
         .name("sdroxide-sdrplay".into())
         .spawn(move || {
-            run(cfg, center_hz, ctrl_rx, rx_prod, Arc::clone(&thread_shared), ready_tx);
+            run(cfg, center_hz, ctrl_rx, Arc::clone(&thread_shared), ready_tx);
             thread_shared.alive.store(false, Ordering::Relaxed);
         })
         .map_err(|e| Error::Api {
@@ -79,7 +87,7 @@ pub fn spawn(cfg: &SdrPlayConfig, center_hz: f64) -> Result<SdrPlayHandle> {
 
     match ready_rx.recv() {
         Ok(Ok(info)) => Ok(SdrPlayHandle::from_parts(
-            rx_cons,
+            info.rx,
             ctrl_tx,
             shared,
             join,
@@ -88,6 +96,8 @@ pub fn spawn(cfg: &SdrPlayConfig, center_hz: f64) -> Result<SdrPlayHandle> {
             info.model,
             info.out_rate_hz,
             info.analog_bw_hz,
+            info.dual,
+            info.low_if_khz,
         )),
         Ok(Err(e)) => {
             let _ = join.join();
@@ -104,11 +114,69 @@ pub fn spawn(cfg: &SdrPlayConfig, center_hz: f64) -> Result<SdrPlayHandle> {
 }
 
 struct DeviceInfo {
+    /// The read end of the ring, built on the session thread — only there is
+    /// it known how many tuners the device actually opened with, and that is
+    /// what decides both the depth and the shape of it.
+    rx: Consumer<f32>,
     label: String,
     serial: String,
     model: SdrPlayModel,
     out_rate_hz: f64,
     analog_bw_hz: f64,
+    dual: bool,
+    low_if_khz: i32,
+}
+
+/// What the requested sample rate turns into on this device, which depends on
+/// how many tuners are running.
+///
+/// One tuner samples at baseband and the ADC follows the rate. Two share one
+/// ADC at a fixed 6 MHz and hand the service a low IF, from which its own
+/// downconverter delivers 2 Msps — decimated further for anything narrower.
+/// A rate the second arrangement cannot reach is clamped rather than refused:
+/// a configuration carried over from single-tuner operation should still open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RatePlan {
+    dual: bool,
+    /// ADC rate to program.
+    fs_hz: f64,
+    /// The API's decimation factor.
+    decim: u8,
+    /// What comes out, after that decimation.
+    out_hz: f64,
+    if_type: ffi::IfType,
+}
+
+impl RatePlan {
+    /// `dual` is what the device *opened* as, not what was asked for: a
+    /// diversity setting left behind by an RSPduo must not put an RSP1A into
+    /// a low IF and a 2 Msps ceiling it has no reason to be in.
+    fn for_device(cfg: &SdrPlayConfig, dual: bool) -> RatePlan {
+        if dual {
+            let decim = device::dual_decim(cfg.sample_rate_hz);
+            RatePlan {
+                dual: true,
+                fs_hz: device::DUAL_FS_HZ,
+                decim,
+                out_hz: device::DUAL_OUT_HZ / f64::from(decim),
+                if_type: ffi::IF_1_620,
+            }
+        } else {
+            let (fs, decim) = device::fs_and_decim(cfg.sample_rate_hz);
+            RatePlan {
+                dual: false,
+                fs_hz: fs,
+                decim,
+                out_hz: fs / f64::from(decim),
+                if_type: ffi::IF_ZERO,
+            }
+        }
+    }
+
+    /// Floats per sample in the ring — a pair, or both tuners' pairs.
+    fn stride(&self) -> usize {
+        if self.dual { QUAD } else { 2 }
+    }
 }
 
 /// Everything the callbacks touch. Leaked to a raw pointer for the life of
@@ -121,7 +189,11 @@ struct CbCtx {
 
 struct StreamState {
     ring: Producer<f32>,
+    /// Where one tuner's block is converted to `f32` on its way to the ring.
+    /// The paired path has no use for it: [`Pairer`] converts as it stages.
     scratch: Vec<f32>,
+    /// `Some` with both tuners running — see [`crate::pair`].
+    pair: Option<Pairer>,
     stats: RxStats,
 }
 
@@ -133,19 +205,35 @@ struct Live {
     lna_wanted: u8,
     /// What is actually programmed after the per-band clamp.
     lna_programmed: u8,
+    /// The same pair for the second tuner, when both are running.
+    aux_lna_wanted: u8,
+    aux_lna_programmed: u8,
     antenna: String,
     hdr: bool,
+}
+
+/// The parameter block and `Update` addressee for each tuner in use.
+///
+/// The API's channel blocks are named for the tuners, not for the jobs: `A` is
+/// always tuner 1. Which of them carries the main aerial is the operator's
+/// choice ([`SdrPlayConfig::duo_tuner`]), so it is resolved once, here, and
+/// everything downstream says main and aux.
+struct Tuners {
+    main: *mut ffi::RxChannelParamsT,
+    main_sel: ffi::TunerSelect,
+    /// `None` with one tuner running.
+    aux: Option<*mut ffi::RxChannelParamsT>,
+    aux_sel: ffi::TunerSelect,
 }
 
 fn run(
     cfg: SdrPlayConfig,
     center_hz: f64,
     ctrl: Receiver<Ctrl>,
-    ring: Producer<f32>,
     shared: Arc<Shared>,
     ready: crossbeam_channel::Sender<Result<DeviceInfo>>,
 ) {
-    let (api, mut dev) = match api::select(&cfg.serial, cfg.duo_tuner) {
+    let (api, mut dev) = match api::select(&cfg.serial, cfg.duo_tuner, cfg.wants_dual_tuner()) {
         Ok(v) => v,
         Err(e) => {
             if matches!(e, Error::ServiceDown(_)) {
@@ -174,14 +262,30 @@ fn run(
     }
     // Service-owned storage; see the module doc for the lifetime rule.
     let dev_params = unsafe { (*params_ptr).dev_params };
-    let ch_params = unsafe {
-        if dev.tuner == ffi::TUNER_B {
-            (*params_ptr).rx_channel_b
-        } else {
-            (*params_ptr).rx_channel_a
+    // Believe the device record rather than the configuration: `select` only
+    // puts an RSPduo into dual-tuner mode, and a diversity setting left behind
+    // by one must not have the driver look for a second tuner on an RSP1A.
+    let dual = dev.rsp_duo_mode == ffi::RSPDUO_MODE_DUAL_TUNER;
+    let plan = RatePlan::for_device(&cfg, dual);
+    let (ch_a, ch_b) = unsafe { ((*params_ptr).rx_channel_a, (*params_ptr).rx_channel_b) };
+    let tuners = if dual {
+        let main_is_a = cfg.duo_tuner == SdrPlayDuoTuner::Tuner1;
+        Tuners {
+            main: if main_is_a { ch_a } else { ch_b },
+            main_sel: if main_is_a { ffi::TUNER_A } else { ffi::TUNER_B },
+            aux: Some(if main_is_a { ch_b } else { ch_a }),
+            aux_sel: if main_is_a { ffi::TUNER_B } else { ffi::TUNER_A },
+        }
+    } else {
+        let b = dev.tuner == ffi::TUNER_B;
+        Tuners {
+            main: if b { ch_b } else { ch_a },
+            main_sel: if b { ffi::TUNER_B } else { ffi::TUNER_A },
+            aux: None,
+            aux_sel: ffi::TUNER_NEITHER,
         }
     };
-    if dev_params.is_null() || ch_params.is_null() {
+    if dev_params.is_null() || tuners.main.is_null() || tuners.aux == Some(std::ptr::null_mut()) {
         api::release(&mut dev);
         let _ = ready.send(Err(Error::Api {
             call: "GetDeviceParams",
@@ -190,34 +294,66 @@ fn run(
         return;
     }
 
-    let (fs, decim) = device::fs_and_decim(cfg.sample_rate_hz);
-    let effective = fs / decim as f64;
-    let bw = device::bw_khz_for(cfg.bw_khz, effective);
+    let effective = plan.out_hz;
+    let bw = device::bw_khz_for(cfg.bw_khz, effective, dual);
     let center = center_hz.clamp(MIN_RF_HZ, MAX_RF_HZ);
     let hiz = device::antenna_is_hiz(model, &cfg.antenna);
     let hdr = cfg.hdr && model.has_hdr();
     let lna_wanted = cfg.lna_state.min(model.max_lna_state());
     let lna_programmed = lna_wanted.min(device::max_lna_state(model, center, hiz, hdr));
+    // The second tuner has no port choice of its own — its 50 Ω input is all
+    // it has — so its clamp never sees a Hi-Z path.
+    let aux_lna_wanted = cfg.diversity.lna_state.min(model.max_lna_state());
+    let aux_lna_programmed = aux_lna_wanted.min(device::max_lna_state(model, center, false, false));
 
-    let mut live =
-        Live { center_hz: center, lna_wanted, lna_programmed, antenna: cfg.antenna.clone(), hdr };
+    let mut live = Live {
+        center_hz: center,
+        lna_wanted,
+        lna_programmed,
+        aux_lna_wanted,
+        aux_lna_programmed,
+        antenna: cfg.antenna.clone(),
+        hdr,
+    };
 
     unsafe {
         let dp = &mut *dev_params;
         dp.ppm = cfg.ppm;
-        dp.fs_freq.fs_hz = fs;
+        dp.fs_freq.fs_hz = plan.fs_hz;
 
-        let ch = &mut *ch_params;
+        // The second tuner is configured exactly like the first apart from its
+        // gains: same span, same filter, same decimation, same notches. That
+        // is not tidiness — two branches filtered differently are two branches
+        // the adaptive filter cannot line up.
+        if let Some(aux) = tuners.aux {
+            let ch = &mut *aux;
+            ch.tuner_params.bw_type = bw;
+            ch.tuner_params.if_type = plan.if_type;
+            ch.tuner_params.lo_mode = ffi::LO_AUTO;
+            ch.tuner_params.rf_freq.rf_hz = center;
+            ch.tuner_params.gain.g_rdb =
+                cfg.diversity.if_gr_db.clamp(SdrPlayConfig::IF_GR_MIN, SdrPlayConfig::IF_GR_MAX);
+            ch.tuner_params.gain.lna_state = aux_lna_programmed;
+            ch.tuner_params.gain.min_gr = ffi::NORMAL_MIN_GR;
+            ch.ctrl_params.decimation.enable = (plan.decim > 1) as u8;
+            ch.ctrl_params.decimation.decimation_factor = plan.decim;
+            ch.ctrl_params.agc.enable = cfg.agc.code() as ffi::AgcControl;
+            ch.ctrl_params.agc.set_point_dbfs = cfg.agc_setpoint_dbfs.clamp(-72, -20);
+            ch.rsp_duo_tuner_params.rf_notch_enable = cfg.rf_notch as u8;
+            ch.rsp_duo_tuner_params.rf_dab_notch_enable = cfg.dab_notch as u8;
+        }
+
+        let ch = &mut *tuners.main;
         ch.tuner_params.bw_type = bw;
-        ch.tuner_params.if_type = ffi::IF_ZERO;
+        ch.tuner_params.if_type = plan.if_type;
         ch.tuner_params.lo_mode = ffi::LO_AUTO;
         ch.tuner_params.rf_freq.rf_hz = center;
         ch.tuner_params.gain.g_rdb =
             cfg.if_gr_db.clamp(SdrPlayConfig::IF_GR_MIN, SdrPlayConfig::IF_GR_MAX);
         ch.tuner_params.gain.lna_state = lna_programmed;
         ch.tuner_params.gain.min_gr = ffi::NORMAL_MIN_GR;
-        ch.ctrl_params.decimation.enable = (decim > 1) as u8;
-        ch.ctrl_params.decimation.decimation_factor = decim;
+        ch.ctrl_params.decimation.enable = (plan.decim > 1) as u8;
+        ch.ctrl_params.decimation.decimation_factor = plan.decim;
         ch.ctrl_params.agc.enable = cfg.agc.code() as ffi::AgcControl;
         ch.ctrl_params.agc.set_point_dbfs = cfg.agc_setpoint_dbfs.clamp(-72, -20);
 
@@ -256,23 +392,37 @@ fn run(
         }
     }
     shared.lna_state.store(lna_programmed, Ordering::Relaxed);
+    shared.aux_lna_state.store(aux_lna_programmed, Ordering::Relaxed);
 
+    let (ring, rx) = ring_for(effective, plan.stride());
     // The callback context: leaked here, reclaimed strictly after Uninit.
     let ctx = Box::into_raw(Box::new(CbCtx {
         shared: Arc::clone(&shared),
         stream: Mutex::new(StreamState {
             ring,
             scratch: Vec::new(),
+            pair: dual.then(|| Pairer::new(effective)),
             stats: RxStats::new(effective),
         }),
         epoch: Instant::now(),
     }));
-    // Both stream slots point at the same handler: in single-tuner mode only
-    // one of them ever fires, and which one is the service's business.
-    let mut cbfns = ffi::CallbackFnsT {
-        stream_a: Some(stream_cb),
-        stream_b: Some(stream_cb),
-        event: Some(event_cb),
+    // With one tuner running both slots point at the same handler: only one of
+    // them ever fires, and which one is the service's business. With two, the
+    // slot *is* the tuner — that is the only thing that says which aerial a
+    // block came off — so each gets a handler that knows which it is.
+    let mut cbfns = if dual {
+        let main_is_a = tuners.main_sel == ffi::TUNER_A;
+        ffi::CallbackFnsT {
+            stream_a: Some(if main_is_a { stream_main_cb } else { stream_aux_cb }),
+            stream_b: Some(if main_is_a { stream_aux_cb } else { stream_main_cb }),
+            event: Some(event_cb),
+        }
+    } else {
+        ffi::CallbackFnsT {
+            stream_a: Some(stream_cb),
+            stream_b: Some(stream_cb),
+            event: Some(event_cb),
+        }
     };
 
     let err = unsafe { (api.init)(dev.dev, &mut cbfns, ctx.cast::<c_void>()) };
@@ -290,17 +440,35 @@ fn run(
 
     let label = format!("SDRplay {} (serial {serial})", model.label());
     tracing::info!(
-        "{label} streaming: fs {:.3} Msps / {decim} -> {:.3} Msps, bw {bw} kHz, {} samples/pkt",
-        fs / 1e6,
+        "{label} streaming: fs {:.3} Msps / {} -> {:.3} Msps, bw {bw} kHz, IF {} kHz, {} \
+         samples/pkt",
+        plan.fs_hz / 1e6,
+        plan.decim,
         effective / 1e6,
+        plan.if_type,
         unsafe { (*dev_params).samples_per_pkt },
     );
+    if dual {
+        tracing::info!(
+            "both RSPduo tuners are running: {} is the main aerial, {} the second (LNA state \
+             {aux_lna_programmed}, IF gain reduction {} dB). Dual-tuner mode fixes the ADC at \
+             {:.0} MHz and the widest span at {:.3} Msps.",
+            cfg.duo_tuner.short_label(),
+            cfg.aux_tuner().short_label(),
+            cfg.diversity.if_gr_db,
+            device::DUAL_FS_HZ / 1e6,
+            device::DUAL_OUT_HZ / 1e6,
+        );
+    }
     let _ = ready.send(Ok(DeviceInfo {
+        rx,
         label,
         serial,
         model,
         out_rate_hz: effective,
         analog_bw_hz: bw as f64 * 1000.0,
+        dual,
+        low_if_khz: plan.if_type,
     }));
 
     let mut pending = Pending::default();
@@ -316,9 +484,14 @@ fn run(
             Err(RecvTimeoutError::Disconnected) => break,
         }
         // The overload acknowledgement the API requires, moved out of the
-        // event callback so no Update ever runs on the service's thread.
-        if shared.overload_ack_pending.swap(false, Ordering::Relaxed) {
-            update(&api, &dev, ffi::UPDATE_CTRL_OVERLOAD_ACK, ffi::UPDATE_EXT1_NONE);
+        // event callback so no Update ever runs on the service's thread. It
+        // goes to the tuner that reported it, and to no other.
+        let acks = shared.overload_ack_pending.swap(0, Ordering::Relaxed);
+        for sel in [Some(tuners.main_sel), tuners.aux.map(|_| tuners.aux_sel)].into_iter().flatten()
+        {
+            if acks & ack_bit(sel) != 0 {
+                update(&api, &dev, sel, ffi::UPDATE_CTRL_OVERLOAD_ACK, ffi::UPDATE_EXT1_NONE);
+            }
         }
         if pending.shutdown {
             break;
@@ -328,7 +501,7 @@ fn run(
             break;
         }
         if !pending.is_empty() {
-            apply(&api, &dev, dev_params, ch_params, model, &shared, &mut live, &mut pending);
+            apply(&api, &dev, dev_params, &tuners, model, &shared, &mut live, &mut pending);
             pending = Pending::default();
         }
     }
@@ -343,13 +516,27 @@ fn run(
     tracing::debug!("SDRplay session ended");
 }
 
+/// Which bit of [`Shared::overload_ack_pending`] belongs to a tuner.
+fn ack_bit(tuner: ffi::TunerSelect) -> u8 {
+    if tuner == ffi::TUNER_B { 0b10 } else { 0b01 }
+}
+
 /// One `sdrplay_api_Update`, with failures logged rather than fatal: a slider
 /// tweak that the service refuses should not take the receiver down.
-fn update(api: &ffi::Api, dev: &ffi::DeviceT, reason: ffi::Reason, ext1: ffi::ReasonExt1) {
+///
+/// The tuner is named by the caller rather than read off the device: with both
+/// running, `dev.tuner` is `Tuner_Both`, which is how the pair was *selected*
+/// and not somewhere an update can be sent.
+fn update(
+    api: &ffi::Api,
+    dev: &ffi::DeviceT,
+    tuner: ffi::TunerSelect,
+    reason: ffi::Reason,
+    ext1: ffi::ReasonExt1,
+) {
     if reason == ffi::UPDATE_NONE && ext1 == ffi::UPDATE_EXT1_NONE {
         return;
     }
-    let tuner = if dev.tuner == ffi::TUNER_B { ffi::TUNER_B } else { ffi::TUNER_A };
     let err = unsafe { (api.update)(dev.dev, tuner, reason, ext1) };
     if err != ffi::ERR_SUCCESS {
         tracing::warn!("sdrplay_api_Update({reason:#x},{ext1:#x}) failed: {}", api.err_text(err));
@@ -363,7 +550,7 @@ fn apply(
     api: &ffi::Api,
     dev: &ffi::DeviceT,
     dev_params: *mut ffi::DevParamsT,
-    ch_params: *mut ffi::RxChannelParamsT,
+    tuners: &Tuners,
     model: SdrPlayModel,
     shared: &Shared,
     live: &mut Live,
@@ -371,13 +558,35 @@ fn apply(
 ) {
     let mut reason = ffi::UPDATE_NONE;
     let mut ext1 = ffi::UPDATE_EXT1_NONE;
+    // What the second tuner is told, which is not the same set: it follows the
+    // dial and the filters but keeps its own gains.
+    let mut aux_reason = ffi::UPDATE_NONE;
     let dp = unsafe { &mut *dev_params };
-    let ch = unsafe { &mut *ch_params };
+    let ch = unsafe { &mut *tuners.main };
+    // Safety: the same service-owned storage rule as `ch`, and the two are
+    // different tuners' blocks, so this never aliases.
+    let mut aux = tuners.aux.map(|a| unsafe { &mut *a });
 
     if let Some(hz) = p.center {
         live.center_hz = hz.clamp(MIN_RF_HZ, MAX_RF_HZ);
         ch.tuner_params.rf_freq.rf_hz = live.center_hz;
         reason |= ffi::UPDATE_TUNER_FRF;
+        if let Some(a) = aux.as_mut() {
+            // Both aerials on one frequency is what makes the pair coherent in
+            // the first place; a second tuner left behind on the old dial is
+            // two receivers, not diversity.
+            a.tuner_params.rf_freq.rf_hz = live.center_hz;
+            aux_reason |= ffi::UPDATE_TUNER_FRF;
+        }
+    }
+    if let Some(gr) = p.aux_if_gr
+        && let Some(a) = aux.as_mut()
+    {
+        a.tuner_params.gain.g_rdb = gr.clamp(SdrPlayConfig::IF_GR_MIN, SdrPlayConfig::IF_GR_MAX);
+        aux_reason |= ffi::UPDATE_TUNER_GR;
+    }
+    if let Some(lna) = p.aux_lna {
+        live.aux_lna_wanted = lna.min(model.max_lna_state());
     }
     if let Some(gr) = p.if_gr {
         ch.tuner_params.gain.g_rdb = gr.clamp(SdrPlayConfig::IF_GR_MIN, SdrPlayConfig::IF_GR_MAX);
@@ -431,6 +640,16 @@ fn apply(
         shared.lna_state.store(clamped, Ordering::Relaxed);
         reason |= ffi::UPDATE_TUNER_GR;
     }
+    if let Some(a) = aux.as_mut() {
+        let clamped =
+            live.aux_lna_wanted.min(device::max_lna_state(model, live.center_hz, false, false));
+        if clamped != live.aux_lna_programmed || p.aux_lna.is_some() {
+            live.aux_lna_programmed = clamped;
+            a.tuner_params.gain.lna_state = clamped;
+            shared.aux_lna_state.store(clamped, Ordering::Relaxed);
+            aux_reason |= ffi::UPDATE_TUNER_GR;
+        }
+    }
 
     if p.agc.is_some() || p.agc_setpoint.is_some() {
         if let Some(code) = p.agc {
@@ -440,6 +659,15 @@ fn apply(
             ch.ctrl_params.agc.set_point_dbfs = sp.clamp(-72, -20);
         }
         reason |= ffi::UPDATE_CTRL_AGC;
+        if let Some(a) = aux.as_mut() {
+            if let Some(code) = p.agc {
+                a.ctrl_params.agc.enable = code as ffi::AgcControl;
+            }
+            if let Some(sp) = p.agc_setpoint {
+                a.ctrl_params.agc.set_point_dbfs = sp.clamp(-72, -20);
+            }
+            aux_reason |= ffi::UPDATE_CTRL_AGC;
+        }
     }
     if let Some(ppm) = p.ppm {
         dp.ppm = ppm.clamp(-1000.0, 1000.0);
@@ -479,6 +707,10 @@ fn apply(
             SdrPlayModel::RspDuo => {
                 ch.rsp_duo_tuner_params.rf_notch_enable = on as u8;
                 reason |= ffi::UPDATE_RSPDUO_RF_NOTCH;
+                if let Some(a) = aux.as_mut() {
+                    a.rsp_duo_tuner_params.rf_notch_enable = on as u8;
+                    aux_reason |= ffi::UPDATE_RSPDUO_RF_NOTCH;
+                }
             }
             SdrPlayModel::RspDx | SdrPlayModel::RspDxR2 => {
                 dp.rsp_dx_params.rf_notch_enable = on as u8;
@@ -496,6 +728,10 @@ fn apply(
             SdrPlayModel::RspDuo => {
                 ch.rsp_duo_tuner_params.rf_dab_notch_enable = on as u8;
                 reason |= ffi::UPDATE_RSPDUO_DAB_NOTCH;
+                if let Some(a) = aux.as_mut() {
+                    a.rsp_duo_tuner_params.rf_dab_notch_enable = on as u8;
+                    aux_reason |= ffi::UPDATE_RSPDUO_DAB_NOTCH;
+                }
             }
             SdrPlayModel::RspDx | SdrPlayModel::RspDxR2 => {
                 dp.rsp_dx_params.rf_dab_notch_enable = on as u8;
@@ -505,14 +741,63 @@ fn apply(
         }
     }
 
-    update(api, dev, reason, ext1);
+    update(api, dev, tuners.main_sel, reason, ext1);
+    if tuners.aux.is_some() {
+        update(api, dev, tuners.aux_sel, aux_reason, ffi::UPDATE_EXT1_NONE);
+    }
 }
 
-/// The service's sample delivery. Foreign thread — see the module doc.
+/// The service's sample delivery with one tuner running. Foreign thread — see
+/// the module doc.
 unsafe extern "C" fn stream_cb(
     xi: *mut i16,
     xq: *mut i16,
-    _params: *mut ffi::StreamCbParamsT,
+    params: *mut ffi::StreamCbParamsT,
+    num_samples: u32,
+    reset: u32,
+    cb_context: *mut c_void,
+) {
+    unsafe { deliver(None, xi, xq, params, num_samples, reset, cb_context) }
+}
+
+/// The same for the tuner carrying the main aerial, with both running.
+unsafe extern "C" fn stream_main_cb(
+    xi: *mut i16,
+    xq: *mut i16,
+    params: *mut ffi::StreamCbParamsT,
+    num_samples: u32,
+    reset: u32,
+    cb_context: *mut c_void,
+) {
+    unsafe { deliver(Some(Side::Main), xi, xq, params, num_samples, reset, cb_context) }
+}
+
+/// ...and for the one carrying the second.
+unsafe extern "C" fn stream_aux_cb(
+    xi: *mut i16,
+    xq: *mut i16,
+    params: *mut ffi::StreamCbParamsT,
+    num_samples: u32,
+    reset: u32,
+    cb_context: *mut c_void,
+) {
+    unsafe { deliver(Some(Side::Aux), xi, xq, params, num_samples, reset, cb_context) }
+}
+
+/// One block of samples, from whichever tuner. Foreign thread — see the module
+/// doc; nothing here may unwind, and nothing here may touch the parameter
+/// block.
+///
+/// # Safety
+///
+/// The pointers are the service's, valid for `num_samples` for the duration of
+/// the call, and `cb_context` is the leaked [`CbCtx`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn deliver(
+    side: Option<Side>,
+    xi: *mut i16,
+    xq: *mut i16,
+    params: *mut ffi::StreamCbParamsT,
     num_samples: u32,
     reset: u32,
     cb_context: *mut c_void,
@@ -536,18 +821,41 @@ unsafe extern "C" fn stream_cb(
             return;
         };
         let st = &mut *guard;
-        st.scratch.resize(2 * n, 0.0);
-        for i in 0..n {
-            st.scratch[2 * i] = xi[i] as f32 * SCALE;
-            st.scratch[2 * i + 1] = xq[i] as f32 * SCALE;
-        }
         let paused = ctx.shared.rx_paused.load(Ordering::Relaxed);
-        let dropped = push_iq(&mut st.ring, &st.scratch[..2 * n], &mut st.stats, paused);
+        let (delivered, dropped) = match (side, st.pair.as_mut()) {
+            (Some(side), Some(pair)) => {
+                // The sample number is the only thing that says which of the
+                // other tuner's samples these belong with; a service that does
+                // not fill it in is noticed inside the pairing.
+                let first =
+                    if params.is_null() { 0 } else { unsafe { (*params).first_sample_num } };
+                pair.push(side, xi, xq, first);
+                let out = pair.drain(&mut st.ring, &mut st.stats, paused);
+                ctx.shared.pair_slips.store(pair.slips(), Ordering::Relaxed);
+                ctx.shared.aux_stalled.store(pair.stalled(), Ordering::Relaxed);
+                ctx.shared.pair_stamped.store(pair.believes_sample_numbers(), Ordering::Relaxed);
+                out
+            }
+            _ => {
+                st.scratch.resize(2 * n, 0.0);
+                for i in 0..n {
+                    st.scratch[2 * i] = f32::from(xi[i]) * SCALE;
+                    st.scratch[2 * i + 1] = f32::from(xq[i]) * SCALE;
+                }
+                (n, push_iq(&mut st.ring, &st.scratch[..2 * n], &mut st.stats, paused, 2))
+            }
+        };
         if dropped > 0 {
             ctx.shared.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
         }
         st.stats.tick();
-        ctx.shared.last_rx_ms.store(ctx.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        // Only what actually reached the ring counts as the receiver being
+        // alive. A pairing that produces nothing while blocks keep arriving is
+        // a receiver that has stopped, and the watchdog has to be able to see
+        // that.
+        if delivered > 0 {
+            ctx.shared.last_rx_ms.store(ctx.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
     }))
     .is_err();
     if panicked {
@@ -561,7 +869,7 @@ unsafe extern "C" fn stream_cb(
 /// The service's event delivery. Foreign thread — see the module doc.
 unsafe extern "C" fn event_cb(
     event_id: ffi::EventId,
-    _tuner: ffi::TunerSelect,
+    tuner: ffi::TunerSelect,
     params: *mut ffi::EventParamsT,
     cb_context: *mut c_void,
 ) {
@@ -591,13 +899,26 @@ unsafe extern "C" fn event_cb(
                 let kind = unsafe { (*params).power_overload.power_overload_change_type };
                 let over = kind == ffi::OVERLOAD_DETECTED;
                 let was = shared.overload.swap(over, Ordering::Relaxed);
-                // The API insists every overload message is acknowledged; the
-                // session thread does that, not this foreign one.
-                shared.overload_ack_pending.store(true, Ordering::Relaxed);
+                // The API insists every overload message is acknowledged, by
+                // the tuner it came from; the session thread does that, not
+                // this foreign one. An event naming neither tuner (or both) is
+                // marked for both, and the session thread only answers for the
+                // ones it is running.
+                let bits = match tuner {
+                    ffi::TUNER_A => 0b01,
+                    ffi::TUNER_B => 0b10,
+                    _ => 0b11,
+                };
+                shared.overload_ack_pending.fetch_or(bits, Ordering::Relaxed);
                 if over && !was {
                     tracing::warn!(
-                        "SDRplay: RF overload — raise the LNA slider (more attenuation), lower \
-                         IF gain, or enable AGC"
+                        "SDRplay: RF overload on {} — raise the LNA slider (more \
+                         attenuation), lower IF gain, or enable AGC",
+                        match tuner {
+                            ffi::TUNER_A => "tuner 1",
+                            ffi::TUNER_B => "tuner 2",
+                            _ => "the receiver",
+                        }
                     );
                 } else if !over && was {
                     tracing::info!("SDRplay: overload corrected");

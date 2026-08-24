@@ -2111,7 +2111,15 @@ fn sdrplay_caps(src: &sdrplay_source::SdrPlaySource) -> DeviceCaps {
         tx_channels: 0,
         audio_mode: false,
         freq_ranges_rx: vec![(1_000.0, 2_000_000_000.0)],
-        sample_rates: SdrPlayConfig::SAMPLE_RATES.to_vec(),
+        // With both RSPduo tuners running the API fixes the ADC clock and
+        // downconverts from a low IF, which leaves a much shorter ladder —
+        // and publishing the long one would offer spans this session cannot
+        // reach.
+        sample_rates: if src.dual_tuner() {
+            SdrPlayConfig::DUAL_SAMPLE_RATES.to_vec()
+        } else {
+            SdrPlayConfig::SAMPLE_RATES.to_vec()
+        },
         gains: vec![
             GainElement {
                 name: SdrPlayConfig::LNA_ELEMENT.into(),

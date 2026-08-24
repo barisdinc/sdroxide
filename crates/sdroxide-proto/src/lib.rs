@@ -583,7 +583,18 @@ use sdroxide_types::{
 /// Fields in the radio configuration, which rides in both a command and an
 /// event, so a v85 peer would read the tail of either as garbage — the
 /// handshake's equality test is what stops it trying.
-pub const PROTO_VERSION: u16 = 86;
+///
+/// **87** — an RSPduo can run *both* of its tuners and combine them, the same
+/// way a LimeSDR's second chain is combined at v82 (issue #153).
+/// [`sdroxide_types::SdrPlayConfig`] gained a `diversity` block —
+/// [`sdroxide_types::SdrPlayDiversity`] — carrying whether the second tuner
+/// runs at all, its own two gains, and the adaptive filter's mode, length,
+/// rate and hold.
+///
+/// A field appended to the radio configuration, which rides in both a command
+/// and an event, so a v86 peer would read the tail of either as garbage — the
+/// handshake's equality test is what stops it trying.
+pub const PROTO_VERSION: u16 = 87;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1471,6 +1482,24 @@ mod tests {
                 scope_span: sdroxide_types::IcomScopeSpan::Khz500,
                 ..sdroxide_types::IcomNetConfig::default()
             },
+            // Both of an RSPduo's tuners, and the filter that combines them:
+            // like the LimeSDR's second chain below, this block decides
+            // whether a whole extra stream exists.
+            sdrplay: sdroxide_types::SdrPlayConfig {
+                serial: "1809014C9B".into(),
+                sample_rate_hz: 1_000_000.0,
+                duo_tuner: sdroxide_types::SdrPlayDuoTuner::Tuner2,
+                diversity: sdroxide_types::SdrPlayDiversity {
+                    enabled: true,
+                    mode: sdroxide_types::DiversityMode::Combine,
+                    lna_state: 6,
+                    if_gr_db: 27,
+                    taps: 24,
+                    rate: 0.35,
+                    frozen: true,
+                },
+                ..sdroxide_types::SdrPlayConfig::default()
+            },
             // The last block in the struct, and the one most worth filling in:
             // every field here differs from its neighbours' defaults, because a
             // field-order slip only shows where two adjacent fields disagree.
@@ -1515,7 +1544,7 @@ mod tests {
                     role: sdroxide_types::LimeAuxRole::Diversity,
                     antenna: "LNAW".into(),
                     gain_db: 33.0,
-                    mode: sdroxide_types::LimeDiversityMode::Combine,
+                    mode: sdroxide_types::DiversityMode::Combine,
                     taps: 24,
                     rate: 0.35,
                     frozen: true,

@@ -5392,7 +5392,8 @@ service, or the device.
   runs at 2 Msps and the service decimates, which is the normal way to run a
   narrow span. Above 6.048 Msps the ADC trades resolution for speed (12 bits
   up to 6.048 Msps, 10 to 8.064, 8 beyond) — worth knowing before picking
-  10 Msps for weak-signal work. Takes effect on **Apply / reconnect**.
+  10 Msps for weak-signal work. Takes effect on **Apply / reconnect**. With
+  both RSPduo tuners running the list is shorter, and not by choice: see below.
 - **IF bandwidth** — the tuner's analog filter. *Auto* picks the widest one
   that fits the sample rate, which is what you want unless a strong
   off-channel neighbour argues otherwise.
@@ -5421,9 +5422,10 @@ service, or the device.
 - **Antenna** — on the RSP2 (A / B / Hi-Z), RSPdx and RSPdx R2 (A / B / C),
   and the RSPduo's tuner 1 (50 Ω / Hi-Z). Applied live; the Hi-Z inputs have
   a shorter LNA ladder, which the clamping above absorbs.
-- **Tuner** (RSPduo) — which of the two tuners to run, one at a time, chosen
-  when the device opens. Dual-tuner and master/slave operation are not
-  supported.
+- **Tuner** (RSPduo) — which of the two tuners to run, chosen when the device
+  opens. With **Run both tuners** on (below) this names the tuner your *main*
+  aerial is on, and the other one carries the second. Master/slave operation —
+  sharing the receiver with another application — is not supported.
 - **HDR mode** (RSPdx / RSPdx R2) — the high-dynamic-range path below 2 MHz.
 - **Bias tee** — about 4.7 V DC up the coax for an active antenna (every model
   except the original RSP1).
@@ -5436,6 +5438,84 @@ If the service reports the ADC **overloaded**, sdroxide shows it on screen and
 in the log: raise the LNA state, lower the IF gain, or turn the AGC on. If the
 RSP is unplugged — or the service restarted under sdroxide — it notices within
 a few seconds and reconnects by itself when the device returns.
+
+##### The RSPduo's second tuner: diversity and QRM suppression
+
+> **Help wanted — this has not been verified against an RSPduo.** Dual-tuner
+> operation here is written from SDRplay's API rather than measured on the
+> hardware. If it misbehaves, the log is the place to look: it says which tuner
+> is which, whether the two streams are being paired by the service's sample
+> numbers or by arrival order, and how deep a null the filter is reaching.
+
+An RSPduo is two complete tuners on one board, clocked from one reference. Run
+both — **Run both tuners** on the Radio tab — and they hear the same span at
+the same instant, with a relative phase set by the aerials and the feedlines
+rather than by chance. That is what makes it possible to combine them, and it
+is the same arrangement (and the same adaptive filter) as the LimeSDR's second
+receive chain in [§6.2.17](#6217-limesdr-family--limerfe-limesuite).
+
+**What to do with it** picks between the two jobs:
+
+- **Cancel — null a noise source.** The DSP form of a noise-cancelling phaser.
+  What the second aerial hears is subtracted from what the first one hears, in
+  the gain, phase and delay that make the two versions of the noise line up,
+  and what is left is the band without it. The second aerial wants to hear
+  **the noise and as little of the band as possible** — a short whip next to
+  the offending switched-mode supply, a loop pointed at it, or simply the
+  noisier of two aerials.
+- **Combine — diversity reception.** Two aerials on the same signal, added in
+  the phase that makes them reinforce and weighted so the one hearing it better
+  counts for more. On HF the two fade independently, so this fills in the
+  fades: 3 dB on two equal aerials, and much more when one is momentarily in a
+  null.
+
+The rest of the controls:
+
+- **Its LNA state** and **Its IF gain reduction** — the second tuner's own
+  gains, because the two aerials are rarely the same aerial. Set them so
+  **both show about the same noise floor**: this is the adjustment everything
+  else rests on. Combining weights the two branches by their noise, and a
+  second front end driven into overload hands the filter a distorted copy of
+  the interference, which cannot be subtracted from an undistorted one. A
+  steady gain is also what the filter wants, so switching the **AGC** off is
+  worth it for a null you mean to keep — the loop owns the IF gain while it
+  runs, on both tuners.
+- **Filter length** — one tap is a gain and a phase, which is a null at one
+  frequency that gets worse either side of it (all an analogue phaser can do).
+  Each further tap buys one sample period of the path difference between the
+  two aerials that the filter can equalise, which is what turns that notch into
+  a band quiet all the way across. The panel says what a given length costs on
+  the sample path.
+- **Adaptation**, **Hold** and **Restart** — how fast the filter chases,
+  whether it chases at all, and starting it again. The workflow is: adaptation
+  well to the right, watch the waterfall until the noise drops away, then
+  **Hold**. A filter left adapting will re-aim itself at whatever becomes
+  loudest, which on a quiet band is the station you are listening to.
+
+Everything except **Run both tuners** itself applies as you change it —
+finding a null is done by adjusting and listening. Turning the mode on or off
+reopens the device, because the API fixes it when the RSPduo is selected.
+
+**What running both tuners costs.** The API puts the ADC at a fixed 6 MHz and
+hands back 2 Msps from a low IF, so **2 Msps is the widest span** with both
+running (1.536 MHz of it inside the analog filter), and the narrower rates are
+that decimated. The sample-rate and bandwidth lists shrink accordingly, and a
+wider rate left over from single-tuner operation is clamped rather than
+refused. Both tuners get the same span, the same filter and the same notches —
+two branches filtered differently are two branches the filter cannot line up —
+and both follow the dial together.
+
+> **Nothing here can tell a wanted signal from an unwanted one.** The filter
+> only knows what the two aerials have in common, so pointing both at the same
+> thing in *Cancel* will dutifully cancel the station. How deep a null it is
+> achieving goes to the log every ten seconds — a converged canceller on a real
+> noise source reads 15–30 dB, and one reading a fraction of a decibel is one
+> whose second aerial cannot hear what it is being asked to subtract.
+
+If the second tuner stops delivering, the first one carries on alone and the
+log says so: the receiver keeps working and the filter stops, rather than the
+other way round. Asking for both tuners on any other RSP — a setting left
+behind by an RSPduo — is reported on screen and ignored.
 
 #### 6.2.9 Airspy HF+ (USB)
 
@@ -10041,9 +10121,11 @@ All in [§6.2.8](#628-sdrplay-rsp-usb):
   (20 dB is maximum gain, 59 minimum) and **LNA state 0 is maximum** — the
   default of 4 exists because full front-end gain on a real antenna overloads
   the ADC.
-- An **RSPduo** runs one tuner at a time, chosen at open; dual-tuner and
-  master/slave modes are not supported. **HDR mode** below 2 MHz is the
-  RSPdx / RSPdx R2 path.
+- An **RSPduo** runs one tuner at a time, chosen at open — or **both**, for
+  diversity and QRM suppression, which fixes the ADC clock and caps the span at
+  2 Msps (not yet verified against the hardware). Master/slave mode, sharing
+  the receiver with another application, is not supported. **HDR mode** below
+  2 MHz is the RSPdx / RSPdx R2 path.
 - Above 6.048 Msps the ADC trades bit depth for speed — worth knowing before
   picking 10 Msps for weak-signal work.
 

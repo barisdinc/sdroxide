@@ -25,6 +25,10 @@ pub(crate) enum Ctrl {
     /// IF gain reduction in dB (the RSP's native unit, 20..=59).
     IfGr(i32),
     Lna(u8),
+    /// The second tuner's gains, when both are running (issue #153). Separate
+    /// from the first tuner's because the two aerials are not the same aerial.
+    AuxIfGr(i32),
+    AuxLna(u8),
     /// [`sdroxide_types::SdrPlayAgc::code`] value.
     Agc(i32),
     AgcSetpoint(i32),
@@ -46,6 +50,8 @@ pub(crate) struct Pending {
     pub center: Option<f64>,
     pub if_gr: Option<i32>,
     pub lna: Option<u8>,
+    pub aux_if_gr: Option<i32>,
+    pub aux_lna: Option<u8>,
     pub agc: Option<i32>,
     pub agc_setpoint: Option<i32>,
     pub ppm: Option<f64>,
@@ -63,6 +69,8 @@ impl Pending {
             Ctrl::Center(v) => self.center = Some(v),
             Ctrl::IfGr(v) => self.if_gr = Some(v),
             Ctrl::Lna(v) => self.lna = Some(v),
+            Ctrl::AuxIfGr(v) => self.aux_if_gr = Some(v),
+            Ctrl::AuxLna(v) => self.aux_lna = Some(v),
             Ctrl::Agc(v) => self.agc = Some(v),
             Ctrl::AgcSetpoint(v) => self.agc_setpoint = Some(v),
             Ctrl::Ppm(v) => self.ppm = Some(v),
@@ -90,9 +98,12 @@ pub(crate) struct Shared {
     pub dropped: AtomicU64,
     /// The service said the ADC is overloaded (and has not yet said corrected).
     pub overload: AtomicBool,
-    /// An overload message is waiting for the mandatory acknowledgement,
-    /// which must come from the session thread rather than the callback.
-    pub overload_ack_pending: AtomicBool,
+    /// Which tuners have an overload message waiting for the mandatory
+    /// acknowledgement, which must come from the session thread rather than
+    /// the callback: bit 0 is tuner A, bit 1 is tuner B. A mask rather than a
+    /// flag because the acknowledgement names a tuner, and one sent for a
+    /// tuner that never reported an overload is one the service refuses.
+    pub overload_ack_pending: AtomicU8,
     /// The device disappeared mid-session (unplug or service failure).
     pub removed: AtomicBool,
     /// What the GainChange event last reported, `i64::MIN` for "not yet".
@@ -105,6 +116,16 @@ pub(crate) struct Shared {
     pub ev_curr_gain_milli_db: AtomicI64,
     /// The LNA state actually programmed, after any per-band clamp.
     pub lna_state: AtomicU8,
+    /// The same for the second tuner, when both are running.
+    pub aux_lna_state: AtomicU8,
+    /// The second tuner has stopped delivering and the first is going through
+    /// unpaired — see [`crate::pair`].
+    pub aux_stalled: AtomicBool,
+    /// How many times the two tuners had to be paired up again from scratch.
+    pub pair_slips: AtomicU64,
+    /// Whether the service fills in the sample numbers the pairing prefers, or
+    /// the pairing has fallen back to arrival order.
+    pub pair_stamped: AtomicBool,
     /// Set while the engine is transmitting and therefore not reading this
     /// receiver — see `IqSource::set_rx_paused`. Read by the stream thread on
     /// every block so a ring that fills during an over is accounted for as the
@@ -119,12 +140,16 @@ impl Shared {
             last_rx_ms: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             overload: AtomicBool::new(false),
-            overload_ack_pending: AtomicBool::new(false),
+            overload_ack_pending: AtomicU8::new(0),
             removed: AtomicBool::new(false),
             ev_gr_db: AtomicI64::new(i64::MIN),
             ev_lna_gr_db: AtomicI64::new(i64::MIN),
             ev_curr_gain_milli_db: AtomicI64::new(i64::MIN),
             lna_state: AtomicU8::new(0),
+            aux_lna_state: AtomicU8::new(0),
+            aux_stalled: AtomicBool::new(false),
+            pair_slips: AtomicU64::new(0),
+            pair_stamped: AtomicBool::new(true),
             rx_paused: AtomicBool::new(false),
         }
     }
@@ -221,15 +246,18 @@ pub(crate) fn push_iq(
     data: &[f32],
     stats: &mut RxStats,
     paused: bool,
+    stride: usize,
 ) -> usize {
     let mut written = 0;
-    // Rounded down to a whole number of I/Q pairs. `slots()` is a count of
-    // floats and is under no obligation to be even, so taking it at face value
-    // would eventually commit a lone I with its Q dropped — and from then on
-    // every pair in the ring is one float out of step, which swaps I with Q for
-    // the rest of the session and mirrors the spectrum. That reads like a
-    // driver bug rather than the overrun it is.
-    let room = ring.slots() & !1;
+    // Rounded down to a whole number of samples — a pair with one tuner
+    // running, a quadruple with two. `slots()` is a count of floats and is
+    // under no obligation to be a multiple of anything, so taking it at face
+    // value would eventually commit a lone I with its Q dropped — and from
+    // then on every sample in the ring is one float out of step, which swaps I
+    // with Q for the rest of the session and mirrors the spectrum. That reads
+    // like a driver bug rather than the overrun it is.
+    let free = ring.slots();
+    let room = free - free % stride;
     if let Ok(mut chunk) = ring.write_chunk_uninit(data.len().min(room)) {
         let (a, b) = chunk.as_mut_slices();
         let split = a.len();
@@ -244,8 +272,8 @@ pub(crate) fn push_iq(
         written = a.len() + b.len();
         unsafe { chunk.commit_all() };
     }
-    stats.on_iq(written / 2);
-    let short = (data.len() - written) / 2;
+    stats.on_iq(written / stride);
+    let short = (data.len() - written) / stride;
     if short == 0 {
         return 0;
     }
@@ -262,9 +290,10 @@ pub(crate) fn push_iq(
 }
 
 /// Ring sized for half a second of interleaved `f32` at `rate`, rounded up to
-/// a power of two.
-pub(crate) fn ring_for(rate: f64) -> (Producer<f32>, Consumer<f32>) {
-    let slots = ((rate * 2.0 * 0.5) as usize).next_power_of_two().clamp(1 << 14, 1 << 24);
+/// a power of two. `stride` is the floats per sample: two with one tuner
+/// running, four with an RSPduo's pair interleaved.
+pub(crate) fn ring_for(rate: f64, stride: usize) -> (Producer<f32>, Consumer<f32>) {
+    let slots = ((rate * stride as f64 * 0.5) as usize).next_power_of_two().clamp(1 << 14, 1 << 24);
     RingBuffer::new(slots)
 }
 
@@ -279,6 +308,13 @@ pub struct SdrPlayHandle {
     model: SdrPlayModel,
     out_rate_hz: f64,
     analog_bw_hz: f64,
+    /// Whether the ring carries both of an RSPduo's tuners, interleaved as
+    /// quadruples — see [`SdrPlayHandle::read_pair`].
+    dual: bool,
+    /// The low IF the API's downconverter worked from, in kHz, or zero for
+    /// plain zero-IF. Dual-tuner operation forces a low IF, which is what
+    /// spares it the DC spike the zero-IF path needs an LO offset to dodge.
+    low_if_khz: i32,
     opened_at: Instant,
     released: bool,
 }
@@ -304,6 +340,8 @@ impl SdrPlayHandle {
         model: SdrPlayModel,
         out_rate_hz: f64,
         analog_bw_hz: f64,
+        dual: bool,
+        low_if_khz: i32,
     ) -> SdrPlayHandle {
         SdrPlayHandle {
             rx,
@@ -315,6 +353,8 @@ impl SdrPlayHandle {
             model,
             out_rate_hz,
             analog_bw_hz,
+            dual,
+            low_if_khz,
             opened_at: Instant::now(),
             released: false,
         }
@@ -340,6 +380,40 @@ impl SdrPlayHandle {
     /// The programmed analog IF bandwidth, for the LO-offset calculation.
     pub fn analog_bw_hz(&self) -> f64 {
         self.analog_bw_hz
+    }
+
+    /// Whether both of an RSPduo's tuners are running and being paired.
+    pub fn dual_tuner(&self) -> bool {
+        self.dual
+    }
+
+    /// The low IF the service downconverted from, in kHz — zero for the
+    /// ordinary zero-IF path. A low IF puts the converter's DC offset outside
+    /// the span by construction, so the source needs no LO offset to hide it.
+    pub fn low_if_khz(&self) -> i32 {
+        self.low_if_khz
+    }
+
+    /// The second tuner has stopped delivering, so blocks are going through
+    /// unpaired and the diversity filter has nothing to work with.
+    pub fn aux_stalled(&self) -> bool {
+        self.shared.aux_stalled.load(Ordering::Relaxed)
+    }
+
+    /// How many times the two tuners had to be paired up again from scratch.
+    pub fn pair_slips(&self) -> u64 {
+        self.shared.pair_slips.load(Ordering::Relaxed)
+    }
+
+    /// Whether the pairing is working from the service's sample numbers, or
+    /// has fallen back to arrival order because they do not advance.
+    pub fn pair_stamped(&self) -> bool {
+        self.shared.pair_stamped.load(Ordering::Relaxed)
+    }
+
+    /// The second tuner's LNA state, after any per-band clamp.
+    pub fn aux_lna_state(&self) -> u8 {
+        self.shared.aux_lna_state.load(Ordering::Relaxed)
     }
 
     /// Whether the session thread is still running.
@@ -384,10 +458,16 @@ impl SdrPlayHandle {
     }
 
     /// Read interleaved complex samples. Returns how many `f32` were taken.
+    ///
+    /// With both tuners running the ring holds quadruples rather than pairs,
+    /// so this is the wrong door — use [`Self::read_pair`], which is what the
+    /// source calls either way.
     pub fn read(&mut self, out: &mut [f32]) -> usize {
+        let stride = self.stride();
         let n = out.len().min(self.rx.slots());
-        // Keep I and Q together: an odd count would swap them for good.
-        let n = n - (n % 2);
+        // Keep a sample's floats together: a partial one would swap I with Q
+        // for good.
+        let n = n - (n % stride);
         if n == 0 {
             return 0;
         }
@@ -403,6 +483,45 @@ impl SdrPlayHandle {
         }
     }
 
+    /// Floats per sample in the ring: I and Q, or both tuners' I and Q.
+    fn stride(&self) -> usize {
+        if self.dual { crate::pair::QUAD } else { 2 }
+    }
+
+    /// Read both tuners at once, as interleaved complex samples, and return
+    /// how many **complex samples** landed in each.
+    ///
+    /// The pair is sample-aligned by construction: the two tuners are put
+    /// together in the callbacks and travel through one ring, so there is no
+    /// way for them to come apart on the way here — see [`crate::pair`]. With
+    /// one tuner running `aux` is left untouched and this is the ordinary
+    /// read.
+    pub fn read_pair(&mut self, main: &mut [f32], aux: &mut [f32]) -> usize {
+        if !self.dual {
+            return self.read(main) / 2;
+        }
+        let quad = crate::pair::QUAD;
+        let want = (main.len() / 2).min(aux.len() / 2).min(self.rx.slots() / quad);
+        if want == 0 {
+            return 0;
+        }
+        let Ok(chunk) = self.rx.read_chunk(want * quad) else {
+            return 0;
+        };
+        let (head, tail) = chunk.as_slices();
+        for (idx, &v) in head.iter().chain(tail.iter()).enumerate() {
+            let (sample, lane) = (idx / quad, idx % quad);
+            match lane {
+                0 => main[2 * sample] = v,
+                1 => main[2 * sample + 1] = v,
+                2 => aux[2 * sample] = v,
+                _ => aux[2 * sample + 1] = v,
+            }
+        }
+        chunk.commit_all();
+        want
+    }
+
     pub fn set_center_hz(&self, hz: f64) {
         let _ = self.ctrl.send(Ctrl::Center(hz));
     }
@@ -413,6 +532,15 @@ impl SdrPlayHandle {
 
     pub fn set_lna_state(&self, state: u8) {
         let _ = self.ctrl.send(Ctrl::Lna(state));
+    }
+
+    /// The second tuner's gains, when both are running.
+    pub fn set_aux_if_gr_db(&self, gr: i32) {
+        let _ = self.ctrl.send(Ctrl::AuxIfGr(gr));
+    }
+
+    pub fn set_aux_lna_state(&self, state: u8) {
+        let _ = self.ctrl.send(Ctrl::AuxLna(state));
     }
 
     pub fn set_agc(&self, code: i32) {
@@ -501,12 +629,19 @@ mod tests {
 
     #[test]
     fn the_ring_holds_about_half_a_second() {
-        let (p, _c) = ring_for(2_000_000.0);
+        let (p, _c) = ring_for(2_000_000.0, 2);
         assert!(p.slots() >= 2_000_000);
         assert!(p.slots().is_power_of_two());
+        // Two tuners are twice the floats for the same half second.
+        let (p, _c) = ring_for(2_000_000.0, 4);
+        assert!(p.slots() >= 4_000_000);
     }
 
     fn test_handle(cons: Consumer<f32>) -> SdrPlayHandle {
+        test_handle_with(cons, false)
+    }
+
+    fn test_handle_with(cons: Consumer<f32>, dual: bool) -> SdrPlayHandle {
         let (tx, _rx) = crossbeam_channel::unbounded();
         SdrPlayHandle::from_parts(
             cons,
@@ -515,9 +650,11 @@ mod tests {
             std::thread::spawn(|| {}),
             "test".into(),
             "0000000000".into(),
-            SdrPlayModel::Rsp1b,
+            if dual { SdrPlayModel::RspDuo } else { SdrPlayModel::Rsp1b },
             2_000_000.0,
             1_536_000.0,
+            dual,
+            if dual { 1620 } else { 0 },
         )
     }
 
@@ -569,9 +706,26 @@ mod tests {
         for v in [1.0, 2.0, 3.0, 4.0, 5.0] {
             prod.push(v).expect("room");
         }
-        let dropped = push_iq(&mut prod, &[6.0, 7.0, 8.0, 9.0], &mut stats, false);
+        let dropped = push_iq(&mut prod, &[6.0, 7.0, 8.0, 9.0], &mut stats, false, 2);
         assert_eq!(cons.slots(), 7, "only one whole pair fitted the three free slots");
         assert_eq!(dropped, 1, "the pair that did not fit is one complex sample");
+    }
+
+    /// The paired read must split the ring's quadruples back into two streams
+    /// the right way round — an I and a Q of one tuner, then of the other.
+    #[test]
+    fn a_paired_read_splits_the_two_tuners_apart() {
+        let (mut prod, cons) = RingBuffer::<f32>::new(64);
+        let mut stats = RxStats::new(2.0e6);
+        // Two samples: main (1,2) then (5,6); aux (3,4) then (7,8).
+        push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &mut stats, false, 4);
+        let mut h = test_handle_with(cons, true);
+        let (mut main, mut aux) = ([0f32; 8], [0f32; 8]);
+        let n = h.read_pair(&mut main, &mut aux);
+        assert_eq!(n, 2, "two complex samples per tuner");
+        assert_eq!(&main[..4], &[1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(&aux[..4], &[3.0, 4.0, 7.0, 8.0]);
+        h.released = true;
     }
 
     /// A ring that fills because the engine stopped reading for an over is not
@@ -582,14 +736,14 @@ mod tests {
         let (mut prod, cons) = RingBuffer::<f32>::new(4);
         let mut stats = RxStats::new(2.0e6);
 
-        push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0], &mut stats, true);
-        let dropped = push_iq(&mut prod, &[5.0, 6.0], &mut stats, true);
+        push_iq(&mut prod, &[1.0, 2.0, 3.0, 4.0], &mut stats, true, 2);
+        let dropped = push_iq(&mut prod, &[5.0, 6.0], &mut stats, true, 2);
         assert_eq!(dropped, 0, "a paused receiver reports no overruns to its caller");
         assert_eq!(stats.win_dropped, 0);
         assert_eq!(stats.win_keyed, 1, "the discarded pair is accounted for as keyed");
 
         // Unpaused, the very same full ring is a genuine overrun again.
-        let dropped = push_iq(&mut prod, &[7.0, 8.0], &mut stats, false);
+        let dropped = push_iq(&mut prod, &[7.0, 8.0], &mut stats, false, 2);
         assert_eq!(dropped, 1);
         assert_eq!(stats.win_dropped, 1);
         assert_eq!(stats.win_keyed, 1);

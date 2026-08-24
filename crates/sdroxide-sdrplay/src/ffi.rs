@@ -55,6 +55,9 @@ pub const TUNER_BOTH: TunerSelect = 3;
 pub type RspDuoMode = i32;
 pub const RSPDUO_MODE_UNKNOWN: RspDuoMode = 0;
 pub const RSPDUO_MODE_SINGLE_TUNER: RspDuoMode = 1;
+pub const RSPDUO_MODE_DUAL_TUNER: RspDuoMode = 2;
+pub const RSPDUO_MODE_MASTER: RspDuoMode = 4;
+pub const RSPDUO_MODE_SLAVE: RspDuoMode = 8;
 
 /// `sdrplay_api_ReasonForUpdateT` — unsigned, see the module doc.
 pub type Reason = u32;
@@ -96,6 +99,11 @@ pub const BW_UNDEFINED: BwType = 0;
 /// `sdrplay_api_If_kHzT` — the value is the IF in kHz; `-1` is "undefined".
 pub type IfType = i32;
 pub const IF_ZERO: IfType = 0;
+/// The low IF the API's own downconverter works from. Mandatory with both of
+/// an RSPduo's tuners running, where the ADC is fixed at 6 MHz.
+pub const IF_1_620: IfType = 1620;
+/// The same for an 8 MHz ADC clock.
+pub const IF_2_048: IfType = 2048;
 /// `sdrplay_api_LoModeT`.
 pub type LoMode = i32;
 pub const LO_AUTO: LoMode = 1;

@@ -5191,6 +5191,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
         cfg.sdrplay.sample_rate_hz,
         cfg.sdrplay.bw_khz,
         cfg.sdrplay.duo_tuner,
+        cfg.sdrplay.diversity.enabled,
     );
 
     // Which rows to draw comes from the *selected* device's model, and with
@@ -5219,6 +5220,15 @@ pub(in crate::app) fn settings_sdrplay_tab(
         ui.label(RichText::new(w).color(Color32::from_rgb(220, 170, 70)));
         ui.add_space(6.0);
     }
+
+    // Same story as the ports: an RSPdx guessed to be an RSP1B would lose two
+    // thirds of its LNA range. The open device publishes the real one. Hoisted
+    // out of the grid because the second tuner's ladder is the same ladder.
+    let max_lna = open
+        .and_then(|c| c.gains.iter().find(|g| g.name == SdrPlayConfig::LNA_ELEMENT))
+        .map(|g| (-g.min_db).round().clamp(0.0, 255.0) as u8)
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| model.max_lna_state());
 
     egui::Grid::new("sdrplay-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Receiver");
@@ -5270,13 +5280,23 @@ pub(in crate::app) fn settings_sdrplay_tab(
         });
         ui.end_row();
 
-        ui.label("Sample rate").on_hover_text(
-            "Rates below 2 Msps run the ADC at 2 Msps and decimate in the \
-             service. Takes effect on Apply.",
-        );
+        // Two tuners share one ADC at a fixed clock, so the ladder they can
+        // reach is a different — and much shorter — one. Offering the wide
+        // rates would offer spans this configuration cannot open.
+        let dual = model == SdrPlayModel::RspDuo && cfg.sdrplay.diversity.enabled;
+        ui.label("Sample rate").on_hover_text(if dual {
+            "With both tuners running, the API fixes the ADC at 6 MHz and hands back \
+             2 Msps from a low IF — so 2 Msps is the widest span, and the narrower ones \
+             are that decimated. Takes effect on Apply."
+        } else {
+            "Rates below 2 Msps run the ADC at 2 Msps and decimate in the service. \
+             Takes effect on Apply."
+        });
         let shown = format!("{:.3} Msps", cfg.sdrplay.sample_rate_hz / 1e6);
         ComboBox::from_id_salt("sdrplay_rate").selected_text(shown).show_styled(ui, |ui| {
-            for &r in &SdrPlayConfig::SAMPLE_RATES {
+            let rates: &[f64] =
+                if dual { &SdrPlayConfig::DUAL_SAMPLE_RATES } else { &SdrPlayConfig::SAMPLE_RATES };
+            for &r in rates {
                 let sel = (cfg.sdrplay.sample_rate_hz - r).abs() < 1.0;
                 let mut label = format!("{:.3} Msps", r / 1e6);
                 if r > 6_048_000.0 {
@@ -5306,6 +5326,10 @@ pub(in crate::app) fn settings_sdrplay_tab(
             for &khz in &SdrPlayConfig::BANDWIDTHS_KHZ {
                 // Filters wider than the rate would only alias; don't offer them.
                 if (khz as f64) * 1000.0 > cfg.sdrplay.sample_rate_hz {
+                    continue;
+                }
+                // The low IF two tuners work from has no room for the wide ones.
+                if dual && khz > SdrPlayConfig::DUAL_MAX_BW_KHZ {
                     continue;
                 }
                 if ui.selectable_label(cfg.sdrplay.bw_khz == khz, format!("{khz} kHz")).clicked() {
@@ -5383,13 +5407,6 @@ pub(in crate::app) fn settings_sdrplay_tab(
              driver clamps and keeps your choice for when you tune back. \
              Applies immediately.",
         );
-        // Same story as the ports: an RSPdx guessed to be an RSP1B would lose
-        // two thirds of its LNA range. The open device publishes the real one.
-        let max_lna = open
-            .and_then(|c| c.gains.iter().find(|g| g.name == SdrPlayConfig::LNA_ELEMENT))
-            .map(|g| (-g.min_db).round().clamp(0.0, 255.0) as u8)
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| model.max_lna_state());
         if crate::chrome::slider(ui, Slider::new(&mut cfg.sdrplay.lna_state, 0..=max_lna))
             .on_hover_text("0 = max gain")
             .changed()
@@ -5421,10 +5438,14 @@ pub(in crate::app) fn settings_sdrplay_tab(
         ui.end_row();
 
         if model == SdrPlayModel::RspDuo {
-            ui.label("Tuner").on_hover_text(
-                "Which of the RSPduo's two tuners to run (one at a time). \
-                 Takes effect on Apply.",
-            );
+            ui.label(if cfg.sdrplay.diversity.enabled { "Main aerial's tuner" } else { "Tuner" })
+                .on_hover_text(if cfg.sdrplay.diversity.enabled {
+                    "Which of the RSPduo's two tuners carries the aerial you are listening \
+                     to. The other one carries the second aerial. Takes effect on Apply."
+                } else {
+                    "Which of the RSPduo's two tuners to run (one at a time). Takes effect \
+                     on Apply."
+                });
             let mut tuner = cfg.sdrplay.duo_tuner;
             enum_combo(
                 ui,
@@ -5547,6 +5568,216 @@ pub(in crate::app) fn settings_sdrplay_tab(
         }
     });
 
+    // ---- the second tuner (issue #153) -------------------------------------
+    // Shown for an RSPduo, and for anything still carrying the setting: a
+    // switch that cannot be seen is a switch that cannot be turned off, and
+    // this one survives moving the configuration to another receiver.
+    if model == SdrPlayModel::RspDuo || cfg.sdrplay.diversity.enabled {
+        use sdroxide_types::{DIVERSITY_MAX_TAPS, DiversityMode, diversity_cost_note};
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new("Second aerial").strong());
+        ui.label(
+            RichText::new(
+                "An RSPduo is two whole tuners on one board, clocked from one reference, so \
+                 running both gives two aerials hearing the same span at the same instant — \
+                 with a relative phase set by the feedlines rather than by chance. That is \
+                 what lets the two be combined: subtracted to null a local noise source, or \
+                 added to ride out a fade.",
+            )
+            .weak(),
+        );
+        if crate::chrome::checkbox(ui, &mut cfg.sdrplay.diversity.enabled, "Run both tuners")
+            .on_hover_text(
+                "Puts the RSPduo in the API's dual-tuner mode, where the ADC is fixed at \
+                 6 MHz and the widest span is 2 Msps. Takes effect on Apply, because the \
+                 mode is chosen when the device is opened.",
+            )
+            .changed()
+        {
+            // The wide rates do not exist in dual-tuner mode; carrying one in
+            // would open at 2 Msps and leave the panel claiming otherwise.
+            if cfg.sdrplay.diversity.enabled {
+                cfg.sdrplay.sample_rate_hz = cfg.sdrplay.sample_rate_hz.min(2_000_000.0);
+                cfg.sdrplay.bw_khz = 0;
+            }
+        }
+
+        if cfg.sdrplay.diversity.enabled {
+            let div = &mut cfg.sdrplay.diversity;
+            egui::Grid::new("sdrplay-div-grid").num_columns(2).spacing([12.0, 6.0]).show(
+                ui,
+                |ui| {
+                    ui.label("What to do with it");
+                    ComboBox::from_id_salt("sdrplay_div_mode")
+                        .selected_text(div.mode.label())
+                        .show_styled(ui, |ui| {
+                            for m in DiversityMode::ALL {
+                                if ui.selectable_label(div.mode == m, m.label()).clicked() {
+                                    div.mode = m;
+                                    push_gain(
+                                        cmds,
+                                        SdrPlayConfig::DIV_MODE_ELEMENT,
+                                        f64::from(u8::from(m == DiversityMode::Combine)),
+                                    );
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Its LNA state").on_hover_text(
+                        "The second tuner's own front-end attenuation. Set so both aerials \
+                         show about the same noise floor: this is the adjustment everything \
+                         else rests on, because combining weights the two branches by their \
+                         noise, and a second front end driven into overload hands the filter \
+                         a distorted copy of the interference — which cannot be subtracted \
+                         from an undistorted one. Applies immediately.",
+                    );
+                    if crate::chrome::slider(ui, Slider::new(&mut div.lna_state, 0..=max_lna))
+                        .on_hover_text("0 = max gain")
+                        .changed()
+                    {
+                        push_gain(cmds, SdrPlayConfig::AUX_LNA_ELEMENT, -(div.lna_state as f64));
+                    }
+                    ui.end_row();
+
+                    ui.label("Its IF gain reduction").on_hover_text(
+                        "The second tuner's IF gain, in the RSP's native unit: 20 dB is \
+                         maximum gain. Ignored while the AGC is running — and a steady gain \
+                         is what the filter wants, so switching the AGC off is worth it for \
+                         a null you intend to hold.",
+                    );
+                    ui.add_enabled_ui(cfg.sdrplay.agc == SdrPlayAgc::Off, |ui| {
+                        if crate::chrome::slider(
+                            ui,
+                            Slider::new(
+                                &mut div.if_gr_db,
+                                SdrPlayConfig::IF_GR_MIN..=SdrPlayConfig::IF_GR_MAX,
+                            )
+                            .suffix(" dB"),
+                        )
+                        .changed()
+                        {
+                            push_gain(
+                                cmds,
+                                SdrPlayConfig::AUX_IF_GAIN_ELEMENT,
+                                -(div.if_gr_db as f64),
+                            );
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Filter length");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                DragValue::new(&mut div.taps)
+                                    .speed(1.0)
+                                    .range(1..=DIVERSITY_MAX_TAPS)
+                                    .suffix(" taps"),
+                            )
+                            .on_hover_text(
+                                "One tap is a gain and a phase — a null at one frequency \
+                                 that gets worse either side of it, which is all an analogue \
+                                 phaser can do. Each further tap buys one sample period of \
+                                 the path difference between the two aerials that the filter \
+                                 can equalise, which is what turns that notch into a band \
+                                 quiet all the way across.",
+                            )
+                            .changed()
+                        {
+                            push_gain(cmds, SdrPlayConfig::DIV_TAPS_ELEMENT, f64::from(div.taps));
+                        }
+                        ui.label(
+                            RichText::new(diversity_cost_note(
+                                div.taps,
+                                cfg.sdrplay.sample_rate_hz.min(2_000_000.0),
+                            ))
+                            .weak(),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label("Adaptation");
+                    ui.horizontal(|ui| {
+                        if crate::chrome::slider(
+                            ui,
+                            Slider::new(&mut div.rate, 0.0..=1.0).show_value(false),
+                        )
+                        .on_hover_text(
+                            "Slow and steady at the left, converging inside a fraction of a \
+                             second and visibly hunting at the right. Start fast to find the \
+                             null, then hold it.",
+                        )
+                        .changed()
+                        {
+                            push_gain(cmds, SdrPlayConfig::DIV_RATE_ELEMENT, f64::from(div.rate));
+                        }
+                        if ui
+                            .checkbox(&mut div.frozen, "Hold")
+                            .on_hover_text(
+                                "Stop the filter moving. Reach for this the moment a null \
+                                 appears: a filter left adapting will re-aim itself at \
+                                 whatever becomes loudest, which on a quiet band is the \
+                                 station you are listening to.",
+                            )
+                            .changed()
+                        {
+                            push_gain(
+                                cmds,
+                                SdrPlayConfig::DIV_FREEZE_ELEMENT,
+                                f64::from(u8::from(div.frozen)),
+                            );
+                        }
+                        if ui
+                            .button("Restart")
+                            .on_hover_text("Zero the filter and find the null again.")
+                            .clicked()
+                        {
+                            push_gain(cmds, SdrPlayConfig::DIV_RESET_ELEMENT, 1.0);
+                        }
+                    });
+                    ui.end_row();
+                },
+            );
+            ui.label(
+                RichText::new(
+                    "Nothing here can tell a wanted signal from an unwanted one — the filter \
+                     only knows what the two aerials have in common. In Cancel, the second \
+                     aerial wants to hear the noise source and as little of the band as \
+                     possible, or it will dutifully cancel the station too. In Combine, both \
+                     want to hear the same station. How deep the null is going runs to the \
+                     log every few seconds.",
+                )
+                .weak(),
+            );
+            ui.label(
+                RichText::new(
+                    "Not yet verified against an RSPduo: dual-tuner operation here is \
+                     written from SDRplay's API rather than measured on the hardware.",
+                )
+                .color(Color32::from_rgb(220, 170, 70)),
+            );
+            if model != SdrPlayModel::RspDuo {
+                ui.label(
+                    RichText::new(if devices.is_empty() {
+                        "Only an RSPduo has a second tuner, and no receiver is listed to \
+                         check against — the log says what actually opened."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Only an RSPduo has a second tuner, and the receiver selected \
+                             here is an {}, so this will do nothing.",
+                            model.label()
+                        )
+                    })
+                    .color(Color32::from_rgb(220, 170, 70)),
+                );
+            }
+        }
+    }
+
     if cfg.sdrplay.bias_tee && model.has_bias_tee() {
         ui.add_space(4.0);
         ui.label(
@@ -5565,6 +5796,7 @@ pub(in crate::app) fn settings_sdrplay_tab(
             cfg.sdrplay.sample_rate_hz,
             cfg.sdrplay.bw_khz,
             cfg.sdrplay.duo_tuner,
+            cfg.sdrplay.diversity.enabled,
         )
     {
         *apply = true;
@@ -5606,7 +5838,7 @@ pub(in crate::app) fn settings_lime_tab(
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{
-        LimeAuxConfig, LimeAuxRole, LimeConfig, LimeDiversityMode, RFE_ATTEN_MAX_STEPS,
+        DiversityMode, LimeAuxConfig, LimeAuxRole, LimeConfig, RFE_ATTEN_MAX_STEPS,
         RFE_ATTEN_STEP_DB, RfeChannel, RfeLink, RfeModeControl, RfePort,
     };
     let Some(cfg) = radio_edit.as_mut() else {
@@ -5956,13 +6188,13 @@ pub(in crate::app) fn settings_lime_tab(
                 egui::ComboBox::from_id_salt("lime-div-mode")
                     .selected_text(cfg.lime.aux.mode.label())
                     .show_styled(ui, |ui| {
-                        for m in LimeDiversityMode::ALL {
+                        for m in DiversityMode::ALL {
                             if ui.selectable_label(cfg.lime.aux.mode == m, m.label()).clicked() {
                                 cfg.lime.aux.mode = m;
                                 push_gain(
                                     cmds,
                                     LimeConfig::DIV_MODE_ELEMENT,
-                                    f64::from(u8::from(m == LimeDiversityMode::Combine)),
+                                    f64::from(u8::from(m == DiversityMode::Combine)),
                                 );
                             }
                         }

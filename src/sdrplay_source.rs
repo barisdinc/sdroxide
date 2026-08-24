@@ -3,17 +3,26 @@
 //!
 //! Receive only: the trait's transmit methods already default to errors, which
 //! is the correct answer for this hardware.
+//!
+//! On an RSPduo with both tuners running, this is also where the two aerials
+//! meet: the driver hands back a sample-aligned pair and the adaptive filter
+//! in `sdroxide_dsp` turns it into one stream — a noise source nulled, or two
+//! fading paths combined (issue #153).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use sdroxide_dsp::Diversity;
 use sdroxide_radio::{Complex32, IqSource, Result, lo_offset_for};
 use sdroxide_sdrplay::SdrPlayHandle;
-use sdroxide_types::{SdrPlayAgc, SdrPlayConfig, SdrPlayModel};
+use sdroxide_types::{DiversityMode, SdrPlayAgc, SdrPlayConfig, SdrPlayDiversity, SdrPlayModel};
 
 /// How long the receiver may deliver nothing before the connection counts as
 /// dead. The service delivers continuously while healthy, so three seconds of
 /// silence means the session is gone, same as the other local backends.
 const SILENCE_BEFORE_REOPEN: Duration = Duration::from_secs(3);
+
+/// How often the diversity filter's achieved null depth reaches the log.
+const DEPTH_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct SdrPlaySource {
     handle: SdrPlayHandle,
@@ -30,16 +39,35 @@ pub struct SdrPlaySource {
     /// The ports this model (and, on the RSPduo, this tuner) offers — what
     /// the capabilities advertise. Empty hides the selector.
     antennas: Vec<String>,
+    /// The second tuner's settings as configured, so the panel's live controls
+    /// have somewhere to land.
+    div_cfg: SdrPlayDiversity,
+    /// `Some` when both tuners are running: the filter that combines them.
+    diversity: Option<Diversity>,
+    /// The second tuner's samples, as the filter wants them.
+    aux_scratch: Vec<f32>,
+    aux_buf: Vec<Complex32>,
+    last_depth_log: Instant,
 }
 
 impl SdrPlaySource {
     pub fn open(cfg: &SdrPlayConfig, center_hz: f64) -> anyhow::Result<Self> {
         let handle = sdroxide_sdrplay::spawn(cfg, center_hz)?;
         let rate = handle.out_rate_hz();
-        let label = format!("{} @ {:.3} Msps", handle.label(), rate / 1e6);
+        let dual = handle.dual_tuner();
+        let label = format!(
+            "{} @ {:.3} Msps{}",
+            handle.label(),
+            rate / 1e6,
+            if dual { ", both tuners" } else { "" }
+        );
         // Zero-IF part: park the LO off the VFO where the analog filter
-        // allows it — see `sdroxide_radio::lo_offset_for`.
-        let lo_offset = lo_offset_for(rate, handle.analog_bw_hz());
+        // allows it — see `sdroxide_radio::lo_offset_for`. A low IF has no DC
+        // spike in the middle of the span to dodge, so it wants none: the
+        // offset would only push the wanted signal towards the skirt of an
+        // analog filter that is already the narrowest part of this mode.
+        let lo_offset =
+            if handle.low_if_khz() != 0 { 0.0 } else { lo_offset_for(rate, handle.analog_bw_hz()) };
         let antennas: Vec<String> =
             handle.model().antennas(cfg.duo_tuner).iter().map(|s| s.to_string()).collect();
         let antenna = if cfg.antenna.is_empty() {
@@ -47,10 +75,33 @@ impl SdrPlaySource {
         } else {
             cfg.antenna.clone()
         };
+        let diversity = dual.then(|| {
+            Diversity::new(
+                div_mode(cfg.diversity.mode),
+                usize::from(cfg.diversity.taps),
+                cfg.diversity.rate,
+            )
+        });
         tracing::info!(
             "SDRplay source ready: {label}, center {center_hz:.0} Hz, \
              LO offset {lo_offset:.0} Hz (0 = LO on the VFO)"
         );
+        if diversity.is_some() {
+            tracing::info!(
+                "diversity is on: {} filter, {} taps{}",
+                match cfg.diversity.mode {
+                    DiversityMode::Cancel => "cancelling",
+                    DiversityMode::Combine => "combining",
+                },
+                cfg.diversity.taps,
+                if handle.pair_stamped() {
+                    ""
+                } else {
+                    " (the service is not numbering its blocks, so the two tuners are being \
+                     paired by arrival order)"
+                }
+            );
+        }
         Ok(SdrPlaySource {
             center: center_hz,
             rx_scratch: Vec::new(),
@@ -61,6 +112,11 @@ impl SdrPlaySource {
             bias_tee: cfg.bias_tee,
             antenna,
             antennas,
+            div_cfg: cfg.diversity.clone(),
+            diversity,
+            aux_scratch: Vec::new(),
+            aux_buf: Vec::new(),
+            last_depth_log: Instant::now(),
             handle,
         })
     }
@@ -71,6 +127,50 @@ impl SdrPlaySource {
 
     pub fn antennas(&self) -> &[String] {
         &self.antennas
+    }
+
+    /// Whether both tuners are running and being combined.
+    pub fn dual_tuner(&self) -> bool {
+        self.handle.dual_tuner()
+    }
+
+    /// Say how the filter is doing, occasionally.
+    ///
+    /// The null depth is the one number that separates "the second aerial
+    /// hears the noise" from "the second aerial hears nothing the first one
+    /// does", and no amount of adjusting the filter fixes the second case.
+    fn log_depth(&mut self) {
+        if self.last_depth_log.elapsed() < DEPTH_LOG_INTERVAL {
+            return;
+        }
+        self.last_depth_log = Instant::now();
+        let Some(d) = self.diversity.as_ref() else { return };
+        let slips = self.handle.pair_slips();
+        match d.depth_db() {
+            Some(db) => tracing::info!(
+                "diversity: {db:.1} dB of the main aerial's signal is being cancelled{}{}",
+                if d.frozen() { ", filter held" } else { "" },
+                if slips > 0 { format!(", {slips} pairing restart(s)") } else { String::new() }
+            ),
+            None if slips > 0 => {
+                tracing::debug!("diversity: combining, {slips} pairing restart(s)");
+            }
+            None => {}
+        }
+        if self.handle.aux_stalled() {
+            tracing::warn!(
+                "the RSPduo's second tuner is not delivering, so blocks are going through \
+                 uncombined — the receiver is still working, but diversity is not"
+            );
+        }
+    }
+}
+
+/// The configuration's mode, as the DSP crate spells it.
+fn div_mode(mode: DiversityMode) -> sdroxide_dsp::DiversityMode {
+    match mode {
+        DiversityMode::Cancel => sdroxide_dsp::DiversityMode::Cancel,
+        DiversityMode::Combine => sdroxide_dsp::DiversityMode::Combine,
     }
 }
 
@@ -102,13 +202,26 @@ impl IqSource for SdrPlaySource {
         self.lo_offset
     }
 
+    /// One block from the receiver — and, with both tuners running, the second
+    /// aerial combined with the first.
+    ///
+    /// The pair the driver hands back is sample-aligned by construction, so
+    /// there is nothing to check here; what there is to respect is the second
+    /// tuner having stopped, in which case the block goes through uncombined
+    /// rather than combined against silence.
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
         let need = buf.len() * 2;
         if self.rx_scratch.len() < need {
             self.rx_scratch.resize(need, 0.0);
         }
-        let n = self.handle.read(&mut self.rx_scratch[..need]);
-        let pairs = n / 2;
+        let dual = self.handle.dual_tuner();
+        if dual && self.aux_scratch.len() < need {
+            self.aux_scratch.resize(need, 0.0);
+        }
+        // Disjoint fields, so both landing buffers can be handed to the handle
+        // while the handle borrows itself.
+        let (main, aux) = (&mut self.rx_scratch[..need], &mut self.aux_scratch[..]);
+        let pairs = self.handle.read_pair(main, if dual { aux } else { &mut [] });
         if pairs == 0 {
             // Nothing yet — brief nap so the DSP loop doesn't spin hot.
             std::thread::sleep(Duration::from_millis(2));
@@ -116,6 +229,21 @@ impl IqSource for SdrPlaySource {
         }
         for p in 0..pairs {
             buf[p] = Complex32::new(self.rx_scratch[2 * p], self.rx_scratch[2 * p + 1]);
+        }
+        if dual && !self.handle.aux_stalled() {
+            if self.aux_buf.len() < pairs {
+                self.aux_buf.resize(pairs, Complex32::new(0.0, 0.0));
+            }
+            for p in 0..pairs {
+                self.aux_buf[p] =
+                    Complex32::new(self.aux_scratch[2 * p], self.aux_scratch[2 * p + 1]);
+            }
+            if let Some(d) = self.diversity.as_mut() {
+                d.process(&mut buf[..pairs], &self.aux_buf[..pairs]);
+            }
+        }
+        if dual {
+            self.log_depth();
         }
         Ok(pairs)
     }
@@ -163,6 +291,57 @@ impl IqSource for SdrPlaySource {
             }
             SdrPlayConfig::HDR_ELEMENT => {
                 self.handle.set_hdr(db >= 0.5);
+            }
+            // The second tuner and its filter. Everything here is live: a null
+            // is found by adjusting and listening, so a control that needed a
+            // reconnect would be no use at all.
+            SdrPlayConfig::AUX_LNA_ELEMENT => {
+                let state = (-db).round().clamp(0.0, 255.0) as u8;
+                self.div_cfg.lna_state = state;
+                self.handle.set_aux_lna_state(state);
+            }
+            SdrPlayConfig::AUX_IF_GAIN_ELEMENT => {
+                let gr = (-db).round() as i32;
+                self.div_cfg.if_gr_db =
+                    gr.clamp(SdrPlayConfig::IF_GR_MIN, SdrPlayConfig::IF_GR_MAX);
+                self.handle.set_aux_if_gr_db(self.div_cfg.if_gr_db);
+            }
+            SdrPlayConfig::DIV_MODE_ELEMENT => {
+                self.div_cfg.mode =
+                    if db >= 0.5 { DiversityMode::Combine } else { DiversityMode::Cancel };
+                if let Some(d) = self.diversity.as_mut() {
+                    // The filter is kept across the switch: it is the same
+                    // estimate either way, and throwing away a converged one
+                    // would cost the operator the convergence they watched.
+                    d.set_mode(div_mode(self.div_cfg.mode));
+                }
+            }
+            SdrPlayConfig::DIV_RATE_ELEMENT => {
+                self.div_cfg.rate = db as f32;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_rate(self.div_cfg.rate);
+                }
+            }
+            SdrPlayConfig::DIV_TAPS_ELEMENT => {
+                let taps =
+                    db.round().clamp(1.0, f64::from(sdroxide_types::DIVERSITY_MAX_TAPS)) as u8;
+                self.div_cfg.taps = taps;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_taps(usize::from(taps));
+                }
+            }
+            SdrPlayConfig::DIV_FREEZE_ELEMENT => {
+                self.div_cfg.frozen = db >= 0.5;
+                if let Some(d) = self.diversity.as_mut() {
+                    d.set_frozen(self.div_cfg.frozen);
+                }
+            }
+            SdrPlayConfig::DIV_RESET_ELEMENT => {
+                if let Some(d) = self.diversity.as_mut()
+                    && db >= 0.5
+                {
+                    d.reset();
+                }
             }
             _ => {}
         }
@@ -224,6 +403,43 @@ impl IqSource for SdrPlaySource {
                  enable AGC"
                     .to_string(),
             );
+        }
+        // A setting that quietly did nothing is worse than one that is
+        // refused: only an RSPduo has a second tuner, and only the API's
+        // dual-tuner mode runs it.
+        if self.div_cfg.enabled && !self.handle.dual_tuner() {
+            notes.push(if self.model() == SdrPlayModel::RspDuo {
+                "Both tuners were asked for but the device opened with one — another \
+                 application may be holding the RSPduo, or holding it in single-tuner mode. \
+                 Diversity is off."
+                    .to_string()
+            } else {
+                format!(
+                    "Diversity needs two tuners and an {} has one, so it is off.",
+                    self.model().label()
+                )
+            });
+        } else if self.handle.dual_tuner() {
+            notes.push(format!(
+                "Diversity is running on the RSPduo's second tuner — {}. Watch the log for the \
+                 depth it is reaching.",
+                match self.div_cfg.mode {
+                    DiversityMode::Cancel => "cancelling a noise source",
+                    DiversityMode::Combine => "combining two aerials",
+                }
+            ));
+            // The second tuner's ladder is shorter on some bands than others,
+            // exactly like the first one's — and unlike the first one's, no
+            // gain readout on screen would ever show it.
+            let programmed = self.handle.aux_lna_state();
+            if programmed != self.div_cfg.lna_state {
+                notes.push(format!(
+                    "The second tuner's LNA state is clamped to {programmed} in this band \
+                     (you asked for {}); your choice comes back when you tune somewhere it \
+                     fits.",
+                    self.div_cfg.lna_state
+                ));
+            }
         }
         if notes.is_empty() { None } else { Some(notes.join("\n")) }
     }

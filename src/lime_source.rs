@@ -31,12 +31,12 @@
 
 use std::time::{Duration, Instant};
 
-use sdroxide_dsp::{Diversity, DiversityMode, IqCorrect, PureSignal};
+use sdroxide_dsp::{Diversity, IqCorrect, PureSignal};
 use sdroxide_lime::LimeHandle;
 use sdroxide_lime::handle::RX_TIMEOUT_MS;
 use sdroxide_limerfe::LimeRfeHandle;
 use sdroxide_radio::{Complex32, DC_BLOCK_HZ, IqSource, RadioError, Result, lo_offset_for};
-use sdroxide_types::{LimeAuxRole, LimeConfig, LimeDiversityMode, RfeLink, RfeModeControl};
+use sdroxide_types::{DiversityMode, LimeAuxRole, LimeConfig, RfeLink, RfeModeControl};
 
 /// How often the diversity filter's achieved null depth reaches the log.
 ///
@@ -173,8 +173,8 @@ impl LimeSource {
             tracing::info!(
                 "diversity is on: second aerial on {socket}, {} filter, {} taps{}",
                 match cfg.aux.mode {
-                    LimeDiversityMode::Cancel => "cancelling",
-                    LimeDiversityMode::Combine => "combining",
+                    DiversityMode::Cancel => "cancelling",
+                    DiversityMode::Combine => "combining",
                 },
                 cfg.aux.taps,
                 if handle.aux_timestamped() {
@@ -493,10 +493,10 @@ impl LimeSource {
 }
 
 /// The configuration's mode, as the DSP crate spells it.
-fn div_mode(mode: LimeDiversityMode) -> DiversityMode {
+fn div_mode(mode: DiversityMode) -> sdroxide_dsp::DiversityMode {
     match mode {
-        LimeDiversityMode::Cancel => DiversityMode::Cancel,
-        LimeDiversityMode::Combine => DiversityMode::Combine,
+        DiversityMode::Cancel => sdroxide_dsp::DiversityMode::Cancel,
+        DiversityMode::Combine => sdroxide_dsp::DiversityMode::Combine,
     }
 }
 
@@ -590,8 +590,7 @@ impl IqSource for LimeSource {
                 self.cfg.aux.gain_db = db;
             }
             LimeConfig::DIV_MODE_ELEMENT => {
-                let mode =
-                    if db >= 0.5 { LimeDiversityMode::Combine } else { LimeDiversityMode::Cancel };
+                let mode = if db >= 0.5 { DiversityMode::Combine } else { DiversityMode::Cancel };
                 self.cfg.aux.mode = mode;
                 if let Some(d) = self.diversity.as_mut() {
                     d.set_mode(div_mode(mode));

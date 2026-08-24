@@ -29,6 +29,33 @@ pub fn fs_and_decim(rate_hz: f64) -> (f64, u8) {
     (fs, factor)
 }
 
+/// The ADC clock the API insists on with both of an RSPduo's tuners running.
+///
+/// Not a choice: in dual-tuner mode both tuners hand the service a low IF
+/// rather than baseband, and 6 MHz with a 1.620 MHz IF is the pairing its
+/// downconverter is built around (8 MHz with 2.048 MHz is the other one).
+pub const DUAL_FS_HZ: f64 = 6_000_000.0;
+/// What that downconverter delivers, before any further decimation.
+pub const DUAL_OUT_HZ: f64 = 2_000_000.0;
+
+/// Turn a requested effective rate into the decimation factor to apply to
+/// [`DUAL_OUT_HZ`], for an RSPduo running both tuners.
+///
+/// The rate is *clamped*, not refused: a configuration carried over from
+/// single-tuner operation will ask for something wider than 2 Msps, and
+/// opening 2 Msps wide beats refusing to open.
+pub fn dual_decim(rate_hz: f64) -> u8 {
+    let want = rate_hz.clamp(DUAL_OUT_HZ / 32.0, DUAL_OUT_HZ);
+    let mut factor: u8 = 1;
+    // The nearest available rate, chosen in the log domain — halving is the
+    // step, so the crossover between two neighbours is their geometric mean
+    // rather than their average.
+    while factor < 32 && want <= DUAL_OUT_HZ / f64::from(factor) / std::f64::consts::SQRT_2 {
+        factor *= 2;
+    }
+    factor
+}
+
 /// The widest analog IF filter that fits inside the effective rate — wider
 /// would alias, narrower gives the panadapter rolled-off edges for no reason.
 pub fn bw_for_rate(effective_hz: f64) -> ffi::BwType {
@@ -43,12 +70,18 @@ pub fn bw_for_rate(effective_hz: f64) -> ffi::BwType {
 
 /// The bandwidth to program: the operator's override when it names a real
 /// filter, else automatic from the rate.
-pub fn bw_khz_for(cfg_bw_khz: u32, effective_hz: f64) -> ffi::BwType {
-    if SdrPlayConfig::BANDWIDTHS_KHZ.contains(&cfg_bw_khz) {
+///
+/// `dual` says both of an RSPduo's tuners are running, where the low IF the
+/// API works from leaves room for nothing wider than 1.536 MHz — a wider
+/// filter is refused by the service, so a setting carried over from
+/// single-tuner operation is clamped rather than passed on.
+pub fn bw_khz_for(cfg_bw_khz: u32, effective_hz: f64, dual: bool) -> ffi::BwType {
+    let khz = if SdrPlayConfig::BANDWIDTHS_KHZ.contains(&cfg_bw_khz) {
         cfg_bw_khz as ffi::BwType
     } else {
         bw_for_rate(effective_hz)
-    }
+    };
+    if dual { khz.min(SdrPlayConfig::DUAL_MAX_BW_KHZ as ffi::BwType) } else { khz }
 }
 
 /// Highest usable LNA state for a model on a band. The counts come from the
@@ -190,9 +223,38 @@ mod tests {
         // An override is obeyed when it names a real filter and ignored when
         // it does not — a stale config cannot program a bandwidth the tuner
         // lacks.
-        assert_eq!(bw_khz_for(600, 2_000_000.0), 600);
-        assert_eq!(bw_khz_for(0, 2_000_000.0), 1536);
-        assert_eq!(bw_khz_for(1234, 2_000_000.0), 1536);
+        assert_eq!(bw_khz_for(600, 2_000_000.0, false), 600);
+        assert_eq!(bw_khz_for(0, 2_000_000.0, false), 1536);
+        assert_eq!(bw_khz_for(1234, 2_000_000.0, false), 1536);
+        // With both RSPduo tuners running the low IF caps the filter, and a
+        // setting left over from a 10 Msps single-tuner session must not be
+        // handed to the service.
+        assert_eq!(bw_khz_for(6000, 6_000_000.0, true), 1536);
+        assert_eq!(bw_khz_for(600, 2_000_000.0, true), 600);
+    }
+
+    /// The dual-tuner rate ladder is 2 Msps halved, and every entry in the
+    /// list the settings panel offers must land on itself.
+    #[test]
+    fn dual_tuner_rates_are_two_msps_decimated() {
+        for (rate, want) in [
+            (2_000_000.0, 1),
+            (1_000_000.0, 2),
+            (500_000.0, 4),
+            (250_000.0, 8),
+            (125_000.0, 16),
+            (62_500.0, 32),
+        ] {
+            assert_eq!(dual_decim(rate), want, "{rate}");
+            assert!((DUAL_OUT_HZ / f64::from(dual_decim(rate)) - rate).abs() < 1.0);
+        }
+        // A rate carried over from single-tuner operation is clamped to the
+        // widest the mode has rather than refused.
+        assert_eq!(dual_decim(10_000_000.0), 1);
+        assert_eq!(dual_decim(0.0), 32);
+        // And one between two rungs takes the nearer, in the log domain.
+        assert_eq!(dual_decim(1_500_000.0), 1);
+        assert_eq!(dual_decim(600_000.0), 4);
     }
 
     #[test]

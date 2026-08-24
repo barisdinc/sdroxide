@@ -24,6 +24,7 @@ mod device;
 mod error;
 mod ffi;
 mod handle;
+mod pair;
 mod stream;
 
 pub use api::{list, try_list};
