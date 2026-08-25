@@ -134,6 +134,51 @@ fn build_analyzer(
     )
 }
 
+/// Workers in the pool the block loop forks its lanes onto.
+///
+/// One block of receive samples divides into three independent pieces — the
+/// device-wide panadapter analyser, the panadapter's zoom lane, and the receive
+/// chain — and the third of them runs on the engine thread itself, which is
+/// where it has to stay (see [`Engine::process_block`]). So two workers, not
+/// three. None of the three writes anything another reads, and on a wide front
+/// end each is tens of percent of a core: an RX-888 at 32.4 Msps ran all three
+/// down one thread and left thirty other cores idle.
+///
+/// A pool of this crate's own rather than rayon's global one, which is sized to
+/// the machine: this forks about two thousand times a second on a fast front
+/// end, and thirty-two workers waking to look for two pieces of work cost more
+/// than they finish. Measured: 2.3 µs a fork on a pool of three, 9.8 µs on the
+/// global one.
+const LANE_WORKERS: usize = 2;
+
+/// Cores below which the block loop stays on one thread.
+///
+/// Forking is only ever worth it where there is somewhere for the work to go.
+/// A Raspberry Pi running the GUI, the receive chain and a compositor on four
+/// cores has no spare one to steal a lane onto, and the hand-off would be pure
+/// loss.
+const LANE_POOL_MIN_CORES: usize = 4;
+
+/// The pool the block loop forks onto, or `None` on a machine that should stay
+/// on one thread — see [`LANE_WORKERS`].
+fn lane_pool() -> Option<rayon::ThreadPool> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if cores < LANE_POOL_MIN_CORES {
+        return None;
+    }
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(LANE_WORKERS)
+        .thread_name(|i| format!("sdroxide-lane{i}"))
+        .build()
+    {
+        Ok(pool) => Some(pool),
+        Err(e) => {
+            warn!("could not start the panadapter lane pool, staying single-threaded: {e}");
+            None
+        }
+    }
+}
+
 /// The finest overlap any lane runs at, and the one the zoom lane reaches.
 ///
 /// An eighth rather than the usual half: the finer the zoom the longer one
@@ -1401,6 +1446,41 @@ impl TxChain {
     }
 }
 
+/// The receive chain over one block, with everything it touches handed in.
+///
+/// Free-standing rather than a method on [`Engine`] because it is one half of a
+/// fork: the other half holds `&mut Engine`, so this one may hold nothing of
+/// it. `out` is (speaker left, speaker right, recorder left, recorder right).
+///
+/// The audio is copied out rather than left borrowed from the chain because a
+/// digital-voice mode may replace it wholesale, and deciding that needs the
+/// digi engine — which would otherwise be borrowed against the chain.
+fn run_chain_block(
+    chain: &mut RxChain,
+    rx: &RxState,
+    iq: &[Complex32],
+    want_rec: bool,
+    out: (&mut Vec<f32>, &mut Vec<f32>, &mut Vec<f32>, &mut Vec<f32>),
+) {
+    let (play, play_r, rec, rec_r) = out;
+    play.clear();
+    play_r.clear();
+    let (audio, right) = chain.run(iq, rx, want_rec);
+    play.extend_from_slice(audio);
+    if let Some(r) = right {
+        play_r.extend_from_slice(r);
+    }
+    rec.clear();
+    rec_r.clear();
+    if want_rec {
+        let (rec_audio, rec_right) = chain.take_rec_audio();
+        rec.extend_from_slice(rec_audio);
+        if let Some(r) = rec_right {
+            rec_r.extend_from_slice(r);
+        }
+    }
+}
+
 /// A satellite lock in progress: the parsed propagator, who is watching from
 /// where, and the numbers most recently computed from them.
 struct ActiveSatLock {
@@ -1582,6 +1662,13 @@ struct Engine {
     /// Rows clocked since this engine started. Diagnostic; see the
     /// `sdroxide::panadapter` log.
     rows_clocked: u64,
+    /// The receive chain's DDC output rate, as of the top of this block.
+    ///
+    /// Cached rather than asked of the chain, because the frame builder may run
+    /// while the chain is away on another core — see [`Engine::process_block`]
+    /// — and a digital mode's channel analyser is described by this number. It
+    /// changes only when the chain is rebuilt, which is never inside a block.
+    channel_rate_hz: f64,
     /// Waterfall rows clocked since the last frame went out, oldest first,
     /// `row_axis`'s width apiece. Emptied into every published frame.
     row_batch: Vec<u8>,
@@ -2369,6 +2456,7 @@ fn engine_thread(
         row_samples: 0,
         row_sample_clock: false,
         rows_clocked: 0,
+        channel_rate_hz: 48_000.0,
         wide_window: None,
         wide_at: Instant::now(),
         wide_fresh: false,
@@ -2595,6 +2683,11 @@ fn engine_thread(
     // for — the VFO is sitting exactly on the centre. See `sync_cw_dial`.
     engine.sync_cw_dial();
 
+    // Where the block loop's lanes go when the machine has cores to spare.
+    // Built once: a pool is threads, and starting them per block would cost
+    // more than the fork saves. `None` on a small machine — see [`lane_pool`].
+    let pool = lane_pool();
+
     let mut buf = vec![Complex32::default(); 16_384];
     // Where a decimated block lands. A local rather than a field on the engine,
     // so the borrow of the decimator ends before the samples are handed on.
@@ -2744,8 +2837,7 @@ fn engine_thread(
                         engine.nb.process(&mut buf[..n]);
                     }
                     let iq = decimate(engine.decim.as_mut(), &buf[..n], &mut dbuf);
-                    engine.feed_panadapter(iq);
-                    engine.run_audio(iq);
+                    engine.process_block(iq, pool.as_ref());
                 }
                 Err(e) => {
                     let _ = engine.event_tx.send(RadioEvent::ConnectionLost(e.to_string()));
@@ -3090,6 +3182,111 @@ impl Drop for Engine {
 
 impl Engine {
     fn run_audio(&mut self, iq: &[Complex32]) {
+        let want_rec_main = self.recorder.is_some() && !self.caps.rx_audio_external;
+        let rx0 = self.state.rx[0];
+        self.refresh_channel_rate();
+        let Some(main) = self.main.as_mut() else { return };
+        // Four disjoint fields, so the chain's own borrow and the buffers its
+        // output is copied into can be live at once.
+        run_chain_block(
+            main,
+            &rx0,
+            iq,
+            want_rec_main,
+            (
+                &mut self.main_play,
+                &mut self.main_play_r,
+                &mut self.main_play_rec,
+                &mut self.main_play_r_rec,
+            ),
+        );
+        self.finish_audio(iq);
+    }
+
+    /// One block through every lane that consumes it, on as many cores as the
+    /// machine has to spare.
+    ///
+    /// Three things read these samples and write nothing in common: the
+    /// device-wide panadapter analyser, the panadapter's zoom lane, and the
+    /// receive chain. One after the other they are a sum — on an RX-888 at
+    /// 32.4 Msps, most of a core on a machine with thirty-one idle ones. Side
+    /// by side they are a maximum.
+    ///
+    /// **Which half is sent matters.** The receive chain is not `Send`:
+    /// DeepFilterNet's inference plan holds `Rc`s, so a chain cannot cross a
+    /// thread boundary at all. The two analysers can, so they are what goes to
+    /// the pool while the chain stays here — which is also why this uses
+    /// `in_place_scope` rather than `join`, since only the spawned side of a
+    /// scope has to be `Send`.
+    ///
+    /// The fork is taken only for a block that lies wholly inside one waterfall
+    /// row. A row is pooled from whichever lane is drawing, which is a question
+    /// about the engine's *state* and cannot be asked while the analysers are
+    /// away — so a block a row boundary falls inside runs the ordinary
+    /// sequential path. On a front end fast enough for this to matter that is a
+    /// small minority of blocks (an RX-888 at 32.4 Msps clocks a row every
+    /// fifteenth one); on a slow one it is most of them, and there is nothing
+    /// there to win anyway.
+    fn process_block(&mut self, iq: &[Complex32], pool: Option<&rayon::ThreadPool>) {
+        // Read while the chain is certainly in hand, and on both paths: the
+        // frame builder asks for it and must never be answered with the
+        // stand-in.
+        self.refresh_channel_rate();
+        let per_row = self.row_period_samples();
+        let one_row = self.row_samples + iq.len() <= per_row;
+        let Some(pool) = pool.filter(|_| one_row && !iq.is_empty()) else {
+            self.feed_panadapter(iq);
+            self.run_audio(iq);
+            return;
+        };
+        self.row_sample_clock = true;
+        self.sync_zoom();
+
+        let want_rec_main = self.recorder.is_some() && !self.caps.rx_audio_external;
+        let rx0 = self.state.rx[0];
+        // Named apart so the compiler can see that the three lanes below borrow
+        // disjoint fields of the engine.
+        let analyzer = &mut self.analyzer;
+        let zoom = self.zoom.as_mut();
+        let chain = self.main.as_mut();
+        let play = &mut self.main_play;
+        let play_r = &mut self.main_play_r;
+        let play_rec = &mut self.main_play_rec;
+        let play_r_rec = &mut self.main_play_r_rec;
+
+        pool.in_place_scope(|scope| {
+            scope.spawn(move |_| analyzer.process(iq));
+            if let Some(zoom) = zoom {
+                scope.spawn(move |_| zoom.process(iq));
+            }
+            // This thread's share, and the one that could not have been
+            // anywhere else.
+            if let Some(chain) = chain {
+                run_chain_block(
+                    chain,
+                    &rx0,
+                    iq,
+                    want_rec_main,
+                    (play, play_r, play_rec, play_r_rec),
+                );
+            }
+        });
+
+        self.row_samples += iq.len();
+        if self.row_samples >= per_row {
+            self.row_samples = 0;
+            self.push_row();
+        }
+        if self.main.is_some() {
+            self.finish_audio(iq);
+        }
+    }
+
+    /// Everything downstream of the receive chain: the speaker, the decoders,
+    /// the recorders and the lanes that take their own decimation of the raw
+    /// block. Split from [`Engine::run_audio`] so the chain itself can be
+    /// forked — see [`Engine::process_block`].
+    fn finish_audio(&mut self, iq: &[Complex32]) {
         let want_rec = self.recorder.is_some();
         // A radio listening to its transceiver while an attached receiver
         // paints the picture. The main chain still runs — the high-resolution
@@ -3098,28 +3295,7 @@ impl Engine {
         // so its speaker and recorder taps are dropped and the transceiver's
         // audio takes their place below.
         let ext = self.caps.rx_audio_external;
-        let want_rec_main = want_rec && !ext;
-        let Some(main) = self.main.as_mut() else { return };
-        let out_rate = main.out_rate;
-        // Copied out rather than borrowed: a digital-voice mode may replace
-        // this audio wholesale, and deciding that needs the digi engine, which
-        // would otherwise be borrowed against the chain.
-        self.main_play.clear();
-        self.main_play_r.clear();
-        let (audio, right) = main.run(iq, &self.state.rx[0], want_rec_main);
-        self.main_play.extend_from_slice(audio);
-        if let Some(r) = right {
-            self.main_play_r.extend_from_slice(r);
-        }
-        self.main_play_rec.clear();
-        self.main_play_r_rec.clear();
-        if want_rec_main {
-            let (rec_audio, rec_right) = main.take_rec_audio();
-            self.main_play_rec.extend_from_slice(rec_audio);
-            if let Some(r) = rec_right {
-                self.main_play_r_rec.extend_from_slice(r);
-            }
-        }
+        let Some(out_rate) = self.main.as_ref().map(|m| m.out_rate) else { return };
 
         if ext {
             // Everything the operator hears is the transceiver's: the speaker,
@@ -3344,14 +3520,18 @@ impl Engine {
         (decim > 1).then_some(((lo + hi) / 2.0, decim))
     }
 
-    /// Keep the zoom lane in step with the window the display is asking for,
-    /// and feed it this block.
+    /// Keep the zoom lane in step with the window the display is asking for.
     ///
     /// Synced here rather than at each of the half-dozen places a viewport, a
     /// centre or a rate can move: it is a handful of comparisons when nothing
     /// has changed, and a lane that quietly stopped matching its window would
     /// show the operator a picture of somewhere else.
-    fn feed_zoom(&mut self, iq: &[Complex32]) {
+    ///
+    /// Separate from feeding it samples because feeding is forked: choosing the
+    /// lane needs the whole engine, and running it needs only the lane. Nothing
+    /// inside a block can change the answer, so it is settled once at the top of
+    /// [`Engine::feed_panadapter`] and the two analysers then run side by side.
+    fn sync_zoom(&mut self) {
         let in_rate = self.state.sample_rate;
         match self.wanted_zoom() {
             None => {
@@ -3382,9 +3562,6 @@ impl Engine {
                     self.zoom = Some(lane);
                 }
             },
-        }
-        if let Some(z) = self.zoom.as_mut() {
-            z.process(iq);
         }
     }
 
@@ -4592,7 +4769,7 @@ impl Engine {
             (true, false) => {
                 // 16k-point FFT over the ~50 kHz channel ≈ 3 Hz/bin, enough to
                 // resolve 6.25 Hz FT8 tones.
-                let ch_rate = self.main.as_ref().map(|c| c.channel_rate()).unwrap_or(48_000.0);
+                let ch_rate = self.channel_rate_hz;
                 self.channel_analyzer = Some(SpectrumAnalyzer::new(16_384, ch_rate, 0.10));
             }
             // Covers arriving in CW from a digital mode, where the analyzer is
@@ -4732,14 +4909,19 @@ impl Engine {
     /// `rate / hop` simply repeats them.
     fn feed_panadapter(&mut self, iq: &[Complex32]) {
         self.row_sample_clock = true;
-        let per_row = (self.state.sample_rate / f64::from(self.cfg.rows())).max(1.0) as usize;
+        // Which window the zoom lane covers cannot change inside one block, so
+        // it is settled once here rather than per piece.
+        self.sync_zoom();
+        let per_row = self.row_period_samples();
         let mut off = 0;
         while off < iq.len() {
             let want = per_row.saturating_sub(self.row_samples).max(1);
             let take = want.min(iq.len() - off);
             let chunk = &iq[off..off + take];
             self.analyzer.process(chunk);
-            self.feed_zoom(chunk);
+            if let Some(zoom) = self.zoom.as_mut() {
+                zoom.process(chunk);
+            }
             self.row_samples += take;
             off += take;
             if self.row_samples >= per_row {
@@ -4747,6 +4929,17 @@ impl Engine {
                 self.push_row();
             }
         }
+    }
+
+    /// Take the receive chain's channel rate into
+    /// [`Engine::channel_rate_hz`](#structfield.channel_rate_hz).
+    fn refresh_channel_rate(&mut self) {
+        self.channel_rate_hz = self.main.as_ref().map_or(48_000.0, |c| c.channel_rate());
+    }
+
+    /// Samples between waterfall rows at the rate the client asked for.
+    fn row_period_samples(&self) -> usize {
+        (self.state.sample_rate / f64::from(self.cfg.rows())).max(1.0) as usize
     }
 
     /// Clock one row into the batch the next frame will carry.

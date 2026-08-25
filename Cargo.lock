@@ -5322,6 +5322,7 @@ dependencies = [
  "crossbeam-channel",
  "image",
  "num-complex",
+ "rayon",
  "rtrb",
  "sdroxide-aprs",
  "sdroxide-ax25",

@@ -44,6 +44,14 @@ pub struct SpectrumAnalyzer {
     alpha: f32,
     primed: bool,
     peak_abs: f32,
+    /// Whether [`Self::process`] scans every sample for the input peak.
+    ///
+    /// Off by default. It is a pass over the whole stream — on an RX-888 at
+    /// 32.4 Msps, thirty-two million squared magnitudes a second — kept for one
+    /// caller: the terminal waterfall prints a dBFS column beside each line.
+    /// Nothing in the GUI or the server reads it, and a lane that nobody asks
+    /// should not pay for it. See [`Self::take_peak_dbfs`].
+    peak_track: bool,
     seq: u32,
     /// Hide the hardware DC/LO-leakage spike in emitted frames.
     dc_suppress: bool,
@@ -99,6 +107,7 @@ impl SpectrumAnalyzer {
             alpha: 1.0,
             primed: false,
             peak_abs: 0.0,
+            peak_track: false,
             seq: 0,
             transforms: 0,
             dc_suppress: true,
@@ -174,13 +183,28 @@ impl SpectrumAnalyzer {
         self.alpha = if tc_secs <= 0.0 { 1.0 } else { 1.0 - (-hop_time / tc_secs).exp() };
     }
 
+    /// Start (or stop) tracking the input peak [`Self::take_peak_dbfs`] reads.
+    ///
+    /// Off by default, because it costs a pass over every sample and only the
+    /// terminal waterfall wants it — see [`Self::peak_track`](#structfield.peak_track).
+    pub fn set_peak_track(&mut self, on: bool) {
+        self.peak_track = on;
+        if !on {
+            self.peak_abs = 0.0;
+        }
+    }
+
     /// Consume IQ samples, running as many overlapped FFTs as fit.
     pub fn process(&mut self, iq: &[Complex32]) {
-        for s in iq {
-            let a = s.norm_sqr();
-            if a > self.peak_abs {
-                self.peak_abs = a;
+        if self.peak_track {
+            let mut peak = self.peak_abs;
+            for s in iq {
+                let a = s.norm_sqr();
+                if a > peak {
+                    peak = a;
+                }
             }
+            self.peak_abs = peak;
         }
         self.pending.extend_from_slice(iq);
 
@@ -236,6 +260,8 @@ impl SpectrumAnalyzer {
     }
 
     /// Peak input magnitude (dBFS) since the last call; resets on read.
+    ///
+    /// Reads zero unless [`Self::set_peak_track`] switched the scan on.
     pub fn take_peak_dbfs(&mut self) -> f32 {
         let p = self.peak_abs;
         self.peak_abs = 0.0;
