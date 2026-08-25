@@ -67,6 +67,28 @@ struct Shared {
     remap_sampler: wgpu::Sampler,
 }
 
+/// How many rows this repaint appends.
+///
+/// `carried` is what the frame brought and has not been written yet;
+/// `wall_clock` is what the app's own elapsed-time accumulator would scroll.
+///
+/// The rule that matters is the first one. The fallback is for a lane that does
+/// not clock rows *at all* — a radio's own sweep, a transmit monitor — and not
+/// for a frame that merely happens to carry none. Below the frame rate most
+/// frames carry none: at five rows a second and sixty frames, fifty-five in
+/// every sixty are empty, and scrolling those on the wall clock as well ran the
+/// waterfall at about twice the rate its own time labels are spaced at.
+fn rows_to_append(clocked: bool, carried: usize, wall_clock: u32) -> u32 {
+    if clocked { carried as u32 } else { wall_clock.min(MAX_FALLBACK_ROWS) }
+}
+
+/// The most rows one repaint may scroll on the wall clock.
+///
+/// Only the fallback needs it: a hitch or a tab-away would otherwise dump a
+/// whole backlog of repeated rows into the texture at once. A clocking lane is
+/// already bounded by the engine's own batch cap.
+const MAX_FALLBACK_ROWS: u32 = 32;
+
 /// What a machine may be asked to draw, cut down to the facts that decide it.
 ///
 /// Plain numbers rather than the wgpu handles they came from, for the reason
@@ -195,6 +217,13 @@ struct WaterfallResources {
     tex_w: u32,
     /// One render bind group per history texture; index by `active`.
     bind_group: [wgpu::BindGroup; 2],
+    /// `seq` of the last frame whose rows were appended.
+    ///
+    /// The same `Arc<SpectrumFrame>` is handed to every repaint until a new one
+    /// arrives, and repaints outnumber frames — so without this the rows of one
+    /// frame would be written again on every redraw and the waterfall would run
+    /// at the frame rate times however fast the compositor felt like going.
+    last_rows_seq: Option<u32>,
     /// Ping-pong history textures. `active` is the live one; the other is the
     /// scratch target for the frequency-remap pass on a geometry change.
     hist: [wgpu::Texture; 2],
@@ -530,6 +559,7 @@ impl WaterfallResources {
             hist,
             hist_view,
             active: 0,
+            last_rows_seq: None,
             remap_uniforms,
             remap_bg,
             lut_tex,
@@ -700,27 +730,52 @@ impl CallbackTrait for WaterfallCallback {
                 r.last_center = frame.center_hz;
                 r.last_span = frame.span_hz;
             }
-            // Skip appending a row on the remap frame: the new row is written via
-            // the queue (applied before the encoder's remap pass in this submit),
-            // so it would be overwritten. The next frame resumes normally — one
+            // Skip appending on the remap frame: rows are written via the queue
+            // (applied before the encoder's remap pass in this submit), so they
+            // would be overwritten. The next frame resumes normally — one
             // skipped row per zoom is imperceptible.
-            // Time-driven scroll: append `rows_to_write` rows of the latest
-            // frame (the app computes the count from elapsed wall-clock × the
-            // scroll rate, so the axis is stable and matches the gridlines).
-            let n = self.rows_to_write.min(32);
-            if !remapped && n > 0 && !frame.bins.is_empty() {
+            //
+            // Where the frame carries its own rows they *are* the scroll: the
+            // engine clocked them at the rate this client asked for, each one
+            // the loudest thing its slice of time contained, and they are
+            // appended once — hence `last_rows_seq`, because this callback runs
+            // on every repaint and a frame outlives several of them.
+            //
+            // Where it carries none (a radio's own sweep, a transmit monitor)
+            // the fallback is what every build before this one did everywhere:
+            // repeat the current spectrum at `rows_to_write`, which the app
+            // derives from elapsed wall-clock × the scroll rate.
+            let cols = frame.bins.len();
+            let carried = if r.last_rows_seq == Some(frame.seq) { 0 } else { frame.row_count() };
+            // A frame's rows belong to it, so consuming them is per frame and
+            // not per repaint — including on a remap, where they were pooled on
+            // the axis that has just been rewritten and are dropped rather than
+            // laid over the new one.
+            if carried > 0 {
+                r.last_rows_seq = Some(frame.seq);
+            }
+            let n = rows_to_append(frame.rows_clocked, carried, self.rows_to_write);
+            if !remapped && n > 0 && cols > 0 {
                 // Resample to texture width where the frame is not already it.
                 // Routine rather than exceptional: the engine clamps the width
                 // it is asked for against its own FFT, and a station serving two
                 // clients answers whichever spoke last.
-                let row: Vec<u8> = if frame.bins.len() == r.tex_w as usize {
-                    frame.bins.clone()
-                } else {
-                    (0..r.tex_w as usize)
-                        .map(|i| frame.bins[i * frame.bins.len() / r.tex_w as usize])
-                        .collect()
+                let widen = |src: &[u8]| -> Vec<u8> {
+                    if src.len() == r.tex_w as usize {
+                        src.to_vec()
+                    } else {
+                        (0..r.tex_w as usize)
+                            .map(|i| src[i * src.len() / r.tex_w as usize])
+                            .collect()
+                    }
                 };
-                for _ in 0..n {
+                // The fallback writes one row over and over, so widen it once.
+                let repeated = (carried == 0).then(|| widen(&frame.bins));
+                for i in 0..n as usize {
+                    let row = match &repeated {
+                        Some(r) => r.clone(),
+                        None => widen(&frame.rows[i * cols..(i + 1) * cols]),
+                    };
                     queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &r.hist[r.active],
@@ -908,5 +963,43 @@ mod display_class_tests {
     fn a_thin_machine_stays_standard() {
         assert_eq!(auto_display_bins(DisplayClass { cores: 2, ..desktop() }, 3840), DEFAULT_TEX_W);
         assert_eq!(auto_display_bins(DisplayClass { cores: 4, ..desktop() }, 3840), 4096);
+    }
+}
+
+#[cfg(test)]
+mod row_append_tests {
+    use super::{MAX_FALLBACK_ROWS, rows_to_append};
+
+    /// The regression: a lane that clocks rows owns the scroll completely, so a
+    /// frame carrying none means "nothing new yet", not "scroll it yourself".
+    ///
+    /// Getting this wrong was invisible at fast scroll rates, where nearly every
+    /// frame carries a row, and obvious at slow ones, where nearly none do — the
+    /// waterfall ran at roughly double the rate of its own time labels.
+    #[test]
+    fn a_clocking_lane_with_nothing_new_scrolls_not_at_all() {
+        assert_eq!(rows_to_append(true, 0, 5), 0);
+        assert_eq!(rows_to_append(true, 0, 32), 0);
+    }
+
+    /// And when it does bring rows, it brings exactly what is drawn.
+    #[test]
+    fn a_clocking_lane_draws_what_it_brought() {
+        assert_eq!(rows_to_append(true, 1, 0), 1);
+        assert_eq!(rows_to_append(true, 7, 99), 7);
+        // Past the fallback's cap too: the engine bounds its own batch, and a
+        // row it clocked is a row that really happened.
+        assert_eq!(rows_to_append(true, 64, 0), 64);
+    }
+
+    /// A lane that cannot clock rows keeps the behaviour every build before
+    /// this one had everywhere: repeat the current spectrum on the wall clock.
+    #[test]
+    fn a_lane_that_cannot_clock_falls_back_to_the_wall_clock() {
+        assert_eq!(rows_to_append(false, 0, 3), 3);
+        // Its rows, if any somehow arrived, are not what it scrolls by.
+        assert_eq!(rows_to_append(false, 9, 3), 3);
+        // And a hitch cannot dump a backlog into the texture at once.
+        assert_eq!(rows_to_append(false, 0, 5_000), MAX_FALLBACK_ROWS);
     }
 }

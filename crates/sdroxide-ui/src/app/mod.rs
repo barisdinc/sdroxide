@@ -138,6 +138,12 @@ pub struct SdroxideApp {
     /// opened. `None` where there is no wgpu at all (a headless test), which
     /// reads as "the width sdroxide has always drawn".
     display_class: Option<waterfall_gpu::DisplayClass>,
+    /// The display's pixels per egui point, as of the last panadapter draw.
+    ///
+    /// Kept because the row rate asked of the engine has to carry it — the
+    /// waterfall stores one line per device pixel — and the config is built
+    /// outside the frame that measures it.
+    wf_row_scale: f32,
     /// The widest the panadapter has been this session, in *device pixels*.
     ///
     /// Only ever grows. A window dragged narrower keeps the detail it had,
@@ -937,6 +943,7 @@ impl SdroxideApp {
         SdroxideApp {
             ctrl,
             display_class,
+            wf_row_scale: 1.0,
             panadapter_px: 0,
             caps: None,
             state: RadioState::default(),

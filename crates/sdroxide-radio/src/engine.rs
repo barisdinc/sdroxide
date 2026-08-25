@@ -40,6 +40,16 @@ use crate::recorder::{Recorder, RecordingChannels};
 use crate::voice::VoiceKeyer;
 use crate::{Complex32, ControlUpdate, IqSource};
 
+/// The most waterfall rows an engine will hold for a client that has stopped
+/// collecting them.
+///
+/// A hitch on the client — a tab switched away, a compositor stall — must cost
+/// the rows it happened over and no more: replaying a second of backlog into
+/// the texture at once would draw a second of band in one repaint and put the
+/// time axis out by that much. At the fastest row clock this is an eighth of a
+/// second.
+const MAX_BATCH_ROWS: usize = 64;
+
 /// Bins in a full-band frame.
 ///
 /// A constant where the main panadapter's width is not, because this lane does
@@ -66,17 +76,119 @@ const ZOOM_LANE_MARGIN: f64 = 1.4;
 ///
 /// Floored at that same 4096 so a 2048-column display is unchanged, and capped
 /// at 32768: past there a single transform covers more signal than the lane's
-/// hop can hide (see [`ZOOM_LANE_HOP_DIV`]).
+/// hop can hide (see [`MAX_HOP_DIV`]).
 fn zoom_lane_fft(display_bins: usize) -> usize {
     (display_bins * 2).next_power_of_two().clamp(4096, 32_768)
 }
 
-/// The zoom lane's overlap, as the divisor of its FFT size. An eighth rather
-/// than the usual half: the finer the zoom the longer one transform takes to
-/// fill — resolving a hertz needs a second of signal, on any analyser ever
-/// built — and at the deep end a half-window hop would leave the waterfall
-/// crawling. See [`sdroxide_dsp::SpectrumAnalyzer::with_hop_div`].
-const ZOOM_LANE_HOP_DIV: usize = 8;
+/// How many transforms a waterfall row is built from, when there are enough to
+/// choose. More than one so a signal straddling a window boundary is still seen
+/// whole in a neighbouring window, and so the peak hold has something to pick a
+/// maximum from; not many more, because every one past that is folded into the
+/// same row and thrown away.
+const TRANSFORMS_PER_ROW: f64 = 4.0;
+
+/// The overlap to run an analyser at: the divisor of its FFT size that gives
+/// about [`TRANSFORMS_PER_ROW`] transforms per waterfall row.
+///
+/// Overlap is not free and it is not uniformly useful. It exists so a signal
+/// that lands across a window boundary is still seen whole in the next window,
+/// which matters enormously when transforms are scarce — a zoomed lane running
+/// at a few kilohertz fills a 4096-point window barely twice a second, and the
+/// eighth-hop it has always used is what puts rows on its waterfall at all.
+///
+/// It is close to pure waste when transforms are abundant. An RX-888 at
+/// 8.1 MHz through a 4096-point window runs 3955 transforms a second at the
+/// customary half-hop; the waterfall consumes at most 224 of them and the peak
+/// hold folds the rest into the same rows. That was measured at 18% of the
+/// process — the single largest thing in the DSP thread after the receive
+/// chain — for detail no display can show.
+///
+/// So the overlap follows the rate and the scroll speed rather than being a
+/// constant. The clamp keeps both ends honest: never coarser than one window
+/// per hop (which would skip samples outright, and a signal shorter than a
+/// window could then be missed entirely), and never finer than an eighth,
+/// which is what the zoom lane wants and what this returns for it unchanged.
+fn hop_div_for(rate_hz: f64, fft_size: usize, rows_per_sec: f64) -> usize {
+    if !rate_hz.is_finite() || rate_hz <= 0.0 || rows_per_sec <= 0.0 {
+        return 2;
+    }
+    let want_transforms = rows_per_sec * TRANSFORMS_PER_ROW;
+    let hop = (rate_hz / want_transforms).max(1.0);
+    ((fft_size as f64 / hop).ceil() as usize).clamp(1, MAX_HOP_DIV)
+}
+
+/// The device-wide panadapter analyser, at the overlap its rate and the
+/// operator's scroll speed call for — see [`hop_div_for`].
+fn build_analyzer(
+    fft_size: usize,
+    rate_hz: f64,
+    avg_tc: f32,
+    rows_per_sec: f64,
+) -> SpectrumAnalyzer {
+    SpectrumAnalyzer::with_hop_div(
+        fft_size,
+        rate_hz,
+        avg_tc,
+        hop_div_for(rate_hz, fft_size, rows_per_sec),
+    )
+}
+
+/// Workers in the pool the block loop forks its lanes onto.
+///
+/// One block of receive samples divides into three independent pieces — the
+/// device-wide panadapter analyser, the panadapter's zoom lane, and the receive
+/// chain — and the third of them runs on the engine thread itself, which is
+/// where it has to stay (see [`Engine::process_block`]). So two workers, not
+/// three. None of the three writes anything another reads, and on a wide front
+/// end each is tens of percent of a core: an RX-888 at 32.4 Msps ran all three
+/// down one thread and left thirty other cores idle.
+///
+/// A pool of this crate's own rather than rayon's global one, which is sized to
+/// the machine: this forks about two thousand times a second on a fast front
+/// end, and thirty-two workers waking to look for two pieces of work cost more
+/// than they finish. Measured: 2.3 µs a fork on a pool of three, 9.8 µs on the
+/// global one.
+const LANE_WORKERS: usize = 2;
+
+/// Cores below which the block loop stays on one thread.
+///
+/// Forking is only ever worth it where there is somewhere for the work to go.
+/// A Raspberry Pi running the GUI, the receive chain and a compositor on four
+/// cores has no spare one to steal a lane onto, and the hand-off would be pure
+/// loss.
+const LANE_POOL_MIN_CORES: usize = 4;
+
+/// The pool the block loop forks onto, or `None` on a machine that should stay
+/// on one thread — see [`LANE_WORKERS`].
+fn lane_pool() -> Option<rayon::ThreadPool> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if cores < LANE_POOL_MIN_CORES {
+        return None;
+    }
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(LANE_WORKERS)
+        .thread_name(|i| format!("sdroxide-lane{i}"))
+        .build()
+    {
+        Ok(pool) => Some(pool),
+        Err(e) => {
+            warn!("could not start the panadapter lane pool, staying single-threaded: {e}");
+            None
+        }
+    }
+}
+
+/// The finest overlap any lane runs at, and the one the zoom lane reaches.
+///
+/// An eighth rather than the usual half: the finer the zoom the longer one
+/// transform takes to fill — resolving a hertz needs a second of signal, on any
+/// analyser ever built — and at the deep end a half-window hop would leave the
+/// waterfall crawling. It used to be a constant the zoom lane passed by hand;
+/// [`hop_div_for`] now arrives at the same number from the lane's rate, and
+/// this is the ceiling it stops at.
+/// See [`sdroxide_dsp::SpectrumAnalyzer::with_hop_div`].
+const MAX_HOP_DIV: usize = 8;
 
 /// How long the main panadapter keeps drawing a front end's own spectrum after
 /// the last sweep landed.
@@ -339,6 +451,8 @@ pub fn start(source: Box<dyn IqSource>, caps: DeviceCaps, cfg: EngineConfig) -> 
         db_floor: 0.0,
         db_ceil: 0.0,
         bins: Vec::new(),
+        rows: Vec::new(),
+        rows_clocked: false,
     };
     let (spec_in, spectrum_out) = triple_buffer::triple_buffer(&empty);
     let (wide_in, wide_spectrum_out) = triple_buffer::triple_buffer(&empty);
@@ -1332,6 +1446,41 @@ impl TxChain {
     }
 }
 
+/// The receive chain over one block, with everything it touches handed in.
+///
+/// Free-standing rather than a method on [`Engine`] because it is one half of a
+/// fork: the other half holds `&mut Engine`, so this one may hold nothing of
+/// it. `out` is (speaker left, speaker right, recorder left, recorder right).
+///
+/// The audio is copied out rather than left borrowed from the chain because a
+/// digital-voice mode may replace it wholesale, and deciding that needs the
+/// digi engine — which would otherwise be borrowed against the chain.
+fn run_chain_block(
+    chain: &mut RxChain,
+    rx: &RxState,
+    iq: &[Complex32],
+    want_rec: bool,
+    out: (&mut Vec<f32>, &mut Vec<f32>, &mut Vec<f32>, &mut Vec<f32>),
+) {
+    let (play, play_r, rec, rec_r) = out;
+    play.clear();
+    play_r.clear();
+    let (audio, right) = chain.run(iq, rx, want_rec);
+    play.extend_from_slice(audio);
+    if let Some(r) = right {
+        play_r.extend_from_slice(r);
+    }
+    rec.clear();
+    rec_r.clear();
+    if want_rec {
+        let (rec_audio, rec_right) = chain.take_rec_audio();
+        rec.extend_from_slice(rec_audio);
+        if let Some(r) = rec_right {
+            rec_r.extend_from_slice(r);
+        }
+    }
+}
+
 /// A satellite lock in progress: the parsed propagator, who is watching from
 /// where, and the numbers most recently computed from them.
 struct ActiveSatLock {
@@ -1415,6 +1564,7 @@ impl ZoomLane {
         dev_center_hz: f64,
         avg_tc: f32,
         fft: usize,
+        rows_per_sec: f64,
     ) -> Self {
         // The ladder is powers of two, so `Ddc` reaches this rate exactly and
         // `out_rate` is a formality — read back rather than assumed, because
@@ -1423,7 +1573,11 @@ impl ZoomLane {
         let offset_hz = center_hz - dev_center_hz;
         ddc.set_offset_hz(offset_hz);
         let rate_hz = ddc.out_rate();
-        let mut analyzer = SpectrumAnalyzer::with_hop_div(fft, rate_hz, avg_tc, ZOOM_LANE_HOP_DIV);
+        // The same rule the device-wide lane uses. At the rates a zoom lane runs
+        // at it returns the eighth-hop this used to hard-code, and it stops
+        // asking for one on a shallow zoom that is still streaming megahertz.
+        let hop_div = hop_div_for(rate_hz, fft, rows_per_sec);
+        let mut analyzer = SpectrumAnalyzer::with_hop_div(fft, rate_hz, avg_tc, hop_div);
         // DC here is the middle of the operator's window, not the front end's
         // LO leakage, so the usual spike suppression would punch a hole through
         // whatever they had centred.
@@ -1485,6 +1639,16 @@ struct Engine {
     /// Centre and span the cached sweep covers, and when it landed.
     wide_window: Option<(f64, f64)>,
     wide_at: Instant,
+    /// Sweeps a front end with its own spectrum has finished since this engine
+    /// started.
+    ///
+    /// Diagnostic, and the one number that says how much of the picture is
+    /// real on a rig whose scope *is* the main panadapter: the waterfall is
+    /// scrolled on the wall clock there, so at three sweeps a second and a
+    /// hundred rows a second every sweep is drawn thirty times over. Counted
+    /// beside the transform and frame rates in the panadapter diagnostic, which
+    /// is where the same question gets asked about the other lanes.
+    wide_sweeps: u64,
     /// Whether the cached sweep is one the full-band lane has not published.
     /// The main lane has no such flag: it emits at the display rate whether or
     /// not a new sweep arrived, exactly as the FFT analyser does.
@@ -1492,6 +1656,36 @@ struct Engine {
     /// Sequence number for full-band frames, kept apart from the main
     /// analyser's so a client can tell one lane's frames from the other's.
     wide_seq: u32,
+    /// Samples fed to the panadapter since the last row was clocked.
+    ///
+    /// The waterfall's time axis is measured in *signal*, not in wall clock or
+    /// in blocks: a source hands over a block a few dozen times a second, and
+    /// clocking a row per block would cap the waterfall at the block rate for
+    /// no better reason than the size of a read. Counting samples instead puts
+    /// the rows exactly evenly along the axis they are drawn on, at whatever
+    /// rate was asked for, up to the rate the analyser produces transforms.
+    row_samples: usize,
+    /// Whether rows are being clocked off the sample stream (a wideband I/Q
+    /// path) rather than off the wall clock (a demod-audio rig, a radio's own
+    /// sweep — lanes where a block *is* the update).
+    row_sample_clock: bool,
+    /// Rows clocked since this engine started. Diagnostic; see the
+    /// `sdroxide::panadapter` log.
+    rows_clocked: u64,
+    /// The receive chain's DDC output rate, as of the top of this block.
+    ///
+    /// Cached rather than asked of the chain, because the frame builder may run
+    /// while the chain is away on another core — see [`Engine::process_block`]
+    /// — and a digital mode's channel analyser is described by this number. It
+    /// changes only when the chain is rebuilt, which is never inside a block.
+    channel_rate_hz: f64,
+    /// Waterfall rows clocked since the last frame went out, oldest first,
+    /// `row_axis`'s width apiece. Emptied into every published frame.
+    row_batch: Vec<u8>,
+    /// The axis and width the rows in hand were pooled on. A zoom, a retune or
+    /// a change of lane makes the older rows a picture of somewhere else, so
+    /// they are thrown away rather than drawn on the new axis.
+    row_axis: Option<(f64, f64, usize)>,
     /// Sequence number for main-lane frames built from those same bins. A third
     /// counter because a client de-duplicates each lane by its own sequence,
     /// and the two lanes emit at different rates.
@@ -2119,7 +2313,8 @@ fn engine_thread(
     // otherwise it sees whatever the decimation left, which is what every span
     // downstream is measured in.
     let analyzer_rate = if audio_mode { radio_fs } else { state.sample_rate };
-    let analyzer = SpectrumAnalyzer::new(cfg.fft_size as usize, analyzer_rate, cfg.avg_tc);
+    let analyzer =
+        build_analyzer(cfg.fft_size as usize, analyzer_rate, cfg.avg_tc, f64::from(cfg.rows()));
 
     // In audio mode there is no RxChain (the source is already audio); the
     // speaker path is a plain resampler → mixer instead.
@@ -2266,8 +2461,15 @@ fn engine_thread(
         swr_tuning: false,
         swr_tripped: None,
         wide_bins: Vec::new(),
+        row_batch: Vec::new(),
+        row_axis: None,
+        row_samples: 0,
+        row_sample_clock: false,
+        rows_clocked: 0,
+        channel_rate_hz: 48_000.0,
         wide_window: None,
         wide_at: Instant::now(),
+        wide_sweeps: 0,
         wide_fresh: false,
         wide_seq: 0,
         scope_seq: 0,
@@ -2492,11 +2694,17 @@ fn engine_thread(
     // for — the VFO is sitting exactly on the centre. See `sync_cw_dial`.
     engine.sync_cw_dial();
 
+    // Where the block loop's lanes go when the machine has cores to spare.
+    // Built once: a pool is threads, and starting them per block would cost
+    // more than the fork saves. `None` on a small machine — see [`lane_pool`].
+    let pool = lane_pool();
+
     let mut buf = vec![Complex32::default(); 16_384];
     // Where a decimated block lands. A local rather than a field on the engine,
     // so the borrow of the decimator ends before the samples are handed on.
     let mut dbuf: Vec<Complex32> = Vec::new();
     let mut next_frame = Instant::now();
+    let mut next_row = Instant::now();
     let mut next_meters = Instant::now();
     // Panadapter rate diagnostics. Three numbers, because they fail
     // differently: samples/s says whether the front end is delivering, fft/s
@@ -2508,7 +2716,9 @@ fn engine_thread(
     let mut lane_at = Instant::now();
     let mut lane_samples: u64 = 0;
     let mut lane_frames: u64 = 0;
+    let mut lane_rows: u64 = 0;
     let mut lane_ffts = 0u64;
+    let mut lane_sweeps: u64 = 0;
     let mut next_rds = Instant::now();
     let mut next_drm = Instant::now();
     let mut next_session = Instant::now() + SESSION_SAVE_INTERVAL;
@@ -2639,9 +2849,7 @@ fn engine_thread(
                         engine.nb.process(&mut buf[..n]);
                     }
                     let iq = decimate(engine.decim.as_mut(), &buf[..n], &mut dbuf);
-                    engine.analyzer.process(iq);
-                    engine.feed_zoom(iq);
-                    engine.run_audio(iq);
+                    engine.process_block(iq, pool.as_ref());
                 }
                 Err(e) => {
                     let _ = engine.event_tx.send(RadioEvent::ConnectionLost(e.to_string()));
@@ -2655,9 +2863,33 @@ fn engine_thread(
         // built from the same sweep as the strip, so the sweep has to be in hand
         // before either frame is made.
         engine.poll_wide();
+        // The waterfall's own clock, and the reason it is not the frame clock:
+        // a row is a few kilobytes appended to a texture, a frame is a repaint.
+        // Rows are clocked here at whatever rate the client asked for and ride
+        // out in whichever frame comes next, so a screen redrawing sixty times
+        // a second can still be handed two hundred lines of band.
+        //
+        // Caught up rather than accumulated: a row period shorter than the
+        // block this loop is processing (a slow front end, a stalled thread)
+        // would otherwise build a backlog that never drains. The batch is
+        // capped as well — see `MAX_BATCH_ROWS`.
+        let row_period = Duration::from_secs_f64(1.0 / f64::from(engine.cfg.rows()));
+        if engine.row_sample_clock {
+            // The samples are the clock; keep this one parked so handing the
+            // job back (a switch to a demod-audio rig) does not fire a burst.
+            next_row = now + row_period;
+        } else if now >= next_row {
+            let behind = now.duration_since(next_row);
+            let skipped = (behind.as_secs_f64() / row_period.as_secs_f64()) as u32;
+            next_row = now + row_period - behind.min(row_period * skipped.max(1));
+            next_row = next_row.max(now);
+            engine.push_row();
+        }
         if now >= next_frame {
             next_frame = now + Duration::from_secs_f64(1.0 / engine.cfg.fps.max(1) as f64);
-            spec_in.write(engine.make_spectrum_frame());
+            let mut frame = engine.make_spectrum_frame();
+            engine.attach_rows(&mut frame);
+            spec_in.write(frame);
             lane_frames += 1;
         }
         // Once a second, and only where somebody asked for it: this is the
@@ -2676,6 +2908,15 @@ fn engine_thread(
                 samples_per_s = lane_samples as f64 / secs,
                 fft_per_s = ffts_delta as f64 / secs,
                 frames_per_s = lane_frames as f64 / secs,
+                // The waterfall's real time resolution, which is the number
+                // this diagnostic exists to separate from the other two.
+                rows_per_s = engine.rows_clocked.saturating_sub(lane_rows) as f64 / secs,
+                // Finished sweeps from a front end that computes its own
+                // spectrum. Zero on an I/Q receiver; on a rig whose scope is
+                // the main panadapter it is the real picture rate, and the
+                // number to compare `rows_per_s` against before believing a
+                // report that the waterfall looks blocky.
+                sweeps_per_s = engine.wide_sweeps.saturating_sub(lane_sweeps) as f64 / secs,
                 rate_hz = engine.state.sample_rate,
                 fft_size = engine.cfg.fft_size,
                 // What the frames are actually being cut into, which is the
@@ -2685,11 +2926,18 @@ fn engine_thread(
                 bins = engine.cfg.bins(),
                 zoom = engine.zoom.is_some(),
                 audio_mode = engine.audio_mode,
+                // The window the client asked for, and — on a demod-audio rig
+                // — the rig's own passband it is measured against to decide
+                // which lane draws. See `Engine::audio_zoom_window`.
+                view = ?engine.cfg.viewport,
+                audio_band = ?engine.audio_mode.then(|| engine.audio_band()),
                 "panadapter rates",
             );
             lane_at = now;
             lane_samples = 0;
             lane_frames = 0;
+            lane_rows = engine.rows_clocked;
+            lane_sweeps = engine.wide_sweeps;
             lane_ffts = ffts;
         }
         if let Some(frame) = engine.make_wide_frame() {
@@ -2958,6 +3206,111 @@ impl Drop for Engine {
 
 impl Engine {
     fn run_audio(&mut self, iq: &[Complex32]) {
+        let want_rec_main = self.recorder.is_some() && !self.caps.rx_audio_external;
+        let rx0 = self.state.rx[0];
+        self.refresh_channel_rate();
+        let Some(main) = self.main.as_mut() else { return };
+        // Four disjoint fields, so the chain's own borrow and the buffers its
+        // output is copied into can be live at once.
+        run_chain_block(
+            main,
+            &rx0,
+            iq,
+            want_rec_main,
+            (
+                &mut self.main_play,
+                &mut self.main_play_r,
+                &mut self.main_play_rec,
+                &mut self.main_play_r_rec,
+            ),
+        );
+        self.finish_audio(iq);
+    }
+
+    /// One block through every lane that consumes it, on as many cores as the
+    /// machine has to spare.
+    ///
+    /// Three things read these samples and write nothing in common: the
+    /// device-wide panadapter analyser, the panadapter's zoom lane, and the
+    /// receive chain. One after the other they are a sum — on an RX-888 at
+    /// 32.4 Msps, most of a core on a machine with thirty-one idle ones. Side
+    /// by side they are a maximum.
+    ///
+    /// **Which half is sent matters.** The receive chain is not `Send`:
+    /// DeepFilterNet's inference plan holds `Rc`s, so a chain cannot cross a
+    /// thread boundary at all. The two analysers can, so they are what goes to
+    /// the pool while the chain stays here — which is also why this uses
+    /// `in_place_scope` rather than `join`, since only the spawned side of a
+    /// scope has to be `Send`.
+    ///
+    /// The fork is taken only for a block that lies wholly inside one waterfall
+    /// row. A row is pooled from whichever lane is drawing, which is a question
+    /// about the engine's *state* and cannot be asked while the analysers are
+    /// away — so a block a row boundary falls inside runs the ordinary
+    /// sequential path. On a front end fast enough for this to matter that is a
+    /// small minority of blocks (an RX-888 at 32.4 Msps clocks a row every
+    /// fifteenth one); on a slow one it is most of them, and there is nothing
+    /// there to win anyway.
+    fn process_block(&mut self, iq: &[Complex32], pool: Option<&rayon::ThreadPool>) {
+        // Read while the chain is certainly in hand, and on both paths: the
+        // frame builder asks for it and must never be answered with the
+        // stand-in.
+        self.refresh_channel_rate();
+        let per_row = self.row_period_samples();
+        let one_row = self.row_samples + iq.len() <= per_row;
+        let Some(pool) = pool.filter(|_| one_row && !iq.is_empty()) else {
+            self.feed_panadapter(iq);
+            self.run_audio(iq);
+            return;
+        };
+        self.row_sample_clock = true;
+        self.sync_zoom();
+
+        let want_rec_main = self.recorder.is_some() && !self.caps.rx_audio_external;
+        let rx0 = self.state.rx[0];
+        // Named apart so the compiler can see that the three lanes below borrow
+        // disjoint fields of the engine.
+        let analyzer = &mut self.analyzer;
+        let zoom = self.zoom.as_mut();
+        let chain = self.main.as_mut();
+        let play = &mut self.main_play;
+        let play_r = &mut self.main_play_r;
+        let play_rec = &mut self.main_play_rec;
+        let play_r_rec = &mut self.main_play_r_rec;
+
+        pool.in_place_scope(|scope| {
+            scope.spawn(move |_| analyzer.process(iq));
+            if let Some(zoom) = zoom {
+                scope.spawn(move |_| zoom.process(iq));
+            }
+            // This thread's share, and the one that could not have been
+            // anywhere else.
+            if let Some(chain) = chain {
+                run_chain_block(
+                    chain,
+                    &rx0,
+                    iq,
+                    want_rec_main,
+                    (play, play_r, play_rec, play_r_rec),
+                );
+            }
+        });
+
+        self.row_samples += iq.len();
+        if self.row_samples >= per_row {
+            self.row_samples = 0;
+            self.push_row();
+        }
+        if self.main.is_some() {
+            self.finish_audio(iq);
+        }
+    }
+
+    /// Everything downstream of the receive chain: the speaker, the decoders,
+    /// the recorders and the lanes that take their own decimation of the raw
+    /// block. Split from [`Engine::run_audio`] so the chain itself can be
+    /// forked — see [`Engine::process_block`].
+    fn finish_audio(&mut self, iq: &[Complex32]) {
         let want_rec = self.recorder.is_some();
         // A radio listening to its transceiver while an attached receiver
         // paints the picture. The main chain still runs — the high-resolution
@@ -2966,28 +3319,7 @@ impl Engine {
         // so its speaker and recorder taps are dropped and the transceiver's
         // audio takes their place below.
         let ext = self.caps.rx_audio_external;
-        let want_rec_main = want_rec && !ext;
-        let Some(main) = self.main.as_mut() else { return };
-        let out_rate = main.out_rate;
-        // Copied out rather than borrowed: a digital-voice mode may replace
-        // this audio wholesale, and deciding that needs the digi engine, which
-        // would otherwise be borrowed against the chain.
-        self.main_play.clear();
-        self.main_play_r.clear();
-        let (audio, right) = main.run(iq, &self.state.rx[0], want_rec_main);
-        self.main_play.extend_from_slice(audio);
-        if let Some(r) = right {
-            self.main_play_r.extend_from_slice(r);
-        }
-        self.main_play_rec.clear();
-        self.main_play_r_rec.clear();
-        if want_rec_main {
-            let (rec_audio, rec_right) = main.take_rec_audio();
-            self.main_play_rec.extend_from_slice(rec_audio);
-            if let Some(r) = rec_right {
-                self.main_play_r_rec.extend_from_slice(r);
-            }
-        }
+        let Some(out_rate) = self.main.as_ref().map(|m| m.out_rate) else { return };
 
         if ext {
             // Everything the operator hears is the transceiver's: the speaker,
@@ -3212,14 +3544,18 @@ impl Engine {
         (decim > 1).then_some(((lo + hi) / 2.0, decim))
     }
 
-    /// Keep the zoom lane in step with the window the display is asking for,
-    /// and feed it this block.
+    /// Keep the zoom lane in step with the window the display is asking for.
     ///
     /// Synced here rather than at each of the half-dozen places a viewport, a
     /// centre or a rate can move: it is a handful of comparisons when nothing
     /// has changed, and a lane that quietly stopped matching its window would
     /// show the operator a picture of somewhere else.
-    fn feed_zoom(&mut self, iq: &[Complex32]) {
+    ///
+    /// Separate from feeding it samples because feeding is forked: choosing the
+    /// lane needs the whole engine, and running it needs only the lane. Nothing
+    /// inside a block can change the answer, so it is settled once at the top of
+    /// [`Engine::feed_panadapter`] and the two analysers then run side by side.
+    fn sync_zoom(&mut self) {
         let in_rate = self.state.sample_rate;
         match self.wanted_zoom() {
             None => {
@@ -3238,6 +3574,7 @@ impl Engine {
                         self.state.center_hz,
                         self.cfg.avg_tc,
                         fft,
+                        f64::from(self.cfg.rows()),
                     );
                     debug!(
                         center = lane.center_hz,
@@ -3250,9 +3587,6 @@ impl Engine {
                 }
             },
         }
-        if let Some(z) = self.zoom.as_mut() {
-            z.process(iq);
-        }
     }
 
     /// Demod-audio (CAT rig) RX: the source hands us already-demodulated real
@@ -3262,7 +3596,11 @@ impl Engine {
         self.audio_re.clear();
         self.audio_re.extend(iq.iter().map(|c| c.re));
 
-        // Panadapter (packed-real FFT — see make_spectrum_frame).
+        // Panadapter (packed-real FFT — see make_spectrum_frame). No sample
+        // clocking here: a demod-audio lane runs at tens of kilohertz, so a
+        // block already carries more time than a row does and there is nothing
+        // finer to divide.
+        self.row_sample_clock = false;
         self.analyzer.process(iq);
 
         self.play_rx_audio(self.radio_fs);
@@ -4455,7 +4793,7 @@ impl Engine {
             (true, false) => {
                 // 16k-point FFT over the ~50 kHz channel ≈ 3 Hz/bin, enough to
                 // resolve 6.25 Hz FT8 tones.
-                let ch_rate = self.main.as_ref().map(|c| c.channel_rate()).unwrap_or(48_000.0);
+                let ch_rate = self.channel_rate_hz;
                 self.channel_analyzer = Some(SpectrumAnalyzer::new(16_384, ch_rate, 0.10));
             }
             // Covers arriving in CW from a digital mode, where the analyzer is
@@ -4517,6 +4855,7 @@ impl Engine {
             self.wide_window = Some(window);
             self.wide_at = Instant::now();
             self.wide_fresh = true;
+            self.wide_sweeps = self.wide_sweeps.wrapping_add(1);
         }
         // The scope is the display axis while it is the main lane, so the axis
         // has to follow it both ways: a sweep on a new centre or span moves the
@@ -4531,6 +4870,154 @@ impl Engine {
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
             }
         }
+    }
+
+    /// Every FFT lane that can feed the main panadapter, so the peak hold
+    /// between waterfall rows can be switched on or read across all of them at
+    /// once without naming them four times at each call site.
+    fn lanes(&mut self) -> impl Iterator<Item = &mut SpectrumAnalyzer> {
+        std::iter::once(&mut self.analyzer)
+            .chain(std::iter::once(&mut self.tx_analyzer))
+            .chain(self.zoom.as_mut().map(|z| &mut z.analyzer))
+            .chain(self.channel_analyzer.as_mut())
+    }
+
+    /// One waterfall row: the strongest thing each column saw since the last
+    /// row was taken.
+    ///
+    /// Deliberately built by calling [`Engine::make_spectrum_frame`] itself
+    /// with the lanes switched to read their held peaks. The row and the frame
+    /// it will ride in have to agree about which lane is drawing, what the
+    /// viewport is and how the bins are pooled, and the only way to be sure of
+    /// that is for it to be the same code — a second copy of that branch would
+    /// drift from this one on the first change to either.
+    ///
+    /// `None` where a lane has no peaks to hold: a radio's own sweep arrives
+    /// finished a few times a second and has nothing between rows to miss, and
+    /// a transmit monitor is a level check rather than a record of the band.
+    /// Both leave the frame's rows empty and the client scrolls on its own
+    /// clock, which is what every build before this one did everywhere.
+    fn make_row(&mut self) -> Option<SpectrumFrame> {
+        if !self.clocks_rows() {
+            return None;
+        }
+        // Idempotent, and here rather than at the half-dozen places a lane is
+        // built: a lane that quietly came up without its hold would draw rows
+        // of the latest transform instead of the loudest, which is a
+        // sensitivity bug nobody would see until they went looking for a weak
+        // signal that was there all along.
+        self.lanes().for_each(|a| {
+            a.set_row_hold(true);
+            a.set_read_hold(true);
+        });
+        let frame = self.make_spectrum_frame();
+        self.lanes().for_each(|a| {
+            a.set_read_hold(false);
+            a.reset_hold();
+        });
+        Some(frame)
+    }
+
+    /// Feed the panadapter lanes a block, clocking waterfall rows off the
+    /// samples as they go by.
+    ///
+    /// The block is handed over in row-sized pieces rather than whole. Nothing
+    /// about the analysis changes — an FFT still lands every `hop` samples,
+    /// wherever the piece boundaries fall — but a row can now be taken *inside*
+    /// a block, so the waterfall's rate is what the operator asked for instead
+    /// of however often the front end happens to be read. On a 1.5 Msps source
+    /// read 16384 samples at a time that is the difference between 94 rows a
+    /// second and 224.
+    ///
+    /// What still bounds it is the analyser: a row can never show more than the
+    /// transforms its interval contained, so asking for rows faster than
+    /// `rate / hop` simply repeats them.
+    fn feed_panadapter(&mut self, iq: &[Complex32]) {
+        self.row_sample_clock = true;
+        // Which window the zoom lane covers cannot change inside one block, so
+        // it is settled once here rather than per piece.
+        self.sync_zoom();
+        let per_row = self.row_period_samples();
+        let mut off = 0;
+        while off < iq.len() {
+            let want = per_row.saturating_sub(self.row_samples).max(1);
+            let take = want.min(iq.len() - off);
+            let chunk = &iq[off..off + take];
+            self.analyzer.process(chunk);
+            if let Some(zoom) = self.zoom.as_mut() {
+                zoom.process(chunk);
+            }
+            self.row_samples += take;
+            off += take;
+            if self.row_samples >= per_row {
+                self.row_samples = 0;
+                self.push_row();
+            }
+        }
+    }
+
+    /// Take the receive chain's channel rate into
+    /// [`Engine::channel_rate_hz`](#structfield.channel_rate_hz).
+    fn refresh_channel_rate(&mut self) {
+        self.channel_rate_hz = self.main.as_ref().map_or(48_000.0, |c| c.channel_rate());
+    }
+
+    /// Samples between waterfall rows at the rate the client asked for.
+    fn row_period_samples(&self) -> usize {
+        (self.state.sample_rate / f64::from(self.cfg.rows())).max(1.0) as usize
+    }
+
+    /// Clock one row into the batch the next frame will carry.
+    fn push_row(&mut self) {
+        let Some(row) = self.make_row() else {
+            return;
+        };
+        let axis = (row.center_hz, row.span_hz, row.bins.len());
+        if self.row_axis != Some(axis) {
+            self.row_batch.clear();
+            self.row_axis = Some(axis);
+        }
+        let cols = row.bins.len();
+        if cols == 0 {
+            return;
+        }
+        self.rows_clocked = self.rows_clocked.wrapping_add(1);
+        while self.row_batch.len() / cols >= MAX_BATCH_ROWS {
+            self.row_batch.drain(..cols);
+        }
+        self.row_batch.extend_from_slice(&row.bins);
+    }
+
+    /// Hand the batch to a frame about to go out, if the rows are of that
+    /// frame — a lane that switched between the last row and this frame leaves
+    /// them behind rather than drawing one picture's history under another's.
+    fn attach_rows(&mut self, frame: &mut SpectrumFrame) {
+        // Said whether or not there are any rows *this* frame: below the frame
+        // rate most frames carry none, and the client has to know that as
+        // "wait for the next one" rather than as "scroll this yourself".
+        frame.rows_clocked = self.clocks_rows();
+        if self.row_axis == Some((frame.center_hz, frame.span_hz, frame.bins.len())) {
+            frame.rows = std::mem::take(&mut self.row_batch);
+        } else {
+            self.row_batch.clear();
+        }
+    }
+
+    /// Whether the lane about to be published clocks its own waterfall rows.
+    ///
+    /// The same test [`Engine::make_row`] refuses on, named once so the two
+    /// cannot disagree — a lane that said it clocked rows and then never
+    /// produced any would freeze the waterfall.
+    fn clocks_rows(&self) -> bool {
+        // A sweep that arrives finished has nothing between rows to miss, so
+        // the client scrolls it on its own clock. The audio analyser is not
+        // like that: it runs transforms continuously, and while it is the one
+        // drawing ([`Engine::audio_zoom_window`]) the waterfall gets its rows
+        // clocked and its peak held like any other lane.
+        let scope_draws = self.audio_mode
+            && self.scope_main_window().is_some()
+            && self.audio_zoom_window().is_none();
+        !(self.tx_active || scope_draws)
     }
 
     /// Build a full-band frame, if a sweep has arrived since the last one.
@@ -4592,6 +5079,64 @@ impl Engine {
         self.wide_window
     }
 
+    /// The RF window the rig's demodulated audio covers: its passband, on the
+    /// side of the dial the mode puts it.
+    fn audio_band(&self) -> (f64, f64) {
+        let dial = self.state.active_freq_hz();
+        if self.state.rx[0].mode.is_lower_sideband_at(dial) {
+            (dial - self.audio_bw, dial)
+        } else {
+            (dial, dial + self.audio_bw)
+        }
+    }
+
+    /// The viewport, when it lies inside the rig's own passband — and so when
+    /// the audio it is sending resolves that window far better than its scope.
+    ///
+    /// A serial CAT rig's scope is a fixed number of points across whatever
+    /// span it was told to sweep: an IC-705 sends 475, so at ±250 kHz that is a
+    /// kilohertz a point, and an operator zooming in is magnifying rather than
+    /// resolving — a CW signal stays one block wide however far they go, and
+    /// the block only gets fatter. Measured on that radio: 1053 Hz a point at
+    /// ±250 kHz, 105 at ±25 kHz, and about four sweeps a second at every span.
+    ///
+    /// The same rig is already sending its demodulated audio over the sound
+    /// card, and that goes through the panadapter's own analyser — 48 kHz
+    /// through a 16384-point window is some three hertz a bin, arriving twenty
+    /// times a second. Inside the passband it is a better picture by two orders
+    /// of magnitude in both axes.
+    ///
+    /// Outside it there is nothing to switch to: the audio is not a picture of
+    /// the band at all, only of what the rig has already demodulated, so a
+    /// wider view stays on the scope. The display *axis* stays the scope's
+    /// either way ([`Engine::update_display_center`]), so zooming back out is
+    /// the same gesture it always was.
+    fn audio_zoom_window(&self) -> Option<(f64, f64)> {
+        if !self.audio_mode {
+            return None;
+        }
+        let (lo, hi) = self.cfg.viewport?;
+        if !(hi > lo) {
+            return None;
+        }
+        let (band_lo, band_hi) = self.audio_band();
+        // What the operator can actually see, which is not what arrives: a
+        // client sends its window with slack around it so that panning inside
+        // it needs no reconfiguration, and today that slack is double the
+        // visible span. So the visible part is the middle of what was asked
+        // for, and it is the *visible* part that has to be inside the rig's
+        // filter for the audio to be the honest picture. Judging the slack as
+        // well would refuse every zoom that reached the passband edge.
+        let quarter = (hi - lo) / 4.0;
+        if lo + quarter < band_lo || hi - quarter > band_hi {
+            return None;
+        }
+        // Clipped to the filter, so the mirror the other side of the dial is
+        // never drawn: the rig sends *real* audio, whose spectrum is symmetric,
+        // and only the one side of it is the band.
+        Some((lo.max(band_lo), hi.min(band_hi)))
+    }
+
     /// The main panadapter, drawn from the radio's own finished bins.
     ///
     /// Auto-ranged rather than mapped through the operator's dB window: an
@@ -4622,6 +5167,20 @@ impl Engine {
         }
         let bins = self.cfg.bins();
         if self.audio_mode {
+            // Zoomed inside the rig's own passband: its audio resolves that
+            // window by two orders of magnitude more than its scope can, so it
+            // draws — see [`Engine::audio_zoom_window`]. Ahead of the scope
+            // test, because the scope is what owns the picture everywhere else.
+            if let Some(vp) = self.audio_zoom_window() {
+                return self.analyzer.make_frame(
+                    self.state.active_freq_hz(),
+                    self.radio_fs,
+                    self.cfg.db_floor,
+                    self.cfg.db_ceil,
+                    bins,
+                    Some(vp),
+                );
+            }
             // The radio's own scope, where this session has one — the only
             // spectrum of the *band* a demod-audio path can show.
             if let Some((center_hz, span_hz)) = self.scope_main_window() {
@@ -5287,7 +5846,10 @@ impl Engine {
                 }
             }
             SetSpectrumCfg(new_cfg) => {
-                let rebuild = new_cfg.fft_size != self.cfg.fft_size;
+                // The overlap is chosen from the rate *and* the scroll speed
+                // ([`hop_div_for`]), so a change of speed re-sizes the hop too.
+                let rebuild =
+                    new_cfg.fft_size != self.cfg.fft_size || new_cfg.rows() != self.cfg.rows();
                 // The zoom lane's FFT is sized from the display width
                 // ([`zoom_lane_fft`]), and `ZoomLane::serves` knows nothing
                 // about that — it identifies a lane by its window. So a client
@@ -5301,8 +5863,12 @@ impl Engine {
                     self.zoom = None;
                 }
                 if rebuild {
-                    self.analyzer =
-                        SpectrumAnalyzer::new(self.cfg.fft_size as usize, rate, self.cfg.avg_tc);
+                    self.analyzer = build_analyzer(
+                        self.cfg.fft_size as usize,
+                        rate,
+                        self.cfg.avg_tc,
+                        f64::from(self.cfg.rows()),
+                    );
                     self.tx_analyzer = SpectrumAnalyzer::new(
                         self.cfg.fft_size as usize,
                         TX_MONITOR_RATE,
@@ -8400,10 +8966,11 @@ impl Engine {
         self.decim = (factor > 1).then(|| Decimator::new(factor));
         self.state.sample_rate = self.radio_fs / factor as f64;
 
-        self.analyzer = SpectrumAnalyzer::new(
+        self.analyzer = build_analyzer(
             self.cfg.fft_size as usize,
             self.state.sample_rate,
             self.cfg.avg_tc,
+            f64::from(self.cfg.rows()),
         );
         if self.mixer.is_some() {
             self.main =
@@ -8713,8 +9280,12 @@ impl Engine {
         // measures its bins against; the card rate in audio mode, where the
         // analyzer FFTs the rig's audio directly.
         let analyzer_rate = if self.audio_mode { self.radio_fs } else { self.state.sample_rate };
-        self.analyzer =
-            SpectrumAnalyzer::new(self.cfg.fft_size as usize, analyzer_rate, self.cfg.avg_tc);
+        self.analyzer = build_analyzer(
+            self.cfg.fft_size as usize,
+            analyzer_rate,
+            self.cfg.avg_tc,
+            f64::from(self.cfg.rows()),
+        );
 
         // Drop rate-dependent / stateful DSP so it rebuilds for the new source.
         self.tx = None;
@@ -10899,6 +11470,8 @@ fn pool_window_to_frame(
             db_floor,
             db_ceil,
             bins: vec![0; out_bins],
+            rows: Vec::new(),
+            rows_clocked: false,
         };
     }
     let (frac_lo, frac_hi, out_center, out_span) = match viewport {
@@ -10913,14 +11486,51 @@ fn pool_window_to_frame(
     let lo_bin = frac_lo * n as f64;
     let bin_range = (frac_hi - frac_lo) * n as f64;
     let mut bins = Vec::with_capacity(out_bins);
-    for i in 0..out_bins {
-        let lo = ((lo_bin + i as f64 * bin_range / out_bins as f64) as usize).min(n - 1);
-        let hi =
-            ((lo_bin + (i + 1) as f64 * bin_range / out_bins as f64) as usize).clamp(lo + 1, n);
-        let peak = db[lo..hi].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        bins.push(((peak - db_floor) * scale).clamp(0.0, 255.0) as u8);
+    if bin_range < out_bins as f64 {
+        // Stretching, not pooling: the window holds fewer measurements than
+        // there are columns to fill, so each one has to cover several.
+        //
+        // Reading between them rather than repeating them. A rig's own scope is
+        // a fixed number of points however wide the panadapter is drawn — an
+        // IC-705 sends 475 across its whole span, so a view of a fifth of that
+        // span is 85 numbers spread over a couple of thousand pixels — and
+        // repeating each one seventeen times is the wall of hard blocks that
+        // gets reported as a broken waterfall. It is also self-inflicted: the
+        // waterfall's own sampler is linear and would have drawn exactly this
+        // gradient, had the frame not arrived pre-blocked.
+        //
+        // Only in this direction. Coarsening stays the peak below, because a
+        // carrier one bin wide has to survive being pooled into a column, and
+        // averaging or sampling it away is how a signal disappears from a
+        // zoomed-out panadapter.
+        for i in 0..out_bins {
+            // Centre of this column, in source-bin coordinates, with the half
+            // bin taken off so bin centres land on column centres.
+            let at = lo_bin + (i as f64 + 0.5) * bin_range / out_bins as f64 - 0.5;
+            let k = at.floor().clamp(0.0, (n - 1) as f64) as usize;
+            let t = (at - k as f64).clamp(0.0, 1.0) as f32;
+            let (a, b) = (db[k], db[(k + 1).min(n - 1)]);
+            bins.push(((a + (b - a) * t - db_floor) * scale).clamp(0.0, 255.0) as u8);
+        }
+    } else {
+        for i in 0..out_bins {
+            let lo = ((lo_bin + i as f64 * bin_range / out_bins as f64) as usize).min(n - 1);
+            let hi =
+                ((lo_bin + (i + 1) as f64 * bin_range / out_bins as f64) as usize).clamp(lo + 1, n);
+            let peak = db[lo..hi].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            bins.push(((peak - db_floor) * scale).clamp(0.0, 255.0) as u8);
+        }
     }
-    SpectrumFrame { seq, center_hz: out_center, span_hz: out_span, db_floor, db_ceil, bins }
+    SpectrumFrame {
+        seq,
+        center_hz: out_center,
+        span_hz: out_span,
+        db_floor,
+        db_ceil,
+        bins,
+        rows: Vec::new(),
+        rows_clocked: false,
+    }
 }
 
 #[cfg(test)]
@@ -10969,6 +11579,38 @@ mod wide_frame_tests {
         assert_eq!(f.bins.len(), WIDE_BINS);
         assert_eq!(f.bins[1234 * WIDE_BINS / 4096], 255);
         assert_eq!(f.bins[0], 0);
+    }
+
+    /// A rig's own scope is a fixed number of points, and a panadapter drawn
+    /// wider than that is stretching them. Repeating each one is what made an
+    /// IC-705's waterfall a wall of blocks; the ramp between two neighbours has
+    /// to actually be a ramp.
+    #[test]
+    fn a_stretched_sweep_is_a_gradient_and_not_a_staircase() {
+        // Eight points climbing evenly, drawn across 256 columns.
+        let db: Vec<f32> = (0..8).map(|i| -120.0 + i as f32 * 10.0).collect();
+        let f = pool_window_to_frame(&db, 1, 1e6, 1e6, -120.0, -40.0, 256, None);
+        assert_eq!(f.bins.len(), 256);
+
+        // Monotone, as the input is.
+        assert!(f.bins.windows(2).all(|w| w[1] >= w[0]), "the ramp went backwards");
+
+        // And it climbs continuously rather than in eight steps: between the
+        // first and last source points every column differs from its neighbour
+        // by at most a couple of levels, where replication would jump ~32 at
+        // each of seven boundaries.
+        let biggest = f.bins.windows(2).map(|w| w[1] as i32 - w[0] as i32).max().unwrap_or(0);
+        assert!(biggest <= 3, "the largest step between columns was {biggest}");
+    }
+
+    /// The other direction is untouched: coarsening still keeps the peak, which
+    /// is what stops a one-bin carrier vanishing from a zoomed-out view.
+    #[test]
+    fn stretching_does_not_change_how_a_wide_window_is_pooled() {
+        let mut db = vec![-120.0f32; 4096];
+        db[77] = -20.0;
+        let f = pool_window_to_frame(&db, 1, 1e6, 1e6, -120.0, -20.0, 512, None);
+        assert_eq!(f.bins[77 * 512 / 4096], 255);
     }
 
     #[test]
@@ -11179,5 +11821,67 @@ mod auto_level_tests {
         let prev = (-115.0, -25.0);
         assert_eq!(auto_levels(&[], Some(prev)), prev);
         assert_eq!(auto_levels(&[f32::NAN, f32::NAN], Some(prev)), prev);
+    }
+}
+
+#[cfg(test)]
+mod hop_div_tests {
+    use super::{MAX_HOP_DIV, hop_div_for};
+
+    /// The case this rule exists for: a wide front end runs far more transforms
+    /// than any waterfall can draw, and half-overlapping them doubles that for
+    /// nothing. An RX-888 at 8.1 MHz through a 4096-point window makes 3955 a
+    /// second at the customary half-hop; a waterfall wants at most a couple of
+    /// hundred.
+    #[test]
+    fn a_wide_front_end_stops_overlapping() {
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 28.0), 1);
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 224.0), 1);
+    }
+
+    /// It is a rule, not a switch: a rate that produces only a handful of
+    /// transforms per row keeps its overlap. 2 Msps through a 32768-point
+    /// window is 122 transforms a second, which at 28 rows is already about
+    /// the four per row that is wanted — so nothing is taken away.
+    #[test]
+    fn a_lane_with_transforms_to_spare_only_just_keeps_its_overlap() {
+        assert_eq!(hop_div_for(2_000_000.0, 32_768, 28.0), 2);
+        // Scroll faster on the same lane and the overlap has to come back.
+        assert_eq!(hop_div_for(2_000_000.0, 32_768, 224.0), 8);
+    }
+
+    /// And the case it must not break: a zoomed lane at a few kilohertz fills a
+    /// window barely twice a second, and its eighth-hop is what puts rows on
+    /// the waterfall at all. The rule has to hand that back unchanged.
+    #[test]
+    fn a_zoomed_lane_keeps_its_fine_overlap() {
+        // The lane a 10 kHz view on an 8.1 Msps front end builds: 8.1e6/512.
+        assert_eq!(hop_div_for(15_820.0, 4096, 28.0), MAX_HOP_DIV);
+        assert_eq!(hop_div_for(48_000.0, 4096, 56.0), MAX_HOP_DIV);
+    }
+
+    /// Never coarser than one window per hop. Past that the analyser would skip
+    /// samples outright, and a signal shorter than a window could land entirely
+    /// in the gap — which is exactly what the peak hold between rows exists to
+    /// prevent.
+    #[test]
+    fn it_never_skips_samples() {
+        for rate in [48_000.0, 1_536_000.0, 8_100_000.0, 64_000_000.0] {
+            for fft in [1024usize, 4096, 32_768, 131_072] {
+                for rows in [5.0, 28.0, 224.0] {
+                    let d = hop_div_for(rate, fft, rows);
+                    assert!((1..=MAX_HOP_DIV).contains(&d), "{rate}/{fft}/{rows} gave {d}");
+                }
+            }
+        }
+    }
+
+    /// A rate or a scroll speed nobody has filled in yet falls back to the
+    /// half-overlap every build before this one used.
+    #[test]
+    fn an_unknown_rate_keeps_the_old_behaviour() {
+        assert_eq!(hop_div_for(0.0, 4096, 28.0), 2);
+        assert_eq!(hop_div_for(f64::NAN, 4096, 28.0), 2);
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 0.0), 2);
     }
 }

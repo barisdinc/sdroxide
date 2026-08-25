@@ -651,7 +651,32 @@ use sdroxide_types::{
 /// fields by position, so a v90 peer would read `bins` as `fps` and everything
 /// after it as garbage either way. The handshake's equality test is what stops
 /// it trying.
-pub const PROTO_VERSION: u16 = 91;
+///
+/// **92** — the waterfall's *time* axis is the client's to ask for too, and the
+/// engine now clocks it. [`sdroxide_types::SpectrumConfig`] gained
+/// `rows_per_sec`, and [`sdroxide_types::SpectrumFrame`] gained `rows`: the
+/// waterfall lines the engine clocked since the last frame, each of them the
+/// per-bin peak over its own slice of time.
+///
+/// Until now a frame *was* a row, so the waterfall could not advance faster
+/// than the screen redrew — a fast scroll simply wrote the same numbers two or
+/// three times and the operator saw lines two or three pixels tall, while a
+/// front end streaming megahertz had hundreds of transforms a second going
+/// spare. The two rates are now separate all the way down the wire.
+///
+/// The frame also gained `rows_clocked`, which is not the same as `rows` being
+/// non-empty and has to be said separately: below the frame rate most frames
+/// carry no rows at all, and a client that read that as "this lane does not
+/// clock rows" would scroll them on its own wall clock *as well* and run the
+/// waterfall at twice the rate of its own time labels. `false` is the shape for
+/// a lane that really cannot clock them — a radio's own sweep, a transmit
+/// monitor — and only then does the client scroll on its own.
+///
+/// All three ride in the frame or the config, both of which cross the wire, and
+/// `rows_per_sec` sits after `display_bins` rather than at the tail, so a v91
+/// peer would desynchronise on any of them. The handshake's equality test is
+/// what stops it trying.
+pub const PROTO_VERSION: u16 = 92;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

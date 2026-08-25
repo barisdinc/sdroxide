@@ -349,6 +349,15 @@ impl SdroxideApp {
             // what its FFT can actually fill, so the frame that comes back may
             // be narrower; the texture upload resamples where it is.
             display_bins: self.panadapter_bins(),
+            // The waterfall's own clock. Not `fps`: the engine appends lines to
+            // a texture, which is cheap, where a frame is a repaint, which is
+            // not — see `SpectrumConfig::rows_per_sec`. Scaled by the display's
+            // zoom factor for the same reason the rows on screen are, so a line
+            // is one device pixel tall on a HiDPI panel too.
+            rows_per_sec: (self.ui_settings.waterfall_rows_per_sec() * self.wf_row_scale)
+                .round()
+                .clamp(1.0, f32::from(sdroxide_types::MAX_ROWS_PER_SEC))
+                as u16,
             db_floor: self.view.db_floor,
             db_ceil: self.view.db_ceil,
             viewport,
@@ -385,7 +394,8 @@ impl SdroxideApp {
         row_scale: f32,
     ) -> spectrum_view::WfTuning {
         let now = now_unix_f64();
-        let rows_per_sec = self.ui_settings.waterfall_rows_per_sec() * row_scale.max(1.0);
+        self.wf_row_scale = row_scale.max(1.0);
+        let rows_per_sec = self.ui_settings.waterfall_rows_per_sec() * self.wf_row_scale;
         // Clamp dt so a hitch/tab-away can't dump a huge run of rows at once.
         let dt =
             if self.wf_last_now > 0.0 { (now - self.wf_last_now).clamp(0.0, 0.3) } else { 0.0 };
@@ -439,6 +449,7 @@ impl SdroxideApp {
         let ideal = self.desired_spectrum_cfg();
         if sent.fft_size != ideal.fft_size
             || sent.display_bins != ideal.display_bins
+            || sent.rows_per_sec != ideal.rows_per_sec
             || sent.db_floor != ideal.db_floor
             || sent.db_ceil != ideal.db_ceil
             || sent.fps != ideal.fps

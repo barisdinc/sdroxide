@@ -6089,6 +6089,16 @@ That sets a hard ceiling on what any program, sdroxide or RS-BA1 alike, can show
 - On the **12 kHz IF** the panadapter is real spectrum — about **±12 kHz** around
   the dial at 48000 Hz — which can be demodulated, notched, decoded and skimmed.
   The scope then lives in the strip above it instead.
+- **Zoom in past the rig's filter and the audio takes over.** The scope is 475
+  points across whatever **Scope span** is set to — 1053 Hz per point at ±250 kHz,
+  105 Hz at ±25 kHz — and it arrives about four times a second whatever the span,
+  so past a point zooming magnifies rather than resolves and a signal stays one
+  block wide. Once the visible window fits inside the rig's passband the
+  panadapter is drawn from the demodulated audio instead: 48 kHz through the
+  panadapter's own transform is a few hertz per bin, arriving twenty times a
+  second, and the waterfall gets a proper row for every one of them. Zooming back
+  out hands the picture to the scope again — the frequency axis stays the scope's
+  either way, so nothing jumps.
 - The **digital modes** always get the audio band, on either path. FT8 and the
   keyboard modes place stations by their offset inside the rig's passband, and a
   band-wide sweep at a few hundred Hz per bin cannot show one, so the panadapter
@@ -7533,10 +7543,29 @@ spoken announcements below them under `[speech]`:
   Detail costs memory on the graphics card: 8 MB per radio tab at Standard,
   16 at High, 32 at Ultra. Changing it restarts the waterfall's history from
   black, once.
-- **Waterfall scroll speed** — how fast the waterfall scrolls: **Slow** (5
-  rows/s), **Medium** (28) or **Fast** (56). Fast trades screen time for
-  vertical resolution, which is what you want when a CW or FT8 trace is smearing
-  into the row above it; Slow keeps several minutes of band on screen at once.
+- **Waterfall scroll speed** — how fast the waterfall scrolls, in lines a
+  second: **Slow** (5), **Medium** (28), **Fast** (56), **Faster** (112) or
+  **Fastest** (224). Faster trades screen time for vertical resolution, which is
+  what you want when a CW or FT8 trace is smearing into the line above it; Slow
+  keeps several minutes of band on screen at once.
+
+  The two fastest settings are past the rate any screen redraws at, and that is
+  deliberate: the radio clocks the waterfall's lines itself rather than one per
+  redraw, so 224 a second is 224 *different* lines rather than 56 of them drawn
+  four times. Each line is also the **strongest** thing its slice of time
+  contained rather than a snapshot at the end of it, so a CW dot or the edge of
+  a burst that is shorter than the gap between two lines still gets drawn
+  instead of falling between them.
+
+  What limits it is the receiver, not the screen. A line can never show more
+  than one transform of the FFT, and a front end produces `sample rate ÷ half
+  the FFT size` of those a second — an RX-888 at 8 MHz through a 32768-point
+  window makes about 500, so it can feed any of these settings, while a 24 kHz
+  I.F. through the same window makes under one and repeats lines at every
+  setting. Two costs worth knowing: the waterfall keeps a fixed number of
+  lines, so history shortens as the rate rises (73 seconds at Medium, 9 at
+  Fastest), and to a *remote* client every line is a byte per column on the
+  link.
 - **Spectrum update speed** — how quickly the spectrum trace reacts; slower is
   more averaged and smoother.
 - **Waterfall palette** — the waterfall colour scheme (see

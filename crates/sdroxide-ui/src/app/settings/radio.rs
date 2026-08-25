@@ -2108,18 +2108,6 @@ pub(in crate::app) fn settings_icomnet_tab(
         )
         .weak(),
     );
-    ui.label(
-        RichText::new(sdroxide_icomnet_hint())
-            .weak()
-            .color(egui::Color32::from_rgb(0xd0, 0x90, 0x30)),
-    );
-}
-
-/// Kept as a function so the UI crate needs no dependency on the backend crate
-/// just to repeat one sentence.
-fn sdroxide_icomnet_hint() -> &'static str {
-    "Verified on an IC-705 over WiFi; every other model, and still rest on the documentation. \
-     If it misbehaves, please attach the diagnostic report to a bug report."
 }
 
 /// The outcome line under a "Test connection" button.

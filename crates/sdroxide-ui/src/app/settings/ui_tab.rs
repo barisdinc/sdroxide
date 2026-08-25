@@ -115,8 +115,16 @@ pub(in crate::app) fn settings_ui_tab(
         });
         ui.end_row();
 
-        ui.label("Waterfall scroll speed");
-        enum_combo(ui, "ui-wf", &mut cfg.waterfall_speed, &Speed::ALL, Speed::label);
+        ui.label("Waterfall scroll speed").on_hover_text(
+            "How fast the waterfall scrolls, in lines a second: Slow 5, Medium 28, \
+             Fast 56, Faster 112, Fastest 224. The engine clocks these itself, so \
+             the two fastest are real detail rather than the same line drawn \
+             twice — as far as the receiver can feed them: a line can never show \
+             more than one transform, and a narrow front end makes only a few \
+             dozen a second. They cost history, since the waterfall keeps a fixed \
+             number of lines — 73 seconds at Medium, 9 at Fastest.",
+        );
+        enum_combo(ui, "ui-wf", &mut cfg.waterfall_speed, &Speed::WATERFALL, Speed::label);
         ui.end_row();
 
         ui.label("Spectrum update speed");
