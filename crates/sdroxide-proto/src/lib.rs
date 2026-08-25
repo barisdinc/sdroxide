@@ -651,7 +651,25 @@ use sdroxide_types::{
 /// fields by position, so a v90 peer would read `bins` as `fps` and everything
 /// after it as garbage either way. The handshake's equality test is what stops
 /// it trying.
-pub const PROTO_VERSION: u16 = 91;
+///
+/// **92** — the waterfall's *time* axis is the client's to ask for too, and the
+/// engine now clocks it. [`sdroxide_types::SpectrumConfig`] gained
+/// `rows_per_sec`, and [`sdroxide_types::SpectrumFrame`] gained `rows`: the
+/// waterfall lines the engine clocked since the last frame, each of them the
+/// per-bin peak over its own slice of time.
+///
+/// Until now a frame *was* a row, so the waterfall could not advance faster
+/// than the screen redrew — a fast scroll simply wrote the same numbers two or
+/// three times and the operator saw lines two or three pixels tall, while a
+/// front end streaming megahertz had hundreds of transforms a second going
+/// spare. The two rates are now separate all the way down the wire.
+///
+/// `rows` is appended at the tail of the frame and `rows_per_sec` after
+/// `display_bins`, so a v91 peer would desynchronise on both. The handshake's
+/// equality test is what stops it trying. A frame carrying no rows is the
+/// normal shape for a lane that cannot clock them — a radio's own sweep, a
+/// transmit monitor — and the client falls back to scrolling on its own clock.
+pub const PROTO_VERSION: u16 = 92;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

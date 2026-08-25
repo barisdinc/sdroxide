@@ -195,6 +195,13 @@ struct WaterfallResources {
     tex_w: u32,
     /// One render bind group per history texture; index by `active`.
     bind_group: [wgpu::BindGroup; 2],
+    /// `seq` of the last frame whose rows were appended.
+    ///
+    /// The same `Arc<SpectrumFrame>` is handed to every repaint until a new one
+    /// arrives, and repaints outnumber frames — so without this the rows of one
+    /// frame would be written again on every redraw and the waterfall would run
+    /// at the frame rate times however fast the compositor felt like going.
+    last_rows_seq: Option<u32>,
     /// Ping-pong history textures. `active` is the live one; the other is the
     /// scratch target for the frequency-remap pass on a geometry change.
     hist: [wgpu::Texture; 2],
@@ -530,6 +537,7 @@ impl WaterfallResources {
             hist,
             hist_view,
             active: 0,
+            last_rows_seq: None,
             remap_uniforms,
             remap_bg,
             lut_tex,
@@ -700,27 +708,52 @@ impl CallbackTrait for WaterfallCallback {
                 r.last_center = frame.center_hz;
                 r.last_span = frame.span_hz;
             }
-            // Skip appending a row on the remap frame: the new row is written via
-            // the queue (applied before the encoder's remap pass in this submit),
-            // so it would be overwritten. The next frame resumes normally — one
+            // Skip appending on the remap frame: rows are written via the queue
+            // (applied before the encoder's remap pass in this submit), so they
+            // would be overwritten. The next frame resumes normally — one
             // skipped row per zoom is imperceptible.
-            // Time-driven scroll: append `rows_to_write` rows of the latest
-            // frame (the app computes the count from elapsed wall-clock × the
-            // scroll rate, so the axis is stable and matches the gridlines).
-            let n = self.rows_to_write.min(32);
-            if !remapped && n > 0 && !frame.bins.is_empty() {
+            //
+            // Where the frame carries its own rows they *are* the scroll: the
+            // engine clocked them at the rate this client asked for, each one
+            // the loudest thing its slice of time contained, and they are
+            // appended once — hence `last_rows_seq`, because this callback runs
+            // on every repaint and a frame outlives several of them.
+            //
+            // Where it carries none (a radio's own sweep, a transmit monitor)
+            // the fallback is what every build before this one did everywhere:
+            // repeat the current spectrum at `rows_to_write`, which the app
+            // derives from elapsed wall-clock × the scroll rate.
+            let cols = frame.bins.len();
+            let carried = if r.last_rows_seq == Some(frame.seq) { 0 } else { frame.row_count() };
+            // A frame's rows belong to it, so consuming them is per frame and
+            // not per repaint — including on a remap, where they were pooled on
+            // the axis that has just been rewritten and are dropped rather than
+            // laid over the new one.
+            if carried > 0 {
+                r.last_rows_seq = Some(frame.seq);
+            }
+            let n = if carried > 0 { carried as u32 } else { self.rows_to_write.min(32) };
+            if !remapped && n > 0 && cols > 0 {
                 // Resample to texture width where the frame is not already it.
                 // Routine rather than exceptional: the engine clamps the width
                 // it is asked for against its own FFT, and a station serving two
                 // clients answers whichever spoke last.
-                let row: Vec<u8> = if frame.bins.len() == r.tex_w as usize {
-                    frame.bins.clone()
-                } else {
-                    (0..r.tex_w as usize)
-                        .map(|i| frame.bins[i * frame.bins.len() / r.tex_w as usize])
-                        .collect()
+                let widen = |src: &[u8]| -> Vec<u8> {
+                    if src.len() == r.tex_w as usize {
+                        src.to_vec()
+                    } else {
+                        (0..r.tex_w as usize)
+                            .map(|i| src[i * src.len() / r.tex_w as usize])
+                            .collect()
+                    }
                 };
-                for _ in 0..n {
+                // The fallback writes one row over and over, so widen it once.
+                let repeated = (carried == 0).then(|| widen(&frame.bins));
+                for i in 0..n as usize {
+                    let row = match &repeated {
+                        Some(r) => r.clone(),
+                        None => widen(&frame.rows[i * cols..(i + 1) * cols]),
+                    };
                     queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &r.hist[r.active],

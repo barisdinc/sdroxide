@@ -7,21 +7,38 @@ use serde::{Deserialize, Serialize};
 use crate::SpotKind;
 
 /// Coarse speed setting for the waterfall scroll and the spectrum line.
+///
+/// The last two are the waterfall's alone. They exist because the engine now
+/// clocks waterfall rows itself rather than one per published frame, so a rate
+/// past the screen's refresh is real time resolution instead of the same line
+/// drawn twice — see [`crate::SpectrumConfig::rows_per_sec`]. The spectrum
+/// *line* has nothing to gain from them (it is redrawn once a frame whatever
+/// happens), so its combo offers [`Speed::ALL`] and the waterfall's offers
+/// [`Speed::WATERFALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Speed {
     Slow,
     Medium,
     Fast,
+    Faster,
+    Fastest,
 }
 
 impl Speed {
+    /// The three that mean something to the spectrum line.
     pub const ALL: [Speed; 3] = [Speed::Slow, Speed::Medium, Speed::Fast];
+
+    /// Every scroll rate the waterfall offers.
+    pub const WATERFALL: [Speed; 5] =
+        [Speed::Slow, Speed::Medium, Speed::Fast, Speed::Faster, Speed::Fastest];
 
     pub fn label(self) -> &'static str {
         match self {
             Speed::Slow => "Slow",
             Speed::Medium => "Medium",
             Speed::Fast => "Fast",
+            Speed::Faster => "Faster",
+            Speed::Fastest => "Fastest",
         }
     }
 }
@@ -538,12 +555,28 @@ impl UiSettings {
     ///
     /// `Fast` is twice the old fast rate, which now sits on `Medium`: at 28
     /// rows/s a CW or FT8 trace still smears vertically, and chasing a fading
-    /// signal wants the extra time resolution. It costs nothing but rows.
+    /// signal wants the extra time resolution.
+    ///
+    /// `Faster` and `Fastest` are past what a screen redraws at, which is the
+    /// point: the engine clocks rows on its own clock now, so 224 a second is
+    /// 224 *different* lines rather than 56 of them drawn four times. What they
+    /// cost is history — the client's ring is a fixed number of rows, so
+    /// `Fastest` holds nine seconds of it where `Medium` holds seventy-three —
+    /// and, to a remote client, bytes: a row is one per column.
+    ///
+    /// Nothing is gained past the rate the analyser produces transforms at
+    /// (`rate / (fft_size / 2)`), and rows simply repeat above it. That is a
+    /// property of the front end and the FFT size, not something to clamp here:
+    /// an RX-888 at 8 Msps through a 32768-point window makes 494 a second and
+    /// can feed any of these; a 48 kHz audio lane makes 23 and cannot feed even
+    /// `Medium`.
     pub fn waterfall_rows_per_sec(self) -> f32 {
         match self.waterfall_speed {
             Speed::Slow => 5.0,
             Speed::Medium => 28.0,
             Speed::Fast => 56.0,
+            Speed::Faster => 112.0,
+            Speed::Fastest => 224.0,
         }
     }
 
@@ -551,7 +584,9 @@ impl UiSettings {
     /// Fast disables averaging (snappy); slower values smooth it out.
     pub fn spectrum_avg_tc(self) -> f32 {
         match self.spectrum_speed {
-            Speed::Fast => 0.0,
+            // The waterfall-only rates mean the same thing here as `Fast`:
+            // no averaging. Reachable only from a hand-edited config.
+            Speed::Fast | Speed::Faster | Speed::Fastest => 0.0,
             Speed::Medium => 0.1,
             Speed::Slow => 0.2,
         }
