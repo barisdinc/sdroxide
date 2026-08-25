@@ -572,13 +572,15 @@ starting sdroxide before the rig is fine:
   RSPdx HDR mode are available on the Radio tab, and only the rows the selected
   model actually supports are shown.
 
-  **An RSPduo can run both of its tuners at once**, which turns it into two
-  aerials on one clock — the same arrangement the LimeSDR's second receive
-  chain gives, and combined by the same adaptive filter: *cancel* to null a
-  local noise source, or *combine* for diversity reception that fills in HF
-  fades. The second tuner keeps its own LNA state and IF gain, since the two
-  aerials are rarely the same aerial. The API fixes the ADC clock in this mode,
-  so the widest span with both tuners running is 2 Msps.
+  **An RSPduo can run both of its tuners at once**, and there are two things to
+  do with the second one. Combined, it is two aerials on one clock — the same
+  arrangement the LimeSDR's second receive chain gives, and the same adaptive
+  filter: *cancel* to null a local noise source, or *combine* for diversity
+  reception that fills in HF fades, with the controls you actually use while
+  listening on the main strip. Left apart, it is simply a second radio: the
+  tuners tune separately, so one board can be an HF radio in one tab and a VHF
+  radio in another. The API fixes the ADC clock either way, so the widest span
+  with both tuners running is 2 Msps.
 
 - **ELAD FDM-DUO / FDM-S (USB)** — an ELAD FDM-DUO, FDM-DUOr, FDM-S2 or FDM-S1,
   driven directly over USB by a pure-Rust driver — no libusb, no gr-elad, no

@@ -23,7 +23,8 @@
 
 use eframe::egui::{self, Color32, ComboBox, DragValue, RichText, Slider};
 use sdroxide_types::{
-    AgcMode, BURST_MS_RANGE, Band, Command, CwSkimmerDecoder, DCS_CODES, DeviceCaps, Direction,
+    AgcMode, BURST_MS_RANGE, Band, Command, CwSkimmerDecoder, DCS_CODES, DIV_FREEZE_ELEMENT,
+    DIV_MODE_ELEMENT, DIV_RATE_ELEMENT, DIV_RESET_ELEMENT, DeviceCaps, Direction, DiversityMode,
     GainElement, MAX_OFFSET_HZ, Mode, NrEngine, NrLevel, NrStrength, RadioState, RxId, Shift,
     SkimmerKind, SubTone, ToneMode, Vfo,
 };
@@ -51,6 +52,11 @@ const RIGHT_W: f32 = 96.0;
 /// is the strip's bottomless width absorber, and a row that carries it always
 /// reaches the right edge.
 const SMETER_W: f32 = 250.0;
+/// What the diversity mode chip reads, by whether it is combining. Measured
+/// and drawn from the same pair, so the box cannot be planned around a label
+/// it does not carry.
+const DIV_MODE_LABELS: [&str; 2] = ["CANCEL", "COMBINE"];
+
 /// Width of the sub-receiver box at its design size.
 const SUB_W: f32 = 404.0;
 /// How much a box that grows by lengthening its slider rails or widening its
@@ -313,6 +319,7 @@ fn plan_short_strip(
 enum MenuChip {
     Rx,
     Vfo,
+    Div,
     Sub,
     Tx,
     Disp,
@@ -324,6 +331,7 @@ impl MenuChip {
         match self {
             Self::Rx => "RX",
             Self::Vfo => "VFO",
+            Self::Div => "DIV",
             Self::Sub => "SUB",
             Self::Tx => "TX",
             Self::Disp => "DISP",
@@ -683,6 +691,7 @@ impl SdroxideApp {
             Smeter,
             VfoRit,
             RxFilter,
+            Div,
             Sub,
             Tx,
             Display,
@@ -700,6 +709,14 @@ impl SdroxideApp {
                 StripBox { w, flex: 2.0, max_w: w + RAIL_STRETCH_MAX }
             }),
         ];
+        // Only while two aerials are actually being combined — the same rule
+        // as the sub receiver below, and for the same two reasons: the box
+        // appearing is the confirmation that the filter is running, and a
+        // strip is too narrow to carry controls for hardware nobody has.
+        if self.has_diversity() {
+            let w = div_rows_w(ui);
+            boxes.push((Kind::Div, StripBox { w, flex: 1.0, max_w: w + RAIL_STRETCH_MAX }));
+        }
         // Only while the sub is running: the module appearing is itself the
         // confirmation that SUB took effect, and it costs strip width that
         // operators who never use it should not have to pay.
@@ -744,6 +761,7 @@ impl SdroxideApp {
                         Kind::Smeter => self.smeter_box(ui, w, crate::chrome::MODULE_TALL_H, false),
                         Kind::VfoRit => self.vfo_rit_module(ui, cmds, w),
                         Kind::RxFilter => self.rx_filter_module(ui, cmds, w),
+                        Kind::Div => self.div_module(ui, cmds, w),
                         Kind::Sub => self.sub_rx_module(ui, cmds, w),
                         Kind::Tx => self.tx_condensed(ui, cmds, w),
                         Kind::Display => self.display_condensed(ui, cmds, w),
@@ -759,8 +777,11 @@ impl SdroxideApp {
     /// but not drawn — or the reverse — cannot break the plan around it.
     fn menu_chips(&self, tx_capable: bool) -> Vec<MenuChip> {
         let mut chips = vec![MenuChip::Rx, MenuChip::Vfo];
-        // Only while the sub is running: the chip appearing is itself the
-        // confirmation that SUB took effect.
+        // Both of these appear only while what they drive is running: the chip
+        // appearing is itself the confirmation.
+        if self.has_diversity() {
+            chips.push(MenuChip::Div);
+        }
         if self.state.sub_rx_enabled {
             chips.push(MenuChip::Sub);
         }
@@ -776,6 +797,13 @@ impl SdroxideApp {
     fn menu_chip_lit(&self, chip: MenuChip) -> bool {
         match chip {
             MenuChip::Vfo => self.state.split,
+            // Lit while the pair is being combined rather than cancelled: the
+            // difference the chip is there to show at a glance.
+            MenuChip::Div => self.radio_cfg.as_ref().is_some_and(|c| match c.backend {
+                sdroxide_types::Backend::Lime => c.lime.aux.mode == DiversityMode::Combine,
+                sdroxide_types::Backend::SdrPlay => c.sdrplay.duo.mode == DiversityMode::Combine,
+                _ => false,
+            }),
             MenuChip::Sub => true,
             MenuChip::Tx => self.state.tx.tune,
             MenuChip::Rx | MenuChip::Disp | MenuChip::Sys => false,
@@ -830,6 +858,7 @@ impl SdroxideApp {
     fn short_strip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         let tx_capable = self.tx_capable();
         let sub = self.state.sub_rx_enabled;
+        let div = self.has_diversity();
         let gap = ui.spacing().item_spacing.x;
         let chip_h = crate::chrome::chip_height(ui, None);
         let fit = ReadoutFit::measure(ui);
@@ -854,10 +883,18 @@ impl SdroxideApp {
             tag_w,
             bm_w,
             ptt_w,
-            row1: if sub {
-                (3, widest(&["RX", "VFO", "SUB"]))
-            } else {
-                (2, widest(&["RX", "VFO"]))
+            row1: {
+                // The same list the row below is drawn from, in the same
+                // order: a chip counted but not drawn — or the reverse —
+                // breaks the plan around it.
+                let mut r1 = vec!["RX", "VFO"];
+                if div {
+                    r1.push("DIV");
+                }
+                if sub {
+                    r1.push("SUB");
+                }
+                (r1.len(), widest(&r1))
             },
             row2: if tx_capable {
                 (3, widest(&["TX", "DISP", "SYS"]))
@@ -940,6 +977,11 @@ impl SdroxideApp {
                     self.rx_menu(ui, btn, cmds);
                     let btn = crate::chrome::chip_sized(ui, self.state.split, "VFO", cell1);
                     self.vfo_menu(ui, btn, cmds, true);
+                    if div {
+                        let lit = self.menu_chip_lit(MenuChip::Div);
+                        let btn = crate::chrome::chip_sized(ui, lit, "DIV", cell1);
+                        self.div_menu(ui, btn, cmds);
+                    }
                     if sub {
                         let btn = crate::chrome::chip_sized(ui, true, "SUB", cell1);
                         self.sub_menu(ui, btn, cmds);
@@ -1036,6 +1078,7 @@ impl SdroxideApp {
                 // selector and the other VFO's frequency; the phone box shows
                 // only a tag, so its VFO menu carries them instead.
                 MenuChip::Vfo => self.vfo_menu(ui, btn, cmds, tier == crate::layout::Tier::Phone),
+                MenuChip::Div => self.div_menu(ui, btn, cmds),
                 MenuChip::Sub => self.sub_menu(ui, btn, cmds),
                 MenuChip::Tx => self.tx_menu(ui, btn, cmds),
                 MenuChip::Disp => self.disp_menu(ui, btn, cmds),
@@ -1089,6 +1132,18 @@ impl SdroxideApp {
             }
             crate::chrome::menu_caption(ui, "Tuning");
             self.vfo_controls(ui, cmds, true);
+        });
+    }
+
+    /// The DIV menu, shown only while two aerials are being combined.
+    fn div_menu(&mut self, ui: &mut egui::Ui, btn: egui::Response, cmds: &mut Vec<Command>) {
+        let btn = btn.on_hover_text(
+            "The diversity filter: which way it combines the two aerials, how fast it \
+             adapts, and holding it where it is",
+        );
+        crate::chrome::menu_popup(ui, &btn, |ui| {
+            crate::chrome::menu_caption(ui, "Diversity");
+            self.div_controls(ui, cmds, true);
         });
     }
 
@@ -2783,6 +2838,143 @@ impl SdroxideApp {
         });
     }
 
+    /// Whether two coherent aerials are being combined into the span on
+    /// screen — a LimeSDR's two chains, an RSPduo's two tuners. The source
+    /// says so; nothing here has to know which board it is.
+    fn has_diversity(&self) -> bool {
+        self.caps.as_ref().is_some_and(|c| c.diversity)
+    }
+
+    /// The filter's settings, from the radio's own configuration.
+    ///
+    /// Fetched here rather than waiting for the settings dialog to be opened:
+    /// these controls are on the strip precisely so that nobody has to open
+    /// it. One read of one small file, once, on a radio that has a filter.
+    fn div_cfg(&mut self) -> Option<(DiversityMode, f32, bool)> {
+        if self.radio_cfg.is_none() {
+            self.radio_cfg = self.ctrl.radio_config();
+        }
+        let cfg = self.radio_cfg.as_ref()?;
+        match cfg.backend {
+            sdroxide_types::Backend::Lime => {
+                Some((cfg.lime.aux.mode, cfg.lime.aux.rate, cfg.lime.aux.frozen))
+            }
+            sdroxide_types::Backend::SdrPlay => {
+                Some((cfg.sdrplay.duo.mode, cfg.sdrplay.duo.rate, cfg.sdrplay.duo.frozen))
+            }
+            // Every other interface with a second receiver keeps them apart.
+            _ => None,
+        }
+    }
+
+    /// Change the filter and remember the change.
+    ///
+    /// Two messages, and both are wanted: the pseudo-gain reaches the running
+    /// filter now, and the configuration is what it comes back as after a
+    /// reconnect. Saving without reopening is exactly what the settings
+    /// dialog's own live controls do.
+    fn div_edit(&mut self, cmds: &mut Vec<Command>, element: &str, db: f64) {
+        cmds.push(Command::SetGain { dir: Direction::Rx, element: element.to_string(), db });
+        // A restart is momentary — there is nothing about it to remember.
+        if element == DIV_RESET_ELEMENT {
+            return;
+        }
+        let Some(cfg) = self.radio_cfg.as_mut() else { return };
+        let (mode, rate, frozen) = match cfg.backend {
+            sdroxide_types::Backend::Lime => {
+                let a = &mut cfg.lime.aux;
+                (&mut a.mode, &mut a.rate, &mut a.frozen)
+            }
+            sdroxide_types::Backend::SdrPlay => {
+                let d = &mut cfg.sdrplay.duo;
+                (&mut d.mode, &mut d.rate, &mut d.frozen)
+            }
+            _ => return,
+        };
+        match element {
+            DIV_MODE_ELEMENT => {
+                *mode = if db >= 0.5 { DiversityMode::Combine } else { DiversityMode::Cancel }
+            }
+            DIV_RATE_ELEMENT => *rate = db as f32,
+            DIV_FREEZE_ELEMENT => *frozen = db >= 0.5,
+            _ => return,
+        }
+        cmds.push(Command::SetRadioConfig { cfg: Box::new(cfg.clone()), reopen: false });
+    }
+
+    /// The DIV box: the diversity filter, on the strip because it is worked
+    /// while listening (issue #165).
+    fn div_module(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
+        let extra = (w - div_rows_w(ui)).clamp(0.0, RAIL_STRETCH_MAX);
+        crate::chrome::module_bare_h(ui, w, crate::chrome::MODULE_TALL_H, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(MODULE_ROW_SPACING, MODULE_ROW_SPACING);
+                ui.spacing_mut().slider_width = STRIP_RAIL_W + extra;
+                self.div_controls(ui, cmds, false);
+            });
+        });
+    }
+
+    /// The diversity filter's controls — the body of the DIV box, and of the
+    /// DIV menu. See [`crate::chrome::control_row`] for `narrow`.
+    ///
+    /// Which way it combines, how fast it chases, and holding it: the three
+    /// an operator reaches for with the waterfall in front of them. Everything
+    /// else about the filter — how many taps, what the second aerial's gain
+    /// is — is set once and left, and stays in Settings → Radio.
+    fn div_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, narrow: bool) {
+        let Some((mode, rate, frozen)) = self.div_cfg() else { return };
+        crate::chrome::control_row(ui, narrow, |ui| {
+            ui.label(RichText::new("DIV").size(11.0).strong());
+            // A cycling chip rather than a combo, for the same reason as the
+            // AGC chip: a combo inside a menu opens a second popup layer, and
+            // clicking it counts as "outside" and closes the menu it was
+            // opened from. Two settings is hardly a walk.
+            let combine = mode == DiversityMode::Combine;
+            if crate::chrome::chip(ui, combine, DIV_MODE_LABELS[usize::from(combine)])
+                .on_hover_text(
+                    "What the second aerial is for — click to swap.\n\n\
+                     CANCEL subtracts it from the first, in the gain, phase and delay that \
+                     make a local noise source line up on both: the DSP form of a \
+                     noise-cancelling phaser. COMBINE adds the two in the phase that \
+                     reinforces, weighted by how well each hears — diversity reception, \
+                     which fills in fades.",
+                )
+                .clicked()
+            {
+                self.div_edit(cmds, DIV_MODE_ELEMENT, f64::from(u8::from(!combine)));
+            }
+            if crate::chrome::chip(ui, frozen, "HOLD")
+                .on_hover_text(
+                    "Stop the filter moving. Reach for this the moment a null appears: a \
+                     filter left adapting will re-aim itself at whatever becomes loudest, \
+                     which on a quiet band is the station you are listening to.",
+                )
+                .clicked()
+            {
+                self.div_edit(cmds, DIV_FREEZE_ELEMENT, f64::from(u8::from(!frozen)));
+            }
+            if crate::chrome::chip(ui, false, "RESTART")
+                .on_hover_text("Zero the filter and find the null again.")
+                .clicked()
+            {
+                self.div_edit(cmds, DIV_RESET_ELEMENT, 1.0);
+            }
+        });
+        crate::chrome::control_row(ui, narrow, |ui| {
+            ui.label("Adapt").on_hover_text(
+                "How fast the filter chases: slow and steady at the left, converging inside \
+                 a fraction of a second and visibly hunting at the right. Start fast to find \
+                 the null, then HOLD it.",
+            );
+            let mut v = rate;
+            if crate::chrome::slider(ui, Slider::new(&mut v, 0.0..=1.0).show_value(false)).changed()
+            {
+                self.div_edit(cmds, DIV_RATE_ELEMENT, f64::from(v));
+            }
+        });
+    }
+
     /// The sub receiver's controls — the body of the SUB box, and of the SUB
     /// menu. See [`crate::chrome::control_row`] for `narrow`; `extra` widens
     /// the frequency field and the volume rail, and the popup passes 0.
@@ -3882,6 +4074,28 @@ impl RxChip {
     }
 }
 
+/// The width the DIV box wants: its two rows, whichever is wider.
+///
+/// A free function of nothing but the style, like [`tx_rows_fixed_w`], so
+/// `the_diversity_box_fits_its_rows` can price it without an app around it.
+/// The mode chip is measured at its longer label, because it cycles between
+/// the two and a box that shrank under the shorter one would move everything
+/// beside it every time the filter was switched.
+fn div_rows_w(ui: &egui::Ui) -> f32 {
+    let gap = MODULE_ROW_SPACING;
+    let top = crate::chrome::text_width(ui, "DIV", egui::FontId::proportional(11.0))
+        + gap
+        + crate::chrome::chip_width(ui, DIV_MODE_LABELS[1], None)
+        + gap
+        + crate::chrome::chip_width(ui, "HOLD", None)
+        + gap
+        + crate::chrome::chip_width(ui, "RESTART", None);
+    let bottom = crate::chrome::text_width(ui, "Adapt", egui::TextStyle::Body.resolve(ui.style()))
+        + gap
+        + STRIP_RAIL_W;
+    top.max(bottom) + 2.0 * crate::chrome::MODULE_MARGIN_X
+}
+
 /// The RX box's chip run in a mode: the six every mode carries, then whatever
 /// the mode itself brings — a subcarrier to read, a tone to gate on.
 fn rx_chips(mode: Mode) -> Vec<RxChip> {
@@ -4916,6 +5130,38 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// The DIV box's rows have to fit the width it reserved, at both of the
+    /// mode chip's labels — the box is planned once and the chip cycles under
+    /// it, so pricing the shorter one would push RESTART off the right-hand
+    /// edge every time the filter was switched to cancelling.
+    #[test]
+    fn the_diversity_box_fits_its_rows() {
+        let (ctx, input) = desktop_ctx();
+        let _ = ctx.run_ui(input, |ui| {
+            let room = div_rows_w(ui) - 2.0 * crate::chrome::MODULE_MARGIN_X;
+            for label in DIV_MODE_LABELS {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = MODULE_ROW_SPACING;
+                    ui.label(RichText::new("DIV").size(11.0).strong());
+                    crate::chrome::chip(ui, false, label);
+                    crate::chrome::chip(ui, false, "HOLD");
+                    crate::chrome::chip(ui, false, "RESTART");
+                    let took = ui.min_rect().width();
+                    assert!(took <= room + 0.5, "the {label} row took {took} of {room}");
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = MODULE_ROW_SPACING;
+                ui.spacing_mut().slider_width = STRIP_RAIL_W;
+                ui.label("Adapt");
+                let mut v = 0.5f32;
+                crate::chrome::slider(ui, Slider::new(&mut v, 0.0..=1.0).show_value(false));
+                let took = ui.min_rect().width();
+                assert!(took <= room + 0.5, "the adaptation row took {took} of {room}");
+            });
+        });
     }
 
     /// Lay the condensed TX box's rows and mic column out with real widgets at

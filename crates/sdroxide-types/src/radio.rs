@@ -2936,7 +2936,7 @@ impl LimeAuxRole {
 /// the one the configuration and the wire format live in and it must not depend
 /// on the DSP crate. Shared by every backend that has a second receiver to
 /// spare: a LimeSDR's other chain ([`LimeAuxConfig`]) and an RSPduo's other
-/// tuner ([`SdrPlayDiversity`]).
+/// tuner ([`SdrPlayDuo`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DiversityMode {
     /// Subtract what the second aerial hears from what the first does: the DSP
@@ -3026,6 +3026,21 @@ pub struct LimeAuxConfig {
 /// The longest adaptive filter a settings panel offers, matching
 /// `sdroxide_dsp::Diversity::MAX_TAPS`.
 pub const DIVERSITY_MAX_TAPS: u8 = 64;
+
+/// The pseudo-gain elements a diversity filter is driven through, whichever
+/// backend is running one.
+///
+/// One set of names rather than one per backend, because the main window's
+/// controls are one set too: the strip knows a filter is running from
+/// [`crate::DeviceCaps::diversity`] and drives it through these, without
+/// having to know whether it is a LimeSDR's second chain or an RSPduo's second
+/// tuner behind them. `DIV_MODE_ELEMENT` carries [`DiversityMode`]'s index;
+/// `DIV_RESET_ELEMENT` is momentary.
+pub const DIV_MODE_ELEMENT: &str = "DIVMODE";
+pub const DIV_RATE_ELEMENT: &str = "DIVRATE";
+pub const DIV_TAPS_ELEMENT: &str = "DIVTAPS";
+pub const DIV_FREEZE_ELEMENT: &str = "DIVFREEZE";
+pub const DIV_RESET_ELEMENT: &str = "DIVRESET";
 
 /// What a filter of this length costs on the sample path, for a panel that
 /// would otherwise let someone ask for 64 taps at 40 Msps and wonder why the
@@ -3236,14 +3251,16 @@ impl LimeConfig {
     pub const IQ_CORRECTION_ELEMENT: &'static str = "IQCORR";
     /// Momentary: any value at or above 0.5 runs a calibration now.
     pub const CALIBRATE_ELEMENT: &'static str = "CAL";
-    /// The second chain and the diversity filter, through the same door.
-    /// `DIVMODE` is [`DiversityMode`]'s index; `DIVRESET` is momentary.
+    /// The second chain and the diversity filter, through the same door. The
+    /// filter's own names are the shared ones ([`DIV_MODE_ELEMENT`] and
+    /// friends), which is what lets the main strip drive it without knowing
+    /// which board it is.
     pub const AUX_GAIN_ELEMENT: &'static str = "AUXGAIN";
-    pub const DIV_MODE_ELEMENT: &'static str = "DIVMODE";
-    pub const DIV_RATE_ELEMENT: &'static str = "DIVRATE";
-    pub const DIV_TAPS_ELEMENT: &'static str = "DIVTAPS";
-    pub const DIV_FREEZE_ELEMENT: &'static str = "DIVFREEZE";
-    pub const DIV_RESET_ELEMENT: &'static str = "DIVRESET";
+    pub const DIV_MODE_ELEMENT: &'static str = DIV_MODE_ELEMENT;
+    pub const DIV_RATE_ELEMENT: &'static str = DIV_RATE_ELEMENT;
+    pub const DIV_TAPS_ELEMENT: &'static str = DIV_TAPS_ELEMENT;
+    pub const DIV_FREEZE_ELEMENT: &'static str = DIV_FREEZE_ELEMENT;
+    pub const DIV_RESET_ELEMENT: &'static str = DIV_RESET_ELEMENT;
     /// The predistortion loop, likewise. `PSRESET` is momentary and forgets
     /// the table as well as the alignment.
     pub const PS_BINS_ELEMENT: &'static str = "PSBINS";
@@ -4701,7 +4718,7 @@ impl SdrPlayDuoTuner {
     }
 
     /// The other one. There are two, so which tuner carries the second aerial
-    /// is arithmetic rather than a setting — see [`SdrPlayDiversity`].
+    /// is arithmetic rather than a setting — see [`SdrPlayDuo`].
     pub fn other(self) -> SdrPlayDuoTuner {
         match self {
             SdrPlayDuoTuner::Tuner1 => SdrPlayDuoTuner::Tuner2,
@@ -4718,32 +4735,73 @@ impl SdrPlayDuoTuner {
     }
 }
 
+/// What an RSPduo's **second** tuner is for (issue #153, #165).
+///
+/// Appended-to rather than reordered: this is serde-serialised into
+/// `radio.json` by name, but it also rides the wire, where the variant
+/// *index* is what is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SdrPlayDuoRole {
+    /// Combined with the first: a second aerial, to null a noise source or to
+    /// ride out a fade. See [`DiversityMode`].
+    #[default]
+    Diversity,
+    /// A radio of its own, on its own frequency — HF on one tuner and VHF on
+    /// the other, in two tabs, from one board.
+    ///
+    /// Both radios must be configured for it: whichever opens the device
+    /// first is what puts it in dual-tuner mode, and a tuner is only ever
+    /// handed to a second radio by a session that was opened expecting one.
+    SecondRadio,
+}
+
+impl SdrPlayDuoRole {
+    pub const ALL: [SdrPlayDuoRole; 2] = [SdrPlayDuoRole::Diversity, SdrPlayDuoRole::SecondRadio];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SdrPlayDuoRole::Diversity => "A second aerial (diversity / QRM suppression)",
+            SdrPlayDuoRole::SecondRadio => "A second radio, on its own frequency",
+        }
+    }
+}
+
 /// The RSPduo's **second** tuner, and what is done with it (issue #153).
 ///
 /// An RSPduo is two complete tuners on one board sharing one reference clock
-/// and one ADC clock, and that is the property this rests on: run both and
-/// they hear the same span at the same instant, with a relative phase set by
-/// the aerials and the feedlines rather than by chance. Two aerials like that
-/// can be subtracted to null a local noise source, or added to ride out a
-/// fade — the same two jobs the LimeSDR's second chain does, through the same
-/// [`DiversityMode`] and the same adaptive filter.
+/// and one ADC clock. Run both and they hear their spans at the same instant
+/// from the same clock, which is what makes two aerials on them *coherent* —
+/// a relative phase set by the aerials and the feedlines rather than by
+/// chance. Two aerials like that can be subtracted to null a local noise
+/// source, or added to ride out a fade: the same two jobs the LimeSDR's second
+/// chain does, through the same [`DiversityMode`] and the same adaptive
+/// filter.
+///
+/// They do not have to be combined, though. The tuners are separately
+/// tunable, so the other one can instead be a **second radio** — HF in one tab
+/// and VHF in another, off one board ([`SdrPlayDuoRole::SecondRadio`]).
 ///
 /// The tuner this runs on is the one [`SdrPlayConfig::duo_tuner`] is not.
 ///
 /// Dual-tuner operation is not free of constraints: the API fixes the ADC at
 /// 6 MHz and hands back a 2 Msps stream from a low IF, so the widest span
 /// available with both tuners running is 2 MHz (1.536 MHz of it inside the
-/// analog filter). The driver clamps the configured rate rather than
-/// refusing to open.
+/// analog filter) — and that span is the *session's*, so a second radio
+/// adopts whatever the first one opened at. The driver clamps the configured
+/// rate rather than refusing to open.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SdrPlayDiversity {
-    /// Run both tuners and combine them. Off leaves the RSPduo in
-    /// single-tuner mode, which is the only setting that costs nothing.
+pub struct SdrPlayDuo {
+    /// Run both tuners. Off leaves the RSPduo in single-tuner mode, which is
+    /// the only setting that costs nothing.
     ///
     /// Changing this reopens the device: the mode is fixed at selection time,
     /// before the tuners are configured.
     pub enabled: bool,
+    /// What the second tuner is for. Defaults to combining, which is what
+    /// [`Self::enabled`] meant on its own before there was a choice — so a
+    /// configuration written by an older build keeps doing what it did.
+    pub role: SdrPlayDuoRole,
     /// Cancel or combine.
     pub mode: DiversityMode,
     /// LNA state for the second tuner, its own because the two aerials are
@@ -4764,10 +4822,11 @@ pub struct SdrPlayDiversity {
     pub frozen: bool,
 }
 
-impl Default for SdrPlayDiversity {
+impl Default for SdrPlayDuo {
     fn default() -> Self {
-        SdrPlayDiversity {
+        SdrPlayDuo {
             enabled: false,
+            role: SdrPlayDuoRole::Diversity,
             mode: DiversityMode::Cancel,
             // The same mid-ladder default the main tuner has, and for the same
             // reason: state 0 on a real antenna overloads the ADC.
@@ -4819,12 +4878,15 @@ pub struct SdrPlayConfig {
     /// Empty leaves the device's default.
     pub antenna: String,
     /// RSPduo only: which tuner to run — and, with
-    /// [`SdrPlayDiversity::enabled`], which of the two is the main aerial.
+    /// [`SdrPlayDuo::enabled`], which of the two this radio listens on.
     pub duo_tuner: SdrPlayDuoTuner,
     /// RSPdx only: HDR mode below 2 MHz.
     pub hdr: bool,
-    /// RSPduo only: run the other tuner too, and combine the pair.
-    pub diversity: SdrPlayDiversity,
+    /// RSPduo only: run the other tuner too — combined with this one, or as a
+    /// radio of its own. Read from `radio.json` under either name: the block
+    /// was called `diversity` when combining was all it could do.
+    #[serde(alias = "diversity")]
+    pub duo: SdrPlayDuo,
 }
 
 impl Default for SdrPlayConfig {
@@ -4844,7 +4906,7 @@ impl Default for SdrPlayConfig {
             antenna: String::new(),
             duo_tuner: SdrPlayDuoTuner::Tuner1,
             hdr: false,
-            diversity: SdrPlayDiversity::default(),
+            duo: SdrPlayDuo::default(),
         }
     }
 }
@@ -4872,15 +4934,16 @@ impl SdrPlayConfig {
     pub const DAB_NOTCH_ELEMENT: &'static str = "DABNOTCH";
     pub const HDR_ELEMENT: &'static str = "HDR";
     /// The RSPduo's second tuner and the diversity filter, through the same
-    /// door. `DIVMODE` is [`DiversityMode`]'s index; `DIVRESET` is momentary.
-    /// The two gains are carried negated, like the main tuner's.
+    /// door — the filter's names being the shared ones ([`DIV_MODE_ELEMENT`]
+    /// and friends). The two gains are carried negated, like the main
+    /// tuner's.
     pub const AUX_LNA_ELEMENT: &'static str = "AUXLNA";
     pub const AUX_IF_GAIN_ELEMENT: &'static str = "AUXIF";
-    pub const DIV_MODE_ELEMENT: &'static str = "DIVMODE";
-    pub const DIV_RATE_ELEMENT: &'static str = "DIVRATE";
-    pub const DIV_TAPS_ELEMENT: &'static str = "DIVTAPS";
-    pub const DIV_FREEZE_ELEMENT: &'static str = "DIVFREEZE";
-    pub const DIV_RESET_ELEMENT: &'static str = "DIVRESET";
+    pub const DIV_MODE_ELEMENT: &'static str = DIV_MODE_ELEMENT;
+    pub const DIV_RATE_ELEMENT: &'static str = DIV_RATE_ELEMENT;
+    pub const DIV_TAPS_ELEMENT: &'static str = DIV_TAPS_ELEMENT;
+    pub const DIV_FREEZE_ELEMENT: &'static str = DIV_FREEZE_ELEMENT;
+    pub const DIV_RESET_ELEMENT: &'static str = DIV_RESET_ELEMENT;
 
     /// IF gain reduction limits, in dB, from the API (`NORMAL_MIN_GR` and
     /// `MAX_BB_GR`).
@@ -4926,7 +4989,7 @@ impl SdrPlayConfig {
     /// setting left over from an RSPduo must not put an RSP1A into a mode it
     /// does not have.
     pub fn wants_dual_tuner(&self) -> bool {
-        self.diversity.enabled
+        self.duo.enabled
     }
 
     /// The tuner the second aerial is on: the one [`Self::duo_tuner`] is not.
@@ -5931,21 +5994,34 @@ mod tests {
             // And one tuner, which is the only setting that costs nothing: a
             // config written before dual-tuner support must not come back
             // asking an RSPduo for a mode the operator never chose.
-            assert!(!cfg.sdrplay.diversity.enabled, "after loading {json}");
+            assert!(!cfg.sdrplay.duo.enabled, "after loading {json}");
             assert!(!cfg.sdrplay.wants_dual_tuner());
         }
         // A configuration that *does* ask for it keeps the rest of the block's
         // defaults rather than zeroing them — a filter with no taps and no
-        // adaptation rate would combine nothing at all.
+        // adaptation rate would combine nothing at all. Written under the name
+        // the block had in 1.5.x, when combining was all the second tuner
+        // could do: that file must keep working, and keep meaning diversity.
         let dual: RadioConfig =
             serde_json::from_str(r#"{"sdrplay": {"diversity": {"enabled": true}}}"#)
                 .expect("parses");
         assert!(dual.sdrplay.wants_dual_tuner());
-        assert_eq!(dual.sdrplay.diversity.taps, SdrPlayDiversity::default().taps);
-        assert_eq!(dual.sdrplay.diversity.mode, DiversityMode::Cancel);
+        assert_eq!(dual.sdrplay.duo.role, SdrPlayDuoRole::Diversity);
+        assert_eq!(dual.sdrplay.duo.taps, SdrPlayDuo::default().taps);
+        assert_eq!(dual.sdrplay.duo.mode, DiversityMode::Cancel);
         // The second aerial is on the tuner the first one is not.
         assert_eq!(dual.sdrplay.duo_tuner, SdrPlayDuoTuner::Tuner1);
         assert_eq!(dual.sdrplay.aux_tuner(), SdrPlayDuoTuner::Tuner2);
+        // The name it is written under now reads the same way, and the second
+        // tuner can be a radio of its own instead.
+        let split: RadioConfig = serde_json::from_str(
+            r#"{"sdrplay": {"duo": {"enabled": true, "role": "SecondRadio"},
+                            "duo_tuner": "Tuner2"}}"#,
+        )
+        .expect("parses");
+        assert!(split.sdrplay.wants_dual_tuner());
+        assert_eq!(split.sdrplay.duo.role, SdrPlayDuoRole::SecondRadio);
+        assert_eq!(split.sdrplay.aux_tuner(), SdrPlayDuoTuner::Tuner1);
         // And the new variant round-trips by name, which is how `Backend` is
         // stored — appending it must not have renumbered anything.
         let sdrplay: RadioConfig =

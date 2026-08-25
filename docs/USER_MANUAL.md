@@ -5758,9 +5758,10 @@ service, or the device.
   and the RSPduo's tuner 1 (50 Ω / Hi-Z). Applied live; the Hi-Z inputs have
   a shorter LNA ladder, which the clamping above absorbs.
 - **Tuner** (RSPduo) — which of the two tuners to run, chosen when the device
-  opens. With **Run both tuners** on (below) this names the tuner your *main*
-  aerial is on, and the other one carries the second. Master/slave operation —
-  sharing the receiver with another application — is not supported.
+  opens. With **Run both tuners** on (below) this names the tuner *this radio*
+  listens on: the other one carries the second aerial, or belongs to the second
+  radio. Master/slave operation — sharing the receiver with another
+  application — is not supported.
 - **HDR mode** (RSPdx / RSPdx R2) — the high-dynamic-range path below 2 MHz.
 - **Bias tee** — about 4.7 V DC up the coax for an active antenna (every model
   except the original RSP1).
@@ -5774,7 +5775,7 @@ in the log: raise the LNA state, lower the IF gain, or turn the AGC on. If the
 RSP is unplugged — or the service restarted under sdroxide — it notices within
 a few seconds and reconnects by itself when the device returns.
 
-##### The RSPduo's second tuner: diversity and QRM suppression
+##### The RSPduo's second tuner
 
 > **Help wanted — this has not been verified against an RSPduo.** Dual-tuner
 > operation here is written from SDRplay's API rather than measured on the
@@ -5783,11 +5784,23 @@ a few seconds and reconnects by itself when the device returns.
 > numbers or by arrival order, and how deep a null the filter is reaching.
 
 An RSPduo is two complete tuners on one board, clocked from one reference. Run
-both — **Run both tuners** on the Radio tab — and they hear the same span at
-the same instant, with a relative phase set by the aerials and the feedlines
-rather than by chance. That is what makes it possible to combine them, and it
-is the same arrangement (and the same adaptive filter) as the LimeSDR's second
-receive chain in [§6.2.17](#6217-limesdr-family--limerfe-limesuite).
+both — **Run both tuners** on the Radio tab — and there are two things worth
+doing with the other one. **Used for** picks:
+
+- **A second aerial (diversity / QRM suppression)** — the two are *combined*.
+  Because they are clocked together they hear their spans at the same instant,
+  with a relative phase set by the aerials and the feedlines rather than by
+  chance, and that is what makes combining them possible. Same arrangement, and
+  the same adaptive filter, as the LimeSDR's second receive chain in
+  [§6.2.17](#6217-limesdr-family--limerfe-limesuite).
+- **A second radio, on its own frequency** — the two are left *apart*. The
+  tuners tune separately, so one RSPduo can be an HF radio in one tab and a VHF
+  radio in another; see *Both tuners as two radios* below.
+
+Either takes effect on **Apply**: which mode the board runs in is chosen when
+it is opened.
+
+##### Diversity and QRM suppression
 
 **What to do with it** picks between the two jobs:
 
@@ -5827,9 +5840,18 @@ The rest of the controls:
   **Hold**. A filter left adapting will re-aim itself at whatever becomes
   loudest, which on a quiet band is the station you are listening to.
 
-Everything except **Run both tuners** itself applies as you change it —
-finding a null is done by adjusting and listening. Turning the mode on or off
-reopens the device, because the API fixes it when the RSPduo is selected.
+Everything except **Run both tuners** and **Used for** applies as you change it
+— finding a null is done by adjusting and listening. Those two reopen the
+device, because the API fixes the mode when the RSPduo is selected.
+
+**The three you use while listening are on the main window.** With a filter
+running, the strip grows a **DIV** box (a **DIV** menu on a narrow window):
+the mode — **CANCEL** or **COMBINE**, click to swap — **HOLD**, **RESTART**,
+and the adaptation rail. That is the whole workflow with the waterfall in front
+of you: adaptation to the right, watch the noise drop away, **HOLD**. What stays
+in the settings dialog is what you set once — the filter length, and the second
+aerial's own gains. The box appears only while a filter is actually running,
+so it is also the confirmation that one is.
 
 **What running both tuners costs.** The API puts the ADC at a fixed 6 MHz and
 hands back 2 Msps from a low IF, so **2 Msps is the widest span** with both
@@ -5851,6 +5873,43 @@ If the second tuner stops delivering, the first one carries on alone and the
 log says so: the receiver keeps working and the filter stops, rather than the
 other way round. Asking for both tuners on any other RSP — a setting left
 behind by an RSPduo — is reported on screen and ignored.
+
+##### Both tuners as two radios
+
+Set **Used for** to *A second radio, on its own frequency* and the pair is not
+combined at all: each tuner is a receiver of its own, tuned where you like.
+One RSPduo then serves two radio tabs — HF in one and VHF in the other — from
+one board and one connection to the API service.
+
+Both radios have to be set up for it, because whichever one opens the board is
+what puts it into dual-tuner mode:
+
+1. On the first radio: pick the RSPduo, tick **Run both tuners**, set **Used
+   for** to *A second radio*, and set **This radio's tuner** to the one its
+   aerial is on. **Apply**.
+2. Add a second radio (**Settings → Radio → +**,
+   [§2.17](#217-running-more-than-one-radio)), give it the **same receiver**
+   (the same serial), the **other** tuner, and the same two settings.
+   **Apply**.
+
+Either order works, and either radio may be started first; the second one to
+open finds the board already running and takes the tuner that is free. Closing
+one leaves the other streaming, and the board is only handed back to the
+service when the last radio lets go.
+
+What the two share, because the hardware does:
+
+- **The sample rate.** One ADC clock and one decimator setting serve both, so
+  whichever radio opened the board sets the rate and the other adopts it —
+  its own rate setting is remembered but not used while it is the second one
+  in. The dual-tuner ceiling of 2 Msps applies as always.
+- **The reference trim** (*Frequency correction*), which is the board's.
+- **The notch filters and bias tee** are *not* shared: those are per tuner, and
+  each radio drives its own.
+
+Neither radio transmits — no RSP does — and a tuner belongs to one radio at a
+time: a second radio pointed at a tuner that is already running, or at the
+second tuner of a board being used for diversity, is told so and does not open.
 
 #### 6.2.9 Airspy HF+ (USB)
 
@@ -10585,11 +10644,15 @@ All in [§6.2.8](#628-sdrplay-rsp-usb):
   (20 dB is maximum gain, 59 minimum) and **LNA state 0 is maximum** — the
   default of 4 exists because full front-end gain on a real antenna overloads
   the ADC.
-- An **RSPduo** runs one tuner at a time, chosen at open — or **both**, for
-  diversity and QRM suppression, which fixes the ADC clock and caps the span at
-  2 Msps (not yet verified against the hardware). Master/slave mode, sharing
-  the receiver with another application, is not supported. **HDR mode** below
-  2 MHz is the RSPdx / RSPdx R2 path.
+- An **RSPduo** runs one tuner at a time, chosen at open — or **both**, either
+  combined (diversity and QRM suppression, whose controls are the **DIV** box
+  on the main strip) or as two radios on their own frequencies, HF in one tab
+  and VHF in another. Both arrangements fix the ADC clock and cap the span at
+  2 Msps, and neither is yet verified against the hardware. Two radios on one
+  board both need **Run both tuners** set, because whichever opens it first is
+  what puts it in that mode. Master/slave mode, sharing the receiver with
+  another application, is not supported. **HDR mode** below 2 MHz is the
+  RSPdx / RSPdx R2 path.
 - Above 6.048 Msps the ADC trades bit depth for speed — worth knowing before
   picking 10 Msps for weak-signal work.
 

@@ -250,6 +250,10 @@ pub struct SdroxideApp {
     hackrf_devices: Vec<sdroxide_types::HackRfDevice>,
     /// RSPs the SDRplay API service reported on the last Rescan.
     sdrplay_devices: Vec<sdroxide_types::SdrPlayDevice>,
+    /// The interface whose device list was last asked for, so switching to
+    /// another one inside the open dialog asks for that one's — once, not
+    /// every frame. `None` while the dialog is shut.
+    iface_probed: Option<sdroxide_types::Backend>,
     /// SoapySDR devices from the last enumeration (dialog-open on the SoapySDR
     /// interface, or Rescan). `None` = not enumerated yet, which is a different
     /// thing from "enumerated and found nothing".
@@ -970,6 +974,7 @@ impl SdroxideApp {
             hydrasdr_devices: Vec::new(),
             hackrf_devices: Vec::new(),
             sdrplay_devices: Vec::new(),
+            iface_probed: None,
             soapy_devices: None,
             tci_test_result: None,
             icomnet_test_result: None,

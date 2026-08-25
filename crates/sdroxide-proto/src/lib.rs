@@ -587,7 +587,7 @@ use sdroxide_types::{
 /// **87** — an RSPduo can run *both* of its tuners and combine them, the same
 /// way a LimeSDR's second chain is combined at v82 (issue #153).
 /// [`sdroxide_types::SdrPlayConfig`] gained a `diversity` block —
-/// [`sdroxide_types::SdrPlayDiversity`] — carrying whether the second tuner
+/// [`sdroxide_types::SdrPlayDuo`] — carrying whether the second tuner
 /// runs at all, its own two gains, and the adaptive filter's mode, length,
 /// rate and hold.
 ///
@@ -617,7 +617,28 @@ use sdroxide_types::{
 /// mode keeps its number — but a v88 client handed `Aprs` has no variant to
 /// decode it into and desynchronises on everything after it, rather than
 /// failing on the field itself.
-pub const PROTO_VERSION: u16 = 89;
+///
+/// **90** — an RSPduo's two tuners can be two *radios* rather than two aerials
+/// combined, and the diversity filter's controls have moved to the main strip
+/// (issue #165). [`sdroxide_types::SdrPlayDuo`] gained `role`
+/// ([`sdroxide_types::SdrPlayDuoRole`]): whether the second tuner is combined
+/// with the first or handed to a radio of its own.
+/// [`sdroxide_types::DeviceCaps`] gained `diversity`, which is what tells the
+/// strip that a filter is running without it having to know which backend has
+/// one.
+///
+/// Fields appended to the radio configuration and to the capabilities. Both
+/// ride the wire — the configuration in a command and an event, the
+/// capabilities in an event of their own — so a v89 peer would read the tail
+/// of any of them as garbage; the handshake's equality test is what stops it
+/// trying.
+///
+/// The block itself is written under a new name with this version — `duo`
+/// rather than `diversity`, since combining is no longer all it does — which
+/// is invisible here: postcard numbers fields by position and never sends a
+/// name. It is `radio.json` that the old name matters to, and a serde alias
+/// keeps those files loading.
+pub const PROTO_VERSION: u16 = 90;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1512,8 +1533,9 @@ mod tests {
                 serial: "1809014C9B".into(),
                 sample_rate_hz: 1_000_000.0,
                 duo_tuner: sdroxide_types::SdrPlayDuoTuner::Tuner2,
-                diversity: sdroxide_types::SdrPlayDiversity {
+                duo: sdroxide_types::SdrPlayDuo {
                     enabled: true,
+                    role: sdroxide_types::SdrPlayDuoRole::SecondRadio,
                     mode: sdroxide_types::DiversityMode::Combine,
                     lna_state: 6,
                     if_gr_db: 27,

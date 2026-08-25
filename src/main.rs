@@ -2114,8 +2114,9 @@ fn sdrplay_caps(src: &sdrplay_source::SdrPlaySource) -> DeviceCaps {
         // With both RSPduo tuners running the API fixes the ADC clock and
         // downconverts from a low IF, which leaves a much shorter ladder —
         // and publishing the long one would offer spans this session cannot
-        // reach.
-        sample_rates: if src.dual_tuner() {
+        // reach. True however the pair is being used: two radios sharing the
+        // board are as bound by its one clock as one radio combining them.
+        sample_rates: if src.dual_tuner() || src.split_tuner() {
             SdrPlayConfig::DUAL_SAMPLE_RATES.to_vec()
         } else {
             SdrPlayConfig::SAMPLE_RATES.to_vec()
@@ -2137,6 +2138,9 @@ fn sdrplay_caps(src: &sdrplay_source::SdrPlaySource) -> DeviceCaps {
             },
         ],
         antennas_rx: src.antennas().to_vec(),
+        // Two aerials arriving as one span: what puts the filter's controls on
+        // the main strip rather than only in the settings dialog (issue #165).
+        diversity: src.dual_tuner(),
         ..DeviceCaps::default()
     }
 }
