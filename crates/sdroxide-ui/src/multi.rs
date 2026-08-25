@@ -620,9 +620,9 @@ impl MultiApp {
                             RichText::new(if tab.enabled { "ON" } else { "OFF" }).size(11.0),
                         );
                         let tip = if tab.enabled {
-                            "Switch this radio off: its interface is closed, its settings are kept"
+                            crate::chrome::POWER_OFF_TIP
                         } else {
-                            "Switch this radio on"
+                            crate::chrome::POWER_ON_TIP
                         };
                         if power.on_hover_text(tip).clicked() {
                             actions.push(StripAction::Power { id, on: !tab.enabled });

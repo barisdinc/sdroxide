@@ -49,34 +49,36 @@ use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
 use sdroxide_types::{CwKeying, IcomNetConfig, IcomRxSource, Mode, TxTelemetry};
 
 use crate::dial::Dial;
+use crate::session_trace::TraceStore;
 
-/// The last session's trace, kept after the source is dropped.
-///
-/// A connection that fails or misbehaves is usually replaced immediately — by
-/// the engine's background retry, or by the operator pressing Apply — and the
-/// trace of the *interesting* session would go with it. Holding the most recent
-/// one here is what lets Settings → Radio still offer it afterwards.
-static LAST_TRACE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The last session's trace of each radio, kept after the source is dropped.
+/// See [`crate::session_trace`] — including why there is one per radio rather
+/// than one for the process.
+static TRACES: TraceStore = TraceStore::new();
 
-/// The most recent Icom LAN session trace, for a bug report.
-pub fn last_diagnostics() -> Option<String> {
-    LAST_TRACE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+/// What tells two Icoms on one LAN apart, in the one form both sides of the
+/// question can spell: the source knows what it dialled, and the tab asking for
+/// the report knows what its own `radio.json` says.
+fn session_key(cfg: &IcomNetConfig) -> String {
+    format!("{}:{}", cfg.address.trim().to_ascii_lowercase(), cfg.control_port)
 }
 
-/// The trace if there is one, and an explanation of what to do with it either
-/// way — the settings dialog offers the button whether or not a session has run.
-pub fn diagnostics_or_hint() -> String {
-    match last_diagnostics() {
+/// The trace of the radio *this* configuration names, and an explanation of
+/// what to do with it either way — the settings dialog offers the button
+/// whether or not a session has run.
+pub fn diagnostics_or_hint(cfg: &IcomNetConfig) -> String {
+    match TRACES.get(&session_key(cfg)) {
         Some(t) => format!("{t}\n{}\n", sdroxide_icomnet::FIELD_REPORT_HINT),
         None => format!(
-            "No Icom LAN session has run yet — connect to a radio first.\n\n{}\n",
+            "No Icom LAN session has run yet for {} — connect to that radio first.\n\n{}\n",
+            if cfg.address.trim().is_empty() { "this radio" } else { cfg.address.trim() },
             sdroxide_icomnet::FIELD_REPORT_HINT
         ),
     }
 }
 
-fn record_trace(dev: &IcomNetDevice) {
-    *LAST_TRACE.lock().unwrap_or_else(|e| e.into_inner()) = Some(dev.trace().dump());
+fn record_trace(key: &str, dev: &IcomNetDevice) {
+    TRACES.record(key, dev.trace().dump());
 }
 
 /// The IF the radio puts in the audio stream when its LAN output is set to IF.
@@ -128,6 +130,11 @@ const SCOPE_DB_PER_UNIT: f32 = 0.5;
 
 pub struct IcomNetSource {
     dev: IcomNetDevice,
+    /// Which radio this session is with, for [`TRACES`]. Held rather than
+    /// rebuilt from the configuration on the way out: the trace has to be
+    /// filed under the address it was actually dialled at, even if the
+    /// operator has retyped that address since.
+    key: String,
     audio: rtrb::Consumer<f32>,
     tx: Option<rtrb::Producer<f32>>,
     rate: f64,
@@ -200,10 +207,11 @@ impl IcomNetSource {
             },
             trace.clone(),
         );
+        let key = session_key(cfg);
         let dev = match dev {
             Ok(dev) => dev,
             Err(e) => {
-                *LAST_TRACE.lock().unwrap_or_else(|x| x.into_inner()) = Some(trace.dump());
+                TRACES.record(&key, trace.dump());
                 return Err(e.into());
             }
         };
@@ -227,6 +235,7 @@ impl IcomNetSource {
 
         let mut src = IcomNetSource {
             dev,
+            key,
             audio,
             tx,
             rate: match rx_source {
@@ -838,14 +847,14 @@ impl IqSource for IcomNetSource {
     fn needs_reopen(&self) -> bool {
         if !self.dev.is_alive() {
             // The session that just died is the one worth reporting on.
-            record_trace(&self.dev);
+            record_trace(&self.key, &self.dev);
             return true;
         }
         false
     }
 
     fn release(&mut self) {
-        record_trace(&self.dev);
+        record_trace(&self.key, &self.dev);
         self.dev.shutdown();
     }
 }
@@ -888,6 +897,40 @@ mod tests {
                 .unwrap();
         let src = IcomNetSource::open(&cfg(&sim)).expect("open");
         assert_eq!(src.center_hz(), 7_074_000.0, "the radio's own dial, not 0");
+    }
+
+    /// Two Icoms on one LAN, each keeping its own session trace.
+    ///
+    /// The trace is what a field report is built from, and a station with an
+    /// IC-7300 and an IC-9700 on it is the ordinary case. One slot for the
+    /// process handed whichever of them last hung up to whoever pressed the
+    /// button — so the 9700's tab answered with the 7300's conversation, which
+    /// is worse than answering with nothing (issue #169).
+    #[test]
+    fn each_radio_keeps_its_own_session_trace() {
+        let a = Sim::start(SimOptions { civ_address: 0xB6, scope: false, ..Default::default() })
+            .unwrap();
+        let b = Sim::start(SimOptions { civ_address: 0xA2, scope: false, ..Default::default() })
+            .unwrap();
+        let (ca, cb) = (cfg(&a), cfg(&b));
+        let mut sa = IcomNetSource::open(&ca).expect("open the first radio");
+        let mut sb = IcomNetSource::open(&cb).expect("open the second radio");
+        // Both sessions end, in the order that used to decide the answer.
+        sa.release();
+        sb.release();
+
+        // Each radio's CI-V address is in its own frames and nowhere else, so
+        // it says which conversation came back.
+        let (ra, rb) = (diagnostics_or_hint(&ca), diagnostics_or_hint(&cb));
+        assert!(ra.contains("fe fe b6"), "the first radio's report is not its own session");
+        assert!(!ra.contains("fe fe a2"), "the first radio's report carries the second's session");
+        assert!(rb.contains("fe fe a2"), "the second radio's report is not its own session");
+        assert!(!rb.contains("fe fe b6"), "the second radio's report carries the first's session");
+
+        // And a radio nothing has connected to says so, rather than handing
+        // over the nearest session it can find.
+        let never = IcomNetConfig { address: "192.0.2.7".into(), ..Default::default() };
+        assert!(diagnostics_or_hint(&never).contains("No Icom LAN session has run yet"));
     }
 
     #[test]

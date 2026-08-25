@@ -1486,11 +1486,7 @@ impl SdroxideApp {
     /// offers no switch — put its radio down and pick it back up.
     fn power_chip(&mut self, ui: &mut egui::Ui, on: bool, size: egui::Vec2) {
         let chip = crate::chrome::chip_power(ui, on, size);
-        let tip = if on {
-            "Switch this radio off: its interface is closed, its settings are kept"
-        } else {
-            "Switch this radio on"
-        };
+        let tip = if on { crate::chrome::POWER_OFF_TIP } else { crate::chrome::POWER_ON_TIP };
         if chip.on_hover_text(tip).clicked() {
             self.radio_tab_requests
                 .push(crate::app::RadioTabRequest::Power { id: self.radio_id, on: !on });

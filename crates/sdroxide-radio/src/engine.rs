@@ -1932,6 +1932,14 @@ const SKIM_TARGET_HZ: f64 = 192_000.0;
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(15);
 
+/// How long [`Engine::abandon_retry`] waits for the answer of an attempt it is
+/// throwing away. It is only ever called with the factory lock held, so the
+/// attempt has already finished and this covers the instruction between its
+/// releasing that lock and sending — never a whole open. A worker that died
+/// without answering drops its sender and is noticed at once rather than at
+/// the end of this.
+const ABANDON_WAIT: Duration = Duration::from_millis(250);
+
 /// How often the dial and mode are compared against what is in `session.json`.
 /// Only a change writes anything, and a clean exit flushes as well, so this
 /// interval only decides how much tuning a crash or a kill can lose.
@@ -6423,7 +6431,11 @@ impl Engine {
     /// The address we'd bind, when it is the very rig we are connected to as a
     /// TCI client.
     fn tci_backend_conflict(&self) -> Option<String> {
-        let radio = sdroxide_config::load_radio_config();
+        // This radio's scope, not the station's: on a station with more than
+        // one radio the free function is radio 0's file, so radio 1's server
+        // would be diagnosed against radio 0's backend — and either accuse it
+        // of a clash it does not have, or miss its own.
+        let radio = self.store.load_radio_config();
         if radio.backend != sdroxide_types::Backend::Tci {
             return None;
         }
@@ -8415,6 +8427,15 @@ impl Engine {
         // wins as soon as that one finishes.
         let opened = {
             let mut reopen = factory.lock().unwrap_or_else(|e| e.into_inner());
+            // Holding the factory means any attempt that was already in flight
+            // has finished. Its answer is stale — it was opening whatever the
+            // configuration said a moment ago — so it is let go of here rather
+            // than collected later, where `poll_reconnect` would adopt it on
+            // top of what the operator just asked for. That is what used to
+            // put a radio's interface straight back after it was switched off:
+            // the switch released the device, and the attempt already running
+            // claimed it again a moment later, with the switch reading OFF.
+            self.abandon_retry();
             reopen(center)
         };
         // Whatever the operator just chose starts the retry schedule over.
@@ -8428,6 +8449,26 @@ impl Engine {
                     .event_tx
                     .send(RadioEvent::Notice(Some(format!("Interface change failed: {e}"))));
             }
+        }
+    }
+
+    /// Throw away a background reconnect attempt, standing down whatever it
+    /// opened.
+    ///
+    /// Called only with the factory lock held, which is what bounds the wait:
+    /// the worker holds that lock across its whole open, so by the time this
+    /// runs the attempt has finished and its answer is at most one instruction
+    /// away. A source it did open is *released* rather than merely dropped —
+    /// an exclusively-claimed device has to be let go before its replacement
+    /// can have it, and that is the method that says so.
+    fn abandon_retry(&mut self) {
+        let Some(rx) = self.retry.take() else { return };
+        if let Ok(Ok((mut source, _))) = rx.recv_timeout(ABANDON_WAIT) {
+            debug!(source = %source.describe(), "dropping a reconnect the operator overtook");
+            source.release();
+        }
+        if let Some(j) = self.retry_join.take() {
+            let _ = j.join();
         }
     }
 

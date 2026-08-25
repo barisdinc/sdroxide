@@ -2084,8 +2084,9 @@ pub(in crate::app) fn settings_icomnet_tab(
                 if ui
                     .button("Copy diagnostic report")
                     .on_hover_text(
-                        "Copies the last session's handshake and CI-V trace to the clipboard, \
-                         for a bug report.",
+                        "Copies this radio's last session — its handshake and CI-V trace — \
+                         to the clipboard, for a bug report. This radio's, not the station's: \
+                         with two Icoms on the LAN each tab answers about its own address.",
                     )
                     .clicked()
                 {

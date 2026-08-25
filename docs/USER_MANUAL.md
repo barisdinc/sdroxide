@@ -1357,6 +1357,20 @@ stays exactly where it is. The tab stays too, with its name greyed, and its
 whole Settings → Radio page is still there to be read and edited. Press the
 switch again and the radio opens where it left off.
 
+It is *sdroxide's* switch rather than the radio's, and the difference matters
+on a station with more than one rig on it. What it lets go of is this end of
+the connection — the USB device, the serial CAT port, the LAN session — so
+sdroxide is demonstrably no longer holding that radio: the dongle can be
+unplugged, the port is free for another program, and the rig's network session
+is hung up. A transceiver with a power switch of its own is not touched by it
+and stays on, receiving into its own speaker; sdroxide has no way to press that
+switch and, having pressed it, no way to press it back. What is guaranteed is
+the transmit side: a radio that is off has no transmitter as far as sdroxide is
+concerned, so nothing — not PTT, not TUNE, not a digital-mode sequence, not a
+program on its built-in server — can key it until it is switched back on. That
+is on top of the station-wide interlock below, which applies to every radio
+that *is* switched on.
+
 The same switch is in the roster at the top of **Settings → Radio**, which is
 where the choice is easiest to see across all the radios at once — and on the
 main window itself, as the **⏻ power button** above the A/B selector in the
@@ -6175,7 +6189,10 @@ sdroxide follows it back after about a second.
 - **Test connection** — connect, report what the radio said it is, and
   disconnect.
 - **Copy diagnostic report** — the last session's handshake and CI-V trace, as
-  text.
+  text. It is *this* radio's session: with two Icoms on the LAN, each tab's
+  button answers about the address that tab is configured for, and a radio
+  nothing has connected to yet says so rather than handing over the other
+  one's conversation.
 
 
 #### 6.2.11 RTL-SDR over rtl_tcp (network dongles)

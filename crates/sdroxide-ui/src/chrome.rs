@@ -1343,6 +1343,23 @@ pub fn chip(ui: &mut Ui, selected: bool, text: impl Into<RichText>) -> Response 
     chip_impl(ui, selected, text.into(), None, Sense::click(), None)
 }
 
+/// What sdroxide's own power switch does, in the one place all three of its
+/// homes read it from: the frequency box, the tab strip and the settings
+/// roster.
+///
+/// It says what is let go of, because the alternative reading — that this is
+/// the rig's own power button — is a fair guess and a wrong one, and an
+/// operator who believed it would think a radio that is still connected had
+/// been switched off (issue #169).
+pub const POWER_OFF_TIP: &str = "Switch this radio off: sdroxide lets its interface go — the \
+     device released, a CAT port closed, a network session hung up — so it can neither receive \
+     nor transmit. Its settings are kept. This is sdroxide's switch, not the rig's: the radio \
+     itself stays powered.";
+
+/// The other half of [`POWER_OFF_TIP`].
+pub const POWER_ON_TIP: &str =
+    "Switch this radio on: its interface is opened again, where it was left";
+
 /// A chip carrying the IEC power symbol (⏻) instead of a label, at an exact
 /// size. The symbol is painted, not typed: no bundled font has U+23FB, so as
 /// text it would come out as a tofu box. It takes the ink the label would

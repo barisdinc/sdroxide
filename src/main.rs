@@ -20,6 +20,7 @@ mod rtlsdr_source;
 mod rx888_source;
 mod sdrplay_source;
 mod server_main;
+mod session_trace;
 mod smartsdr_source;
 mod spyserver_source;
 mod tci_source;

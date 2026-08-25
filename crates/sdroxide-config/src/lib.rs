@@ -483,6 +483,12 @@ impl Store {
         Store { scope: (id != 0).then_some(id) }
     }
 
+    /// Which radio this scope belongs to, as the roster numbers it. The station
+    /// scope answers 0, which is the radio it holds the files of.
+    pub fn radio_id(&self) -> u32 {
+        self.scope.unwrap_or(0)
+    }
+
     /// This scope's directory. Not created here; writers create it on demand.
     pub fn dir(&self) -> Result<PathBuf, ConfigError> {
         let root = config_dir()?;

@@ -3172,9 +3172,9 @@ impl SdroxideApp {
                         RichText::new(if chip.enabled { "ON" } else { "OFF" }).size(11.0),
                     )
                     .on_hover_text(if chip.enabled {
-                        "Switch this radio off: its interface is closed, its settings are kept"
+                        crate::chrome::POWER_OFF_TIP
                     } else {
-                        "Switch this radio on"
+                        crate::chrome::POWER_ON_TIP
                     })
                     .clicked()
                 {
