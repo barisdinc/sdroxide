@@ -486,6 +486,7 @@ mod tests {
             db_ceil: -20.0,
             bins,
             rows: Vec::new(),
+            rows_clocked: false,
         }
     }
 

@@ -184,8 +184,19 @@ impl SpectrumAnalyzer {
         }
         self.pending.extend_from_slice(iq);
 
-        while self.pending.len() >= self.fft_size {
-            for (w, (x, win)) in self.work.iter_mut().zip(self.pending.iter().zip(&self.window)) {
+        // Walk the buffer with an offset and compact it once at the end, rather
+        // than draining a hop off the front after every transform.
+        //
+        // `Vec::drain` from the front shifts everything after it down, so the
+        // old loop memmoved the whole remaining buffer once per transform: on a
+        // block of sixteen thousand samples through a 4096-point window that is
+        // eight shifts of some ten thousand complex samples apiece, tens of
+        // megabytes a second of pure copying, and it grows with the front end's
+        // rate. One compaction per block does the same job.
+        let mut at = 0;
+        while self.pending.len() - at >= self.fft_size {
+            let frame = &self.pending[at..at + self.fft_size];
+            for (w, (x, win)) in self.work.iter_mut().zip(frame.iter().zip(&self.window)) {
                 *w = x * win;
             }
             self.fft.process_with_scratch(&mut self.work, &mut self.scratch);
@@ -211,7 +222,10 @@ impl SpectrumAnalyzer {
                 }
             }
             self.transforms = self.transforms.wrapping_add(1);
-            self.pending.drain(..self.hop);
+            at += self.hop;
+        }
+        if at > 0 {
+            self.pending.drain(..at);
         }
     }
 
@@ -316,6 +330,7 @@ impl SpectrumAnalyzer {
             db_ceil,
             bins,
             rows: Vec::new(),
+            rows_clocked: false,
         }
     }
 }

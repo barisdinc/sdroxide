@@ -67,6 +67,28 @@ struct Shared {
     remap_sampler: wgpu::Sampler,
 }
 
+/// How many rows this repaint appends.
+///
+/// `carried` is what the frame brought and has not been written yet;
+/// `wall_clock` is what the app's own elapsed-time accumulator would scroll.
+///
+/// The rule that matters is the first one. The fallback is for a lane that does
+/// not clock rows *at all* — a radio's own sweep, a transmit monitor — and not
+/// for a frame that merely happens to carry none. Below the frame rate most
+/// frames carry none: at five rows a second and sixty frames, fifty-five in
+/// every sixty are empty, and scrolling those on the wall clock as well ran the
+/// waterfall at about twice the rate its own time labels are spaced at.
+fn rows_to_append(clocked: bool, carried: usize, wall_clock: u32) -> u32 {
+    if clocked { carried as u32 } else { wall_clock.min(MAX_FALLBACK_ROWS) }
+}
+
+/// The most rows one repaint may scroll on the wall clock.
+///
+/// Only the fallback needs it: a hitch or a tab-away would otherwise dump a
+/// whole backlog of repeated rows into the texture at once. A clocking lane is
+/// already bounded by the engine's own batch cap.
+const MAX_FALLBACK_ROWS: u32 = 32;
+
 /// What a machine may be asked to draw, cut down to the facts that decide it.
 ///
 /// Plain numbers rather than the wgpu handles they came from, for the reason
@@ -732,7 +754,7 @@ impl CallbackTrait for WaterfallCallback {
             if carried > 0 {
                 r.last_rows_seq = Some(frame.seq);
             }
-            let n = if carried > 0 { carried as u32 } else { self.rows_to_write.min(32) };
+            let n = rows_to_append(frame.rows_clocked, carried, self.rows_to_write);
             if !remapped && n > 0 && cols > 0 {
                 // Resample to texture width where the frame is not already it.
                 // Routine rather than exceptional: the engine clamps the width
@@ -941,5 +963,43 @@ mod display_class_tests {
     fn a_thin_machine_stays_standard() {
         assert_eq!(auto_display_bins(DisplayClass { cores: 2, ..desktop() }, 3840), DEFAULT_TEX_W);
         assert_eq!(auto_display_bins(DisplayClass { cores: 4, ..desktop() }, 3840), 4096);
+    }
+}
+
+#[cfg(test)]
+mod row_append_tests {
+    use super::{MAX_FALLBACK_ROWS, rows_to_append};
+
+    /// The regression: a lane that clocks rows owns the scroll completely, so a
+    /// frame carrying none means "nothing new yet", not "scroll it yourself".
+    ///
+    /// Getting this wrong was invisible at fast scroll rates, where nearly every
+    /// frame carries a row, and obvious at slow ones, where nearly none do — the
+    /// waterfall ran at roughly double the rate of its own time labels.
+    #[test]
+    fn a_clocking_lane_with_nothing_new_scrolls_not_at_all() {
+        assert_eq!(rows_to_append(true, 0, 5), 0);
+        assert_eq!(rows_to_append(true, 0, 32), 0);
+    }
+
+    /// And when it does bring rows, it brings exactly what is drawn.
+    #[test]
+    fn a_clocking_lane_draws_what_it_brought() {
+        assert_eq!(rows_to_append(true, 1, 0), 1);
+        assert_eq!(rows_to_append(true, 7, 99), 7);
+        // Past the fallback's cap too: the engine bounds its own batch, and a
+        // row it clocked is a row that really happened.
+        assert_eq!(rows_to_append(true, 64, 0), 64);
+    }
+
+    /// A lane that cannot clock rows keeps the behaviour every build before
+    /// this one had everywhere: repeat the current spectrum on the wall clock.
+    #[test]
+    fn a_lane_that_cannot_clock_falls_back_to_the_wall_clock() {
+        assert_eq!(rows_to_append(false, 0, 3), 3);
+        // Its rows, if any somehow arrived, are not what it scrolls by.
+        assert_eq!(rows_to_append(false, 9, 3), 3);
+        // And a hitch cannot dump a backlog into the texture at once.
+        assert_eq!(rows_to_append(false, 0, 5_000), MAX_FALLBACK_ROWS);
     }
 }

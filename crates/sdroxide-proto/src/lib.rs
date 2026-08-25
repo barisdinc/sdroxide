@@ -664,11 +664,18 @@ use sdroxide_types::{
 /// front end streaming megahertz had hundreds of transforms a second going
 /// spare. The two rates are now separate all the way down the wire.
 ///
-/// `rows` is appended at the tail of the frame and `rows_per_sec` after
-/// `display_bins`, so a v91 peer would desynchronise on both. The handshake's
-/// equality test is what stops it trying. A frame carrying no rows is the
-/// normal shape for a lane that cannot clock them — a radio's own sweep, a
-/// transmit monitor — and the client falls back to scrolling on its own clock.
+/// The frame also gained `rows_clocked`, which is not the same as `rows` being
+/// non-empty and has to be said separately: below the frame rate most frames
+/// carry no rows at all, and a client that read that as "this lane does not
+/// clock rows" would scroll them on its own wall clock *as well* and run the
+/// waterfall at twice the rate of its own time labels. `false` is the shape for
+/// a lane that really cannot clock them — a radio's own sweep, a transmit
+/// monitor — and only then does the client scroll on its own.
+///
+/// All three ride in the frame or the config, both of which cross the wire, and
+/// `rows_per_sec` sits after `display_bins` rather than at the tail, so a v91
+/// peer would desynchronise on any of them. The handshake's equality test is
+/// what stops it trying.
 pub const PROTO_VERSION: u16 = 92;
 const VERSION_BYTE: u8 = 0x12;
 

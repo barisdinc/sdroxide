@@ -76,17 +76,74 @@ const ZOOM_LANE_MARGIN: f64 = 1.4;
 ///
 /// Floored at that same 4096 so a 2048-column display is unchanged, and capped
 /// at 32768: past there a single transform covers more signal than the lane's
-/// hop can hide (see [`ZOOM_LANE_HOP_DIV`]).
+/// hop can hide (see [`MAX_HOP_DIV`]).
 fn zoom_lane_fft(display_bins: usize) -> usize {
     (display_bins * 2).next_power_of_two().clamp(4096, 32_768)
 }
 
-/// The zoom lane's overlap, as the divisor of its FFT size. An eighth rather
-/// than the usual half: the finer the zoom the longer one transform takes to
-/// fill — resolving a hertz needs a second of signal, on any analyser ever
-/// built — and at the deep end a half-window hop would leave the waterfall
-/// crawling. See [`sdroxide_dsp::SpectrumAnalyzer::with_hop_div`].
-const ZOOM_LANE_HOP_DIV: usize = 8;
+/// How many transforms a waterfall row is built from, when there are enough to
+/// choose. More than one so a signal straddling a window boundary is still seen
+/// whole in a neighbouring window, and so the peak hold has something to pick a
+/// maximum from; not many more, because every one past that is folded into the
+/// same row and thrown away.
+const TRANSFORMS_PER_ROW: f64 = 4.0;
+
+/// The overlap to run an analyser at: the divisor of its FFT size that gives
+/// about [`TRANSFORMS_PER_ROW`] transforms per waterfall row.
+///
+/// Overlap is not free and it is not uniformly useful. It exists so a signal
+/// that lands across a window boundary is still seen whole in the next window,
+/// which matters enormously when transforms are scarce — a zoomed lane running
+/// at a few kilohertz fills a 4096-point window barely twice a second, and the
+/// eighth-hop it has always used is what puts rows on its waterfall at all.
+///
+/// It is close to pure waste when transforms are abundant. An RX-888 at
+/// 8.1 MHz through a 4096-point window runs 3955 transforms a second at the
+/// customary half-hop; the waterfall consumes at most 224 of them and the peak
+/// hold folds the rest into the same rows. That was measured at 18% of the
+/// process — the single largest thing in the DSP thread after the receive
+/// chain — for detail no display can show.
+///
+/// So the overlap follows the rate and the scroll speed rather than being a
+/// constant. The clamp keeps both ends honest: never coarser than one window
+/// per hop (which would skip samples outright, and a signal shorter than a
+/// window could then be missed entirely), and never finer than an eighth,
+/// which is what the zoom lane wants and what this returns for it unchanged.
+fn hop_div_for(rate_hz: f64, fft_size: usize, rows_per_sec: f64) -> usize {
+    if !rate_hz.is_finite() || rate_hz <= 0.0 || rows_per_sec <= 0.0 {
+        return 2;
+    }
+    let want_transforms = rows_per_sec * TRANSFORMS_PER_ROW;
+    let hop = (rate_hz / want_transforms).max(1.0);
+    ((fft_size as f64 / hop).ceil() as usize).clamp(1, MAX_HOP_DIV)
+}
+
+/// The device-wide panadapter analyser, at the overlap its rate and the
+/// operator's scroll speed call for — see [`hop_div_for`].
+fn build_analyzer(
+    fft_size: usize,
+    rate_hz: f64,
+    avg_tc: f32,
+    rows_per_sec: f64,
+) -> SpectrumAnalyzer {
+    SpectrumAnalyzer::with_hop_div(
+        fft_size,
+        rate_hz,
+        avg_tc,
+        hop_div_for(rate_hz, fft_size, rows_per_sec),
+    )
+}
+
+/// The finest overlap any lane runs at, and the one the zoom lane reaches.
+///
+/// An eighth rather than the usual half: the finer the zoom the longer one
+/// transform takes to fill — resolving a hertz needs a second of signal, on any
+/// analyser ever built — and at the deep end a half-window hop would leave the
+/// waterfall crawling. It used to be a constant the zoom lane passed by hand;
+/// [`hop_div_for`] now arrives at the same number from the lane's rate, and
+/// this is the ceiling it stops at.
+/// See [`sdroxide_dsp::SpectrumAnalyzer::with_hop_div`].
+const MAX_HOP_DIV: usize = 8;
 
 /// How long the main panadapter keeps drawing a front end's own spectrum after
 /// the last sweep landed.
@@ -350,6 +407,7 @@ pub fn start(source: Box<dyn IqSource>, caps: DeviceCaps, cfg: EngineConfig) -> 
         db_ceil: 0.0,
         bins: Vec::new(),
         rows: Vec::new(),
+        rows_clocked: false,
     };
     let (spec_in, spectrum_out) = triple_buffer::triple_buffer(&empty);
     let (wide_in, wide_spectrum_out) = triple_buffer::triple_buffer(&empty);
@@ -1426,6 +1484,7 @@ impl ZoomLane {
         dev_center_hz: f64,
         avg_tc: f32,
         fft: usize,
+        rows_per_sec: f64,
     ) -> Self {
         // The ladder is powers of two, so `Ddc` reaches this rate exactly and
         // `out_rate` is a formality — read back rather than assumed, because
@@ -1434,7 +1493,11 @@ impl ZoomLane {
         let offset_hz = center_hz - dev_center_hz;
         ddc.set_offset_hz(offset_hz);
         let rate_hz = ddc.out_rate();
-        let mut analyzer = SpectrumAnalyzer::with_hop_div(fft, rate_hz, avg_tc, ZOOM_LANE_HOP_DIV);
+        // The same rule the device-wide lane uses. At the rates a zoom lane runs
+        // at it returns the eighth-hop this used to hard-code, and it stops
+        // asking for one on a shallow zoom that is still streaming megahertz.
+        let hop_div = hop_div_for(rate_hz, fft, rows_per_sec);
+        let mut analyzer = SpectrumAnalyzer::with_hop_div(fft, rate_hz, avg_tc, hop_div);
         // DC here is the middle of the operator's window, not the front end's
         // LO leakage, so the usual spike suppression would punch a hole through
         // whatever they had centred.
@@ -2153,7 +2216,8 @@ fn engine_thread(
     // otherwise it sees whatever the decimation left, which is what every span
     // downstream is measured in.
     let analyzer_rate = if audio_mode { radio_fs } else { state.sample_rate };
-    let analyzer = SpectrumAnalyzer::new(cfg.fft_size as usize, analyzer_rate, cfg.avg_tc);
+    let analyzer =
+        build_analyzer(cfg.fft_size as usize, analyzer_rate, cfg.avg_tc, f64::from(cfg.rows()));
 
     // In audio mode there is no RxChain (the source is already audio); the
     // speaker path is a plain resampler → mixer instead.
@@ -3306,6 +3370,7 @@ impl Engine {
                         self.state.center_hz,
                         self.cfg.avg_tc,
                         fft,
+                        f64::from(self.cfg.rows()),
                     );
                     debug!(
                         center = lane.center_hz,
@@ -4631,7 +4696,7 @@ impl Engine {
     /// Both leave the frame's rows empty and the client scrolls on its own
     /// clock, which is what every build before this one did everywhere.
     fn make_row(&mut self) -> Option<SpectrumFrame> {
-        if self.tx_active || (self.audio_mode && self.scope_main_window().is_some()) {
+        if !self.clocks_rows() {
             return None;
         }
         // Idempotent, and here rather than at the half-dozen places a lane is
@@ -4709,11 +4774,24 @@ impl Engine {
     /// frame — a lane that switched between the last row and this frame leaves
     /// them behind rather than drawing one picture's history under another's.
     fn attach_rows(&mut self, frame: &mut SpectrumFrame) {
+        // Said whether or not there are any rows *this* frame: below the frame
+        // rate most frames carry none, and the client has to know that as
+        // "wait for the next one" rather than as "scroll this yourself".
+        frame.rows_clocked = self.clocks_rows();
         if self.row_axis == Some((frame.center_hz, frame.span_hz, frame.bins.len())) {
             frame.rows = std::mem::take(&mut self.row_batch);
         } else {
             self.row_batch.clear();
         }
+    }
+
+    /// Whether the lane about to be published clocks its own waterfall rows.
+    ///
+    /// The same test [`Engine::make_row`] refuses on, named once so the two
+    /// cannot disagree — a lane that said it clocked rows and then never
+    /// produced any would freeze the waterfall.
+    fn clocks_rows(&self) -> bool {
+        !(self.tx_active || (self.audio_mode && self.scope_main_window().is_some()))
     }
 
     /// Build a full-band frame, if a sweep has arrived since the last one.
@@ -5470,7 +5548,10 @@ impl Engine {
                 }
             }
             SetSpectrumCfg(new_cfg) => {
-                let rebuild = new_cfg.fft_size != self.cfg.fft_size;
+                // The overlap is chosen from the rate *and* the scroll speed
+                // ([`hop_div_for`]), so a change of speed re-sizes the hop too.
+                let rebuild =
+                    new_cfg.fft_size != self.cfg.fft_size || new_cfg.rows() != self.cfg.rows();
                 // The zoom lane's FFT is sized from the display width
                 // ([`zoom_lane_fft`]), and `ZoomLane::serves` knows nothing
                 // about that — it identifies a lane by its window. So a client
@@ -5484,8 +5565,12 @@ impl Engine {
                     self.zoom = None;
                 }
                 if rebuild {
-                    self.analyzer =
-                        SpectrumAnalyzer::new(self.cfg.fft_size as usize, rate, self.cfg.avg_tc);
+                    self.analyzer = build_analyzer(
+                        self.cfg.fft_size as usize,
+                        rate,
+                        self.cfg.avg_tc,
+                        f64::from(self.cfg.rows()),
+                    );
                     self.tx_analyzer = SpectrumAnalyzer::new(
                         self.cfg.fft_size as usize,
                         TX_MONITOR_RATE,
@@ -8583,10 +8668,11 @@ impl Engine {
         self.decim = (factor > 1).then(|| Decimator::new(factor));
         self.state.sample_rate = self.radio_fs / factor as f64;
 
-        self.analyzer = SpectrumAnalyzer::new(
+        self.analyzer = build_analyzer(
             self.cfg.fft_size as usize,
             self.state.sample_rate,
             self.cfg.avg_tc,
+            f64::from(self.cfg.rows()),
         );
         if self.mixer.is_some() {
             self.main =
@@ -8896,8 +8982,12 @@ impl Engine {
         // measures its bins against; the card rate in audio mode, where the
         // analyzer FFTs the rig's audio directly.
         let analyzer_rate = if self.audio_mode { self.radio_fs } else { self.state.sample_rate };
-        self.analyzer =
-            SpectrumAnalyzer::new(self.cfg.fft_size as usize, analyzer_rate, self.cfg.avg_tc);
+        self.analyzer = build_analyzer(
+            self.cfg.fft_size as usize,
+            analyzer_rate,
+            self.cfg.avg_tc,
+            f64::from(self.cfg.rows()),
+        );
 
         // Drop rate-dependent / stateful DSP so it rebuilds for the new source.
         self.tx = None;
@@ -11083,6 +11173,7 @@ fn pool_window_to_frame(
             db_ceil,
             bins: vec![0; out_bins],
             rows: Vec::new(),
+            rows_clocked: false,
         };
     }
     let (frac_lo, frac_hi, out_center, out_span) = match viewport {
@@ -11112,6 +11203,7 @@ fn pool_window_to_frame(
         db_ceil,
         bins,
         rows: Vec::new(),
+        rows_clocked: false,
     }
 }
 
@@ -11371,5 +11463,67 @@ mod auto_level_tests {
         let prev = (-115.0, -25.0);
         assert_eq!(auto_levels(&[], Some(prev)), prev);
         assert_eq!(auto_levels(&[f32::NAN, f32::NAN], Some(prev)), prev);
+    }
+}
+
+#[cfg(test)]
+mod hop_div_tests {
+    use super::{MAX_HOP_DIV, hop_div_for};
+
+    /// The case this rule exists for: a wide front end runs far more transforms
+    /// than any waterfall can draw, and half-overlapping them doubles that for
+    /// nothing. An RX-888 at 8.1 MHz through a 4096-point window makes 3955 a
+    /// second at the customary half-hop; a waterfall wants at most a couple of
+    /// hundred.
+    #[test]
+    fn a_wide_front_end_stops_overlapping() {
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 28.0), 1);
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 224.0), 1);
+    }
+
+    /// It is a rule, not a switch: a rate that produces only a handful of
+    /// transforms per row keeps its overlap. 2 Msps through a 32768-point
+    /// window is 122 transforms a second, which at 28 rows is already about
+    /// the four per row that is wanted — so nothing is taken away.
+    #[test]
+    fn a_lane_with_transforms_to_spare_only_just_keeps_its_overlap() {
+        assert_eq!(hop_div_for(2_000_000.0, 32_768, 28.0), 2);
+        // Scroll faster on the same lane and the overlap has to come back.
+        assert_eq!(hop_div_for(2_000_000.0, 32_768, 224.0), 8);
+    }
+
+    /// And the case it must not break: a zoomed lane at a few kilohertz fills a
+    /// window barely twice a second, and its eighth-hop is what puts rows on
+    /// the waterfall at all. The rule has to hand that back unchanged.
+    #[test]
+    fn a_zoomed_lane_keeps_its_fine_overlap() {
+        // The lane a 10 kHz view on an 8.1 Msps front end builds: 8.1e6/512.
+        assert_eq!(hop_div_for(15_820.0, 4096, 28.0), MAX_HOP_DIV);
+        assert_eq!(hop_div_for(48_000.0, 4096, 56.0), MAX_HOP_DIV);
+    }
+
+    /// Never coarser than one window per hop. Past that the analyser would skip
+    /// samples outright, and a signal shorter than a window could land entirely
+    /// in the gap — which is exactly what the peak hold between rows exists to
+    /// prevent.
+    #[test]
+    fn it_never_skips_samples() {
+        for rate in [48_000.0, 1_536_000.0, 8_100_000.0, 64_000_000.0] {
+            for fft in [1024usize, 4096, 32_768, 131_072] {
+                for rows in [5.0, 28.0, 224.0] {
+                    let d = hop_div_for(rate, fft, rows);
+                    assert!((1..=MAX_HOP_DIV).contains(&d), "{rate}/{fft}/{rows} gave {d}");
+                }
+            }
+        }
+    }
+
+    /// A rate or a scroll speed nobody has filled in yet falls back to the
+    /// half-overlap every build before this one used.
+    #[test]
+    fn an_unknown_rate_keeps_the_old_behaviour() {
+        assert_eq!(hop_div_for(0.0, 4096, 28.0), 2);
+        assert_eq!(hop_div_for(f64::NAN, 4096, 28.0), 2);
+        assert_eq!(hop_div_for(8_100_000.0, 4096, 0.0), 2);
     }
 }

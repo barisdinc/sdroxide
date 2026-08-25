@@ -25,6 +25,16 @@ pub struct SpectrumFrame {
     /// repeating it, exactly as every build before this one did.
     #[serde(default)]
     pub rows: Vec<u8>,
+    /// Whether this lane clocks its own waterfall rows at all.
+    ///
+    /// Distinct from `rows` being non-empty, and the distinction matters at
+    /// every scroll rate below the frame rate: at five rows a second and sixty
+    /// frames, fifty-five frames in every sixty carry none — and a client that
+    /// read "no rows" as "this lane does not clock rows" would fall back to
+    /// scrolling on its own wall clock *as well*, running the waterfall at
+    /// twice the rate its own time labels assume.
+    #[serde(default)]
+    pub rows_clocked: bool,
 }
 
 impl SpectrumFrame {
@@ -192,6 +202,7 @@ mod tests {
             db_ceil: -20.0,
             bins: vec![0; 2048],
             rows: vec![0; 2048 * 3],
+            rows_clocked: true,
         };
         assert_eq!(f.row_count(), 3);
         f.rows.clear();
