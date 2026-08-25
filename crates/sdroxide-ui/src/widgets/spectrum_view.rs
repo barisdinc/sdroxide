@@ -938,6 +938,11 @@ pub fn show_ext(
     // clickable: the ISM window is where a device is acted on, and a box here is
     // a "this one, there" annotation.
     ism: &[IsmLabel],
+    // Stored memories whose dial lands on the visible span, marked along the
+    // waterfall's oldest edge under the band-plan strip. Like the ISM labels,
+    // an annotation and not a control: the memory list is where a channel is
+    // recalled from.
+    mem: &[crate::widgets::memories::MemMark],
     // Operator's pointer preferences: what the wheel does (plain and with
     // Shift), whether left-drag tunes, and the click-tune rounding.
     wheel: WheelSettings,
@@ -1686,8 +1691,11 @@ pub fn show_ext(
         },
     ));
 
-    // Bandplan strip along the bottom of the waterfall (over the GPU layer).
-    crate::widgets::bandplan::overlay(&painter, view, &wf_rect, panel_below);
+    // Bandplan strip along the bottom of the waterfall (over the GPU layer),
+    // with the stored memories marked on the same edge, stacked inwards from
+    // however deep the strip ended up.
+    let strip_h = crate::widgets::bandplan::overlay(&painter, view, &wf_rect, panel_below);
+    crate::widgets::memories::overlay(&painter, view, &wf_rect, mem, strip_h, panel_below);
 
     // --- VFO markers + passband shading -----------------------------------
     let in_view = |hz: f64| (view.view_lo_hz..=view.view_hi_hz).contains(&hz);

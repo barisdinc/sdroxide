@@ -257,6 +257,15 @@ sub-segments, and the shortwave broadcast blocks that overlap an amateur band in
 one region and not another (3.900–4.000 and 7.200–7.300 are broadcasting in
 Regions 1 and 3 and amateur in Region 2).
 
+**Memory marks.** Every stored memory whose frequency falls on the visible span
+is labelled just inside the band-plan strip, reading `Mem: folder / name` — or
+`Mem: name` for one that is not filed in a folder — on a thin green line drawn
+at the frequency itself. Channels close together stagger into stacked rows
+rather than overprinting; a name too long for its label is cut short with an
+ellipsis, and anything that would need a fifth row is left out. The marks are an
+annotation, not a control: [§2.12](#212-memory-channels) is where a channel is
+stored and recalled.
+
 ### 2.4 Bands and modes
 
 Click the **Band / Mode** button (which reads, for example, `20M · USB`) to open a
@@ -943,6 +952,10 @@ deletes only the folder: the memories filed under it move back to the top
 level. Folders collapse and expand with the arrow at the left of their header,
 and a memory scan works through every memory regardless of the folder it
 sits in.
+
+Every memory on the visible span is also marked along the bottom of the
+waterfall, as `Mem: folder / name` — see
+[2.3 Tuning](#23-tuning).
 
 ![The memory channels window](images/06-memories.png)
 

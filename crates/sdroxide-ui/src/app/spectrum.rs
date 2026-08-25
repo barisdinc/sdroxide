@@ -446,6 +446,36 @@ impl SdroxideApp {
             .collect()
     }
 
+    /// The stored memories to mark along the bottom of the waterfall.
+    ///
+    /// Only the ones on the visible span are formatted. A station list runs to
+    /// hundreds of channels and this is rebuilt every frame, so the span the
+    /// last frame was drawn with does the filtering — a pan moves the picture
+    /// and its marks together on the frame after, which is one frame and
+    /// invisible.
+    pub(in crate::app) fn memory_overlay(&self) -> Vec<crate::widgets::memories::MemMark> {
+        let (lo, hi) = (self.view.view_lo_hz, self.view.view_hi_hz);
+        self.memories
+            .iter()
+            .filter(|m| (lo..=hi).contains(&m.freq_hz))
+            .map(|m| {
+                // A memory whose folder has gone from under it reads as
+                // unfiled, exactly as the memory window lists it.
+                let folder = m
+                    .folder
+                    .and_then(|id| self.mem_folders.iter().find(|f| f.id == id))
+                    .map(|f| f.name.as_str());
+                crate::widgets::memories::MemMark {
+                    freq_hz: m.freq_hz,
+                    text: match folder {
+                        Some(f) => format!("Mem: {f} / {}", m.name),
+                        None => format!("Mem: {}", m.name),
+                    },
+                }
+            })
+            .collect()
+    }
+
     pub(in crate::app) fn net_overlay(&self, now_utc: i64) -> (Vec<Spot>, Vec<f32>) {
         let max_age = self.net_cfg_edit.spot_max_age_secs.max(60) as i64;
         let mut spots = Vec::new();

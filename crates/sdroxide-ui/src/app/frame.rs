@@ -321,6 +321,8 @@ impl eframe::App for SdroxideApp {
         // Built once for both panadapter call sites: the same devices are
         // labelled whichever layout is on screen.
         let ism_labels = self.ism_overlay();
+        // Likewise the memory marks along the bottom of the waterfall.
+        let mem_marks = self.memory_overlay();
         // Remaining space: the panadapter (+ FT8/FT4 operating panel).
         if let Some(err) = self.error.clone() {
             let offer_retry = self.ctrl.can_reconnect();
@@ -561,6 +563,7 @@ impl eframe::App for SdroxideApp {
                         &net_alpha,
                         &mut clicked_spot,
                         &ism_labels,
+                        &mem_marks,
                         self.input.cfg.wheel,
                         pan,
                         wf_tuning,
@@ -718,6 +721,7 @@ impl eframe::App for SdroxideApp {
                         &net_alpha,
                         &mut clicked_spot,
                         &ism_labels,
+                        &mem_marks,
                         self.input.cfg.wheel,
                         pan,
                         wf_tuning,
