@@ -26,6 +26,65 @@ impl Speed {
     }
 }
 
+/// How much detail the panadapter is drawn with: how many columns its waterfall
+/// history holds, and so how many bins the engine is asked to put in every
+/// frame (see [`crate::SpectrumConfig::display_bins`]).
+///
+/// `Auto` is the default and is what nearly everyone should leave it on. It
+/// reads the GPU's own texture limit, what the adapter calls itself, which
+/// backend is in use, whether the engine is across a network, and how wide the
+/// panadapter actually is in *pixels* — then picks the most that machine can
+/// carry. The named steps are for overruling it in either direction: a remote
+/// client on a link Auto is being cautious about, or a machine that would
+/// rather have the frame rate than the columns.
+///
+/// Steps above what the renderer can hold are shown greyed rather than hidden,
+/// so the ladder is visible even where it cannot be climbed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpectrumDetail {
+    /// Pick from this machine and this screen, and follow them if they change.
+    #[default]
+    Auto,
+    /// 2048 columns — what every sdroxide before this drew, and about what a
+    /// 1080p panadapter can show.
+    Standard,
+    /// 4096 columns — one per pixel of a 4K panadapter.
+    High,
+    /// 8192 columns — two per pixel of a 4K panadapter, which is what keeps a
+    /// carrier sharp while the view is panned off the pixel grid.
+    Ultra,
+}
+
+impl SpectrumDetail {
+    pub const ALL: [SpectrumDetail; 4] = [
+        SpectrumDetail::Auto,
+        SpectrumDetail::Standard,
+        SpectrumDetail::High,
+        SpectrumDetail::Ultra,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpectrumDetail::Auto => "Auto",
+            SpectrumDetail::Standard => "Standard (2048)",
+            SpectrumDetail::High => "High (4096)",
+            SpectrumDetail::Ultra => "Ultra (8192)",
+        }
+    }
+
+    /// The width this asks for, or `None` for `Auto` — which only the client
+    /// that knows its own renderer can answer
+    /// (`sdroxide_ui::waterfall_gpu::auto_display_bins`).
+    pub fn columns(self) -> Option<u32> {
+        match self {
+            SpectrumDetail::Auto => None,
+            SpectrumDetail::Standard => Some(2048),
+            SpectrumDetail::High => Some(4096),
+            SpectrumDetail::Ultra => Some(8192),
+        }
+    }
+}
+
 /// A usage class on the band-plan strip painted along the bottom of the
 /// waterfall — what an allocation is *for*, which is the only thing the strip
 /// colours by.
@@ -292,6 +351,12 @@ pub struct UiSettings {
     pub spectrum_speed: Speed,
     /// Waterfall colour palette, as an index into the client's palette list.
     pub waterfall_palette: usize,
+    /// How many columns the panadapter and its waterfall are drawn with.
+    ///
+    /// This screen's preference, like the frame rate above it and for the same
+    /// reason: what a machine can carry is a fact about the machine looking,
+    /// not about the radio being looked at. A remote client picks its own.
+    pub spectrum_detail: SpectrumDetail,
     /// Fill the spectrum area with a vertical top→bottom colour gradient.
     pub spectrum_gradient: bool,
     /// Gradient colour at the top of the spectrum area (sRGB, 0–255).
@@ -425,6 +490,7 @@ impl Default for UiSettings {
             waterfall_speed: Speed::Medium,
             spectrum_speed: Speed::Medium,
             waterfall_palette: 0,
+            spectrum_detail: SpectrumDetail::Auto,
             spectrum_gradient: true,
             gradient_top: [64, 0, 0],   // dark red
             gradient_bottom: [0, 0, 0], // black

@@ -192,9 +192,18 @@ pub const SUB_COLOR: Color32 = Color32::from_rgb(185, 130, 255);
 pub struct WfTuning {
     /// Waterfall rows to append this frame (from elapsed wall-clock time).
     pub rows_to_write: u32,
-    /// Scroll rate in rows/second — used both to advance the waterfall and to
-    /// space the 60-second gridlines, so the line tracks the waterfall exactly.
+    /// The operator's scroll rate in rows/second, before [`Self::row_scale`].
+    /// The gridlines are spaced from it, so the time axis and the waterfall
+    /// track each other exactly at any zoom factor.
     pub rows_per_sec: f32,
+    /// History rows per egui point — the display's pixels per point, so a row
+    /// is one device pixel tall rather than two on a HiDPI panel. Both the row
+    /// rate and the rows on screen carry it, which leaves the seconds in view
+    /// and the scroll speed unchanged. Never below 1.
+    pub row_scale: f32,
+    /// Columns the history texture should hold, from the client's own reading
+    /// of this machine and this screen — see `SdroxideApp::panadapter_bins`.
+    pub tex_w: u32,
     /// Wall-clock UTC seconds, for the minute-boundary time labels.
     pub now_unix: f64,
     /// EMA coefficient for the spectrum *line* only (1.0 = no smoothing). The
@@ -849,15 +858,26 @@ struct TraceKey {
     generation: u32,
     view_lo: u64,
     view_hi: u64,
+    /// The zoom factor the polyline was sampled at: the trace is one vertex per
+    /// device pixel, so moving the window to a screen with a different one has
+    /// to recompute it.
+    ppp: u32,
     rect: [u32; 4],
 }
 
-fn trace_key(f: &SpectrumFrame, generation: u32, view: &ViewState, rect: &Rect) -> TraceKey {
+fn trace_key(
+    f: &SpectrumFrame,
+    generation: u32,
+    view: &ViewState,
+    rect: &Rect,
+    ppp: f32,
+) -> TraceKey {
     TraceKey {
         seq: f.seq,
         generation,
         view_lo: view.view_lo_hz.to_bits(),
         view_hi: view.view_hi_hz.to_bits(),
+        ppp: ppp.to_bits(),
         rect: [
             rect.left().to_bits(),
             rect.top().to_bits(),
@@ -1633,10 +1653,10 @@ pub fn show_ext(
         draw_grid(&painter, view, &spec_rect);
         if view.peak_hold {
             peaks.update(f);
-            let key = trace_key(f, peaks.generation, view, &spec_rect);
-            let pts = trace
-                .hold
-                .points_for(key, || compute_trace(view, f, Some(&peaks.bins), &spec_rect));
+            let key = trace_key(f, peaks.generation, view, &spec_rect, wf.row_scale);
+            let pts = trace.hold.points_for(key, || {
+                compute_trace(view, f, Some(&peaks.bins), &spec_rect, wf.row_scale)
+            });
             painter.add(Shape::line(
                 pts,
                 Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 220, 90, 170)),
@@ -1647,9 +1667,10 @@ pub fn show_ext(
         // Live trace: UI-smoothed (per the spectrum-speed setting) so the line's
         // reaction speed is independent of the un-averaged waterfall detail.
         smooth.update(f, wf.spectrum_alpha);
-        let key = trace_key(f, smooth.generation, view, &spec_rect);
-        let pts =
-            trace.live.points_for(key, || compute_trace(view, f, Some(&smooth.bins), &spec_rect));
+        let key = trace_key(f, smooth.generation, view, &spec_rect, wf.row_scale);
+        let pts = trace.live.points_for(key, || {
+            compute_trace(view, f, Some(&smooth.bins), &spec_rect, wf.row_scale)
+        });
         painter.add(Shape::line(pts, Stroke::new(1.0, Color32::from_rgb(120, 220, 255))));
     }
     draw_scale(&painter, view, &scale_rect);
@@ -1683,11 +1704,16 @@ pub fn show_ext(
             frame: Some(Arc::clone(f)),
             u_lo,
             u_hi,
-            rows_visible: wf_rect.height(),
+            // Rows, not points: one history row per device pixel. Clamped to
+            // the ring, or the shader's own `min(1.0)` would quietly draw the
+            // same history over a taller widget and the timestamps would slide
+            // off the rows they belong to.
+            rows_visible: (wf_rect.height() * wf.row_scale).min(crate::waterfall_gpu::TEX_H as f32),
             lut: wf.palette,
             rows_to_write: wf.rows_to_write,
             flip: view.waterfall_flip,
             wf_id: wf.wf_id,
+            tex_w: wf.tex_w,
         },
     ));
 
@@ -2132,14 +2158,21 @@ pub fn show_ext(
     // something was heard.
     let rows_per_sec = wf.rows_per_sec as f64;
     if rows_per_sec > 0.01 && wf_rect.height() > 4.0 {
-        let visible_secs = wf_rect.height() as f64 / rows_per_sec;
+        // Seconds on screen from the rows actually on screen, not from the
+        // widget's height: the two agree until the ring runs out, and where it
+        // does the labels have to follow the rows rather than the pixels or
+        // they would name times the waterfall is no longer showing.
+        let rows_visible =
+            ((wf_rect.height() * wf.row_scale) as f64).min(f64::from(crate::waterfall_gpu::TEX_H));
+        let visible_secs = rows_visible / (rows_per_sec * wf.row_scale as f64);
+        let pts_per_sec = wf_rect.height() as f64 / visible_secs.max(1e-6);
         let step = time_grid_step_s(visible_secs);
         let now = wf.now_unix;
         let oldest = now - visible_secs;
         let grid = Color32::from_rgba_unmultiplied(200, 205, 215, 60);
         let mut t = (oldest / step).ceil() * step; // first boundary ≥ oldest
         while t <= now {
-            let age_px = ((now - t) * rows_per_sec) as f32;
+            let age_px = ((now - t) * pts_per_sec) as f32;
             let y = if view.waterfall_flip {
                 wf_rect.bottom() - age_px
             } else {
@@ -2511,21 +2544,29 @@ fn click_tune_label(
 /// Per-pixel polyline of the frame's bins (or of `values` when given, e.g.
 /// the peak-hold bins) mapped through the current viewport. This is the
 /// expensive path the [`TraceCache`] avoids on unchanged repaints.
+///
+/// One vertex per *device* pixel, not per egui point. On a HiDPI panel the two
+/// differ by the zoom factor, and a polyline sampled in points is drawn with
+/// every segment spanning two pixels — the trace's own share of the coarse
+/// picture of issue #172, and the reason it stair-stepped next to a waterfall
+/// that had just been widened.
 fn compute_trace(
     view: &ViewState,
     f: &SpectrumFrame,
     values: Option<&[f32]>,
     rect: &Rect,
+    ppp: f32,
 ) -> Vec<Pos2> {
     let n = values.map(|v| v.len()).unwrap_or(f.bins.len());
     if n == 0 {
         return Vec::new();
     }
     let base = f.center_hz - f.span_hz / 2.0;
-    let w = rect.width().max(1.0) as usize;
+    let ppp = ppp.clamp(1.0, 8.0);
+    let w = ((rect.width() * ppp).max(1.0)) as usize;
     let mut points = Vec::with_capacity(w);
     for px in 0..w {
-        let x = rect.left() + px as f32;
+        let x = rect.left() + px as f32 / ppp;
         let hz = view.x_to_freq(x, rect);
         let bin_f = (hz - base) / f.span_hz * n as f64;
         let v = if (0.0..n as f64).contains(&bin_f) {

@@ -40,28 +40,36 @@ use crate::recorder::{Recorder, RecordingChannels};
 use crate::voice::VoiceKeyer;
 use crate::{Complex32, ControlUpdate, IqSource};
 
-/// Number of bins in emitted display frames (matches the waterfall texture width).
-pub const DISPLAY_BINS: usize = 2048;
-
-/// Bins of the device-wide analyser a viewport has to keep before the
-/// panadapter is served from a zoom lane instead (see [`ZoomLane`]).
+/// Bins in a full-band frame.
 ///
-/// One per column of the emitted frame. Below that the pooling in
-/// `SpectrumAnalyzer::make_frame` has fewer measurements than it has columns to
-/// fill and the trace stair-steps: an RX-888 streaming 8.1 MHz through a
-/// 32768-point FFT is 247 Hz a bin, so a 68 kHz window on screen is drawn from
-/// 275 numbers.
-const ZOOM_LANE_MIN_BINS: f64 = DISPLAY_BINS as f64;
+/// A constant where the main panadapter's width is not, because this lane does
+/// not follow anybody's screen: the strip that draws it keeps its own
+/// 1024-column history, never zooms, and is a few dozen pixels tall. This is
+/// already twice what it can show, and `sdroxide_spyserver`'s
+/// `FFT_DISPLAY_PIXELS` is matched to it.
+///
+/// The main panadapter's width is [`sdroxide_types::SpectrumConfig::bins`].
+pub const WIDE_BINS: usize = 2048;
 
 /// How much wider than the viewport the zoom lane's output has to be, so the
 /// decimator's transition band stays off the edge of the display.
 const ZOOM_LANE_MARGIN: f64 = 1.4;
 
-/// The zoom lane's FFT size. The decimation ladder is powers of two, so the
-/// lane's output lands between [`ZOOM_LANE_MARGIN`] and twice that times the
-/// viewport, which puts at least 1400 of these bins inside it — about one per
-/// column of any display anyone owns, at any zoom.
-const ZOOM_LANE_FFT: usize = 4096;
+/// The zoom lane's FFT size for a display `display_bins` columns wide.
+///
+/// The decimation ladder is powers of two, so the lane's output lands between
+/// [`ZOOM_LANE_MARGIN`] and twice that times the viewport — which means the
+/// bins that fall *inside* the viewport are between a 2.8th and a 1.4th of
+/// these. Twice the columns therefore puts about one bin per column inside it
+/// even at the narrow end of the ladder, which is the property the old fixed
+/// 4096 had back when every display was 2048 columns wide.
+///
+/// Floored at that same 4096 so a 2048-column display is unchanged, and capped
+/// at 32768: past there a single transform covers more signal than the lane's
+/// hop can hide (see [`ZOOM_LANE_HOP_DIV`]).
+fn zoom_lane_fft(display_bins: usize) -> usize {
+    (display_bins * 2).next_power_of_two().clamp(4096, 32_768)
+}
 
 /// The zoom lane's overlap, as the divisor of its FFT size. An eighth rather
 /// than the usual half: the finer the zoom the longer one transform takes to
@@ -1394,8 +1402,20 @@ struct ZoomLane {
 
 impl ZoomLane {
     /// A lane covering `in_rate / decim` centred on `center_hz`, with the front
-    /// end currently on `dev_center_hz`.
-    fn new(in_rate_hz: f64, decim: u32, center_hz: f64, dev_center_hz: f64, avg_tc: f32) -> Self {
+    /// end currently on `dev_center_hz`, analysed `fft` points at a time.
+    ///
+    /// `fft` comes from [`zoom_lane_fft`] and so from the width the client is
+    /// drawing: a lane that resolved a 2048-column display would stair-step a
+    /// 4096-column one, which is the whole complaint this lane exists to answer,
+    /// one zoom level further in.
+    fn new(
+        in_rate_hz: f64,
+        decim: u32,
+        center_hz: f64,
+        dev_center_hz: f64,
+        avg_tc: f32,
+        fft: usize,
+    ) -> Self {
         // The ladder is powers of two, so `Ddc` reaches this rate exactly and
         // `out_rate` is a formality — read back rather than assumed, because
         // the frame's axis has to be the width actually produced.
@@ -1403,8 +1423,7 @@ impl ZoomLane {
         let offset_hz = center_hz - dev_center_hz;
         ddc.set_offset_hz(offset_hz);
         let rate_hz = ddc.out_rate();
-        let mut analyzer =
-            SpectrumAnalyzer::with_hop_div(ZOOM_LANE_FFT, rate_hz, avg_tc, ZOOM_LANE_HOP_DIV);
+        let mut analyzer = SpectrumAnalyzer::with_hop_div(fft, rate_hz, avg_tc, ZOOM_LANE_HOP_DIV);
         // DC here is the middle of the operator's window, not the front end's
         // LO leakage, so the usual spike suppression would punch a hole through
         // whatever they had centred.
@@ -2659,6 +2678,11 @@ fn engine_thread(
                 frames_per_s = lane_frames as f64 / secs,
                 rate_hz = engine.state.sample_rate,
                 fft_size = engine.cfg.fft_size,
+                // What the frames are actually being cut into, which is the
+                // client's choice and not this engine's — worth naming next to
+                // the transform size, because "the FFT is 32768" and "the
+                // picture is 2048 columns wide" answer different questions.
+                bins = engine.cfg.bins(),
                 zoom = engine.zoom.is_some(),
                 audio_mode = engine.audio_mode,
                 "panadapter rates",
@@ -3163,12 +3187,18 @@ impl Engine {
         if !span.is_finite() || span <= 0.0 || full <= 0.0 || span >= full {
             return None;
         }
+        // One device-wide bin per column of the emitted frame. Below that the
+        // pooling in `SpectrumAnalyzer::make_frame` has fewer measurements than
+        // it has columns to fill and the trace stair-steps: an RX-888 streaming
+        // 8.1 MHz through a 32768-point FFT is 247 Hz a bin, so a 68 kHz window
+        // on screen is drawn from 275 numbers.
+        //
         // Hysteresis: a lane already up is held until the device-wide analyser
         // has comfortably enough bins again. The two draw the same signal at
         // different bin widths, so they put the noise floor at different levels
         // — a zoom parked on the threshold would otherwise flip the picture
         // between them every time the client resent its window.
-        let need = ZOOM_LANE_MIN_BINS * if self.zoom.is_some() { 1.5 } else { 1.0 };
+        let need = self.cfg.bins() as f64 * if self.zoom.is_some() { 1.5 } else { 1.0 };
         if self.analyzer.fft_size() as f64 * span / full >= need {
             return None;
         }
@@ -3200,17 +3230,20 @@ impl Engine {
                 // The same window: only the front end may have moved under it.
                 Some(z) if z.serves(want, in_rate) => z.point_at(self.state.center_hz),
                 _ => {
+                    let fft = zoom_lane_fft(self.cfg.bins());
                     let lane = ZoomLane::new(
                         in_rate,
                         want.1,
                         want.0,
                         self.state.center_hz,
                         self.cfg.avg_tc,
+                        fft,
                     );
                     debug!(
                         center = lane.center_hz,
                         rate = lane.rate_hz,
                         decim = lane.decim,
+                        fft,
                         "panadapter zoom lane built"
                     );
                     self.zoom = Some(lane);
@@ -4503,9 +4536,14 @@ impl Engine {
     /// Build a full-band frame, if a sweep has arrived since the last one.
     ///
     /// The source hands over dBFS bins covering its whole Nyquist band; the
-    /// display policy — pooling down to [`DISPLAY_BINS`] and mapping to the u8
+    /// display policy — pooling down to [`WIDE_BINS`] and mapping to the u8
     /// range the client draws — stays here, identical to the main lane, so both
     /// panadapters respond to the same level controls.
+    ///
+    /// Deliberately the constant and not the client's chosen width: the strip
+    /// this feeds is a shallow band-wide overview a thousand pixels across, so
+    /// widening it with the main panadapter would spend link bandwidth on
+    /// detail that is pooled away again at the far end.
     fn make_wide_frame(&mut self) -> Option<SpectrumFrame> {
         if !self.wide_fresh {
             return None;
@@ -4522,7 +4560,7 @@ impl Engine {
             span_hz,
             floor,
             ceil,
-            DISPLAY_BINS,
+            WIDE_BINS,
             None,
         ))
     }
@@ -4573,7 +4611,7 @@ impl Engine {
             span_hz,
             floor,
             ceil,
-            DISPLAY_BINS,
+            self.cfg.bins(),
             self.cfg.viewport,
         )
     }
@@ -4582,6 +4620,7 @@ impl Engine {
         if self.tx_active {
             return self.make_tx_frame();
         }
+        let bins = self.cfg.bins();
         if self.audio_mode {
             // The radio's own scope, where this session has one — the only
             // spectrum of the *band* a demod-audio path can show.
@@ -4602,7 +4641,7 @@ impl Engine {
                 self.radio_fs,
                 self.cfg.db_floor,
                 self.cfg.db_ceil,
-                DISPLAY_BINS,
+                bins,
                 Some(vp),
             );
         }
@@ -4635,7 +4674,7 @@ impl Engine {
                     ch_rate,
                     self.cfg.db_floor,
                     self.cfg.db_ceil,
-                    DISPLAY_BINS,
+                    bins,
                     Some((vp_lo, vp_hi)),
                 );
             }
@@ -4648,7 +4687,7 @@ impl Engine {
                 z.rate_hz,
                 self.cfg.db_floor,
                 self.cfg.db_ceil,
-                DISPLAY_BINS,
+                bins,
                 self.cfg.viewport,
             );
         }
@@ -4657,7 +4696,7 @@ impl Engine {
             self.state.sample_rate,
             self.cfg.db_floor,
             self.cfg.db_ceil,
-            DISPLAY_BINS,
+            bins,
             self.cfg.viewport,
         )
     }
@@ -4668,6 +4707,7 @@ impl Engine {
     /// transmit-sideband scope built from the TX baseband/audio.
     fn make_tx_frame(&mut self) -> SpectrumFrame {
         let dial = self.tx_center_hz;
+        let bins = self.cfg.bins();
         let lsb = self.state.rx[0].mode.is_lower_sideband_at(dial);
         let (floor, ceil) = (self.cfg.db_floor, self.cfg.db_ceil);
         // Attenuate the monitor for display by mapping through a window shifted
@@ -4693,17 +4733,10 @@ impl Engine {
             } else {
                 (dial, dial + bw)
             };
-            self.tx_analyzer.make_frame(dial, TX_MONITOR_RATE, mf, mc, DISPLAY_BINS, Some(vp))
+            self.tx_analyzer.make_frame(dial, TX_MONITOR_RATE, mf, mc, bins, Some(vp))
         } else {
             // Wideband IQ: the upconverted TX sits at `tx_center_hz` in the full span.
-            self.analyzer.make_frame(
-                self.tx_center_hz,
-                self.state.sample_rate,
-                mf,
-                mc,
-                DISPLAY_BINS,
-                None,
-            )
+            self.analyzer.make_frame(self.tx_center_hz, self.state.sample_rate, mf, mc, bins, None)
         };
         // Report the real range so the panadapter's dB axis is unchanged; the
         // bins are already dimmed by the shifted window above.
@@ -5255,8 +5288,18 @@ impl Engine {
             }
             SetSpectrumCfg(new_cfg) => {
                 let rebuild = new_cfg.fft_size != self.cfg.fft_size;
+                // The zoom lane's FFT is sized from the display width
+                // ([`zoom_lane_fft`]), and `ZoomLane::serves` knows nothing
+                // about that — it identifies a lane by its window. So a client
+                // that widens its display without moving the window would keep
+                // a lane analysing for the old width. Drop it and let
+                // `feed_zoom` build the replacement.
+                let rewidth = new_cfg.bins() != self.cfg.bins();
                 let rate = self.analyzer_rate();
                 self.cfg = new_cfg;
+                if rewidth {
+                    self.zoom = None;
+                }
                 if rebuild {
                     self.analyzer =
                         SpectrumAnalyzer::new(self.cfg.fft_size as usize, rate, self.cfg.avg_tc);
@@ -10881,6 +10924,38 @@ fn pool_window_to_frame(
 }
 
 #[cfg(test)]
+mod zoom_lane_fft_tests {
+    use super::zoom_lane_fft;
+
+    /// A client on the historic 2048-column panadapter gets the lane it always
+    /// had. The whole change has to be invisible to it.
+    #[test]
+    fn the_old_width_gets_the_old_lane() {
+        assert_eq!(zoom_lane_fft(2048), 4096);
+    }
+
+    /// Twice the columns, twice the transform — so the bins that land inside
+    /// the viewport still outnumber the columns drawing them at every rung of
+    /// the decimation ladder.
+    #[test]
+    fn a_wider_panadapter_gets_a_wider_transform() {
+        assert_eq!(zoom_lane_fft(4096), 8192);
+        assert_eq!(zoom_lane_fft(8192), 16_384);
+    }
+
+    /// Held at both ends: nothing below the lane's own floor, and nothing past
+    /// the point where one transform covers more signal than its hop can hide.
+    #[test]
+    fn it_is_a_power_of_two_inside_the_bounds() {
+        for w in [0usize, 1, 1000, 2048, 3000, 4096, 8192, 100_000] {
+            let n = zoom_lane_fft(w);
+            assert!((4096..=32_768).contains(&n), "{w} gave {n}");
+            assert!(n.is_power_of_two(), "{w} gave {n}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod wide_frame_tests {
     use super::*;
 
@@ -10890,9 +10965,9 @@ mod wide_frame_tests {
         // into two thousand — this is the whole reason for max-pooling.
         let mut db = vec![-120.0f32; 4096];
         db[1234] = -20.0;
-        let f = pool_window_to_frame(&db, 1, 16.2e6, 32.4e6, -120.0, -20.0, DISPLAY_BINS, None);
-        assert_eq!(f.bins.len(), DISPLAY_BINS);
-        assert_eq!(f.bins[1234 * DISPLAY_BINS / 4096], 255);
+        let f = pool_window_to_frame(&db, 1, 16.2e6, 32.4e6, -120.0, -20.0, WIDE_BINS, None);
+        assert_eq!(f.bins.len(), WIDE_BINS);
+        assert_eq!(f.bins[1234 * WIDE_BINS / 4096], 255);
         assert_eq!(f.bins[0], 0);
     }
 
@@ -10921,8 +10996,8 @@ mod wide_frame_tests {
     #[test]
     fn fewer_input_bins_than_output_bins_still_produces_a_full_frame() {
         let db = vec![-50.0f32; 100];
-        let f = pool_window_to_frame(&db, 1, 0.0, 1.0, -120.0, -20.0, DISPLAY_BINS, None);
-        assert_eq!(f.bins.len(), DISPLAY_BINS);
+        let f = pool_window_to_frame(&db, 1, 0.0, 1.0, -120.0, -20.0, WIDE_BINS, None);
+        assert_eq!(f.bins.len(), WIDE_BINS);
         assert!(f.bins.iter().all(|b| *b > 0));
     }
 

@@ -191,7 +191,7 @@ pub use scanner::{SCAN_STEPS_HZ, ScanKind, ScanResume, ScanState, ScannerConfig}
 pub use skimmer::{
     CW_SLOT_CHOICES, CW_SLOTS_DEFAULT, CwSkimmerDecoder, SkimmerKind, SkimmerSettings, SkimmerSpot,
 };
-pub use spectrum::{SpectrumConfig, SpectrumFrame};
+pub use spectrum::{DEFAULT_DISPLAY_BINS, MAX_DISPLAY_BINS, SpectrumConfig, SpectrumFrame};
 pub use speech::{
     CallsignStyle, CategoryFlags, DecodeSpeech, FreqStyle, SpeechSettings, TextSpeech, TuneSpeech,
     Verbosity,
@@ -206,7 +206,9 @@ pub use state::{
 pub use station::StationConfig;
 pub use tciserver::TciServerConfig;
 pub use tone::{CTCSS_TONES, SubTone};
-pub use ui::{BandplanKind, ChromeStyle, FontSize, LayoutMode, Speed, UiSettings, UiTheme};
+pub use ui::{
+    BandplanKind, ChromeStyle, FontSize, LayoutMode, SpectrumDetail, Speed, UiSettings, UiTheme,
+};
 pub use voice::{VOICE_MAX_LEN_S, VOICE_SLOTS, VoiceSlotInfo, VoiceStatus, slot_label};
 pub use wefax::{WEFAX_STATIONS, WefaxChartMeta, WefaxIoc, WefaxLpm, WefaxStation, WefaxStatus};
 pub use winlink::{

@@ -638,7 +638,20 @@ use sdroxide_types::{
 /// is invisible here: postcard numbers fields by position and never sends a
 /// name. It is `radio.json` that the old name matters to, and a serde alias
 /// keeps those files loading.
-pub const PROTO_VERSION: u16 = 90;
+///
+/// **91** — the panadapter's horizontal resolution is the client's to ask for
+/// (issue #172). [`sdroxide_types::SpectrumConfig`] gained `bins`: how many
+/// columns the emitted frames carry, which until now was a constant 2048 on
+/// both sides of the wire and so never needed saying.
+///
+/// It is the *client* that knows the number — its screen's pixel width and its
+/// own renderer's limits — so it has to travel, and it travels in the same
+/// command as the FFT size and the frame rate. Inserted after `fft_size`
+/// rather than appended, because it belongs next to it: postcard numbers
+/// fields by position, so a v90 peer would read `bins` as `fps` and everything
+/// after it as garbage either way. The handshake's equality test is what stops
+/// it trying.
+pub const PROTO_VERSION: u16 = 91;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

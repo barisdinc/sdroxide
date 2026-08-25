@@ -2078,7 +2078,8 @@ impl SdroxideApp {
                 });
             }
             SettingsTab::Ui => {
-                settings_ui_tab(ui, io.ui_edit, io.solar_cloud_march.as_deref_mut());
+                let detail = self.detail_report(io.ui_edit.spectrum_detail);
+                settings_ui_tab(ui, io.ui_edit, &detail, io.solar_cloud_march.as_deref_mut());
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);

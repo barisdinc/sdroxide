@@ -331,7 +331,7 @@ pub trait IqSource: Send {
     /// of complex samples for a picture that is a couple of thousand pixels
     /// wide. The source already has the samples and can analyse a small
     /// fraction of them cheaply, so it hands over the result and the engine
-    /// keeps the display policy (pooling to `DISPLAY_BINS`, the dB window).
+    /// keeps the display policy (pooling to `WIDE_BINS`, the dB window).
     ///
     /// Default: nothing to show.
     fn wide_spectrum_db(&mut self, _out: &mut Vec<f32>) -> Option<(f64, f64)> {

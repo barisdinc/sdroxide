@@ -677,6 +677,7 @@ mod tests {
     fn first_frame_cfg() -> ClientMsg {
         ClientMsg::Command(Command::SetSpectrumCfg(SpectrumConfig {
             fft_size: 32768,
+            display_bins: 4096,
             fps: 60,
             avg_tc: 0.0,
             db_floor: -120.0,

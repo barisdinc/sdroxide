@@ -653,9 +653,21 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 **FFT module:**
 
 - **floor** / **ceil** — the waterfall's dB range.
-- **FFT** size — `2048`, `4096`, `8192`, `16384`, or `32768`. This is the FFT
-  over the *whole* of what the radio streams, and the panadapter grows it with
-  the zoom until it runs out. Past that, zooming in gets a window of its own:
+- **FFT** size — `2048`, `4096`, `8192`, `16384`, `32768`, `65536` or `131072`.
+  This is the FFT over the *whole* of what the radio streams, and the panadapter
+  grows it with the zoom until it runs out.
+
+  A word on what the larger sizes buy. The transform is pooled down to the
+  panadapter's own columns — 2048 of them by default, more on a screen that can
+  show more (**Panadapter detail** in
+  [§6.3](#63-ui-display-preferences-and-voice-announcements)) — so up to that
+  width a bigger FFT is more columns, and past it, it is *sharper* ones: each
+  column becomes the strongest of more bins, so a weak carrier stands further
+  out of the noise instead of being averaged into it. That is why the largest
+  sizes are worth having on a wide front end and do nothing at all on a narrow
+  one, where the size is capped by the rate regardless (a transform may not
+  cover more than a tenth of a second of signal, which on an Icom's 24 kHz I.F.
+  is 2048 whatever is lit). Past that, zooming in gets a window of its own:
   the visible span is mixed down and decimated to its own width before it is
   analysed, so the detail you see follows the window you are looking at rather
   than how wide the front end happens to be. It matters most on a receiver that
@@ -7494,6 +7506,33 @@ spoken announcements below them under `[speech]`:
   on modest graphics: the radio itself is unaffected (the engine still processes
   every sample and audio never stutters), you simply see fewer spectrum frames,
   and the waterfall repeats rows to keep its scroll speed.
+- **Panadapter detail** — how many columns the panadapter and its waterfall are
+  drawn with. **Auto** is the default and is what nearly everyone should leave
+  it on: it reads this machine's graphics — the largest texture it will hold,
+  whether it is drawing on a real GPU or in software, which renderer is in use,
+  whether the radio is across a network — together with how wide the panadapter
+  actually is *in pixels*, and picks the most the machine can carry. The number
+  it settled on is shown beside the dropdown.
+
+  The steps are **Standard (2048)**, **High (4096)** and **Ultra (8192)**.
+  Standard is what every sdroxide before this one drew, and about what a 1080p
+  panadapter can show; High is one column per pixel of a 4K panel, which is the
+  point of the setting; Ultra is two per pixel, which keeps a carrier sharp
+  while the view is panned off the pixel grid. A step this machine cannot hold
+  is shown greyed, with the reason on hover — a Raspberry Pi, an older graphics
+  chip, a browser without WebGPU and a machine drawing without a GPU at all are
+  all held to Standard, because a wider waterfall there costs the frame rate and
+  buys a picture the renderer cannot draw anyway.
+
+  Auto stops at High even on a very large screen; Ultra is there to be chosen.
+  Auto also stays at Standard when the radio is on the other end of a network,
+  because every column is a byte in every frame — 4096 columns at 60 fps is
+  about a quarter of a megabyte a second — and there is no way to measure the
+  link from this end. On a LAN, set it by hand.
+
+  Detail costs memory on the graphics card: 8 MB per radio tab at Standard,
+  16 at High, 32 at Ultra. Changing it restarts the waterfall's history from
+  black, once.
 - **Waterfall scroll speed** — how fast the waterfall scrolls: **Slow** (5
   rows/s), **Medium** (28) or **Fast** (56). Fast trades screen time for
   vertical resolution, which is what you want when a CW or FT8 trace is smearing

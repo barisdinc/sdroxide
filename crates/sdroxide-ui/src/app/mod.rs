@@ -134,6 +134,18 @@ pub struct SdroxideApp {
     sent_cfg: Option<SpectrumConfig>,
     desired_cfg: Option<SpectrumConfig>,
     desired_at: f64,
+    /// What this machine's renderer will carry, gathered once when the window
+    /// opened. `None` where there is no wgpu at all (a headless test), which
+    /// reads as "the width sdroxide has always drawn".
+    display_class: Option<waterfall_gpu::DisplayClass>,
+    /// The widest the panadapter has been this session, in *device pixels*.
+    ///
+    /// Only ever grows. A window dragged narrower keeps the detail it had,
+    /// because re-cutting the frame costs the waterfall its scrollback and buys
+    /// back nothing but bandwidth — where a window dragged wider is the
+    /// operator moving onto the screen they bought this for. It also keeps the
+    /// width from thrashing against `cfg_still_good` while a window is resized.
+    panadapter_px: u32,
     /// The visible span last handed to the skimmers, the one waiting to be, and
     /// when it settled. Separate from `sent_cfg` because the spectrum viewport
     /// carries deliberate slack and this must not.
@@ -892,6 +904,19 @@ impl SdroxideApp {
         crate::theme::set_spot_colors(&ui_settings.spot_colors);
         crate::theme::set_bandplan_colors(&ui_settings.bandplan_colors);
         crate::theme::apply(egui_ctx);
+        // What this renderer will carry. Gathered here because it is the one
+        // place that holds the render state and the controller at once, and
+        // because none of it changes for the life of the window.
+        let display_class = wgpu_render_state.as_ref().map(|rs| {
+            let info = rs.adapter.get_info();
+            waterfall_gpu::DisplayClass {
+                max_texture_dim: rs.device.limits().max_texture_dimension_2d,
+                device_type: info.device_type,
+                backend: info.backend,
+                remote: ctrl.engine_is_remote(),
+                cores: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+            }
+        });
         if let Some(rs) = &wgpu_render_state {
             waterfall_gpu::init(rs);
         }
@@ -911,6 +936,8 @@ impl SdroxideApp {
         let _ = &wgpu_render_state;
         SdroxideApp {
             ctrl,
+            display_class,
+            panadapter_px: 0,
             caps: None,
             state: RadioState::default(),
             frame: None,

@@ -15,12 +15,29 @@ use crate::app::settings::general::device_combo;
 use crate::app::speech::SpeechStatus;
 use crate::chrome::StyledCombo;
 
+/// What this machine will actually draw, so the detail combo can show the
+/// operator what `Auto` decided and grey what the renderer cannot hold.
+///
+/// Passed in rather than worked out here because `sdroxide-types`, where
+/// [`sdroxide_types::UiSettings`] lives, must never learn about wgpu.
+pub(in crate::app) struct DetailReport {
+    /// Columns in force right now, whatever the setting says.
+    pub chosen: u32,
+    /// The widest the operator may pick on this renderer.
+    pub ceiling: u32,
+    /// One sentence naming what bound it, for the hover on a greyed row.
+    pub reason: String,
+}
+
 pub(in crate::app) fn settings_ui_tab(
     ui: &mut egui::Ui,
     cfg: &mut sdroxide_types::UiSettings,
+    detail: &DetailReport,
     cloud_march: Option<&mut bool>,
 ) {
-    use sdroxide_types::{ChromeStyle, FontSize, LayoutMode, Speed, UiSettings, UiTheme};
+    use sdroxide_types::{
+        ChromeStyle, FontSize, LayoutMode, SpectrumDetail, Speed, UiSettings, UiTheme,
+    };
     ui.label(RichText::new("Display").size(14.0).strong().color(crate::theme::CYAN()));
     ui.add_space(6.0);
     egui::Grid::new("ui-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -60,6 +77,42 @@ pub(in crate::app) fn settings_ui_tab(
                     ui.selectable_value(&mut cfg.frame_rate_fps, f, format!("{f} fps"));
                 }
             });
+        ui.end_row();
+
+        ui.label("Panadapter detail").on_hover_text(
+            "How many columns the panadapter and its waterfall are drawn with. \
+             Auto reads this machine's renderer and the size of the panadapter \
+             and picks the most it can carry — a 4K screen wants 4096. Every \
+             column is a byte in every frame, so a client connected to a remote \
+             station pays for the detail on its link: 4096 columns at 60 fps is \
+             about a quarter of a megabyte a second, twice the standard width.",
+        );
+        ui.horizontal(|ui| {
+            // Hand-rolled rather than `enum_combo`, so a step this renderer
+            // cannot hold is shown greyed with its reason instead of being
+            // hidden. A ladder with rungs missing reads as a bug; a ladder with
+            // rungs out of reach reads as the truth.
+            ComboBox::from_id_salt("ui-detail")
+                .selected_text(cfg.spectrum_detail.label())
+                .show_styled(ui, |ui| {
+                    for d in SpectrumDetail::ALL {
+                        let over = d.columns().is_some_and(|c| c > detail.ceiling);
+                        ui.add_enabled_ui(!over, |ui| {
+                            let r = ui.selectable_label(cfg.spectrum_detail == d, d.label());
+                            if over {
+                                r.on_disabled_hover_text(&detail.reason);
+                            } else if r.clicked() {
+                                cfg.spectrum_detail = d;
+                            }
+                        });
+                    }
+                });
+            ui.label(
+                RichText::new(format!("{} columns", detail.chosen))
+                    .size(11.0)
+                    .color(Color32::from_gray(150)),
+            );
+        });
         ui.end_row();
 
         ui.label("Waterfall scroll speed");

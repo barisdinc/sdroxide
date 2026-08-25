@@ -3644,8 +3644,25 @@ impl SdroxideApp {
         // layer, and clicking it counts as "outside" and closes this one.
         crate::chrome::menu_caption(ui, "FFT size");
         ui.horizontal_wrapped(|ui| {
-            for n in [2048u32, 4096, 8192, 16384, 32768] {
-                if crate::chrome::chip(ui, self.view.fft_size == n, format!("{n}")).clicked() {
+            let cols = self.panadapter_bins();
+            for n in [2048u32, 4096, 8192, 16384, 32768, 65536, 131_072] {
+                // Past the panadapter's own width a bigger transform stops
+                // adding columns and starts sharpening the ones there are —
+                // each is the maximum of more bins, so a weak carrier stands
+                // further out of the noise. Worth saying, because "no more
+                // detail" is what it looks like otherwise.
+                let hint = if n <= cols {
+                    format!("{n} bins across the whole stream — one per column, or finer")
+                } else {
+                    format!(
+                        "{n} bins pooled into the panadapter's {cols} columns: \
+                         sharper signals, not more of them"
+                    )
+                };
+                if crate::chrome::chip(ui, self.view.fft_size == n, format!("{n}"))
+                    .on_hover_text(hint)
+                    .clicked()
+                {
                     self.view.fft_size = n;
                 }
             }
