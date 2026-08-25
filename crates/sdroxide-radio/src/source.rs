@@ -363,6 +363,29 @@ pub trait IqSource: Send {
         false
     }
 
+    /// Where a transceiver's I/Q lands when the radio is in CW: on the
+    /// frequency its VFO displays (true), or a sidetone pitch below it (false).
+    ///
+    /// The question exists because a transceiver in CW displays the carrier it
+    /// *transmits* while listening a sidetone away from it, and radios settle
+    /// that in two different places. Some move their own I.F. by the pitch, so
+    /// a station on the displayed frequency arrives already offset and the
+    /// stream is a pitch below the readout — the K3's `CW WGHT: VFO OFS`, a QMX
+    /// on I/Q. Others hand out the DDC as it is, centred on the VFO, and leave
+    /// the offset to whatever demodulates it; an ELAD FDM-DUO does.
+    ///
+    /// It matters for one thing, and it is not the picture: on the second kind
+    /// the frequency being copied is a pitch *above* the VFO, so a radio keying
+    /// its own transmitter — a paddle in its socket, text handed to its keyer —
+    /// has to be left sitting there and not on our dial, or every over goes out
+    /// a sidetone below the station (issue #170).
+    ///
+    /// Default: false, which is how sdroxide has always treated every rig, so
+    /// only a radio this is *known* about should answer otherwise.
+    fn cw_iq_on_vfo(&self) -> bool {
+        false
+    }
+
     /// Drain any out-of-band changes the rig reported (dial/mode moved on the
     /// radio). Default: none.
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
@@ -804,6 +827,12 @@ impl IqSource for ConvertedSource {
     /// the spectrum sits — it is still the rig's.
     fn center_is_dial(&self) -> bool {
         self.inner.center_is_dial()
+    }
+
+    /// Nor where the rig puts its own I.F. in CW: that is a property of the
+    /// radio, and a converter ahead of it moves both numbers together.
+    fn cw_iq_on_vfo(&self) -> bool {
+        self.inner.cw_iq_on_vfo()
     }
 
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {

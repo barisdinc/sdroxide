@@ -1054,6 +1054,14 @@ is audible.
   *below* the signal, so with a 700 Hz pitch it reads 700 Hz low. The logbook's
   **+ NEW ENTRY** ([3.2.6](#326-logging-and-the-logbook)) fills itself in from
   the same figure, not from the dial.
+- **On a transceiver that keys its own transmitter, that same figure is what
+  the radio's VFO reads.** It has to be: the rig makes the carrier itself, on
+  its VFO, so leaving the VFO on sdroxide's zero-beat would answer every station
+  a sidetone low. sdroxide puts the VFO on the contact and tunes the pitch out
+  on its own side, so the two readouts differ by exactly your pitch and both are
+  right. Radios that shift their own I.F. in CW instead — a K3 on
+  `CONFIG:CW WGHT: VFO OFS`, a QMX sending I/Q — have already done that
+  themselves and are left alone.
 
 **What the header tells you.** A CW decoder cannot fail quietly the way a
 framed digital mode does — fed noise, a naive one produces confident nonsense —
@@ -6906,7 +6914,9 @@ This front end hands over a whole down-converter window, but that window is
 centred on the transceiver's own VFO: the receiver being streamed is the one the
 radio tunes for itself, so moving the VFO moves the window with it, hertz for
 hertz. There is no arrangement in which the radio's display and sdroxide's
-readout are different numbers and both are true.
+readout are different numbers and both are true — except in CW, where they are
+*supposed* to differ by your sidetone pitch, and the paragraph on CW below says
+why.
 
 So with the CAT port set, the two agree in both directions. Tuning here — the
 digits, the mouse wheel, a click on the waterfall, a memory, a band button —
@@ -6940,6 +6950,18 @@ having no VFO at all.
 that accepts text — its `SW` command plays one of the ten messages stored *in
 the radio* — so the CW panel cannot key it over CAT. Menu 37 `CW IN` set to
 `Key+DTR` is the other route, using the CAT cable's DTR line as a straight key.
+
+Which is why, in CW and only in CW, **the radio's VFO sits a sidetone pitch
+above sdroxide's readout**. The down-converter comes out on the VFO whatever
+mode the radio is in, so the station you are copying at 700 Hz is 700 Hz above
+the number in the big readout — and the VFO is what the radio keys its own
+transmitter on. sdroxide therefore leaves the VFO on the station and tunes its
+own receiver the 700 Hz down, so the radio's display reads the frequency you are
+working (the same figure the CW panel shows beside the pitch, and the one to
+log) while sdroxide's readout stays the zero-beat it has always been. Nothing on
+the waterfall moves. Without it the paddle answered every station a whole
+sidetone low and nobody came back
+([issue #170](https://github.com/dividebysandwich/sdroxide/issues/170)).
 
 > **Not verified against hardware.** The whole of this backend — the USB
 > protocol, the tuning arithmetic, the calibration map and the CAT dialect — is

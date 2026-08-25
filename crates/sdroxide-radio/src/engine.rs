@@ -2460,6 +2460,10 @@ fn engine_thread(
     engine.push_rx_mode();
     engine.keep_vfo_in_span();
     engine.update_tuning();
+    // And a session restored into CW puts a radio that keys its own transmitter
+    // a sidetone off our dial, which the span check above has no reason to ask
+    // for — the VFO is sitting exactly on the centre. See `sync_cw_dial`.
+    engine.sync_cw_dial();
 
     let mut buf = vec![Complex32::default(); 16_384];
     // Where a decimated block lands. A local rather than a field on the engine,
@@ -3435,6 +3439,11 @@ impl Engine {
     fn apply_control(&mut self, update: ControlUpdate) {
         match update {
             ControlUpdate::Freq(hz) => {
+                // The rig reports its VFO, which in CW on a radio that keys its
+                // own transmitter is a sidetone above our dial — the offset this
+                // end put there (`rig_cw_offset_hz`). Taking it back out is what
+                // stops the readout climbing by one pitch per poll.
+                let hz = hz - self.rig_cw_offset_hz();
                 match self.state.active_vfo {
                     Vfo::A => self.state.vfo_a_hz = hz,
                     Vfo::B => self.state.vfo_b_hz = hz,
@@ -3600,6 +3609,10 @@ impl Engine {
                     }
                     self.update_display_center(); // sideband flip changes the window
                     self.sync_digi_mode();
+                    // Into or out of CW the dial and the rig's VFO stop being
+                    // the same number — see `reseat_dial_for_cw`, which moves
+                    // ours rather than the radio's.
+                    self.reseat_dial_for_cw();
                     let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
                 }
             }
@@ -4185,7 +4198,7 @@ impl Engine {
         if self.state.rx[0].mode != Mode::Cw {
             return;
         }
-        let pitch = self.digi.as_ref().map_or(self.digi_config.cw_pitch_hz, |d| d.audio_hz());
+        let pitch = self.cw_pitch_hz();
         let r = &mut self.state.rx[0];
         let w = (r.filter_hi - r.filter_lo).abs().clamp(50.0, 3000.0);
         let (lo, hi) = (pitch - w / 2.0, pitch + w / 2.0);
@@ -4197,6 +4210,100 @@ impl Engine {
             d.set_filter(lo, hi);
         }
         self.push_control_filter();
+    }
+
+    /// The sidetone pitch the CW panel is copying at.
+    ///
+    /// The controller's rather than the configuration's, because the operator
+    /// moves it by clicking; the stored figure only stands in before there is a
+    /// controller to ask.
+    fn cw_pitch_hz(&self) -> f32 {
+        self.digi.as_ref().map_or(self.digi_config.cw_pitch_hz, |d| d.audio_hz())
+    }
+
+    /// How far above our dial a transceiver's own VFO has to sit.
+    ///
+    /// Zero everywhere but one case, and that case is CW on a radio handing us
+    /// raw I/Q around its own VFO. sdroxide's CW dial is a zero-beat — the tone
+    /// being copied sits a sidetone pitch above it, which is what
+    /// [`Mode::on_air_hz`] answers and where the keyer puts the carrier when
+    /// sdroxide makes it. A transceiver put in CW makes its own instead, on its
+    /// VFO, whether the key is a paddle in its socket or text handed to its
+    /// keyer — so a VFO left on our dial transmits a whole sidetone below the
+    /// station being answered, and the station never hears the call. That is
+    /// issue #170, reported on an ELAD FDM-DUO with a key in it: the signal was
+    /// copied perfectly at 700 Hz and worked nobody.
+    ///
+    /// So the VFO goes where the contact is and the DDC takes the difference.
+    /// Nothing on screen moves: the readout, the passband and the axis are all
+    /// exactly where they were, and the radio is on the station.
+    ///
+    /// Whether the stream comes out on the VFO at all is a property of the
+    /// radio rather than of CW, so the front end has to say
+    /// ([`IqSource::cw_iq_on_vfo`]): a rig that moves its own I.F. by the
+    /// pitch instead — a K3 on `CW WGHT: VFO OFS`, a QMX on I/Q — hands out a
+    /// stream that is already a sidetone below its readout, and there the dial
+    /// and the VFO are the same number and must stay it.
+    ///
+    /// Not in demodulated-audio mode, where the rig's own receiver has already
+    /// applied the offset — a station on its VFO is what arrives as a tone — and
+    /// not for MCW ([`IqSource::cw_audio_keyed`]), where the rig is held on a
+    /// sideband and keyed sidetone lands a pitch above the VFO exactly as it
+    /// does on an SDR.
+    fn rig_cw_offset_hz(&self) -> f64 {
+        if self.audio_mode
+            || self.state.rx[0].mode != Mode::Cw
+            || !self.source.center_is_dial()
+            || !self.source.cw_iq_on_vfo()
+            || self.source.cw_audio_keyed()
+        {
+            return 0.0;
+        }
+        f64::from(self.cw_pitch_hz())
+    }
+
+    /// Put the dial back under a VFO whose *mode* the radio changed.
+    ///
+    /// [`Self::rig_cw_offset_hz`] the other way round. A mode reported by the
+    /// rig is somebody's hand on its front panel, and nothing there moved the
+    /// VFO — so entering or leaving CW is ours to absorb: the radio keeps the
+    /// frequency it is displaying and our dial takes the sidetone step. The
+    /// alternative would nudge a stranger's rig 700 Hz for having been switched
+    /// to CW, which is not what connecting to it should do.
+    ///
+    /// Only where the centre *is* the rig's VFO, which is also where that
+    /// front end parks no LO of its own, so the two numbers are one.
+    fn reseat_dial_for_cw(&mut self) {
+        if self.audio_mode || !self.source.center_is_dial() {
+            return;
+        }
+        let want = self.state.center_hz - self.rig_cw_offset_hz();
+        if (want - self.state.active_freq_hz()).abs() < 0.5 {
+            return;
+        }
+        match self.state.active_vfo {
+            Vfo::A => self.state.vfo_a_hz = want,
+            Vfo::B => self.state.vfo_b_hz = want,
+        }
+        self.state.band = Band::containing(want);
+        self.good_vfo_hz = want;
+        self.update_tuning();
+    }
+
+    /// Keep a self-keying transceiver's VFO where CW says it has to be.
+    ///
+    /// The pitch is where the contact is ([`Self::rig_cw_offset_hz`]), so a
+    /// pitch the operator moved — from the panel, or by clicking a station in
+    /// the passband — moves the frequency such a radio belongs on; and a
+    /// session restored straight into CW opens with the dial and the VFO on the
+    /// same number, which in CW they must not be. A no-op in every other mode,
+    /// and on an SDR, where `follow_dial` falls through to the span check.
+    fn sync_cw_dial(&mut self) {
+        if self.state.rx[0].mode != Mode::Cw {
+            return;
+        }
+        self.follow_dial();
+        self.update_tuning();
     }
 
     /// Hand the main receiver's passband to a radio that filters for us.
@@ -5173,6 +5280,7 @@ impl Engine {
                 // settles the argument over the dial that suspended it.
                 self.hop_suspended = false;
                 self.sync_cw_filter();
+                self.sync_cw_dial();
                 if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
                     warn!("saving digi config: {e}");
                 }
@@ -5187,6 +5295,7 @@ impl Engine {
                     d.set_audio_hz(hz);
                 }
                 self.sync_cw_filter();
+                self.sync_cw_dial();
                 // Remembered against the band, and only here: this arm is the
                 // operator's own route (the offset box, the nudge chips, a click
                 // on a decode or the waterfall). The automatic movers never
@@ -7226,7 +7335,11 @@ impl Engine {
             // hands the discriminator a 250 kHz channel with the DC spike
             // inside it. Re-check the clearance and move the LO if it grew.
             if !self.audio_mode {
-                self.keep_vfo_in_span();
+                // `follow_dial` rather than the span check alone: entering or
+                // leaving CW moves a self-keying transceiver's VFO by a whole
+                // sidetone (`rig_cw_offset_hz`), and that is a move no span
+                // check would ever ask for — the VFO is sitting on the centre.
+                self.follow_dial();
                 self.update_tuning();
             }
         }
@@ -7433,6 +7546,11 @@ impl Engine {
             return;
         }
         self.state.scan = sdroxide_types::ScanState::default();
+        // A sweep drives the hardware centre itself, dial and all, so a scan
+        // that stopped on a CW signal leaves a self-keying transceiver's VFO on
+        // our zero-beat rather than on the station. Put it back before the
+        // operator reaches for the paddle. See `sync_cw_dial`.
+        self.sync_cw_dial();
         if let Some(why) = why {
             self.notice(why);
         }
@@ -9028,7 +9146,11 @@ impl Engine {
             // In audio mode `tx_begin` just asserts CAT PTT; there is no
             // modulator/DUC (the rig modulates the audio we feed its sound card).
             let begin_rate = if self.audio_mode { self.radio_fs } else { self.state.sample_rate };
-            match self.source.tx_begin(txf, begin_rate) {
+            // On a radio that makes its own CW carrier the VFO *is* the transmit
+            // frequency, and the contact sits a sidetone above the dial — the
+            // same offset the receive window already rides on.
+            let rig_txf = txf + self.rig_cw_offset_hz();
+            match self.source.tx_begin(rig_txf, begin_rate) {
                 Ok(tx_rate) => {
                     // Rate-match the digital modes to whatever this radio
                     // actually plays.
@@ -9986,13 +10108,19 @@ impl Engine {
             self.keep_vfo_in_span();
             return;
         }
-        let vfo = self.state.active_freq_hz();
+        let dial = self.state.active_freq_hz();
+        // Not always the dial: in CW a radio that keys its own transmitter has
+        // to sit on the contact, a sidetone above it (`rig_cw_offset_hz`).
+        let vfo = dial + self.rig_cw_offset_hz();
         // Asking for a centre the front end is already on costs a skimmer
         // restart and a CAT write for nothing.
         if (self.state.center_hz - (vfo + self.lo_offset_hz())).abs() >= 0.5 {
-            self.retune_for_vfo(vfo);
+            if self.retune_for_vfo(vfo) {
+                // What a refused tune goes back to is a dial, not a VFO.
+                self.good_vfo_hz = dial;
+            }
         } else {
-            self.good_vfo_hz = vfo;
+            self.good_vfo_hz = dial;
         }
     }
 

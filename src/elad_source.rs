@@ -26,6 +26,15 @@
 //! so and the engine commands the VFO for every tune, exactly as it does for a
 //! transceiver sending I/Q down a sound card ([`crate::audio_cat_source`]).
 //!
+//! CW is the one exception, and it is not really one. The window still rides the
+//! VFO — that is the point — but sdroxide's CW dial is a zero-beat and the tone
+//! being copied sits a sidetone pitch above it, while the DUO keys its own
+//! transmitter on the VFO. So there the VFO goes on the station and the dial
+//! stays a pitch under it: [`IqSource::cw_iq_on_vfo`] is this radio saying which
+//! of the two CW families it belongs to, and the engine's `rig_cw_offset_hz` is
+//! what it costs. Leaving the two equal answered every station a sidetone low
+//! ([issue #170]).
+//!
 //! It used to be the other way round — the VFO was parked on the panadapter
 //! centre and the dial moved inside the window in software — and every way that
 //! could go wrong, did. The rig's display never agreed with sdroxide's readout;
@@ -51,6 +60,7 @@
 //!
 //! [issue #111]: https://github.com/dividebysandwich/sdroxide/issues/111
 //! [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
+//! [issue #170]: https://github.com/dividebysandwich/sdroxide/issues/170
 //!
 //! # Not verified against hardware
 //!
@@ -437,6 +447,19 @@ impl IqSource for EladSource {
     /// walks out of the receiver instead of into it.
     fn center_is_dial(&self) -> bool {
         self.dial_reachable
+    }
+
+    /// The DDC on this USB interface is the receiver's, not the demodulator's:
+    /// it is handed out centred on the VFO whatever mode the rig is in, and the
+    /// sidetone offset lives in whatever demodulates it — the DUO's own audio
+    /// stage, or ours.
+    ///
+    /// Which means that in CW the station being copied is a pitch *above* the
+    /// VFO, and the VFO is what the rig keys its own transmitter on. Issue #170
+    /// is what that costs when the two are left equal: a signal copied
+    /// perfectly at 700 Hz, answered 700 Hz below, and nobody coming back.
+    fn cw_iq_on_vfo(&self) -> bool {
+        true
     }
 
     /// The transceiver in front of us owns its mode, and a mode chosen here has
