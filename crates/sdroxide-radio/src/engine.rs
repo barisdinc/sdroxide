@@ -1639,6 +1639,16 @@ struct Engine {
     /// Centre and span the cached sweep covers, and when it landed.
     wide_window: Option<(f64, f64)>,
     wide_at: Instant,
+    /// Sweeps a front end with its own spectrum has finished since this engine
+    /// started.
+    ///
+    /// Diagnostic, and the one number that says how much of the picture is
+    /// real on a rig whose scope *is* the main panadapter: the waterfall is
+    /// scrolled on the wall clock there, so at three sweeps a second and a
+    /// hundred rows a second every sweep is drawn thirty times over. Counted
+    /// beside the transform and frame rates in the panadapter diagnostic, which
+    /// is where the same question gets asked about the other lanes.
+    wide_sweeps: u64,
     /// Whether the cached sweep is one the full-band lane has not published.
     /// The main lane has no such flag: it emits at the display rate whether or
     /// not a new sweep arrived, exactly as the FFT analyser does.
@@ -2459,6 +2469,7 @@ fn engine_thread(
         channel_rate_hz: 48_000.0,
         wide_window: None,
         wide_at: Instant::now(),
+        wide_sweeps: 0,
         wide_fresh: false,
         wide_seq: 0,
         scope_seq: 0,
@@ -2707,6 +2718,7 @@ fn engine_thread(
     let mut lane_frames: u64 = 0;
     let mut lane_rows: u64 = 0;
     let mut lane_ffts = 0u64;
+    let mut lane_sweeps: u64 = 0;
     let mut next_rds = Instant::now();
     let mut next_drm = Instant::now();
     let mut next_session = Instant::now() + SESSION_SAVE_INTERVAL;
@@ -2899,6 +2911,12 @@ fn engine_thread(
                 // The waterfall's real time resolution, which is the number
                 // this diagnostic exists to separate from the other two.
                 rows_per_s = engine.rows_clocked.saturating_sub(lane_rows) as f64 / secs,
+                // Finished sweeps from a front end that computes its own
+                // spectrum. Zero on an I/Q receiver; on a rig whose scope is
+                // the main panadapter it is the real picture rate, and the
+                // number to compare `rows_per_s` against before believing a
+                // report that the waterfall looks blocky.
+                sweeps_per_s = engine.wide_sweeps.saturating_sub(lane_sweeps) as f64 / secs,
                 rate_hz = engine.state.sample_rate,
                 fft_size = engine.cfg.fft_size,
                 // What the frames are actually being cut into, which is the
@@ -2908,12 +2926,18 @@ fn engine_thread(
                 bins = engine.cfg.bins(),
                 zoom = engine.zoom.is_some(),
                 audio_mode = engine.audio_mode,
+                // The window the client asked for, and — on a demod-audio rig
+                // — the rig's own passband it is measured against to decide
+                // which lane draws. See `Engine::audio_zoom_window`.
+                view = ?engine.cfg.viewport,
+                audio_band = ?engine.audio_mode.then(|| engine.audio_band()),
                 "panadapter rates",
             );
             lane_at = now;
             lane_samples = 0;
             lane_frames = 0;
             lane_rows = engine.rows_clocked;
+            lane_sweeps = engine.wide_sweeps;
             lane_ffts = ffts;
         }
         if let Some(frame) = engine.make_wide_frame() {
@@ -4831,6 +4855,7 @@ impl Engine {
             self.wide_window = Some(window);
             self.wide_at = Instant::now();
             self.wide_fresh = true;
+            self.wide_sweeps = self.wide_sweeps.wrapping_add(1);
         }
         // The scope is the display axis while it is the main lane, so the axis
         // has to follow it both ways: a sweep on a new centre or span moves the
@@ -4984,7 +5009,15 @@ impl Engine {
     /// cannot disagree — a lane that said it clocked rows and then never
     /// produced any would freeze the waterfall.
     fn clocks_rows(&self) -> bool {
-        !(self.tx_active || (self.audio_mode && self.scope_main_window().is_some()))
+        // A sweep that arrives finished has nothing between rows to miss, so
+        // the client scrolls it on its own clock. The audio analyser is not
+        // like that: it runs transforms continuously, and while it is the one
+        // drawing ([`Engine::audio_zoom_window`]) the waterfall gets its rows
+        // clocked and its peak held like any other lane.
+        let scope_draws = self.audio_mode
+            && self.scope_main_window().is_some()
+            && self.audio_zoom_window().is_none();
+        !(self.tx_active || scope_draws)
     }
 
     /// Build a full-band frame, if a sweep has arrived since the last one.
@@ -5046,6 +5079,64 @@ impl Engine {
         self.wide_window
     }
 
+    /// The RF window the rig's demodulated audio covers: its passband, on the
+    /// side of the dial the mode puts it.
+    fn audio_band(&self) -> (f64, f64) {
+        let dial = self.state.active_freq_hz();
+        if self.state.rx[0].mode.is_lower_sideband_at(dial) {
+            (dial - self.audio_bw, dial)
+        } else {
+            (dial, dial + self.audio_bw)
+        }
+    }
+
+    /// The viewport, when it lies inside the rig's own passband — and so when
+    /// the audio it is sending resolves that window far better than its scope.
+    ///
+    /// A serial CAT rig's scope is a fixed number of points across whatever
+    /// span it was told to sweep: an IC-705 sends 475, so at ±250 kHz that is a
+    /// kilohertz a point, and an operator zooming in is magnifying rather than
+    /// resolving — a CW signal stays one block wide however far they go, and
+    /// the block only gets fatter. Measured on that radio: 1053 Hz a point at
+    /// ±250 kHz, 105 at ±25 kHz, and about four sweeps a second at every span.
+    ///
+    /// The same rig is already sending its demodulated audio over the sound
+    /// card, and that goes through the panadapter's own analyser — 48 kHz
+    /// through a 16384-point window is some three hertz a bin, arriving twenty
+    /// times a second. Inside the passband it is a better picture by two orders
+    /// of magnitude in both axes.
+    ///
+    /// Outside it there is nothing to switch to: the audio is not a picture of
+    /// the band at all, only of what the rig has already demodulated, so a
+    /// wider view stays on the scope. The display *axis* stays the scope's
+    /// either way ([`Engine::update_display_center`]), so zooming back out is
+    /// the same gesture it always was.
+    fn audio_zoom_window(&self) -> Option<(f64, f64)> {
+        if !self.audio_mode {
+            return None;
+        }
+        let (lo, hi) = self.cfg.viewport?;
+        if !(hi > lo) {
+            return None;
+        }
+        let (band_lo, band_hi) = self.audio_band();
+        // What the operator can actually see, which is not what arrives: a
+        // client sends its window with slack around it so that panning inside
+        // it needs no reconfiguration, and today that slack is double the
+        // visible span. So the visible part is the middle of what was asked
+        // for, and it is the *visible* part that has to be inside the rig's
+        // filter for the audio to be the honest picture. Judging the slack as
+        // well would refuse every zoom that reached the passband edge.
+        let quarter = (hi - lo) / 4.0;
+        if lo + quarter < band_lo || hi - quarter > band_hi {
+            return None;
+        }
+        // Clipped to the filter, so the mirror the other side of the dial is
+        // never drawn: the rig sends *real* audio, whose spectrum is symmetric,
+        // and only the one side of it is the band.
+        Some((lo.max(band_lo), hi.min(band_hi)))
+    }
+
     /// The main panadapter, drawn from the radio's own finished bins.
     ///
     /// Auto-ranged rather than mapped through the operator's dB window: an
@@ -5076,6 +5167,20 @@ impl Engine {
         }
         let bins = self.cfg.bins();
         if self.audio_mode {
+            // Zoomed inside the rig's own passband: its audio resolves that
+            // window by two orders of magnitude more than its scope can, so it
+            // draws — see [`Engine::audio_zoom_window`]. Ahead of the scope
+            // test, because the scope is what owns the picture everywhere else.
+            if let Some(vp) = self.audio_zoom_window() {
+                return self.analyzer.make_frame(
+                    self.state.active_freq_hz(),
+                    self.radio_fs,
+                    self.cfg.db_floor,
+                    self.cfg.db_ceil,
+                    bins,
+                    Some(vp),
+                );
+            }
             // The radio's own scope, where this session has one — the only
             // spectrum of the *band* a demod-audio path can show.
             if let Some((center_hz, span_hz)) = self.scope_main_window() {
@@ -11381,12 +11486,40 @@ fn pool_window_to_frame(
     let lo_bin = frac_lo * n as f64;
     let bin_range = (frac_hi - frac_lo) * n as f64;
     let mut bins = Vec::with_capacity(out_bins);
-    for i in 0..out_bins {
-        let lo = ((lo_bin + i as f64 * bin_range / out_bins as f64) as usize).min(n - 1);
-        let hi =
-            ((lo_bin + (i + 1) as f64 * bin_range / out_bins as f64) as usize).clamp(lo + 1, n);
-        let peak = db[lo..hi].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        bins.push(((peak - db_floor) * scale).clamp(0.0, 255.0) as u8);
+    if bin_range < out_bins as f64 {
+        // Stretching, not pooling: the window holds fewer measurements than
+        // there are columns to fill, so each one has to cover several.
+        //
+        // Reading between them rather than repeating them. A rig's own scope is
+        // a fixed number of points however wide the panadapter is drawn — an
+        // IC-705 sends 475 across its whole span, so a view of a fifth of that
+        // span is 85 numbers spread over a couple of thousand pixels — and
+        // repeating each one seventeen times is the wall of hard blocks that
+        // gets reported as a broken waterfall. It is also self-inflicted: the
+        // waterfall's own sampler is linear and would have drawn exactly this
+        // gradient, had the frame not arrived pre-blocked.
+        //
+        // Only in this direction. Coarsening stays the peak below, because a
+        // carrier one bin wide has to survive being pooled into a column, and
+        // averaging or sampling it away is how a signal disappears from a
+        // zoomed-out panadapter.
+        for i in 0..out_bins {
+            // Centre of this column, in source-bin coordinates, with the half
+            // bin taken off so bin centres land on column centres.
+            let at = lo_bin + (i as f64 + 0.5) * bin_range / out_bins as f64 - 0.5;
+            let k = at.floor().clamp(0.0, (n - 1) as f64) as usize;
+            let t = (at - k as f64).clamp(0.0, 1.0) as f32;
+            let (a, b) = (db[k], db[(k + 1).min(n - 1)]);
+            bins.push(((a + (b - a) * t - db_floor) * scale).clamp(0.0, 255.0) as u8);
+        }
+    } else {
+        for i in 0..out_bins {
+            let lo = ((lo_bin + i as f64 * bin_range / out_bins as f64) as usize).min(n - 1);
+            let hi =
+                ((lo_bin + (i + 1) as f64 * bin_range / out_bins as f64) as usize).clamp(lo + 1, n);
+            let peak = db[lo..hi].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            bins.push(((peak - db_floor) * scale).clamp(0.0, 255.0) as u8);
+        }
     }
     SpectrumFrame {
         seq,
@@ -11446,6 +11579,38 @@ mod wide_frame_tests {
         assert_eq!(f.bins.len(), WIDE_BINS);
         assert_eq!(f.bins[1234 * WIDE_BINS / 4096], 255);
         assert_eq!(f.bins[0], 0);
+    }
+
+    /// A rig's own scope is a fixed number of points, and a panadapter drawn
+    /// wider than that is stretching them. Repeating each one is what made an
+    /// IC-705's waterfall a wall of blocks; the ramp between two neighbours has
+    /// to actually be a ramp.
+    #[test]
+    fn a_stretched_sweep_is_a_gradient_and_not_a_staircase() {
+        // Eight points climbing evenly, drawn across 256 columns.
+        let db: Vec<f32> = (0..8).map(|i| -120.0 + i as f32 * 10.0).collect();
+        let f = pool_window_to_frame(&db, 1, 1e6, 1e6, -120.0, -40.0, 256, None);
+        assert_eq!(f.bins.len(), 256);
+
+        // Monotone, as the input is.
+        assert!(f.bins.windows(2).all(|w| w[1] >= w[0]), "the ramp went backwards");
+
+        // And it climbs continuously rather than in eight steps: between the
+        // first and last source points every column differs from its neighbour
+        // by at most a couple of levels, where replication would jump ~32 at
+        // each of seven boundaries.
+        let biggest = f.bins.windows(2).map(|w| w[1] as i32 - w[0] as i32).max().unwrap_or(0);
+        assert!(biggest <= 3, "the largest step between columns was {biggest}");
+    }
+
+    /// The other direction is untouched: coarsening still keeps the peak, which
+    /// is what stops a one-bin carrier vanishing from a zoomed-out view.
+    #[test]
+    fn stretching_does_not_change_how_a_wide_window_is_pooled() {
+        let mut db = vec![-120.0f32; 4096];
+        db[77] = -20.0;
+        let f = pool_window_to_frame(&db, 1, 1e6, 1e6, -120.0, -20.0, 512, None);
+        assert_eq!(f.bins[77 * 512 / 4096], 255);
     }
 
     #[test]

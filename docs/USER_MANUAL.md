@@ -6089,6 +6089,16 @@ That sets a hard ceiling on what any program, sdroxide or RS-BA1 alike, can show
 - On the **12 kHz IF** the panadapter is real spectrum — about **±12 kHz** around
   the dial at 48000 Hz — which can be demodulated, notched, decoded and skimmed.
   The scope then lives in the strip above it instead.
+- **Zoom in past the rig's filter and the audio takes over.** The scope is 475
+  points across whatever **Scope span** is set to — 1053 Hz per point at ±250 kHz,
+  105 Hz at ±25 kHz — and it arrives about four times a second whatever the span,
+  so past a point zooming magnifies rather than resolves and a signal stays one
+  block wide. Once the visible window fits inside the rig's passband the
+  panadapter is drawn from the demodulated audio instead: 48 kHz through the
+  panadapter's own transform is a few hertz per bin, arriving twenty times a
+  second, and the waterfall gets a proper row for every one of them. Zooming back
+  out hands the picture to the scope again — the frequency axis stays the scope's
+  either way, so nothing jumps.
 - The **digital modes** always get the audio band, on either path. FT8 and the
   keyboard modes place stations by their offset inside the rig's passband, and a
   band-wide sweep at a few hundred Hz per bin cannot show one, so the panadapter

@@ -335,16 +335,39 @@ impl SpectrumAnalyzer {
         let bin_range = (frac_hi - frac_lo) * n as f64;
 
         let mut bins = Vec::with_capacity(out_bins);
-        for b in 0..out_bins {
-            let lo = (lo_bin + b as f64 * bin_range / out_bins as f64) as usize;
-            let hi =
-                ((lo_bin + (b + 1) as f64 * bin_range / out_bins as f64) as usize).clamp(lo + 1, n);
-            let mut max_p = 0.0f32;
-            for i in lo..hi.max(lo + 1).min(n) {
-                max_p = max_p.max(shifted(i));
+        if bin_range < out_bins as f64 {
+            // Stretching, not pooling: the window holds fewer bins than there
+            // are columns to fill, so each bin has to cover several. Reading
+            // between them rather than repeating them — a repeated bin is a
+            // hard block, and a wall of them is what a zoom past the transform's
+            // resolution used to look like. The same rule the finished-sweep
+            // pooler uses; see `pool_window_to_frame` in the engine.
+            //
+            // Interpolated in power and then taken to dB, so the ramp between
+            // two bins is the ramp between the two levels rather than between
+            // their logarithms.
+            for b in 0..out_bins {
+                // Centre of this column in bin coordinates, less the half bin
+                // that puts bin centres on column centres.
+                let at = lo_bin + (b as f64 + 0.5) * bin_range / out_bins as f64 - 0.5;
+                let k = at.floor().clamp(0.0, (n - 1) as f64) as usize;
+                let t = (at - k as f64).clamp(0.0, 1.0) as f32;
+                let (p0, p1) = (shifted(k), shifted((k + 1).min(n - 1)));
+                let db = 10.0 * (p0 + (p1 - p0) * t + 1e-20).log10();
+                bins.push(((db - db_floor) * scale).clamp(0.0, 255.0) as u8);
             }
-            let db = 10.0 * (max_p + 1e-20).log10();
-            bins.push(((db - db_floor) * scale).clamp(0.0, 255.0) as u8);
+        } else {
+            for b in 0..out_bins {
+                let lo = (lo_bin + b as f64 * bin_range / out_bins as f64) as usize;
+                let hi = ((lo_bin + (b + 1) as f64 * bin_range / out_bins as f64) as usize)
+                    .clamp(lo + 1, n);
+                let mut max_p = 0.0f32;
+                for i in lo..hi.max(lo + 1).min(n) {
+                    max_p = max_p.max(shifted(i));
+                }
+                let db = 10.0 * (max_p + 1e-20).log10();
+                bins.push(((db - db_floor) * scale).clamp(0.0, 255.0) as u8);
+            }
         }
 
         self.seq = self.seq.wrapping_add(1);
