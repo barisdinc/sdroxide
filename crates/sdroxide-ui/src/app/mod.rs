@@ -55,7 +55,6 @@ use crate::waterfall_gpu;
 use crate::widgets::spectrum_view;
 
 use self::logbook::LogEditForm;
-use self::panels::decodes::DecodeSort;
 use self::panels::fsq::fsq_load_contacts;
 use self::panels::rf_paint::RfPaintUi;
 use self::panels::sstv::SstvUi;
@@ -488,17 +487,6 @@ pub struct SdroxideApp {
     /// Location of the decode row hovered this frame, shown on the map as a
     /// bright yellow dot. Frame-scoped (set by the decode list, read by the map).
     digi_hover_ll: Option<(f64, f64)>,
-    /// Decode-list ordering within each turn, and whether to show CQ only.
-    digi_sort: DecodeSort,
-    /// Sort direction: `true` = descending (strongest / farthest first).
-    digi_sort_desc: bool,
-    digi_cq_only: bool,
-    /// Decode-list filter: only stations that would put something new in the
-    /// log (new entity, new band-slot, new grid, or a callsign never worked).
-    digi_new_only: bool,
-    /// Show every decode as one list — sorted across all turns — instead of
-    /// grouped into odd/even turn blocks.
-    digi_single_list: bool,
     /// The FT8 free-text entry, sent verbatim in the next transmit slot.
     digi_free_text: String,
     /// Country-flag textures, uploaded on first use and kept for the session.
@@ -1076,11 +1064,6 @@ impl SdroxideApp {
             prop_heat: Default::default(),
             wspr_spots: Vec::new(),
             digi_hover_ll: None,
-            digi_sort: DecodeSort::None,
-            digi_sort_desc: true,
-            digi_cq_only: false,
-            digi_new_only: false,
-            digi_single_list: false,
             digi_free_text: String::new(),
             flags: Default::default(),
             show_logbook: false,

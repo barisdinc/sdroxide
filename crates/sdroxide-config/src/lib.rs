@@ -2275,6 +2275,46 @@ mod tests {
         assert_eq!(back.ui.window_style, sdroxide_types::ChromeStyle::Gradient);
     }
 
+    /// The FT8/FT4 decode list's own view preferences — the sort, its
+    /// direction, the grouping and the two filters — ride in `[ui]` beside the
+    /// theme, so they have to survive the same trip: a chip clicked in the
+    /// panel is written the moment it is pressed and has to come back on the
+    /// next start.
+    #[test]
+    fn the_decode_list_view_survives_a_toml_round_trip() {
+        let mut s = Settings::default();
+        s.ui.decode_sort = sdroxide_types::DecodeSort::Country;
+        s.ui.decode_sort_desc = false;
+        s.ui.decode_single_list = true;
+        s.ui.decode_cq_only = true;
+        s.ui.decode_new_only = true;
+        let text = toml::to_string_pretty(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui.decode_sort, sdroxide_types::DecodeSort::Country);
+        assert!(!back.ui.decode_sort_desc);
+        assert!(back.ui.decode_single_list);
+        assert!(back.ui.decode_cq_only);
+        assert!(back.ui.decode_new_only);
+    }
+
+    /// A config written before these existed — or one with a hand-typed sort
+    /// name that is not a sort — loads with the list unsorted and every other
+    /// preference intact, rather than throwing the whole `[ui]` table away.
+    #[test]
+    fn an_unknown_decode_sort_degrades_to_no_sorting() {
+        let s: Settings = toml::from_str(
+            "[ui]\n\
+             theme = \"AmberPhosphor\"\n\
+             decode_sort = \"Loudest\"\n",
+        )
+        .expect("an unknown sort name must still parse");
+        assert_eq!(s.ui.decode_sort, sdroxide_types::DecodeSort::None);
+        assert_eq!(s.ui.theme, sdroxide_types::UiTheme::AmberPhosphor);
+        let old: Settings = toml::from_str("[ui]\ntheme = \"AmberPhosphor\"\n").unwrap();
+        assert_eq!(old.ui.decode_sort, sdroxide_types::DecodeSort::None);
+        assert!(!old.ui.decode_cq_only, "a config from before these must not filter the list");
+    }
+
     /// One test rather than several, because it redirects the config directory
     /// through the environment — process-global state that must not race the
     /// other tests in this binary (none of which touch `config_dir`).

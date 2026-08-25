@@ -348,6 +348,21 @@ pub struct UiSettings {
     /// Read that order backwards — Z to A, highest frequency first, and
     /// newest-stored first for [`crate::MemorySort::Stored`].
     pub memory_sort_desc: bool,
+    /// How the FT8/FT4 decode list orders the stations. This screen's
+    /// preference like [`UiSettings::memory_sort`] above, and for the same
+    /// reason: the decodes are the station's, the order they are read in is
+    /// the operator's.
+    pub decode_sort: crate::DecodeSort,
+    /// Read that order backwards — weakest and nearest first, countries Z to A.
+    pub decode_sort_desc: bool,
+    /// Show every decode in one list, newest turn first, instead of grouping
+    /// them into odd/even turn blocks.
+    pub decode_single_list: bool,
+    /// Decode-list filter: only stations calling a CQ we may answer.
+    pub decode_cq_only: bool,
+    /// Decode-list filter: only stations that would put something new in the
+    /// log (new entity, new band-slot, new grid, or a callsign never worked).
+    pub decode_new_only: bool,
 }
 
 /// Default for [`UiSettings::spot_colors`] — every kind on its stock tint.
@@ -425,6 +440,13 @@ impl Default for UiSettings {
             update_check: true,
             memory_sort: crate::MemorySort::Stored,
             memory_sort_desc: false,
+            decode_sort: crate::DecodeSort::None,
+            // Strongest and farthest first, which is the useful end of both
+            // numbers; the Country order flips this when it is picked.
+            decode_sort_desc: true,
+            decode_single_list: false,
+            decode_cq_only: false,
+            decode_new_only: false,
         }
     }
 }

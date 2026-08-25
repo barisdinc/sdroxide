@@ -433,7 +433,7 @@ mode. What is in the box never changes; only where the two rows are cut does.
   and data modes, whose signals *are* tones.)
 - **NR** — noise reduction on the audio, with four selectable engines. The button
   always reads just `NR` and lights when noise reduction is in circuit — that is
-  all it tells you, and it never changes width under the chips beside it. Click
+  all it tells you, and it never changes width under the buttons beside it. Click
   it for a picker with an **Engine** row and a **Strength** row, which is where
   you both read back what is running and change it, so any setting is two clicks
   away; hovering the button names it too. A keyboard or MIDI binding cycles the
@@ -455,7 +455,7 @@ mode. What is in the box never changes; only where the two rows are cut does.
     and a *whitened* noise floor: rather than carving the residue into birdies it
     flattens what is left into even hiss. Good on steady static where the neural
     engines sound processed.
-  - **NR** — the built-in **spectral** noise reduction, whose engine chip keeps
+  - **NR** — the built-in **spectral** noise reduction, whose engine button keeps
     the bare name the button has always worn: it suppresses the stationary noise
     floor while letting the changing, speech-like parts through. Fast and
     predictable on steady static and hiss.
@@ -610,7 +610,7 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 - **SPEC** — opens the **Layers** popup, which switches the two halves of the
   panadapter on and off independently: **SPECTRUM** (the spectrum line) and
   **WATERFALL** (the scrolling display below it). All four displays are
-  available — spectrum only, waterfall only, both, or neither — and the chip is
+  available — spectrum only, waterfall only, both, or neither — and the button is
   lit while both layers are shown.
   - With one of them off the other takes the full height, with the frequency
     scale still along its edge; dragging that scale brings the hidden layer
@@ -619,7 +619,7 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   - With **both** off there is no panadapter at all. In a mode with an
     operating panel under it — the digital modes, and CW — the panel takes the
     whole height; in the other modes the area is simply left empty. The SPEC
-    chip is the way back.
+    button is the way back.
 - **WIDE** — show or hide the **full-band strip**: a shallow second waterfall
   above the panadapter covering everything the receiver can see at once, with a
   blue outline around the slice the panadapter is receiving and an amber line on
@@ -719,7 +719,7 @@ watching for is the needle falling while drive stays put.
 Where there is no power meter but there is an **SWR** bridge, the lower row is
 SWR instead, on a logarithmic scale with 1:1 at the left stop, 3:1 at mid-scale
 and everything past 3:1 in red. Either way the SWR keeps its place as a number
-in the header chip. Rigs with neither show the drive row alone, grown to fill
+in the header button. Rigs with neither show the drive row alone, grown to fill
 the space.
 
 Where the reading comes from depends on the interface. An SDR delivers IQ and
@@ -993,10 +993,10 @@ that the radio is not fighting you for the VFO.
 
 **SKIP works in a range scan too**, and it is remembered. There is no stored
 channel to mark, so the frequency itself goes on a skip list shown under the
-range — a row of chips, one per channel, with **CLEAR** to empty it. The list
+range — a row of buttons, one per channel, with **CLEAR** to empty it. The list
 is saved with the rest of the settings, so a data channel, a pager or a birdie
 dismissed once stays dismissed for the rest of the evening and for every later
-run over the same range, instead of costing a stop every pass. Click a chip to
+run over the same range, instead of costing a stop every pass. Click a button to
 put its channel back into the scan.
 
 The list belongs to **the range it was taken in**: change the From, the to or
@@ -1519,7 +1519,7 @@ tones actually asks for.
   length is next to it (100–2000 ms; 500 is a good default). It is also an
   action — **1750 Hz tone burst** — so it can go on a key, a mouse button, a
   MIDI pad or a footswitch ([6.4](#64-controls-keyboard-mouse-and-midi)).
-- **Receive tone squelch** — the same control as the tone chip in the receiver
+- **Receive tone squelch** — the same control as the tone button in the receiver
   module ([2.7](#27-receiver-controls)), with a **MATCH TX** shortcut that arms
   on receive whatever this station transmits.
 
@@ -1720,7 +1720,7 @@ them apart:
   nothing to keep apart, so both what you receive and what you send are written
   to both channels and the file plays centred instead of out of one ear.
 
-**MONO**, the chip that follows REC, writes a single channel instead, with receive and
+**MONO**, the button that follows REC, writes a single channel instead, with receive and
 transmit taking turns on it: a smaller file, and the honest format for a
 recording that is going to be played back in mono anyway.
 
@@ -1917,14 +1917,14 @@ The panel has two halves:
   that carry no locator, and the flags are built into the program — nothing is
   fetched from the internet to draw them. CQ calls are highlighted. Decoded
   stations are also marked as boxes on the waterfall.
-  The **Sort** chips order the stations within each turn: **SNR** (strongest
+  The **Sort** buttons order the stations within each turn: **SNR** (strongest
   first), **Dist** (farthest first) or **Country** (A to Z by DXCC entity, which
-  puts every station from the same country together). Pressing the active chip
-  again reverses it — the arrow on the chip says which way it is running — and
+  puts every station from the same country together). Pressing the active button
+  again reverses it — the arrow on the button says which way it is running — and
   **None** returns to the order the decoder found them in. Turns stay in their
   own blocks whichever sort is chosen; only the rows inside a turn move.
   **Single list** dissolves the turn blocks: every decode goes into one list,
-  newest turn first, and the Sort chips then order the whole list at once — the
+  newest turn first, and the Sort buttons then order the whole list at once — the
   band's strongest signals or farthest DX in one sweep, whichever turn carried
   them. The odd/even headers go with the blocks, so each row carries its slot
   time instead, coloured by the slot's parity (cyan for even, gold for odd) —
@@ -3058,7 +3058,7 @@ region's:
 
 Set your region under **Settings → General**. If the dial is already on any
 region's APRS channel — you tuned Japan's 144.640 by hand — it is left alone,
-and so is any move you make once you are in the mode. The **⇵ FREQ** chip beside
+and so is any move you make once you are in the mode. The **⇵ FREQ** button beside
 the frequency lists the other regions' channels.
 
 Unlike the slotted modes, the waterfall is **not** narrowed to the channel. APRS
@@ -3493,7 +3493,7 @@ de-obfuscation from prose and apply it to a single unverifiable capture — whic
 would produce device addresses that look authoritative and might be nonsense —
 the frame is listed with its bytes and no interpretation.
 
-**Unidentified bursts** — the `UNKNOWN` chip. Off by default. With it on, every
+**Unidentified bursts** — the `UNKNOWN` button. Off by default. With it on, every
 burst that gates but matches no decoder is listed anyway, **classified** and
 described by what could be measured about it:
 
@@ -4775,7 +4775,7 @@ only.
   never wider than that filter however far you zoom out — which is exactly the
   "the spectrum barely covers one broadcast station" complaint. With the scope
   on, the main panadapter becomes the radio's sweep, centred on the dial and as
-  wide as **Scope span**, and the full-band strip (the **WIDE** chip) carries
+  wide as **Scope span**, and the full-band strip (the **WIDE** button) carries
   it too. The digital modes switch back to the audio band, which is where FT8
   and the keyboard modes place their signals.
 
@@ -5988,7 +5988,7 @@ That sets a hard ceiling on what any program, sdroxide or RS-BA1 alike, can show
   band-wide sweep at a few hundred Hz per bin cannot show one, so the panadapter
   switches back to the audio spectrum for as long as such a mode is selected.
 - The **full-band waterfall** — the strip above the panadapter, switched on with
-  the **WIDE** chip in the Display module — carries the scope on both paths, up
+  the **WIDE** button in the Display module — carries the scope on both paths, up
   to **1 MHz** across. On AF that is worth leaving on once you zoom the
   panadapter into part of the sweep, since the strip keeps the whole of it.
 
@@ -5997,7 +5997,7 @@ no dB per step — its levels are ranged automatically rather than from the
 **FIT** / floor-and-ceiling controls, which govern the audio-band panadapter and
 every other front end as before.
 
-The strip appears on its own once the first sweep arrives, and the **WIDE** chip
+The strip appears on its own once the first sweep arrives, and the **WIDE** button
 appears with it. If neither ever shows up, the radio is not sending its scope:
 **Copy diagnostic report** and look at the `scope sweeps` counter — zero against
 a healthy `CI-V frames in` count means the `27 10`/`27 11` writes did not take.

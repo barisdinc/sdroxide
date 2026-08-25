@@ -87,7 +87,7 @@ pub use command::Command;
 pub use contacts::FsqContact;
 pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};
 pub use digi::{
-    ClockHealth, CwStatus, Decode, DigiConfig, DigiStatus, DxpedMode, FOX_MAX_SLOTS,
+    ClockHealth, CwStatus, Decode, DecodeSort, DigiConfig, DigiStatus, DxpedMode, FOX_MAX_SLOTS,
     FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg, HOUND_ZONE_MAX_HZ, HellVariant, PACKET_HEARD_MAX,
     PacketBaud, PacketHeard, PacketStatus, QsoLive, QsoRecord, QsoStep, QueuedCall, RTTY_CENTER_HZ,
     RadeStatus, ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health,

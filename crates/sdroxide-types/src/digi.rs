@@ -51,6 +51,48 @@ pub struct Decode {
     pub rr73_to: Option<String>,
 }
 
+/// How the FT8/FT4 decode list orders the stations — within each turn, or
+/// across the whole list when the single-list view is on.
+///
+/// A view preference and nothing more, like [`crate::MemorySort`]: the decodes
+/// arrive in the order they were decoded and every screen draws them the way
+/// its own operator asked for. Persisted in `[ui]` with the rest of this
+/// screen's preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DecodeSort {
+    /// Strongest signal first.
+    Signal,
+    /// Farthest (DX) first.
+    Distance,
+    /// Grouped by DXCC entity, alphabetically — what a band opening looks like
+    /// when you are counting countries rather than reading callsigns.
+    Country,
+    /// As received (no reordering).
+    ///
+    /// Declared last and `#[serde(other)]` for the reason [`crate::MemorySort`]
+    /// is: a typo in a hand-edited `config.toml` costs the operator this one
+    /// preference rather than throwing the whole `[ui]` table — theme, fonts,
+    /// layout and all — away.
+    #[default]
+    #[serde(other)]
+    None,
+}
+
+impl DecodeSort {
+    /// Every order, as the chips offer them.
+    pub const ALL: [DecodeSort; 4] =
+        [DecodeSort::None, DecodeSort::Signal, DecodeSort::Distance, DecodeSort::Country];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DecodeSort::None => "None",
+            DecodeSort::Signal => "SNR",
+            DecodeSort::Distance => "Dist",
+            DecodeSort::Country => "Country",
+        }
+    }
+}
+
 /// How far away a station has to be to count as DX when the DXCC entity can't
 /// be resolved from either callsign — a rough stand-in for "another country".
 const DX_FALLBACK_KM: f64 = 3000.0;
