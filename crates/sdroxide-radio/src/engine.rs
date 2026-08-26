@@ -413,6 +413,9 @@ pub struct EngineConfig {
     /// Change signal for the station-shared stores, shared like `tx_gate`.
     /// `None` (the default): no other engine exists, nothing to watch.
     pub store_sync: Option<Arc<crate::StoreSync>>,
+    /// Which radio is on FreeDV, shared like `tx_gate`. `None` (the default,
+    /// and every single-radio start): this engine's own mode is the answer.
+    pub rade_watch: Option<Arc<crate::RadeWatch>>,
 }
 
 impl Default for EngineConfig {
@@ -433,6 +436,7 @@ impl Default for EngineConfig {
             primary: true,
             tx_gate: None,
             store_sync: None,
+            rade_watch: None,
             record_iq: None,
         }
     }
@@ -2141,6 +2145,9 @@ struct Engine {
     /// caught up with. See [`EngineConfig::store_sync`].
     store_sync: Option<Arc<crate::StoreSync>>,
     shared_gen_seen: u64,
+    /// Which of the station's radios is on FreeDV. See
+    /// [`EngineConfig::rade_watch`].
+    rade_watch: Option<Arc<crate::RadeWatch>>,
 }
 
 /// Target width of the skimmers' window (Hz); the Ddc snaps to the nearest
@@ -2682,6 +2689,7 @@ fn engine_thread(
         cw_gate_until: None,
         shared_gen_seen: engine_cfg.store_sync.as_ref().map_or(0, |s| s.generation()),
         store_sync: engine_cfg.store_sync,
+        rade_watch: engine_cfg.rade_watch,
     };
     // After the struct, not before: the preference has to be applied through
     // the same path a reconnect uses, so both land on the same port.
@@ -2712,10 +2720,13 @@ fn engine_thread(
     // Start any enabled network spot feeds from the persisted config. The
     // operator identity comes from the digi config — one identity for the whole
     // app — and has to be in place before the feeds that log in with it.
+    //
     // Only the primary engine brings the feeds up: they hold logins and
     // sockets (DX cluster, RBN, the reporters) that a station has one of, not
-    // one per radio. The config still loads on every engine so a settings
-    // dialog attached to any of them shows the real station setup.
+    // one per radio. First, before anything can start one.
+    if !engine.primary {
+        engine.spots.stand_down();
+    }
     engine.spots.set_operator(&engine.digi_config.my_call, &engine.digi_config.my_grid);
     engine.net_cfg = sdroxide_config::load_network_config();
     // Hand the persisted account to the mailbox. Without this the manager keeps
@@ -2726,9 +2737,15 @@ fn engine_thread(
         Some(wl) => wl.set_config(engine.net_cfg.winlink.clone()),
         None => engine.winlink = open_mailbox(&engine.net_cfg.winlink),
     }
-    if engine.primary {
-        engine.spots.set_config(engine.net_cfg.clone());
-    }
+    // Applied on every engine, not just the primary: the manager holds the
+    // credentials a callsign lookup and a logbook upload need, and both are
+    // per-request work whichever radio asks. `stand_down` above is what keeps
+    // the station's *sockets* on the one engine meant to hold them, wherever
+    // the settings were applied from. Withholding the config here instead left
+    // a second radio without it — and left the operator's next APPLY from that
+    // radio's window opening a duplicate of every feed, a second DX cluster
+    // login and a second FreeDV Reporter session under the same callsign.
+    engine.spots.set_config(engine.net_cfg.clone());
     // Bring up the built-in TCI server (enabled by default) so third-party
     // clients can connect without the operator having to arm anything. Each
     // radio has its own scoped config — additional radios are seeded with the
@@ -8100,9 +8117,31 @@ impl Engine {
         // `tx_freq_hz` (not `rx_freq_hz`) because the reporter shows where a
         // station transmits, and `tx_active` (not `state.tx.ptt`) because a
         // refused key must never be reported as being on the air.
-        self.spots.set_reporter_freq(self.state.tx_freq_hz().round().max(0.0) as u64);
-        self.spots.set_reporter_visible(self.state.rx[0].mode.is_rade());
-        self.spots.set_reporter_tx(self.tx_active);
+        //
+        // On a station with more than one radio the answer is not this engine's
+        // own mode: the session lives on the primary engine, and the radio in
+        // RADE may be any of them. Every engine publishes its own state to the
+        // shared `RadeWatch`; what the reporter is told is whichever radio is
+        // actually on FreeDV. `None` is a single-radio start, where this engine
+        // *is* the station.
+        let in_rade = self.state.rx[0].mode.is_rade();
+        let tx_freq = self.state.tx_freq_hz().round().max(0.0) as u64;
+        let (freq, visible, tx) = match self.rade_watch.as_ref() {
+            Some(w) => {
+                w.publish(self.instance, in_rade, tx_freq, self.tx_active);
+                match w.reported() {
+                    // Nobody on FreeDV: hidden, and the frequency stops
+                    // mattering — keep pushing our own so a station that comes
+                    // back to RADE has something current to show.
+                    None => (tx_freq, false, self.tx_active),
+                    Some((f, t)) => (f, true, t),
+                }
+            }
+            None => (tx_freq, in_rade, self.tx_active),
+        };
+        self.spots.set_reporter_freq(freq);
+        self.spots.set_reporter_visible(visible);
+        self.spots.set_reporter_tx(tx);
 
         for ev in self.spots.poll() {
             let re = match ev {

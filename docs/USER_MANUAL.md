@@ -832,7 +832,21 @@ the space.
 
 Where the reading comes from depends on the interface. An SDR delivers IQ and
 the receiver measures the signal in its own passband, calibrated to dBm by
-`cal_offset_db` in `config.toml`. A **CAT rig on a sound card** sends audio it
+`cal_offset_db` in `config.toml`.
+
+> `cal_offset_db` starts at **0**, which means an SDR's meter starts out reading
+> dBFS — how loud the signal is against the converter's full scale — with a dBm
+> label on it. On a receiver with plenty of gain ahead of an 8-bit converter, an
+> RTL-SDR among them, its own noise sits high enough on that scale to read S9
+> with nothing plugged into the antenna socket. Nothing is wrong with the
+> receiver; the scale has not been told where zero is. Set `cal_offset_db` to
+> the difference between what the meter shows and a level you know — a signal
+> generator, or a band-noise reading you trust — and it will read in dBm from
+> then on. It is one number for the station, so where two radios differ, set it
+> for the one you judge signals on. Changing the front end's gain moves the
+> reading with it, exactly as an attenuator ahead of a real receiver would.
+
+A **CAT rig on a sound card** sends audio it
 has already demodulated and levelled, so there is nothing left on this side to
 measure: Icom rigs are asked for their own S-meter over CI-V instead, which is
 the reading on the radio's front panel, and rigs whose CAT dialect has no meter
@@ -5486,7 +5500,11 @@ Receive only — there is no transmit path in this hardware.
   frequency readout too.
 - **HF reception** — the tuner itself starts at 24 MHz. Below that:
   - an **RTL-SDR Blog V4** upconverts in hardware, so HF simply works and the
-    dial reads correctly with no offset to apply anywhere;
+    dial reads correctly with no offset to apply anywhere. On that path the
+    tuner's own tracking filter is switched out of circuit: what reaches it is
+    the upconverter's output, already filtered on the way in, so the
+    preselector could only add insertion loss — and loss ahead of the LNA is
+    noise figure, which is heard as a raised noise floor across HF;
   - other dongles reach HF only by **direct sampling** the ADC's Q branch, which
     is what a V3's HF port is wired to. *Automatic* switches at the tuner's own
     24 MHz floor (with hysteresis above it, so a dial parked near the boundary
@@ -9805,6 +9823,13 @@ While the feature is on, SDRoxide reports your transmit frequency as you tune an
 your transmit/receive state as you key up, and reports your software as
 `SDRoxide <version>`.
 
+**With more than one radio** the entry is still the *station's*, not the tab's:
+the session belongs to the first radio in the roster, but whichever radio is in
+RADE is the one whose frequency and transmit state go out, and the station is
+hidden only when none of them is. The settings on the FreeDV tab are likewise
+the station's, so applying them from any radio's window changes the one session
+rather than opening a second under the same callsign.
+
 **Callsign exchange.** RADE carries a callsign in the frame at the end of each
 over. SDRoxide transmits the callsign from your digital-mode configuration there,
 so other FreeDV stations can identify you, and decodes the far end's, showing it
@@ -10970,6 +10995,10 @@ All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
   explicitly — and a V4 needs `Automatic` left alone.
 - **Bias tee:** ~4.5 V DC onto the feedline — never with a transceiver, a
   DC-grounded antenna, or a preamp powered from the far end.
+- **"S9 with no antenna" is the scale, not the dongle.** The S-meter starts
+  uncalibrated (`cal_offset_db = 0` in `config.toml`), so it shows dBFS with a
+  dBm label — and an 8-bit converter behind a tuner at 30 dB gain has a noise
+  floor high on that scale. See [§2.9](#29-the-s-meter) for what to set it to.
 
 ### 15.15 SDRplay RSP (RSP1/1A/1B/2, RSPduo, RSPdx)
 
