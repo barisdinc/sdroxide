@@ -1332,24 +1332,42 @@ pub struct DigiConfig {
     #[serde(default = "default_aprs_ttl")]
     pub aprs_station_ttl_min: u32,
 
-    /// How loud the digital modes' transmit audio is handed to a radio that
-    /// modulates it itself — a CAT rig on a sound card, an Icom on its network
-    /// port. 0.05 to 1.0, and 1.0 is what a radio we modulate ourselves always
-    /// gets.
+    /// How loud a digital mode's transmit audio is handed to a radio that
+    /// modulates it itself — a CAT rig on a sound card, a FLEX, an Icom on its
+    /// network port. 0.05 to 1.0, and 1.0 is what a radio we modulate ourselves
+    /// always gets, where the modulator and Drive own the level instead.
     ///
-    /// **On FM this is the deviation.** A sideband rig turns audio level into
-    /// power and its own ALC catches the rest, which is why full scale is right
-    /// there (issue #131). An FM rig turns it into frequency swing, and there
-    /// is no ALC: 1200 baud packet wants about 3 kHz where voice wants 5, so a
-    /// full-scale burst into a data input set for voice over-deviates, and a
-    /// signal that over-deviates sounds completely normal to a listener and
-    /// decodes for nobody.
+    /// **Two of them, because the number does two unrelated jobs.** They were
+    /// one until an operator set 40 % for FM packet and quietly took 8 dB off
+    /// their FT8 as well — the same complaint as issue #131, arriving by
+    /// another road.
     ///
-    /// Full scale by default, which is what every digital mode did before this
-    /// existed. The radio's own input level is the other half of it and only
-    /// the operator can set that.
+    /// `_fm` **is the deviation**: an FM transmitter turns audio level into
+    /// frequency swing and has no ALC to catch it, and 1200 baud packet wants
+    /// about 3 kHz where voice wants 5. A full-scale burst into a data input
+    /// set for voice over-deviates — which sounds completely normal to a
+    /// listener and decodes for nobody.
+    ///
+    /// `_ssb` is **drive into the modulator**, and what keeps a data signal
+    /// clean: the usual adjustment is to bring it down until the rig's ALC is
+    /// barely moving, then set the power at the radio. On these backends it is
+    /// the only level sdroxide has — `TxState::drive` reaches the rig's *power*
+    /// register there, not its audio — so this is the knob that stands between
+    /// a constant-envelope mode and a splattery signal.
+    ///
+    /// Which one applies follows the carrier the mode goes out on, not which
+    /// panel set it: FM for VHF packet, APRS and RIFP, sideband for everything
+    /// else, HF packet included.
+    ///
+    /// Both full scale by default, which is what every digital mode did before
+    /// either existed. The radio's own input level is the other half of it and
+    /// only the operator can set that.
     #[serde(default = "one")]
-    pub tx_audio_level: f32,
+    pub tx_audio_level_fm: f32,
+    /// Drive into a sideband rig's modulator; see [`DigiConfig::tx_audio_level_fm`],
+    /// which this is the other half of.
+    #[serde(default = "one")]
+    pub tx_audio_level_ssb: f32,
 
     // ── WSPR ──
     /// WSPR: percentage of two-minute slots to transmit in, 0–100.
@@ -1531,7 +1549,8 @@ impl Default for DigiConfig {
             aprs_compressed: true,
             aprs_ack_messages: true,
             aprs_station_ttl_min: default_aprs_ttl(),
-            tx_audio_level: 1.0,
+            tx_audio_level_fm: 1.0,
+            tx_audio_level_ssb: 1.0,
             rifp_session_timeout_s: 300,
             wspr_tx_percent: 0,
             wspr_power_dbm: wspr_default_power(),

@@ -676,7 +676,21 @@ use sdroxide_types::{
 /// `rows_per_sec` sits after `display_bins` rather than at the tail, so a v91
 /// peer would desynchronise on any of them. The handshake's equality test is
 /// what stops it trying.
-pub const PROTO_VERSION: u16 = 92;
+///
+/// **93** — the digital modes' transmit-audio level split in two.
+/// [`sdroxide_types::DigiConfig`] lost `tx_audio_level` and gained
+/// `tx_audio_level_fm` and `tx_audio_level_ssb`: the one number was doing two
+/// unrelated jobs — deviation into an FM rig, drive into a sideband rig's
+/// modulator — and a level set for 1200 baud packet was quietly taking 8 dB off
+/// FT8 as well, which is issue #131's symptom by another road.
+///
+/// The configuration rides the wire in a command and comes back in an event, so
+/// one field becoming two moves everything after it: postcard numbers fields by
+/// position, and a v92 peer would read the new sideband level as the field that
+/// used to follow and the rest as garbage. The handshake's equality test is what
+/// stops it trying. `digi.json` is migrated rather than versioned — the old key
+/// carries into both new ones on load, so nobody's signal changes level.
+pub const PROTO_VERSION: u16 = 93;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

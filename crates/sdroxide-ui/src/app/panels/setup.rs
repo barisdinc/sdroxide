@@ -476,30 +476,6 @@ impl SdroxideApp {
                         });
                         ui.end_row();
 
-                        ui.label("TX audio");
-                        ui.horizontal(|ui| {
-                            let mut pct = (cfg.tx_audio_level * 100.0).round();
-                            if ui
-                                .add(egui::DragValue::new(&mut pct).range(5.0..=100.0).suffix(" %"))
-                                .on_hover_text(
-                                    "How loud the burst is handed to a radio that modulates it \
-                                     itself — and on FM that is the deviation, because an FM \
-                                     transmitter turns audio level into frequency swing and has \
-                                     no ALC to catch it. 1200 baud packet wants about 3 kHz \
-                                     where voice wants 5, so full scale into a data input set \
-                                     for voice over-deviates — which sounds completely normal \
-                                     to a listener and decodes for nobody. Turn it down until \
-                                     other stations report you, or set the level at the radio.",
-                                )
-                                .changed()
-                            {
-                                cfg.tx_audio_level = (pct as f32 / 100.0).clamp(0.05, 1.0);
-                                changed = true;
-                            }
-                            ui.label(RichText::new("deviation, on FM").size(9.5).weak());
-                        });
-                        ui.end_row();
-
                         ui.label("Keep stations");
                         changed |= ui
                             .add(
@@ -735,6 +711,57 @@ impl SdroxideApp {
                             ui.end_row();
                         }
                     }
+
+                    // Last, and for every digital mode: the level into a radio
+                    // that modulates what we send it. One row, and which of the
+                    // two levels it edits follows the carrier this mode goes out
+                    // on — the same test the engine transmits by. It used to
+                    // live inside the APRS block, where an operator setting FM
+                    // deviation could not see that they were also turning down
+                    // their FT8.
+                    let fm = mode.is_fm_carrier();
+                    let level =
+                        if fm { &mut cfg.tx_audio_level_fm } else { &mut cfg.tx_audio_level_ssb };
+                    ui.label("TX audio");
+                    ui.horizontal(|ui| {
+                        let mut pct = (*level * 100.0).round();
+                        if ui
+                            .add(egui::DragValue::new(&mut pct).range(5.0..=100.0).suffix(" %"))
+                            .on_hover_text(if fm {
+                                "How loud the burst is handed to a radio that modulates it \
+                                 itself — and on FM that is the deviation, because an FM \
+                                 transmitter turns audio level into frequency swing and has \
+                                 no ALC to catch it. 1200 baud packet wants about 3 kHz \
+                                 where voice wants 5, so full scale into a data input set \
+                                 for voice over-deviates — which sounds completely normal \
+                                 to a listener and decodes for nobody. Turn it down until \
+                                 other stations report you, or set the level at the radio.\n\n\
+                                 The sideband modes keep a level of their own, so this one \
+                                 stays with FM."
+                            } else {
+                                "How loud the over is handed to a radio that modulates it \
+                                 itself — a CAT rig on its sound card, a FLEX, an Icom on \
+                                 its network port. On sideband this is drive into the \
+                                 modulator: bring it down until the rig's ALC is barely \
+                                 moving and set the power at the radio, because ALC riding \
+                                 on a constant-envelope mode is what splatters. Drive \
+                                 reaches the rig's power register here, not its audio, so \
+                                 this is the level.\n\nFM packet and APRS keep a level of \
+                                 their own — a deviation set for 1200 baud never lands on \
+                                 this."
+                            })
+                            .changed()
+                        {
+                            *level = (pct as f32 / 100.0).clamp(0.05, 1.0);
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(if fm { "deviation, on FM" } else { "drive, on SSB" })
+                                .size(9.5)
+                                .weak(),
+                        );
+                    });
+                    ui.end_row();
                 });
                 if !mode.is_aprs() {
                     ui.separator();

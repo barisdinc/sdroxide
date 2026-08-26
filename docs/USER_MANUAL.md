@@ -3231,14 +3231,32 @@ on your channel is sending a format this build does not read.
   network buffers more on top of that. Too little and the far end never locks —
   the transmission is on the air and nothing decodes it. Shared with the packet
   mode, since it is a property of the radio rather than of the protocol.
-- **TX audio** — how loud the burst is handed to a radio that modulates it
-  itself, and **on FM that is the deviation**. An FM transmitter turns audio
-  level into frequency swing and has no ALC to catch it: 1200 baud packet wants
-  about 3 kHz where voice wants 5, so full scale into a data input set for voice
-  over-deviates. An over that over-deviates sounds completely normal to anyone
-  listening and decodes for nobody, so this is the first thing to try when your
-  frames are clean and still nothing acknowledges them. Full scale by default;
-  the radio's own input level is the other half of it.
+- **TX audio** — how loud the over is handed to a radio that modulates it
+  itself: a CAT rig on its sound card, a FLEX, an Icom on its network port. A
+  radio sdroxide modulates itself always gets full scale, because there the
+  modulator and Drive own the level instead.
+
+  There are **two of these levels and the row shows the one your current mode
+  uses**, because the number does two unrelated jobs:
+
+  - **On FM — VHF packet, APRS, RIFP — it is the deviation.** An FM transmitter
+    turns audio level into frequency swing and has no ALC to catch it: 1200 baud
+    packet wants about 3 kHz where voice wants 5, so full scale into a data input
+    set for voice over-deviates. An over that over-deviates sounds completely
+    normal to anyone listening and decodes for nobody, so this is the first thing
+    to try when your frames are clean and still nothing acknowledges them.
+  - **On sideband — FT8, RTTY, PSK, HF packet, everything else — it is drive
+    into the modulator.** Bring it down until the rig's ALC is barely moving and
+    set the power at the radio: ALC riding on a constant-envelope digital mode is
+    what splatters. On these radios Drive reaches the rig's *power* register
+    rather than its audio, so this is the level.
+
+  Both are full scale by default, and the radio's own input level is the other
+  half of either. They are separate so that a deviation set for packet does not
+  quietly take 8 dB off your FT8 — which is what one shared number used to do,
+  invisibly, because it could only be reached from the APRS panel. A
+  configuration written before the split keeps its level on both sides until you
+  change one.
 - **Keep stations** — how long a station stays on the map after it was last
   heard, and what the map's fade is measured against.
 

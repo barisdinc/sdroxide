@@ -374,7 +374,9 @@ fn a_beacon_is_rate_matched_when_the_radio_transmits_at_another_rate() {
 }
 
 /// The transmit audio level reaches the radio, and only where the radio is the
-/// thing doing the modulating.
+/// thing doing the modulating. APRS is FM data, so it is the FM level of the
+/// two — `digi_tx_level::the_sideband_level_is_the_one_a_data_mode_uses` holds
+/// the other end of that.
 ///
 /// On FM that level is the deviation and nothing else sets it: an over that
 /// over-deviates sounds completely normal and decodes for nobody, which is a
@@ -387,7 +389,7 @@ fn the_transmit_audio_level_scales_what_the_radio_is_given() {
             true,
             vec![
                 Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
-                Command::SetDigiConfig(DigiConfig { tx_audio_level: level, ..station() }),
+                Command::SetDigiConfig(DigiConfig { tx_audio_level_fm: level, ..station() }),
                 Command::AprsBeacon,
             ],
         );
@@ -405,7 +407,7 @@ fn the_transmit_audio_level_scales_what_the_radio_is_given() {
         true,
         vec![
             Command::SetMode { rx: RxId::Main, mode: Mode::Aprs },
-            Command::SetDigiConfig(DigiConfig { tx_audio_level: 0.5, ..station() }),
+            Command::SetDigiConfig(DigiConfig { tx_audio_level_fm: 0.5, ..station() }),
             Command::AprsBeacon,
         ],
     );

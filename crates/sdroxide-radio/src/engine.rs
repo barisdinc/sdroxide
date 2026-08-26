@@ -10369,6 +10369,25 @@ impl Engine {
         self.emit_voice_status();
     }
 
+    /// The operator's transmit-audio level for the over that is on the air, on a
+    /// radio that modulates what we send it.
+    ///
+    /// Two levels, because the number does two unrelated jobs and one value
+    /// could not do both (see [`sdroxide_types::DigiConfig::tx_audio_level_fm`]).
+    /// On FM it is the deviation; on sideband it is drive into the modulator,
+    /// and the thing that keeps a constant-envelope mode out of the rig's ALC.
+    ///
+    /// Chosen by the carrier the mode actually goes out on rather than by which
+    /// panel the operator set it from — VHF packet, APRS and RIFP are FM data,
+    /// HF packet is audio on a sideband like any other keyboard mode — so a
+    /// deviation set for 1200 baud never lands on FT8.
+    fn digi_tx_audio_level(&self) -> f32 {
+        let cfg = &self.digi_config;
+        let fm = self.state.rx[0].mode.is_fm_carrier();
+        let level = if fm { cfg.tx_audio_level_fm } else { cfg.tx_audio_level_ssb };
+        level.clamp(0.05, 1.0)
+    }
+
     /// One block of transmit audio from the digital mode, at the rate the radio
     /// consumes and with the modem's own headroom already divided out.
     ///
@@ -10406,16 +10425,10 @@ impl Engine {
         // a full transmitter (issue #131).
         //
         // ...and then the operator's own level, but only where the *radio*
-        // modulates what we send it. On FM that level is the deviation and
-        // nothing else sets it: a full-scale burst into a data input set for
-        // voice over-deviates, which sounds entirely normal and decodes for
-        // nobody. Where we modulate it ourselves the modulator and Drive
-        // already own the level, so this stays out of it.
-        let level = if self.audio_mode || self.caps.tx_audio {
-            self.digi_config.tx_audio_level.clamp(0.05, 1.0)
-        } else {
-            1.0
-        };
+        // modulates what we send it. Where we modulate it ourselves the
+        // modulator and Drive already own the level, so this stays out of it.
+        let level =
+            if self.audio_mode || self.caps.tx_audio { self.digi_tx_audio_level() } else { 1.0 };
         let gain = gain * level;
         if (gain - 1.0).abs() > f32::EPSILON {
             for a in out.iter_mut() {
