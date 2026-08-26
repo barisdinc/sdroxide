@@ -158,6 +158,18 @@ fn pan_view(view: &mut ViewState, dhz: f64, dev_center: f64, dev_span: f64) -> f
 /// The engine reports the centre it actually reached (an RX-888's downconverter
 /// clamps its own, at the ends of the half-spectrum), so the picture simply
 /// stops there.
+/// Where a tuning gesture has the dial after one more frame's delta.
+///
+/// `carried` is what this gesture had last frame — `None` on the frame it
+/// starts — and `echoed` is the dial in the state the engine last sent. The
+/// gesture's own value wins whenever it has one, and that is the whole point:
+/// `echoed` lags, so building on it throws away every delta sent since it was
+/// stamped. See the `gesture-dial` comment in the interaction handler for what
+/// that looks like on screen.
+fn gesture_step(carried: Option<f64>, echoed: f64, dhz: f64) -> f64 {
+    carried.unwrap_or(echoed) + dhz
+}
+
 fn pan_center(
     dev_center: &mut f64,
     state: &mut RadioState,
@@ -1142,6 +1154,30 @@ pub fn show_ext(
     let stop_click_id = ui.id().with("fling-stop-click");
     let mut stop_click: bool = ui.data(|d| d.get_temp(stop_click_id)).unwrap_or(false);
 
+    // The dial the gesture in progress is turning, as *this screen* has it.
+    //
+    // A tuning drag and the coast after it move the dial by a delta a frame,
+    // and the obvious way to write that — read the dial out of the state, add
+    // the delta, put it back — is a read-modify-write on a number the engine
+    // keeps overwriting from behind. `RadioEvent::State` is the engine's whole
+    // snapshot, and mid-drag it is its answer to a `SetVfo` sent some frames
+    // ago; adding this frame's delta to *that* throws away every delta sent
+    // since. The dial then advances one delta per round trip where the view —
+    // which belongs to this screen and is echoed by nobody — advances one per
+    // frame, so the picture slides out from under the marker at a whole
+    // multiple of the right speed, and the marker splits into as many
+    // interleaved positions as there are frames in the round trip. Two,
+    // usually, which is what it looks like: the waterfall running at double
+    // speed and the marker twitching between two places. Barely visible in the
+    // shack, plain over a network — the browser client is where it was found.
+    //
+    // So the gesture keeps its own dial: seeded from the state when it starts,
+    // carried across every frame it lasts, and dropped when it ends — by which
+    // time the engine has had the last word, which is the right place to start
+    // the next one from.
+    let gesture_dial_id = ui.id().with("gesture-dial");
+    let mut gesture_dial: Option<f64> = ui.data(|d| d.get_temp(gesture_dial_id)).unwrap_or(None);
+
     if resp.drag_started_by(egui::PointerButton::Primary) {
         // Decide from the PRESS position, not the current pointer position —
         // by the time the drag threshold trips, the pointer may already have
@@ -1317,7 +1353,8 @@ pub fn show_ext(
         // The sub follows the pointer rather than the grab-the-content sense a
         // pan has — the operator has hold of the receiver itself.
         let dhz = resp.drag_delta().x as f64 * view.span() / rect.width() as f64;
-        let hz = (state.sub_rx_hz + dhz).clamp(dev_lo, dev_hi);
+        let hz = gesture_step(gesture_dial, state.sub_rx_hz, dhz).clamp(dev_lo, dev_hi);
+        gesture_dial = Some(hz);
         state.sub_rx_hz = hz; // optimistic echo, as for the filter grips
         cmds.push(Command::SetSubRxFreq(hz));
     } else if sec_pan {
@@ -1344,7 +1381,8 @@ pub fn show_ext(
             // moved first leaves the dial exactly where it was inside it and
             // the engine's own span guard has nothing to do.
             pan_center(&mut dev_center, state, over, pan, cmds);
-            let hz = (state.active_freq_hz() + dhz).max(0.0);
+            let hz = gesture_step(gesture_dial, state.active_freq_hz(), dhz).max(0.0);
+            gesture_dial = Some(hz);
             match state.active_vfo {
                 Vfo::A => state.vfo_a_hz = hz, // optimistic echo
                 Vfo::B => state.vfo_b_hz = hz,
@@ -1558,10 +1596,17 @@ pub fn show_ext(
                 // The sub follows the pointer, so it coasts the same way it was
                 // dragged; the device passband is the end stop its DDC cannot
                 // reach past, and hitting it parks the dial.
-                let hz = (state.sub_rx_hz + dhz).clamp(dev_lo, dev_hi);
-                if hz == state.sub_rx_hz {
+                // `was` is the same number `gesture_step` builds on, kept so
+                // the end stop is read off the coast's own dial: clamping to a
+                // value it already had is what "ran into the edge" means, and
+                // testing that against the engine's echo instead would park the
+                // coast every time a snapshot arrived a little behind it.
+                let was = gesture_dial.unwrap_or(state.sub_rx_hz);
+                let hz = gesture_step(gesture_dial, state.sub_rx_hz, dhz).clamp(dev_lo, dev_hi);
+                if hz == was {
                     fling = None;
                 } else {
+                    gesture_dial = Some(hz);
                     state.sub_rx_hz = hz; // optimistic echo, as during the drag
                     cmds.push(Command::SetSubRxFreq(hz));
                 }
@@ -1571,7 +1616,8 @@ pub fn show_ext(
                 // the window follows once the view has run out of room.
                 let over = pan_view(view, -dhz, dev_center, dev_span);
                 pan_center(&mut dev_center, state, over, pan, cmds);
-                let hz = (state.active_freq_hz() - dhz).max(0.0);
+                let hz = gesture_step(gesture_dial, state.active_freq_hz(), -dhz).max(0.0);
+                gesture_dial = Some(hz);
                 match state.active_vfo {
                     Vfo::A => state.vfo_a_hz = hz,
                     Vfo::B => state.vfo_b_hz = hz,
@@ -1591,9 +1637,16 @@ pub fn show_ext(
     if ui.input(|i| i.pointer.any_released()) {
         stop_click = false;
     }
+    // Nothing is turning the dial any more, so the next gesture seeds itself
+    // from the state — which by then is where the radio actually ended up, and
+    // not this screen's guess at it.
+    if fling.is_none() && !resp.dragged_by(egui::PointerButton::Primary) {
+        gesture_dial = None;
+    }
     ui.data_mut(|d| {
         d.insert_temp(fling_id, fling);
         d.insert_temp(stop_click_id, stop_click);
+        d.insert_temp(gesture_dial_id, gesture_dial);
     });
     let view_log_id = ui.id().with("view-log");
 
@@ -2974,5 +3027,62 @@ mod tests {
         let (t, px) = coast(FLING_MIN_LAUNCH);
         assert!(t < 0.35, "the shortest coast that can launch is {t}s — too long to feel bounded");
         assert!(px < 30.0, "suppressing it costs {px} points of travel");
+    }
+
+    /// One frame of a drag, against an engine whose state snapshot arrives
+    /// `lag` frames after the `SetVfo` it answers. Returns every dial the drag
+    /// asked for, in order.
+    fn drag(lag: usize, frames: usize, dhz: f64, carry: bool) -> Vec<f64> {
+        let mut sent: Vec<f64> = Vec::new();
+        let mut carried: Option<f64> = None;
+        for f in 0..frames {
+            // What the engine has said by now: the command from `lag` frames
+            // ago, or the dial the drag started on.
+            let echoed = f.checked_sub(lag).map_or(0.0, |i| sent[i]);
+            let hz = gesture_step(carried.filter(|_| carry), echoed, dhz);
+            carried = Some(hz);
+            sent.push(hz);
+        }
+        sent
+    }
+
+    /// A drag turns the dial by one delta a frame and has to go on doing that
+    /// however far behind the engine's echo of it is. The view beside it is
+    /// this screen's own and always does, so any shortfall here is the picture
+    /// sliding out from under the marker.
+    #[test]
+    fn a_drag_turns_the_dial_once_a_frame_however_late_the_echo_is() {
+        const FRAMES: usize = 12;
+        const D: f64 = 100.0;
+        for lag in 1..=3 {
+            let sent = drag(lag, FRAMES, D, true);
+            assert_eq!(
+                *sent.last().unwrap(),
+                FRAMES as f64 * D,
+                "a {lag}-frame echo held the dial back"
+            );
+            // Evenly, too: a dial that arrived by fits and starts would twitch
+            // under the pointer even where it ended up in the right place.
+            for pair in sent.windows(2) {
+                assert_eq!(pair[1] - pair[0], D, "the dial moved unevenly at lag {lag}");
+            }
+        }
+    }
+
+    /// What that replaced, so this says what it is guarding. Rebuilding the
+    /// dial from the engine's snapshot every frame advances it one delta per
+    /// *round trip*: at the two-frame lag of an ordinary network client the
+    /// waterfall runs at twice the speed of its own marker, and the marker
+    /// splits into two interleaved positions — a drift and a twitch.
+    #[test]
+    fn a_dial_rebuilt_from_a_late_echo_runs_slow_and_doubles() {
+        const FRAMES: usize = 12;
+        const D: f64 = 100.0;
+        let sent = drag(2, FRAMES, D, false);
+        assert_eq!(*sent.last().unwrap(), FRAMES as f64 * D / 2.0, "not half speed after all");
+        // Two positions: the frames pair up, each pair asking for the same dial.
+        for pair in sent.chunks(2) {
+            assert_eq!(pair[0], pair[1]);
+        }
     }
 }
