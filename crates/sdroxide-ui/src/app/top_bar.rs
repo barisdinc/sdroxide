@@ -4103,7 +4103,7 @@ impl SdroxideApp {
         }
         // Accented while the beacon hunt is running, like the satellite lock:
         // it is worth knowing at a glance even with the window closed.
-        let qo100_chip = if self.qo100_win.tracking {
+        let qo100_chip = if self.state.qo100.enabled {
             accent_chip_stretched(
                 ui,
                 true,

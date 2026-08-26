@@ -244,11 +244,7 @@ fn edit_field(
         // the editor: the field spans what the digits spanned.
         let digits_w = ui
             .painter()
-            .layout_no_wrap(
-                digit_template(digits),
-                egui::FontId::monospace(size),
-                Color32::WHITE,
-            )
+            .layout_no_wrap(digit_template(digits), egui::FontId::monospace(size), Color32::WHITE)
             .size()
             .x;
         let resp = crate::chrome::field(

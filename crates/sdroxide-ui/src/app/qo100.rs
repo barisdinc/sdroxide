@@ -1,43 +1,41 @@
 //! The QO-100 BEACON window: calibrate the station's frequency chain against
 //! Es'hail-2's narrowband beacon.
 //!
-//! The narrowband transponder carries three beacons — one at each edge and one
-//! in the middle — of which [`BEACON_HZ`] is the easiest to pick out: an
-//! unmodulated carrier, not a telemetry signal buried in noise. Turning
-//! tracking ON tunes there and hunts the strongest bin in view; a double-click
-//! on the strip picks one by hand when the automatic search cannot (the
-//! signal is too weak, or drift has carried it out of the default window).
-//! Either way the difference between where the beacon actually sits and where
-//! it *should* — [`BEACON_HZ`] exactly — is the station's whole frequency
-//! error: the LNB's real LO plus whatever the SDR's own clock is off by,
-//! lumped together the way an operator would correct them by hand. APPLY
-//! writes that correction into [`sdroxide_types::RadioConfig::converter_offset_hz`]
-//! and reopens the front end — the same round trip Settings ▸ Radio ▸ Apply
-//! makes — rather than doing it silently on every frame, so a bad reading
-//! never yanks a running receiver.
+//! The beacon this tracks — [`QO100_BEACON_HZ`] — is not a plain carrier: it
+//! is a 400 baud differential+Manchester BPSK telemetry signal (AO-40
+//! "uncoded" framing), which is why a magnitude peak search has no purpose
+//! here — Manchester encoding leaves a *null* at the carrier frequency, not a
+//! peak. The actual demodulator lives engine-side, in `sdroxide_qo100`
+//! (raw IQ and real phase information, neither of which the UI has); this
+//! window is a thin front end onto [`sdroxide_types::Qo100Settings`] (ON/OFF,
+//! search width) and [`sdroxide_types::Qo100Status`] (lock, measured
+//! frequency, decoded text) — the same split the ISM window keeps with
+//! [`sdroxide_types::IsmSettings`]/[`sdroxide_types::IsmStatus`].
 //!
-//! Deliberately its own small waterfall rather than a second
-//! [`crate::widgets::spectrum_view`] or a borrowed
-//! [`crate::widgets::wide_spectrum::WideWaterfall`]: neither offers a
-//! double-click-to-pick gesture, and both are built for the main panadapter's
-//! much larger job. This one reads the same [`sdroxide_types::SpectrumFrame`]
-//! everything else on screen already gets, cropped to a window around
-//! [`BEACON_HZ`].
+//! When the decoder locks, the frequency it had to assume for the sync word
+//! and CRC to check out *is* the station's whole frequency error — the LNB's
+//! real LO plus whatever the SDR's own clock is off by, lumped together the
+//! way an operator would correct them by hand. APPLY writes that correction
+//! into [`sdroxide_types::RadioConfig::converter_offset_hz`] and reopens the
+//! front end — the same round trip Settings ▸ Radio ▸ Apply makes — rather
+//! than doing it silently on every lock, so a bad reading never yanks a
+//! running receiver.
+//!
+//! The mini waterfall is visual context only now, not a measurement: it reads
+//! the same [`sdroxide_types::SpectrumFrame`] everything else on screen
+//! already gets, cropped to a window around the beacon, so the operator can
+//! see the Manchester null (and the search width buttons' effect) even
+//! though nothing here measures anything off it.
 
 use std::collections::VecDeque;
 
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2,
 };
-use sdroxide_types::{Command, SpectrumFrame, Vfo};
+use sdroxide_types::{Command, QO100_BEACON_HZ, Qo100Status, SpectrumFrame, Vfo};
 
 use crate::app::SdroxideApp;
 use crate::{colormap, theme};
-
-/// The beacon this window tracks: the upper edge of the QO-100 narrowband
-/// transponder. The band-edge and mid-band beacons carry telemetry and are
-/// harder to pick a clean centre frequency from; this one is a plain carrier.
-pub(in crate::app) const BEACON_HZ: f64 = 10_489_750_000.0;
 
 /// Columns the mini waterfall's history is resampled to — independent of the
 /// widget's pixel width, like [`crate::widgets::wide_spectrum`]'s `COLS`.
@@ -47,34 +45,20 @@ const ROWS: usize = 90;
 /// Height of the strip, in points.
 const STRIP_H: f32 = 130.0;
 
-/// Half-widths the width buttons step through, in Hz. 5 kHz either side is
-/// where most stations land after a first calibration; the wider steps are
-/// for finding the beacon at all when the station has drifted further than
-/// that or has never been calibrated.
-const HALF_WIDTHS: [f64; 6] = [2_000.0, 5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0];
-/// Index into [`HALF_WIDTHS`] the window opens with.
-const DEFAULT_HW_IDX: usize = 1;
+/// The search-width step the width buttons move by, and the ends of the
+/// range they're clamped to — "5 kHz and its multiples", wide enough at the
+/// top for a station that has never been calibrated and narrow enough at the
+/// bottom that the search is not paying to cover more band than any real
+/// LNB drifts.
+const WIDTH_STEP_HZ: f64 = 5_000.0;
+const MIN_HALF_WIDTH_HZ: f64 = WIDTH_STEP_HZ;
+const MAX_HALF_WIDTH_HZ: f64 = 50_000.0;
 
-/// How far above the visible slice's own median a bin must stand to count as
-/// the beacon rather than noise. A plain carrier stands proud of the noise
-/// floor by a lot more than this; the point is only to refuse a flat,
-/// beacon-free slice rather than reporting its loudest bin of static.
-const SNR_DB: f32 = 6.0;
-
-/// Everything the window remembers between frames.
+/// Everything the window remembers between frames that is not a setting the
+/// engine already tracks — purely the mini waterfall's own drawing state,
+/// and the last correction actually applied.
+#[derive(Default)]
 pub(in crate::app) struct Qo100WinState {
-    /// Whether the strip is hunting the beacon each frame.
-    pub tracking: bool,
-    /// Index into [`HALF_WIDTHS`] — how wide a slice either side of
-    /// [`BEACON_HZ`] is shown and searched.
-    hw_idx: usize,
-    /// The beacon's last-known dial-domain frequency: from the automatic
-    /// search, or from a double-click that overrode it.
-    measured_hz: Option<f64>,
-    /// Whether `measured_hz` came from a double-click. While set, the
-    /// automatic search stops overwriting it — a manual pick stands until the
-    /// operator clicks again or tracking is switched off.
-    manual_pick: bool,
     /// Newest row last, each [`COLS`] bytes of 0..=255 magnitude, resampled
     /// from whatever of the live [`SpectrumFrame`] falls in the current
     /// window.
@@ -91,22 +75,6 @@ pub(in crate::app) struct Qo100WinState {
     applied: Option<(f64, f64, i64)>,
 }
 
-impl Default for Qo100WinState {
-    fn default() -> Self {
-        Self {
-            tracking: false,
-            hw_idx: DEFAULT_HW_IDX,
-            measured_hz: None,
-            manual_pick: false,
-            rows: VecDeque::new(),
-            tex: None,
-            last_seq: 0,
-            window: None,
-            applied: None,
-        }
-    }
-}
-
 fn fmt_hz_signed(hz: f64) -> String {
     if hz.abs() >= 1000.0 { format!("{:+.2} kHz", hz / 1000.0) } else { format!("{hz:+.0} Hz") }
 }
@@ -119,7 +87,11 @@ fn fmt_hz_signed(hz: f64) -> String {
 /// (`sdroxide_radio::converter_open_hz`: `hardware_hz = dial_hz + offset`, so
 /// `dial_hz = hardware_hz - offset`). The same physical signal read under two
 /// offsets gives `measured_hz - target_hz = new_offset - old_offset`.
-pub(in crate::app) fn corrected_offset_hz(old_offset_hz: f64, measured_hz: f64, target_hz: f64) -> f64 {
+pub(in crate::app) fn corrected_offset_hz(
+    old_offset_hz: f64,
+    measured_hz: f64,
+    target_hz: f64,
+) -> f64 {
     old_offset_hz + (measured_hz - target_hz)
 }
 
@@ -140,47 +112,6 @@ fn bin_range(frame: &SpectrumFrame, lo_hz: f64, hi_hz: f64) -> Option<std::ops::
     let b0 = (((lo_hz.max(flo) - flo) / bin_hz).floor() as isize).clamp(0, n as isize - 1) as usize;
     let b1 = (((hi_hz.min(fhi) - flo) / bin_hz).ceil() as isize).clamp(1, n as isize) as usize;
     (b1 > b0).then_some(b0..b1)
-}
-
-/// The strongest bin of `frame` inside `range`, refined to sub-bin precision
-/// by a three-point parabolic fit around it, and how far above the range's
-/// own median (in dB) it stands. `None` for an empty range or a peak that
-/// does not clear [`SNR_DB`] — a flat slice with nothing in it, most often
-/// meaning the beacon has drifted outside the current window.
-fn find_peak(frame: &SpectrumFrame, range: std::ops::Range<usize>) -> Option<(f64, f32)> {
-    if range.is_empty() {
-        return None;
-    }
-    let bins = &frame.bins[range.clone()];
-    let (mut best_i, mut best_v) = (0usize, bins[0]);
-    for (i, &v) in bins.iter().enumerate() {
-        if v > best_v {
-            (best_i, best_v) = (i, v);
-        }
-    }
-    let mut sorted = bins.to_vec();
-    sorted.sort_unstable();
-    let median = sorted[sorted.len() / 2];
-    let db_span = frame.db_ceil - frame.db_floor;
-    let to_db = |v: u8| frame.db_floor + (v as f32 / 255.0) * db_span;
-    let snr = to_db(best_v) - to_db(median);
-    if snr < SNR_DB {
-        return None;
-    }
-
-    // Parabolic refinement against the *full* bin array, so a peak at the
-    // edge of the search range can still borrow the one neighbour outside it.
-    let gi = range.start + best_i;
-    let y0 = frame.bins.get(gi.wrapping_sub(1)).copied().unwrap_or(best_v) as f32;
-    let y1 = best_v as f32;
-    let y2 = frame.bins.get(gi + 1).copied().unwrap_or(best_v) as f32;
-    let denom = y0 - 2.0 * y1 + y2;
-    let delta = if denom.abs() > f32::EPSILON { (0.5 * (y0 - y2) / denom).clamp(-1.0, 1.0) } else { 0.0 };
-
-    let bin_hz = frame.span_hz / frame.bins.len().max(1) as f64;
-    let lo = frame.center_hz - frame.span_hz / 2.0;
-    let freq = lo + (gi as f64 + 0.5 + delta as f64) * bin_hz;
-    Some((freq, snr))
 }
 
 /// Fold a new frame into the history, resampled onto [`COLS`] against the
@@ -224,7 +155,11 @@ fn push_row(win: &mut Qo100WinState, frame: &SpectrumFrame, lo: f64, hi: f64) {
     win.tex = None; // rebuilt on the next draw
 }
 
-fn texture<'a>(win: &'a mut Qo100WinState, ctx: &egui::Context, palette: usize) -> Option<&'a TextureHandle> {
+fn texture<'a>(
+    win: &'a mut Qo100WinState,
+    ctx: &egui::Context,
+    palette: usize,
+) -> Option<&'a TextureHandle> {
     if win.tex.is_none() && !win.rows.is_empty() {
         let lut = colormap::lut(palette);
         // Newest row first, so the strip scrolls downward like every other
@@ -242,19 +177,23 @@ fn texture<'a>(win: &'a mut Qo100WinState, ctx: &egui::Context, palette: usize) 
     win.tex.as_ref()
 }
 
-/// Draw the strip and handle its one gesture — a double-click picks a beacon
-/// by hand. Returns the picked frequency, if any.
+/// Draw the strip: the target line, and — while the decoder has a lock —
+/// where it actually found the beacon. Purely visual; nothing here is read
+/// back, unlike the version of this window that used to hunt a magnitude
+/// peak in it (see the module doc for why that never worked on this signal).
 fn paint_strip(
     ui: &mut egui::Ui,
     win: &mut Qo100WinState,
     frame: Option<&SpectrumFrame>,
     palette: usize,
-) -> Option<f64> {
-    let (lo, hi) = (BEACON_HZ - HALF_WIDTHS[win.hw_idx], BEACON_HZ + HALF_WIDTHS[win.hw_idx]);
+    lo: f64,
+    hi: f64,
+    measured_hz: Option<f64>,
+) {
     let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), STRIP_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), STRIP_H), Sense::hover());
     if !ui.is_rect_visible(rect) {
-        return None;
+        return;
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, Color32::BLACK);
@@ -276,20 +215,19 @@ fn paint_strip(
         rect.left() + ((hz - lo) / (hi - lo)).clamp(0.0, 1.0) as f32 * rect.width()
     };
     // The target: where the beacon belongs.
-    let tx = x_of(BEACON_HZ);
+    let tx = x_of(QO100_BEACON_HZ);
     painter.line_segment(
         [Pos2::new(tx, rect.top()), Pos2::new(tx, rect.bottom())],
         Stroke::new(1.0, theme::CYAN()),
     );
-    // Where it was actually found (or picked).
-    if let Some(m) = win.measured_hz
+    // Where the decoder actually locked, while that lock is still fresh.
+    if let Some(m) = measured_hz
         && (lo..=hi).contains(&m)
     {
         let mx = x_of(m);
-        let colour = if win.manual_pick { theme::YELLOW() } else { theme::GREEN() };
         painter.line_segment(
             [Pos2::new(mx, rect.top()), Pos2::new(mx, rect.bottom())],
-            Stroke::new(1.6, colour),
+            Stroke::new(1.6, theme::GREEN()),
         );
     }
 
@@ -310,14 +248,7 @@ fn paint_strip(
         dim,
     );
     crate::chrome::paint_cut_border(&painter, rect, theme::LINE_LIT(), theme::PANEL());
-
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
-    resp.double_clicked()
-        .then(|| resp.interact_pointer_pos())
-        .flatten()
-        .map(|p| lo + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * (hi - lo))
+    let _ = resp; // hover-only; kept so `ui.allocate_exact_size` reserves layout the usual way
 }
 
 impl SdroxideApp {
@@ -332,7 +263,7 @@ impl SdroxideApp {
             .open(&mut open)
             .frame(crate::chrome::window_frame())
             .resizable(true)
-            .default_width(crate::layout::window_w(ctx, 420.0))
+            .default_width(crate::layout::window_w(ctx, 440.0))
             .show(ctx, |ui| {
                 crate::chrome::window_body_bg(ui);
                 self.qo100_body(ui, &mut win, cmds)
@@ -345,31 +276,45 @@ impl SdroxideApp {
     }
 
     fn qo100_body(&mut self, ui: &mut egui::Ui, win: &mut Qo100WinState, cmds: &mut Vec<Command>) {
-        let reachable = self.caps.as_ref().is_none_or(|c| c.can_rx_hz(BEACON_HZ));
+        let reachable = self.caps.as_ref().is_none_or(|c| c.can_rx_hz(QO100_BEACON_HZ));
         let frame = self.frame.clone();
-        let (lo, hi) = (BEACON_HZ - HALF_WIDTHS[win.hw_idx], BEACON_HZ + HALF_WIDTHS[win.hw_idx]);
+        // Edited in place and sent whole on any change, the same convention
+        // the ISM window follows for `IsmSettings` — the engine persists this
+        // and echoes it back, so there is no separate apply step.
+        let mut cfg = self.state.qo100;
+        let (lo, hi) = (
+            QO100_BEACON_HZ - cfg.search_half_width_hz,
+            QO100_BEACON_HZ + cfg.search_half_width_hz,
+        );
         // Whether whatever the receiver is *actually* capturing right now
         // reaches anywhere near the beacon at all — as against `reachable`,
         // which asks whether it ever could. A capable receiver still shows a
         // blank strip while it is parked on 144 MHz, and that is the second
         // most likely reason (after no converter at all) this window opens on
-        // an empty waterfall.
+        // an empty waterfall. This only judges the *mini waterfall*'s own
+        // picture — the decoder itself reads the raw IQ straight from the
+        // hardware and does not depend on the main dial being anywhere near
+        // the beacon at all, only on the beacon being inside what the
+        // hardware actually captures.
         let in_view = frame.as_deref().is_some_and(|f| bin_range(f, lo, hi).is_some());
         let dial_hz = self.state.active_freq_hz();
+        let status = self.qo100_status.clone();
 
         ui.horizontal(|ui| {
             let run = crate::chrome::chip_enabled(
                 ui,
                 reachable,
-                win.tracking,
-                if win.tracking { "ON" } else { "OFF" },
+                cfg.enabled,
+                if cfg.enabled { "ON" } else { "OFF" },
             );
             if run.clicked() {
-                win.tracking = !win.tracking;
-                if win.tracking {
-                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: BEACON_HZ });
-                } else {
-                    win.manual_pick = false;
+                cfg.enabled = !cfg.enabled;
+                if cfg.enabled {
+                    // Visual convenience only — the decoder reads raw IQ
+                    // straight off the hardware and works regardless of
+                    // where the main dial happens to be, as long as the
+                    // beacon is inside what the hardware actually captures.
+                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: QO100_BEACON_HZ });
                 }
             }
             if !reachable {
@@ -378,25 +323,31 @@ impl SdroxideApp {
                      LNB/converter offset first (Settings ▸ Radio)",
                 );
             } else {
-                run.on_hover_text("Tune to the beacon and hunt its centre frequency");
+                run.on_hover_text(
+                    "Demodulate the beacon's own BPSK-400 telemetry and measure exactly how far \
+                     it sits from 10489.750 MHz",
+                );
             }
 
             ui.add_space(8.0);
             ui.label(RichText::new("width").size(10.0).color(theme::CYAN_DIM()));
-            if ui.small_button("−").on_hover_text("Narrower — search a smaller slice").clicked() {
-                win.hw_idx = win.hw_idx.saturating_sub(1);
+            if ui.small_button("−").on_hover_text("Narrower — search a smaller slice").clicked()
+            {
+                cfg.search_half_width_hz =
+                    (cfg.search_half_width_hz - WIDTH_STEP_HZ).max(MIN_HALF_WIDTH_HZ);
             }
             ui.label(
-                RichText::new(format!("±{:.0} kHz", HALF_WIDTHS[win.hw_idx] / 1000.0))
+                RichText::new(format!("±{:.0} kHz", cfg.search_half_width_hz / 1000.0))
                     .size(11.0)
                     .monospace(),
             );
             if ui
                 .small_button("+")
-                .on_hover_text("Wider — for when the beacon isn't visible at the current width")
+                .on_hover_text("Wider — for when the beacon isn't found at the current width")
                 .clicked()
             {
-                win.hw_idx = (win.hw_idx + 1).min(HALF_WIDTHS.len() - 1);
+                cfg.search_half_width_hz =
+                    (cfg.search_half_width_hz + WIDTH_STEP_HZ).min(MAX_HALF_WIDTH_HZ);
             }
         });
 
@@ -423,29 +374,30 @@ impl SdroxideApp {
         }
 
         // The receiver *can* reach the beacon but currently is not — parked
-        // on some other band, most often. The strip has nothing to show
-        // either way, but here the fix is one click rather than a trip to
-        // Settings, and worth naming exactly where the dial actually is.
+        // on some other band, most often. Only the *mini waterfall* has
+        // nothing to show either way; the decoder itself is unaffected (see
+        // `in_view`'s own doc), so this is about the picture, not the search.
         if reachable && !in_view {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
                         "The receiver is currently listening around {:.6} MHz — nowhere near the \
-                         10489.750 MHz beacon, so there is nothing here to show.",
+                         10489.750 MHz beacon, so there is nothing here to draw. The decoder keeps \
+                         searching regardless.",
                         dial_hz / 1e6
                     ))
                     .size(10.5)
                     .color(theme::YELLOW()),
                 );
                 if ui.small_button("Tune to 10489.750 MHz").clicked() {
-                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: BEACON_HZ });
+                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: QO100_BEACON_HZ });
                 }
             });
         }
 
         if let Some(f) = self.frame.as_ref() {
-            let capped = f.span_hz / 2.0 < HALF_WIDTHS[win.hw_idx];
+            let capped = f.span_hz / 2.0 < cfg.search_half_width_hz;
             if capped && f.span_hz > 0.0 {
                 ui.label(
                     RichText::new(format!(
@@ -459,28 +411,26 @@ impl SdroxideApp {
         }
 
         ui.add_space(4.0);
-        let picked = paint_strip(ui, win, frame.as_deref(), self.ui_settings.waterfall_palette);
-        if let Some(hz) = picked {
-            win.measured_hz = Some(hz);
-            win.manual_pick = true;
-        } else if win.tracking && !win.manual_pick {
-            win.measured_hz = frame
-                .as_deref()
-                .and_then(|f| bin_range(f, lo, hi).and_then(|r| find_peak(f, r)))
-                .map(|(hz, _)| hz);
-        } else if !win.tracking {
-            win.measured_hz = None;
-        }
+        let measured_hz = locked_freq(status.as_ref());
+        paint_strip(
+            ui,
+            win,
+            frame.as_deref(),
+            self.ui_settings.waterfall_palette,
+            lo,
+            hi,
+            measured_hz,
+        );
 
         ui.add_space(6.0);
         ui.label(
-            RichText::new(if win.manual_pick { "picked by hand — double-click again to repick" } else { "" })
+            RichText::new(status_line(cfg.enabled, status.as_ref()))
                 .size(9.5)
                 .color(theme::CYAN_DIM()),
         );
 
-        let cfg = self.ctrl.radio_config();
-        let old_offset = cfg.as_ref().map(|c| c.converter_offset_hz).unwrap_or(0.0);
+        let radio_cfg = self.ctrl.radio_config();
+        let old_offset = radio_cfg.as_ref().map(|c| c.converter_offset_hz).unwrap_or(0.0);
 
         egui::Grid::new("qo100-grid").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
             let dim = |s: &str| RichText::new(s).size(9.5).color(theme::CYAN_DIM());
@@ -497,16 +447,18 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(dim("TARGET"));
-            ui.label(RichText::new(format!("{:.6} MHz", BEACON_HZ / 1e6)).size(12.0).monospace());
+            ui.label(
+                RichText::new(format!("{:.6} MHz", QO100_BEACON_HZ / 1e6)).size(12.0).monospace(),
+            );
             ui.end_row();
 
             ui.label(dim("MEASURED"));
-            match win.measured_hz {
+            match measured_hz {
                 Some(hz) => ui.label(
                     RichText::new(format!("{:.6} MHz", hz / 1e6)).size(12.0).monospace().strong(),
                 ),
                 None => ui.label(
-                    RichText::new(if win.tracking { "not found — try a wider width" } else { "—" })
+                    RichText::new(if cfg.enabled { "not locked yet" } else { "—" })
                         .size(11.0)
                         .color(theme::CYAN_DIM()),
                 ),
@@ -514,9 +466,9 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(dim("DRIFT"));
-            match win.measured_hz {
+            match measured_hz {
                 Some(hz) => {
-                    let err = hz - BEACON_HZ;
+                    let err = hz - QO100_BEACON_HZ;
                     let colour = if err.abs() < 200.0 {
                         theme::GREEN()
                     } else if err.abs() < 3000.0 {
@@ -535,9 +487,26 @@ impl SdroxideApp {
             ui.end_row();
         });
 
+        // The decoded telemetry text — the beacon's own status report, shown
+        // for its own sake and as independent confirmation the decode is
+        // real: garbage here despite a "locked" CRC would be a red flag no
+        // number above could catch.
+        if let Some(s) = status.as_ref().filter(|s| !s.text.is_empty()) {
+            ui.add_space(4.0);
+            ui.label(RichText::new("TELEMETRY").size(9.5).color(theme::CYAN_DIM()));
+            egui::Frame::new().fill(theme::INPUT_BG()).inner_margin(6.0).show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&s.text).monospace().size(10.5).color(theme::GREEN()),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let can_apply = win.measured_hz.is_some() && cfg.is_some();
+            let can_apply = measured_hz.is_some() && radio_cfg.is_some();
             let apply = ui.add_enabled(
                 can_apply,
                 egui::Button::new(RichText::new(" APPLY CORRECTION ").strong()),
@@ -547,15 +516,15 @@ impl SdroxideApp {
                  interruption, the same one Settings ▸ Radio ▸ Apply makes",
             );
             if apply.clicked()
-                && let (Some(mut c), Some(measured)) = (cfg.clone(), win.measured_hz)
+                && let (Some(mut c), Some(measured)) = (radio_cfg.clone(), measured_hz)
             {
-                let new_offset = corrected_offset_hz(c.converter_offset_hz, measured, BEACON_HZ);
+                let new_offset =
+                    corrected_offset_hz(c.converter_offset_hz, measured, QO100_BEACON_HZ);
                 c.converter_offset_hz = new_offset;
                 self.ctrl.set_radio_config(c.clone());
                 self.ctrl.reopen_source();
                 self.radio_cfg = Some(c);
                 win.applied = Some((old_offset, new_offset, crate::time::now_unix()));
-                win.manual_pick = false;
             }
             if let Some((old, new, at)) = win.applied {
                 let ago = crate::time::now_unix() - at;
@@ -569,6 +538,46 @@ impl SdroxideApp {
                 );
             }
         });
+
+        if cfg != self.state.qo100 {
+            cmds.push(Command::SetQo100Config(cfg));
+        }
+    }
+}
+
+/// The beacon's dial-domain frequency while the decoder's lock is still
+/// fresh — `None` once it has gone stale (see
+/// [`sdroxide_types::Qo100Status::locked`]'s own doc for how long that grace
+/// period is) or if the decoder has never locked at all.
+fn locked_freq(status: Option<&Qo100Status>) -> Option<f64> {
+    status.filter(|s| s.locked).map(|s| QO100_BEACON_HZ + s.offset_hz)
+}
+
+/// The one-line summary under the strip: off, searching (with how many
+/// blocks it has tried), or locked — the same "attempted vs. succeeded"
+/// distinction `IsmStatus`'s bursts/decodes line exists for, so a search
+/// that is running but has not found the beacon yet reads differently from
+/// one that never started.
+fn status_line(enabled: bool, status: Option<&Qo100Status>) -> String {
+    if !enabled {
+        return String::new();
+    }
+    match status {
+        None => "starting…".to_string(),
+        Some(s) if s.locked => {
+            format!(
+                "locked — {} block{} tried, {} locked",
+                s.blocks_tried,
+                if s.blocks_tried == 1 { "" } else { "s" },
+                s.blocks_locked
+            )
+        }
+        Some(s) if s.blocks_tried == 0 => "searching — first block takes about 10 s".to_string(),
+        Some(s) => format!(
+            "searching — {} block{} tried, none locked yet",
+            s.blocks_tried,
+            if s.blocks_tried == 1 { "" } else { "s" }
+        ),
     }
 }
 
@@ -578,24 +587,24 @@ mod tests {
 
     #[test]
     fn a_beacon_read_high_needs_the_offset_raised() {
-        // Beacon really sits on BEACON_HZ but reads 5 kHz high — the LNB's LO
-        // is 5 kHz low, which the software currently under-subtracts.
+        // Beacon really sits on QO100_BEACON_HZ but reads 5 kHz high — the
+        // LNB's LO is 5 kHz low, which the software currently under-subtracts.
         let old = -9_750_000_000.0;
-        let measured = BEACON_HZ + 5_000.0;
-        assert_eq!(corrected_offset_hz(old, measured, BEACON_HZ), old + 5_000.0);
+        let measured = QO100_BEACON_HZ + 5_000.0;
+        assert_eq!(corrected_offset_hz(old, measured, QO100_BEACON_HZ), old + 5_000.0);
     }
 
     #[test]
     fn a_beacon_read_low_needs_the_offset_lowered() {
         let old = -9_750_000_000.0;
-        let measured = BEACON_HZ - 1_200.0;
-        assert_eq!(corrected_offset_hz(old, measured, BEACON_HZ), old - 1_200.0);
+        let measured = QO100_BEACON_HZ - 1_200.0;
+        assert_eq!(corrected_offset_hz(old, measured, QO100_BEACON_HZ), old - 1_200.0);
     }
 
     #[test]
     fn a_correctly_calibrated_station_gets_the_same_offset_back() {
         let old = -9_750_000_000.0;
-        assert_eq!(corrected_offset_hz(old, BEACON_HZ, BEACON_HZ), old);
+        assert_eq!(corrected_offset_hz(old, QO100_BEACON_HZ, QO100_BEACON_HZ), old);
     }
 
     fn frame_with(center_hz: f64, span_hz: f64, bins: Vec<u8>) -> SpectrumFrame {
@@ -603,50 +612,47 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_peak_lands_on_its_own_bin_centre() {
-        // A symmetric peak (equal neighbours) has no reason to shift either
-        // way: the parabola through equal shoulders is flat at the top.
-        let mut bins = vec![20u8; 64];
-        bins[32] = 200;
-        bins[31] = 120;
-        bins[33] = 120;
-        let frame = frame_with(10_489_750_000.0, 640_000.0, bins);
-        let (hz, snr) = find_peak(&frame, 0..64).expect("clears SNR_DB");
-        assert!(snr > SNR_DB);
-        let expected = frame.freq_at_bin(32);
-        assert!((hz - expected).abs() < 1.0, "expected {expected}, got {hz}");
-    }
-
-    #[test]
-    fn a_lopsided_peak_is_pulled_toward_its_stronger_shoulder() {
-        let mut bins = vec![20u8; 64];
-        bins[32] = 200;
-        bins[31] = 100;
-        bins[33] = 160; // stronger on the high side — true peak sits above bin 32
-        let frame = frame_with(10_489_750_000.0, 640_000.0, bins);
-        let (hz, _) = find_peak(&frame, 0..64).expect("clears SNR_DB");
-        assert!(hz > frame.freq_at_bin(32));
-    }
-
-    #[test]
-    fn a_flat_noise_floor_reports_no_beacon() {
-        let bins = vec![40u8; 64];
-        let frame = frame_with(10_489_750_000.0, 640_000.0, bins);
-        assert!(find_peak(&frame, 0..64).is_none());
-    }
-
-    #[test]
     fn bin_range_refuses_a_window_the_frame_never_reaches() {
         let frame = frame_with(14_000_000.0, 100_000.0, vec![0u8; 64]);
-        assert!(bin_range(&frame, BEACON_HZ - 5_000.0, BEACON_HZ + 5_000.0).is_none());
+        assert!(bin_range(&frame, QO100_BEACON_HZ - 5_000.0, QO100_BEACON_HZ + 5_000.0).is_none());
     }
 
     #[test]
     fn bin_range_clamps_to_what_the_frame_actually_covers() {
         // Requested window straddles the frame's edge; the range returned
         // must stay inside 0..bins.len().
-        let frame = frame_with(BEACON_HZ + 3_000.0, 10_000.0, vec![0u8; 100]);
-        let r = bin_range(&frame, BEACON_HZ - 5_000.0, BEACON_HZ + 5_000.0).expect("overlaps");
+        let frame = frame_with(QO100_BEACON_HZ + 3_000.0, 10_000.0, vec![0u8; 100]);
+        let r = bin_range(&frame, QO100_BEACON_HZ - 5_000.0, QO100_BEACON_HZ + 5_000.0)
+            .expect("overlaps");
         assert!(r.end <= 100);
+    }
+
+    fn status(locked: bool, offset_hz: f64) -> Qo100Status {
+        Qo100Status { running: true, locked, offset_hz, ..Default::default() }
+    }
+
+    #[test]
+    fn locked_freq_reads_off_the_target_plus_the_measured_offset() {
+        let s = status(true, 1_234.0);
+        assert_eq!(locked_freq(Some(&s)), Some(QO100_BEACON_HZ + 1_234.0));
+    }
+
+    #[test]
+    fn locked_freq_is_none_when_not_locked_or_absent() {
+        assert_eq!(locked_freq(None), None);
+        assert_eq!(locked_freq(Some(&status(false, 0.0))), None);
+    }
+
+    #[test]
+    fn status_line_is_blank_while_switched_off() {
+        assert_eq!(status_line(false, Some(&status(true, 0.0))), "");
+    }
+
+    #[test]
+    fn status_line_distinguishes_locked_from_still_searching() {
+        assert!(status_line(true, Some(&status(true, 0.0))).starts_with("locked"));
+        let mut searching = status(false, 0.0);
+        searching.blocks_tried = 3;
+        assert!(status_line(true, Some(&searching)).starts_with("searching"));
     }
 }
