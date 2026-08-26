@@ -2644,16 +2644,20 @@ pub fn elad_cat_baud(configured: u32) -> u32 {
 pub struct EladConfig {
     /// Pin a device by its EEPROM serial; empty means "the first one found".
     pub serial: String,
-    /// What rate the DDC stream is *read as*, in Hz — one of
-    /// [`ELAD_SAMPLE_RATES`].
+    /// The DDC's rate in Hz — one of [`ELAD_SAMPLE_RATES`].
     ///
-    /// This is the one setting here that is not a command. No request this
-    /// driver knows how to send programs the decimation, so the device arrives
-    /// at whatever rate it powered up in or was last left in by ELAD's own
-    /// software, and this says which one that is. Get it wrong and the samples
-    /// are still samples — the panadapter is simply the wrong width and every
-    /// frequency inside it is scaled — so the driver measures the throughput
-    /// once the stream is running and says so if the two disagree.
+    /// What this *is* depends on the model, because the six rates are six
+    /// different FPGA images rather than a register — which is why nothing in
+    /// ELAD's vendor protocol selects between them.
+    ///
+    /// On an FDM-S1 or FDM-S2 the host loads that image at every power-up, so
+    /// this is a command: it says which one to load. On an FDM-DUO, which boots
+    /// its own, it is only how the stream is *read* — the radio arrives at
+    /// whatever rate it powered up in or was last left in by ELAD's own
+    /// software, and getting this wrong leaves the samples still samples, with
+    /// the panadapter simply the wrong width and every frequency inside it
+    /// scaled. Either way the driver measures the throughput once the stream is
+    /// running and says so if the two disagree.
     ///
     /// It also selects how the samples are *shaped*: every rate up to 3072 kHz
     /// delivers 32-bit words, and 6144 kHz delivers 16-bit ones. That half is a

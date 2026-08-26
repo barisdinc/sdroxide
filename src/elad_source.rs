@@ -201,6 +201,15 @@ pub struct EladSource {
     /// Warnings from the open, plus the one the stream thread can only raise
     /// once samples have been flowing.
     status: Vec<String>,
+    /// The stream thread's own warnings, kept once they have been taken.
+    ///
+    /// Sticky because [`IqSource::open_status`] is asked in two places and only
+    /// one of them shows the answer: the engine also asks it to decide whether a
+    /// source that wants reopening already has a reason on screen. Taking the
+    /// stream thread's sentence there and dropping it is how the one message
+    /// that explains a receiver delivering nothing — see `sdroxide_elad::fpga`
+    /// and issue #178 — was thrown away on every cycle of the reopen loop.
+    late: std::sync::Mutex<Vec<String>>,
 }
 
 impl EladSource {
@@ -335,6 +344,7 @@ impl EladSource {
             last_signal: None,
             signal_max_age,
             status,
+            late: std::sync::Mutex::new(Vec::new()),
         };
         // Put the transceiver's VFO on the window centre before the first
         // sample is looked at. On a DUO that is where the window *is*, so the
@@ -839,12 +849,18 @@ impl IqSource for EladSource {
 
     /// Surface what an operator needs to know but cannot see.
     fn open_status(&self) -> Option<String> {
-        let mut parts = self.status.clone();
-        // The sample-rate check needs a couple of seconds of stream before it
-        // can say anything, so it arrives long after the open did.
-        if let Some(w) = self.handle.take_late_warning() {
-            parts.push(w);
+        // The sample-rate check and the nothing-has-arrived warning both need a
+        // second or two of stream before they can say anything, so they arrive
+        // long after the open did — and once taken they are kept, because the
+        // caller that asked first is not always the one that displays it.
+        let mut late = self.late.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = self.handle.take_late_warning()
+            && !late.contains(&w)
+        {
+            late.push(w);
         }
+        let mut parts = self.status.clone();
+        parts.extend(late.iter().cloned());
         parts.push(
             "ELAD support is new and has not been verified against real hardware. \
              If it misbehaves, Settings → Radio has a Copy diagnostic report button."

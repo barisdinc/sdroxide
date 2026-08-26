@@ -6892,15 +6892,37 @@ in. There is no serial number in the list: ELAD keeps the serial in the device's
 EEPROM rather than in its USB descriptor, so reading one would mean claiming
 every ELAD on the bus — including one that is streaming.
 
-**Sample rate — read carefully, because this one is not a command.** The
-down-converter delivers 192, 384, 768, 1536, 3072 or 6144 kHz, and **nothing
-sdroxide can send selects between them**. ELAD's own GNU Radio module does not
-set it either, and the FDM-DUO has no front-panel menu for it, which together
-say the decimation is programmed by ELAD's Windows software through a request
-that has never been published.
+**An FDM-S1 or FDM-S2 will not send a single sample until its FPGA is loaded.**
+The two halves of a sampler come up very differently. The USB bridge runs from an
+EEPROM, so the moment you plug one in it enumerates, reports its serial and its
+hardware version, and acknowledges the start of the stream — everything looks
+perfect. The FPGA behind it is loaded from the host and comes up **empty**, so
+there is no down-converter in there to start and the spectrum sits on "waiting
+for spectrum…" for ever, with nothing wrong anywhere to point at.
 
-So the device arrives at whatever rate it powered up in — 192 kHz on a fresh
-FDM-DUO — or whatever FDM-SW2 last left it in, and this setting says which one
+ELAD ship the loader separately, and it has to run after every power-up.
+Download `elad-firmware` from ELAD's Linux area (eladit.com → Download →
+SDR/Linux), copy it to `/usr/local/bin/elad-firmware` and make it executable:
+
+```sh
+sudo install -m 755 elad-firmware-2.0-intel /usr/local/bin/elad-firmware
+```
+
+sdroxide then runs it for you every time it opens the receiver, loading the
+image for the sample rate you picked. It takes about six seconds, once per
+session. If you keep the loader somewhere else, point `SDROXIDE_ELAD_FIRMWARE`
+at it. If sdroxide cannot find it at all, it says so on screen rather than
+retrying in silence.
+
+**Sample rate.** The down-converter delivers 192, 384, 768, 1536, 3072 or
+6144 kHz, and the six rates are six different FPGA images — which is why nothing
+in ELAD's vendor protocol selects between them, and why their own GNU Radio
+module takes the rate as a parameter without ever sending it. On an FDM-S1 or
+FDM-S2 this setting therefore *is* a command: it chooses the image loaded above.
+
+**On an FDM-DUO it is not.** The radio boots its own FPGA and has no front-panel
+menu for the rate, so it arrives at whatever it powered up in — 192 kHz on a
+fresh one — or whatever FDM-SW2 last left it in, and this setting says which one
 that is. Set it wrong and you still get samples: the panadapter is simply the
 wrong width, with every frequency inside it scaled to match. sdroxide measures
 the real throughput a couple of seconds after the stream starts and tells you on
@@ -10641,10 +10663,17 @@ All in [§6.2.16](#6216-elad-fdm-duo--fdm-s-usb):
   drives all three. With only the CAT cable connected, the CAT-family route in
   [§6.2.2](#622-cat-radios-serial-control--usb-audio) works instead, without
   the wideband panadapter.
-- **The sample rate cannot be commanded.** The device sits at whatever it
-  powered up in (192 kHz on a fresh DUO) or whatever FDM-SW2 last left it in;
-  set sdroxide to match, and let its measured-throughput notice name the rate
-  if unsure. 6144 kHz halves the sample width — a wrong guess there is noise.
+- **An FDM-S1 or FDM-S2 that opens perfectly and shows nothing** has an
+  unloaded FPGA. Everything reports "ok" because the USB bridge runs from an
+  EEPROM; the down-converter behind it does not exist until an image is loaded.
+  Put ELAD's `elad-firmware` in `/usr/local/bin` and sdroxide loads it at every
+  open — which is also how the sample rate is chosen on those two models,
+  because each rate is a different image.
+- **On an FDM-DUO the sample rate cannot be commanded.** The radio sits at
+  whatever it powered up in (192 kHz on a fresh one) or whatever FDM-SW2 last
+  left it in; set sdroxide to match, and let its measured-throughput notice name
+  the rate if unsure. 6144 kHz halves the sample width — a wrong guess there is
+  noise.
 - **Baud** matches menu 70 `CAT BAUD` (ships at 38400); **Transmit input**
   asserts menu 32 `TX IN` — `USB audio` is what makes transmit work, and a
   radio left on Microphone transmits the room with nothing on screen to say

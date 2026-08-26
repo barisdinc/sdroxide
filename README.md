@@ -597,17 +597,28 @@ starting sdroxide before the rig is fine:
   answer from the radio is what you give up. CW is keyed by the radio's own key
   or paddle: the FDM-DUO has no command that accepts text.
 
-  **The sample rate cannot be commanded.** The DDC delivers 192, 384, 768, 1536,
-  3072 or 6144 kHz and no request this driver knows selects between them — ELAD's
-  own GNU Radio module does not set it either, and the radio has no menu for it.
-  The device arrives in whatever mode it was left in (192 kHz on a fresh DUO) and
-  the Sample rate setting says how the stream is *read*; sdroxide measures the
-  real throughput a couple of seconds in and tells you on screen if the two
-  disagree. See "ELAD permissions" under Building for the Linux udev rule.
+  **An FDM-S1 or FDM-S2 needs its FPGA loaded before it will send anything.**
+  These are bus-powered front ends: the USB bridge runs from an EEPROM, so an
+  untouched one enumerates, reports its serial and acknowledges the start of the
+  stream — while the FPGA behind it comes up empty and no sample ever arrives.
+  Install ELAD's own `elad-firmware` loader (their Linux download area) as
+  `/usr/local/bin/elad-firmware` and sdroxide runs it for you at every open,
+  choosing the image for the Sample rate you picked; the six rates *are* six
+  images, which is why nothing in the vendor protocol selects between them.
+  Without the loader sdroxide says so on screen rather than sitting on "waiting
+  for spectrum" for ever.
+
+  **On an FDM-DUO the sample rate cannot be commanded.** The radio boots its own
+  FPGA, has no menu for the rate, and arrives in whatever mode it was left in
+  (192 kHz on a fresh one); there the Sample rate setting says how the stream is
+  *read*, and sdroxide measures the real throughput a couple of seconds in and
+  tells you on screen if the two disagree. See "ELAD permissions" under Building
+  for the Linux udev rule.
 
   **Not verified against hardware.** The whole backend is written from ELAD's own
-  [gr-elad](https://github.com/ELADIT/gr-elad) and the FDM-DUO manual's CAT
-  chapter. **Copy diagnostic report** on the Radio tab dumps every command
+  [gr-elad](https://github.com/ELADIT/gr-elad), the FDM-DUO manual's CAT chapter
+  and — for the FPGA load, which `gr-elad` does not do at all —
+  [SoapyELAD](https://github.com/DisagioDigitale/SoapyELAD). **Copy diagnostic report** on the Radio tab dumps every command
   exchanged with the device, and `cargo run -p sdroxide-elad --example probe`
   does the same from a terminal.
 

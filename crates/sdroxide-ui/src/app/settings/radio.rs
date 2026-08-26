@@ -3583,10 +3583,10 @@ pub(in crate::app) fn settings_elad_tab(
         return;
     };
 
-    // What rebuilds the session. The rate is in here even though nothing is
-    // commanded by it: the engine builds its whole downconversion chain around
-    // `IqSource::sample_rate`, so reading the stream differently means opening
-    // the source again.
+    // What rebuilds the session. The rate is in here whichever model this is:
+    // on a sampler it is the FPGA image to load, and on a transceiver the engine
+    // still builds its whole downconversion chain around `IqSource::sample_rate`,
+    // so reading the stream differently means opening the source again.
     let before = (
         cfg.elad.serial.clone(),
         cfg.elad.sample_rate_hz,
@@ -3639,13 +3639,18 @@ pub(in crate::app) fn settings_elad_tab(
         ui.end_row();
 
         ui.label("Sample rate").on_hover_text(
-            "How the receiver's stream is READ — not what the receiver is told \
-             to do.\n\n\
-             Nothing sdroxide can send selects the ELAD's decimation. The device \
-             arrives at whatever rate it powered up in or was last left in by \
-             ELAD's own software (192 kHz on a fresh FDM-DUO), and this setting \
-             says which one that is. Get it wrong and the panadapter is simply \
-             the wrong width, with every frequency inside it scaled to match.\n\n\
+            "The six rates are six different FPGA images, not a register — which \
+             is why nothing in ELAD's protocol selects between them, and why what \
+             this setting means depends on the model.\n\n\
+             FDM-S1 / FDM-S2: a command. Their FPGA is loaded by the computer at \
+             every power-up, and sdroxide runs ELAD's own elad-firmware loader to \
+             put this rate's image in. Without that loader installed a sampler \
+             sends no samples at all, and sdroxide says so on screen.\n\n\
+             FDM-DUO: not a command. The radio boots its own FPGA and arrives at \
+             whatever rate it powered up in or FDM-SW2 last left it in (192 kHz on \
+             a fresh one), and this only says how the stream is READ. Get it wrong \
+             and the panadapter is simply the wrong width, with every frequency \
+             inside it scaled to match.\n\n\
              The stream's real rate is measured a couple of seconds after it \
              starts, and a mismatch is reported on screen. Takes effect on Apply.",
         );
@@ -3671,7 +3676,8 @@ pub(in crate::app) fn settings_elad_tab(
             );
             ui.add(
                 egui::Label::new(
-                    RichText::new("what the device is in, not what it is told").weak(),
+                    RichText::new("FDM-S: the FPGA image loaded — FDM-DUO: how the stream is read")
+                        .weak(),
                 )
                 .wrap(),
             );
