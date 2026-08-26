@@ -598,7 +598,7 @@ pub struct SdroxideApp {
     login_tests_pending: std::collections::HashSet<sdroxide_types::LoginTarget>,
     /// Inbox for an ADIF file chosen via the native "Import" dialog (a picker
     /// thread writes; the UI drains it each frame).
-    adif_import_inbox: Arc<Mutex<Option<String>>>,
+    adif_import_inbox: crate::download::LoadInbox,
     /// Callsigns queued for lookup, drained into commands each frame.
     pending_lookups: Vec<String>,
     /// Everything callsign lookup has resolved this session, by callsign. Kept

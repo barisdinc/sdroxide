@@ -2345,6 +2345,17 @@ manual entries. You can:
   Field lengths are read as the byte counts ADIF specifies, but exporters that
   count characters instead (QRZ's logbook among them) are handled too, so
   accented names and QTHs survive the import intact.
+
+  A file need not be Unicode. Plenty of Windows loggers write their national
+  code page instead, and a Cyrillic or accented name in one used to stop the
+  whole file — every callsign in it — from importing. Such a file is now read
+  anyway: a byte-order mark or valid UTF-8 is taken at its word, and anything
+  else is read as Windows-1251 or Windows-1252 depending on which the text looks
+  like. That last step is a guess, and the network log line at the end of the
+  import names the code page it went with, so a name that comes out as nonsense
+  tells you which one to say when you report it. Everything the log is really
+  keyed on — callsign, date, band, mode, frequency — is plain ASCII in all of
+  them and imports correctly either way. Exports are always UTF-8.
 - **ADIF** — export the whole log to `sdroxide-log.adi` (also the file you sign
   with TQSL for LoTW).
 - **TXT** — export the whole log to `sdroxide-log.txt`.

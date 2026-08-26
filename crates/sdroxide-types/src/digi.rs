@@ -2325,6 +2325,30 @@ mod tests {
         assert_eq!(b.my_grid, "FN42");
     }
 
+    /// A name outside ASCII survives the export and comes back off it. The
+    /// length ADIF declares is a byte count, so a Cyrillic or accented name is
+    /// longer than it looks — writing the character count instead would put
+    /// every later field in the record out of step.
+    #[test]
+    fn adif_round_trips_a_name_outside_ascii() {
+        let rec = QsoRecord {
+            call: "UA1ABC".into(),
+            name: "Владимир".into(),
+            qth: "Москва".into(),
+            country: "Ålesund".into(),
+            band: "20m".into(),
+            mode: "SSB".into(),
+            ..Default::default()
+        };
+        let adif = qso_log_to_adif(std::slice::from_ref(&rec));
+        assert!(adif.contains("<NAME:16>Владимир"), "the count is bytes, not characters");
+        let back = adif_to_qso_log(&adif);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].name, "Владимир");
+        assert_eq!(back[0].qth, "Москва");
+        assert_eq!(back[0].country, "Ålesund");
+    }
+
     #[test]
     fn adif_import_reads_character_counted_lengths() {
         // QRZ's logbook counts the length in characters rather than the bytes
