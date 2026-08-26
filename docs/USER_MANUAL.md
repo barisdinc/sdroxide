@@ -5473,9 +5473,21 @@ Receive only — there is no transmit path in this hardware.
   - an **RTL-SDR Blog V4** upconverts in hardware, so HF simply works and the
     dial reads correctly with no offset to apply anywhere;
   - other dongles reach HF only by **direct sampling** the ADC's Q branch, which
-    is what a V3's HF port is wired to. *Automatic* switches at 28.8 MHz (with
-    hysteresis, so a dial parked near the boundary does not flap); *Direct
-    sampling (Q branch)* forces it; *Off* disables HF entirely.
+    is what a V3's HF port is wired to. *Automatic* switches at the tuner's own
+    24 MHz floor (with hysteresis above it, so a dial parked near the boundary
+    does not flap); *Direct sampling (Q branch)* forces it; *Off* disables HF
+    entirely.
+
+  Direct sampling reaches every HF band, including **17 m and 15 m** — the two
+  that sit above the ADC's 14.4 MHz Nyquist limit and below the tuner's floor,
+  with nowhere else to go. They arrive in the ADC's second Nyquist zone, the
+  right way up, and you tune them at their real frequency like anything else.
+  What you should expect is that whatever is at `28.8 MHz - dial` comes with
+  them: there is no filter in front of the ADC, so 17 m carries 10.7 MHz and
+  15 m carries 7.726 MHz folded on top. Both are quiet enough that FT8 decodes;
+  an HF preselector in front of the dongle removes them entirely. 12 m and 10 m
+  are above 24 MHz, so *Automatic* gives them to the tuner and the question does
+  not arise.
 
   Switching between the tuner and direct sampling re-initialises the tuner and
   briefly interrupts the stream.
@@ -6381,8 +6393,9 @@ because it is the same radio; only these differ:
   other R828D, so sdroxide cannot tell them apart over the wire. *Automatic*
   therefore leaves an R828D alone — right for a V4, which upconverts inside the
   server's own tuning call — and switches anything else to direct sampling below
-  28.8 MHz. If your remote dongle is a *plain* R828D that hears nothing on HF,
-  choose **Direct sampling (Q branch)** explicitly; that is always obeyed.
+  24 MHz. If your remote dongle is a *plain* R828D that hears nothing on HF,
+  choose **Direct sampling (Q branch)** explicitly; that is always obeyed. The
+  second-Nyquist note above applies at the far end just the same.
 - **Bias tee** — feeds the coax at the far end, which may be out of sight and up
   a mast. sdroxide turns it off when the connection closes cleanly, and warns
   while it is on. Older servers do not implement the command at all; because the
@@ -10820,7 +10833,9 @@ All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
 - **HF:** a Blog V4 upconverts in hardware — HF just works, no offset
   anywhere (and don't put one in Converter: below 28.8 MHz the dongle would
   shift it a second time). Any other dongle reaches HF by direct-sampling
-  the Q branch — a V3's HF port — with `Automatic` switching at 28.8 MHz.
+  the Q branch — a V3's HF port — with `Automatic` switching at the tuner's
+  24 MHz floor. 17 m and 15 m come in on the ADC's second Nyquist zone, so
+  they work, with `28.8 MHz - dial` folded on top of them.
 - **You do not have to guess ppm:** `RUST_LOG=sdroxide_rtlsdr=debug` prints a
   measured figure after ~20 s. Over `rtl_tcp` that measurement is
   meaningless — calibrate on USB once and carry the number across.

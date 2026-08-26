@@ -1899,10 +1899,6 @@ impl RtlSdrConfig {
 
     /// Maximum R82xx tuner gain, in dB (the last entry of the gain table).
     pub const GAIN_MAX_DB: f64 = 49.6;
-
-    /// Below this, HF handling kicks in: the Blog V4's upconverter reference
-    /// frequency, and equally the bottom of the R82xx's own range.
-    pub const HF_CROSSOVER_HZ: f64 = 28_800_000.0;
 }
 
 /// An RTL-SDR published over the network by `rtl_tcp` (osmocom's, the

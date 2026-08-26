@@ -1063,8 +1063,14 @@ pub(in crate::app) fn settings_rtlsdr_tab(
         ui.label("HF reception").on_hover_text(
             "The tuner itself starts at 24 MHz. An RTL-SDR Blog V4 upconverts \
              below that in hardware; other dongles reach HF only by sampling the \
-             ADC directly, through the V3's HF port. Switching modes briefly \
-             interrupts the stream.",
+             ADC directly, through the V3's HF port. Automatic hands everything \
+             below 24 MHz to the ADC and everything above it to the tuner.\n\n\
+             Direct sampling covers every HF band, 17 m and 15 m included — they \
+             arrive in the ADC's second Nyquist zone, the right way up. Nothing \
+             filters the ADC's input, though, so whatever is at 28.8 MHz minus \
+             the dial comes with them: 10.7 MHz under 17 m, 7.726 MHz under \
+             15 m.\n\n\
+             Switching modes briefly interrupts the stream.",
         );
         let mut hf = cfg.rtlsdr.hf_mode;
         enum_combo(ui, "rtlsdr_hf", &mut hf, &RtlSdrHfMode::ALL, RtlSdrHfMode::label);
@@ -1273,9 +1279,11 @@ pub(in crate::app) fn settings_rtltcp_tab(
              chip and nothing else, and a V4 is indistinguishable from a plain \
              R828D over the wire.\n\n\
              On a V3 or any other dongle, Automatic switches the server to \
-             direct sampling below the crossover. Choose Direct sampling \
-             explicitly for a plain R828D that hears nothing on HF. Switching \
-             briefly interrupts the stream.",
+             direct sampling below the tuner's own 24 MHz floor — which covers \
+             every HF band, 17 m and 15 m arriving in the ADC's second Nyquist \
+             zone with 28.8 MHz minus the dial folded on top. Choose Direct \
+             sampling explicitly for a plain R828D that hears nothing on HF. \
+             Switching briefly interrupts the stream.",
         );
         let mut hf = cfg.rtltcp.hf_mode;
         enum_combo(ui, "rtltcp_hf", &mut hf, &RtlSdrHfMode::ALL, RtlSdrHfMode::label);
