@@ -28,6 +28,7 @@ pub(in crate::app) mod logbook;
 pub(in crate::app) mod net;
 pub(in crate::app) mod panels;
 pub(crate) mod persist;
+pub(in crate::app) mod qo100;
 pub(in crate::app) mod rds;
 pub(in crate::app) mod sat;
 pub(in crate::app) mod scanner;
@@ -711,6 +712,9 @@ pub struct SdroxideApp {
     /// The SAT window and everything it remembers between frames.
     show_sat: bool,
     sat_win: sat::SatWinState,
+    /// The QO-100 BEACON window and everything it remembers between frames.
+    show_qo100: bool,
+    qo100_win: qo100::Qo100WinState,
     /// The rotctld client's health, mirrored from
     /// [`RadioEvent::RotatorStatus`].
     rotator_status: Option<(bool, f64, f64, Option<String>)>,
@@ -1243,6 +1247,8 @@ impl SdroxideApp {
             sat_track: None,
             show_sat: false,
             sat_win: Default::default(),
+            show_qo100: false,
+            qo100_win: Default::default(),
             rotator_status: None,
             rot_cfg_edit: Default::default(),
             rot_cfg_seeded: false,
