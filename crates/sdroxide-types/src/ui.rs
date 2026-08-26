@@ -356,6 +356,66 @@ impl ChromeStyle {
     }
 }
 
+/// Which face the S-meter wears. Cycled by clicking the meter itself.
+///
+/// A preference of the operator rather than of the radio — which instrument
+/// somebody reads a signal on has nothing to do with what is being received —
+/// so it sits in `[ui]` beside the theme and the fonts, is written the moment
+/// it is clicked, and every radio tab comes up wearing it (issue #185). It
+/// used to ride in the client's per-radio panadapter view, where a second
+/// radio came up on the stock face and a session that ended without a clean
+/// quit lost the choice with the rest of eframe's not-yet-autosaved blob.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SmeterStyle {
+    /// Horizontal gradient bar with a graduated scale beneath it.
+    Bar,
+    /// Scrolling trace of the last quarter-minute — reads fading and QSB (and,
+    /// on transmit, how SWR behaved across the over) the way neither of the
+    /// instantaneous faces can.
+    Trace,
+    /// Analog moving-coil instrument with a swinging needle.
+    ///
+    /// Declared last because serde demands the catch-all be the final variant:
+    /// it also swallows an unrecognised value in a hand-edited config, so a
+    /// typo degrades to the stock face instead of throwing the whole `[ui]`
+    /// table away.
+    #[default]
+    #[serde(other)]
+    Needle,
+}
+
+impl SmeterStyle {
+    /// The next face in the click cycle.
+    pub fn next(self) -> Self {
+        match self {
+            SmeterStyle::Needle => SmeterStyle::Bar,
+            SmeterStyle::Bar => SmeterStyle::Trace,
+            SmeterStyle::Trace => SmeterStyle::Needle,
+        }
+    }
+
+    /// The face for a box wider than it is tall — the shape the compact strip
+    /// hands the meter on a phone.
+    ///
+    /// The needle drops out there. Its arc is a chord across the box, so its
+    /// radius follows the *width*, and the headline chip ends up covering the
+    /// half of the scale the arc has not yet descended past — the reading and
+    /// the instrument printed over each other. The bar says the same thing in
+    /// a strip, which is exactly the shape available.
+    pub fn compact(self) -> Self {
+        match self {
+            SmeterStyle::Needle => SmeterStyle::Bar,
+            other => other,
+        }
+    }
+
+    /// The next face in the click cycle, skipping any this box cannot show.
+    pub fn next_compact(self) -> Self {
+        let next = self.next();
+        if next.compact() != next { next.next() } else { next }
+    }
+}
+
 /// User display preferences. All have defaults so a missing `[ui]` table loads.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -418,6 +478,10 @@ pub struct UiSettings {
     /// factor, so the spacing around the text follows it and the waterfall and
     /// skimmer sizes below are relative to it. `Medium` is the historic size.
     pub menu_font_size: FontSize,
+    /// Which face the S-meter wears — needle (the stock one), bar or trace.
+    /// Cycled by clicking the meter; see [`SmeterStyle`] for why it is a
+    /// screen preference rather than part of a radio's view.
+    pub smeter_style: SmeterStyle,
     /// Ask sdroxide.com once per start whether a newer release has been
     /// published, and say so in the notice banner above the panadapter. In
     /// `[ui]` because it is this screen's preference, like the theme — the
@@ -520,6 +584,7 @@ impl Default for UiSettings {
             skimmer_font_size: FontSize::Medium,
             waterfall_font_size: FontSize::Small,
             menu_font_size: FontSize::Medium,
+            smeter_style: SmeterStyle::Needle,
             update_check: true,
             memory_sort: crate::MemorySort::Stored,
             memory_sort_desc: false,

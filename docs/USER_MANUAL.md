@@ -805,6 +805,11 @@ Clicking the meter cycles three faces:
 - **Trace** — the last fifteen seconds plotted as a scrolling graph, which is
   the one to watch for fading and QSB.
 
+The face you pick is remembered. It belongs to the screen rather than to one
+radio — it is written to `smeter_style` in the `[ui]` table of `config.toml` the
+moment you click, so it survives a restart however the last session ended, and
+every radio comes back up wearing it.
+
 On transmit all three switch to a transmit meter, stacked in two rows. The top
 row is **ALC**. On a rig that reports its own ALC over CAT — Icom CI-V rigs do —
 that is the rig's figure, which is the one that answers "am I overdriving it";

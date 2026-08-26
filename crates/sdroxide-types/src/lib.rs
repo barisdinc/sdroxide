@@ -212,7 +212,8 @@ pub use station::StationConfig;
 pub use tciserver::TciServerConfig;
 pub use tone::{CTCSS_TONES, SubTone};
 pub use ui::{
-    BandplanKind, ChromeStyle, FontSize, LayoutMode, SpectrumDetail, Speed, UiSettings, UiTheme,
+    BandplanKind, ChromeStyle, FontSize, LayoutMode, SmeterStyle, SpectrumDetail, Speed,
+    UiSettings, UiTheme,
 };
 pub use voice::{VOICE_MAX_LEN_S, VOICE_SLOTS, VoiceSlotInfo, VoiceStatus, slot_label};
 pub use wefax::{WEFAX_STATIONS, WefaxChartMeta, WefaxIoc, WefaxLpm, WefaxStation, WefaxStatus};

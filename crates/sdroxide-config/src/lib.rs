@@ -2328,6 +2328,29 @@ mod tests {
         assert_eq!(back.ui.window_style, sdroxide_types::ChromeStyle::Gradient);
     }
 
+    /// The S-meter's face rides in `[ui]` for the same reason (issue #185): it
+    /// is written the moment the meter is clicked, so it has to come back on
+    /// the next start — and a hand-typed face that is not a face must cost the
+    /// operator the face, not the whole table.
+    #[test]
+    fn the_smeter_face_survives_a_toml_round_trip() {
+        let mut s = Settings::default();
+        assert_eq!(s.ui.smeter_style, sdroxide_types::SmeterStyle::Needle, "stock face");
+        s.ui.smeter_style = sdroxide_types::SmeterStyle::Trace;
+        let text = toml::to_string_pretty(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui.smeter_style, sdroxide_types::SmeterStyle::Trace);
+
+        let typo: Settings = toml::from_str(
+            "[ui]\n\
+             theme = \"AmberPhosphor\"\n\
+             smeter_style = \"Dial\"\n",
+        )
+        .expect("an unknown face must still parse");
+        assert_eq!(typo.ui.theme, sdroxide_types::UiTheme::AmberPhosphor, "the table survived");
+        assert_eq!(typo.ui.smeter_style, sdroxide_types::SmeterStyle::Needle);
+    }
+
     /// The FT8/FT4 decode list's own view preferences — the sort, its
     /// direction, the grouping and the two filters — ride in `[ui]` beside the
     /// theme, so they have to survive the same trip: a chip clicked in the

@@ -155,52 +155,11 @@ fn swr_frac(swr: f32) -> f32 {
     (swr.max(1.0).ln() / SWR_MAX.ln()).clamp(0.0, 1.0)
 }
 
-/// Which face the meter wears. Cycled by clicking the meter; persisted in the
-/// client's view state.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SmeterStyle {
-    /// Analog moving-coil instrument with a swinging needle.
-    #[default]
-    Needle,
-    /// Horizontal gradient bar with a graduated scale beneath it.
-    Bar,
-    /// Scrolling trace of the last quarter-minute — reads fading and QSB (and,
-    /// on transmit, how SWR behaved across the over) the way neither of the
-    /// instantaneous faces can.
-    Trace,
-}
-
-impl SmeterStyle {
-    /// The next style in the click cycle.
-    pub fn next(self) -> Self {
-        match self {
-            SmeterStyle::Needle => SmeterStyle::Bar,
-            SmeterStyle::Bar => SmeterStyle::Trace,
-            SmeterStyle::Trace => SmeterStyle::Needle,
-        }
-    }
-
-    /// The face for a box wider than it is tall — the shape the compact strip
-    /// hands the meter on a phone.
-    ///
-    /// The needle drops out there. Its arc is a chord across the box, so its
-    /// radius follows the *width*, and the headline chip ends up covering the
-    /// half of the scale the arc has not yet descended past — the reading and
-    /// the instrument printed over each other. The bar says the same thing in
-    /// a strip, which is exactly the shape available.
-    pub fn compact(self) -> Self {
-        match self {
-            SmeterStyle::Needle => SmeterStyle::Bar,
-            other => other,
-        }
-    }
-
-    /// The next style in the click cycle, skipping any this box cannot show.
-    pub fn next_compact(self) -> Self {
-        let next = self.next();
-        if next.compact() != next { next.next() } else { next }
-    }
-}
+/// Which face the meter wears — the operator's choice, kept in `[ui]` with
+/// the rest of this screen's preferences (see [`sdroxide_types::SmeterStyle`]),
+/// and re-exported here so a caller drawing a meter has the face beside the
+/// widget that draws it.
+pub use sdroxide_types::SmeterStyle;
 
 /// Draw the S-meter in the selected style, filling the box's full interior.
 /// Returns the (clickable) response so the caller can cycle the style.

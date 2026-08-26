@@ -936,7 +936,7 @@ impl SdroxideApp {
                     // whatever height the readout did. Bar or trace only — a
                     // strip this shape cannot hold the needle's arc, see
                     // [`smeter::SmeterStyle::compact`].
-                    let style = self.view.smeter_style;
+                    let style = self.ui_settings.smeter_style;
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), meter_h),
                         egui::Layout::left_to_right(egui::Align::Min),
@@ -944,7 +944,7 @@ impl SdroxideApp {
                             let resp = smeter::show(ui, self.meters.as_ref(), style.compact())
                                 .on_hover_text("Click to cycle meter face: bar / trace");
                             if resp.clicked() {
-                                self.view.smeter_style = style.next_compact();
+                                self.set_smeter_style(style.next_compact());
                             }
                         },
                     );
@@ -1623,6 +1623,19 @@ impl SdroxideApp {
         format!("{hz:.6} MHz", hz = hz / 1e6)
     }
 
+    /// Take the face a click asked for and write it out.
+    ///
+    /// Straight to disk rather than left for eframe's periodic save: the face
+    /// is a screen preference in `[ui]` (issue #185), it is written the moment
+    /// it changes like every other one, and a session that ends in a `pkill`
+    /// or a crash then still comes back on the instrument the operator chose.
+    fn set_smeter_style(&mut self, style: sdroxide_types::SmeterStyle) {
+        if self.ui_settings.smeter_style != style {
+            self.ui_settings.smeter_style = style;
+            crate::app::persist::persist_ui_settings(&self.ui_settings);
+        }
+    }
+
     /// The S-meter in a label-less box, always pinned top-right. Clicking it
     /// cycles the needle / bar / trace faces.
     ///
@@ -1639,8 +1652,9 @@ impl SdroxideApp {
     /// its scale readable by capping and centring it (see
     /// [`crate::widgets::smeter::NEEDLE_FACE_MAX_W`]).
     fn smeter_box(&mut self, ui: &mut egui::Ui, w: f32, h: f32, compact: bool) {
-        let style = self.view.smeter_style;
+        let style = self.ui_settings.smeter_style;
         let shown = if compact { style.compact() } else { style };
+        let mut picked = None;
         crate::chrome::module_bare_flush_h(ui, w, h, |ui| {
             let resp = smeter::show(ui, self.meters.as_ref(), shown).on_hover_text(if compact {
                 "Click to cycle meter face: bar / trace"
@@ -1648,9 +1662,12 @@ impl SdroxideApp {
                 "Click to cycle meter face: needle / bar / trace"
             });
             if resp.clicked() {
-                self.view.smeter_style = if compact { style.next_compact() } else { style.next() };
+                picked = Some(if compact { style.next_compact() } else { style.next() });
             }
         });
+        if let Some(style) = picked {
+            self.set_smeter_style(style);
+        }
     }
 
     /// Combined VFO + RIT/XIT box: the VFO A/B utility chips on top, with the
