@@ -901,10 +901,16 @@ impl IqSource for AudioCatSource {
     }
 
     fn tx_write_audio(&mut self, audio: &[f32]) -> Result<()> {
-        let Some((_, producer)) = self.out.as_mut() else {
+        let Some((out, producer)) = self.out.as_mut() else {
             return Ok(()); // no TX audio device — PTT still keyed the rig
         };
-        // Resample 48 kHz → card rate, then interleave to stereo (both channels).
+        // How many copies of each sample the stream expects. Read from the
+        // stream rather than assumed to be two: `start_output` falls back
+        // through its candidate configurations, and on a card that opened mono
+        // a hardcoded pair wrote every sample twice — which is not a louder
+        // over, it is one transmitted at half speed.
+        let channels = usize::from(out.channels.max(1));
+        // Resample 48 kHz → card rate, then write one sample per channel.
         self.tx_scratch.clear();
         match self.tx_resampler.as_mut() {
             Some(rs) => rs.push(audio, &mut self.tx_scratch),
@@ -915,7 +921,7 @@ impl IqSource for AudioCatSource {
         // (e.g. a 110 s SSTV image) is generated at CPU speed and mostly dropped
         // on a full ring, so the radio only transmits the first buffer-full.
         for &s in &self.tx_scratch {
-            for _ in 0..2 {
+            for _ in 0..channels {
                 let mut v = s;
                 let mut tries = 0u32;
                 while let Err(rtrb::PushError::Full(x)) = producer.push(v) {

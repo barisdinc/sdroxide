@@ -117,6 +117,13 @@ const TX_SLIDER_VALUE_W: f32 = 48.0;
 /// Width of the condensed TX box's mic column: the "Mic" label over a vertical
 /// rail. Calibrated the same way, guarded by the same test.
 const TX_MIC_COL_W: f32 = 30.0;
+/// Width of the condensed TX box's transmit-audio column, which stands in the
+/// mic column's place in the modes where the microphone is not the payload
+/// (issue #186). Wider than [`TX_MIC_COL_W`] because its caption is its
+/// readout — the level in dB, permanently on screen rather than behind a hover
+/// — and "-40 dB" is what it has to fit: 30 pt of it at the desktop tier,
+/// against the 18 the word "Mic" takes. Same calibration, same test.
+const TX_LEVEL_COL_W: f32 = 36.0;
 /// Padding between the TX rows' readouts and the mic column, so the vertical
 /// rail stands apart from the sliders beside it.
 const TX_MIC_GAP: f32 = 16.0;
@@ -3246,23 +3253,158 @@ impl SdroxideApp {
         });
     }
 
+    /// Whether the digital transmit-audio level is the live control for what is
+    /// on the air — and so whether the strip should offer it (issue #186).
+    ///
+    /// Three things have to hold, and each rules out a rail that would do
+    /// nothing:
+    ///
+    /// - the radio modulates what we send it (a CAT rig on its sound card, a
+    ///   FLEX, an Icom on its network port). Where we modulate it ourselves the
+    ///   modulator and Drive own the level and this is never consulted;
+    /// - the mode transmits through the digi engine at all;
+    /// - and for CW, that the rig is keyed as audio. With its own keyer sending,
+    ///   CW leaves as text over the control port and never touches the card.
+    ///
+    /// Not gated on the mode being *digital*: RADE is, and its microphone is
+    /// the payload, so it keeps the mic rail and reaches this one from the TX
+    /// menu instead — see [`Self::tx_controls`].
+    fn digi_tx_level_applies(&self) -> bool {
+        digi_tx_level_applies_to(self.state.rx[0].mode, self.caps.as_ref())
+    }
+
+    /// The mode's transmit-audio level as the strip should draw it, in dB.
+    fn digi_tx_level_db(&self) -> f32 {
+        sdroxide_types::tx_level_db(self.digi_cfg_edit.tx_level_for(self.state.rx[0].mode))
+    }
+
+    /// Send a level the operator has just set, and keep the local copy in step
+    /// so the rail does not snap back before the engine's echo arrives.
+    ///
+    /// Gated on `digi_cfg_seeded` like every other write to this configuration:
+    /// before the first status the local copy is `DigiConfig::default()`, and a
+    /// command built from it would be a level nobody asked for.
+    fn set_digi_tx_level(&mut self, db: f32, cmds: &mut Vec<Command>) {
+        if !self.digi_cfg_seeded {
+            return;
+        }
+        let mode = self.state.rx[0].mode;
+        let level = sdroxide_types::tx_level_from_db(db);
+        self.digi_cfg_edit.set_tx_level(mode, level);
+        cmds.push(Command::SetDigiTxLevel { mode, level });
+    }
+
+    /// The hover that explains the transmit-audio level wherever it is drawn.
+    fn digi_tx_level_hover(&self) -> &'static str {
+        if self.state.rx[0].mode.is_fm_carrier() {
+            "Deviation: how far this mode's burst swings a radio that modulates \
+             it itself. An FM transmitter turns audio level into frequency swing \
+             and has no ALC to catch it, so full scale into a data input set for \
+             voice over-deviates — which sounds completely normal to a listener \
+             and decodes for nobody.\n\nKept per mode, so a deviation set for \
+             1200 baud packet never lands on FT8."
+        } else {
+            "Transmit audio: how hard this mode drives the modulator of a radio \
+             that modulates what we send it — a CAT rig on its sound card, a \
+             FLEX, an Icom on its network port. Bring it down until the rig's \
+             ALC is barely moving and set the power at the radio; ALC riding on \
+             a constant-envelope digital mode is what splatters.\n\nDrive is \
+             not this control: on these radios Drive reaches the rig's power \
+             register and never touches its audio.\n\nKept per mode — FT8, \
+             RTTY, PSK and MCW each keep their own."
+        }
+    }
+
+    /// The transmit-audio level: label + rail + dB readout, laid out like Drive.
+    fn tx_digi_level(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut db = self.digi_tx_level_db();
+        ui.label("TX audio");
+        if crate::chrome::slider(
+            ui,
+            Slider::new(&mut db, sdroxide_types::TX_AUDIO_LEVEL_MIN_DB..=0.0)
+                .show_value(true)
+                .custom_formatter(|v, _| format!("{v:.0} dB")),
+        )
+        .on_hover_text(self.digi_tx_level_hover())
+        .changed()
+        {
+            self.set_digi_tx_level(db, cmds);
+        }
+    }
+
+    /// The transmit-audio level as a vertical rail, in the mic rail's place.
+    ///
+    /// Its caption is its readout rather than a name: the level in dB, which is
+    /// the number the operator is trying to see. The control it replaces was a
+    /// drag-value in a dialog most digital modes cannot even open, and being
+    /// unable to see the figure is half of what issue #186 reported.
+    fn tx_digi_level_vertical(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut db = self.digi_tx_level_db();
+        let hover = self.digi_tx_level_hover();
+        let mut set = None;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new(format!("{db:.0} dB")).size(10.5));
+            // The rail takes whatever height the caption left it.
+            ui.spacing_mut().slider_width = (ui.available_height() - 2.0).max(24.0);
+            if crate::chrome::slider(
+                ui,
+                Slider::new(&mut db, sdroxide_types::TX_AUDIO_LEVEL_MIN_DB..=0.0)
+                    .vertical()
+                    .show_value(false),
+            )
+            .on_hover_text(hover)
+            .changed()
+            {
+                set = Some(db);
+            }
+        });
+        if let Some(db) = set {
+            self.set_digi_tx_level(db, cmds);
+        }
+    }
+
     /// The transmit controls as the TX menu shows them: the keyer and the
     /// levels, in the order the box draws them. PTT is on the strip already;
     /// TUNE rides with the caller (see [`Self::tx_menu`]). See
     /// [`crate::chrome::control_row`] for `narrow`.
     fn tx_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, narrow: bool) {
+        // Both levels where both apply, unlike the condensed box: this is a
+        // list with room to grow, so there is no reason to make RADE — the one
+        // mode that has a use for each — choose between them.
+        //
+        // Mic stays wherever the box would still be showing it, which is what
+        // keeps the two surfaces saying the same thing. It is inert in a
+        // digital mode whatever the radio is, but only where the level rail
+        // stands in its place has anything replaced it; dropping it in the menu
+        // and not in the box would just be the same control missing from one of
+        // the two places it lives.
+        let level = self.digi_tx_level_applies();
+        let mic = self.state.rx[0].mode.allows_voice_keyer() || !level;
         crate::chrome::control_row(ui, narrow, |ui| {
             self.tx_keyer_chip(ui);
             self.tx_drive(ui, cmds);
             self.tx_tune_level(ui, cmds);
-            self.tx_mic(ui, cmds);
+            if mic {
+                self.tx_mic(ui, cmds);
+            }
+            if level {
+                self.tx_digi_level(ui, cmds);
+            }
         });
     }
 
     /// The condensed TX box's natural width — [`tx_rows_w_for`] with the
     /// voice keyer's presence read off the current mode.
     fn tx_rows_w(&self, ui: &egui::Ui) -> f32 {
-        tx_rows_w_for(ui, self.state.rx[0].mode.allows_voice_keyer())
+        tx_rows_w_for(ui, self.state.rx[0].mode.allows_voice_keyer(), self.tx_side_col_w())
+    }
+
+    /// What the condensed TX box's right-hand column costs: the transmit-audio
+    /// rail where it applies, else the mic rail. Exactly one of the two is
+    /// drawn, so the box pays for one of them.
+    fn tx_side_col_w(&self) -> f32 {
+        if self.digi_tx_level_applies() { TX_LEVEL_COL_W } else { TX_MIC_COL_W }
     }
 
     /// The condensed TX box, keyed by what each row transmits: PTT beside the
@@ -3273,9 +3415,11 @@ impl SdroxideApp {
     /// width the packer granted.
     fn tx_condensed(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
         let keyer = self.state.rx[0].mode.allows_voice_keyer();
+        let level = self.digi_tx_level_applies();
+        let side_w = self.tx_side_col_w();
         let (fixed1, fixed2) = tx_rows_fixed_w(ui, keyer);
         let inner = w - 2.0 * crate::chrome::MODULE_MARGIN_X - 4.0;
-        let rows_w = inner - TX_MIC_GAP - TX_MIC_COL_W;
+        let rows_w = inner - TX_MIC_GAP - side_w;
         let (rail1, rail2) =
             ((rows_w - fixed1).max(STRIP_RAIL_W), (rows_w - fixed2).max(STRIP_RAIL_W));
         crate::chrome::module_bare_h(ui, w, crate::chrome::MODULE_TALL_H, |ui| {
@@ -3293,10 +3437,22 @@ impl SdroxideApp {
                     self.tx_tune_level(ui, cmds);
                 });
             });
-            // The mic rail stands apart from the rows' readouts, so it reads
+            // The side rail stands apart from the rows' readouts, so it reads
             // as its own control rather than a fourth element of the rows.
+            //
+            // One rail, not two. In a digital mode the mic gain reaches nothing
+            // — the microphone is drained and discarded, and only the voice
+            // paths ever scale it — so the level rail takes its place rather
+            // than crowding a box of fixed height with a dead control beside a
+            // live one. Flipping USB to FT8 and watching the rail change is
+            // also how an operator finds this at all, which is the other half
+            // of issue #186.
             ui.add_space(TX_MIC_GAP - MODULE_ROW_SPACING);
-            self.tx_mic_vertical(ui, cmds);
+            if level {
+                self.tx_digi_level_vertical(ui, cmds);
+            } else {
+                self.tx_mic_vertical(ui, cmds);
+            }
         });
     }
 
@@ -4138,14 +4294,27 @@ fn tx_rows_fixed_w(ui: &egui::Ui, keyer: bool) -> (f32, f32) {
 }
 
 /// The condensed TX box's natural width: the wider of its rows' fixed parts
-/// plus a rail at [`STRIP_RAIL_W`], the mic column and its padding, the box
+/// plus a rail at [`STRIP_RAIL_W`], the side column and its padding, the box
 /// margins, and a few points of rounding slack.
-fn tx_rows_w_for(ui: &egui::Ui, keyer: bool) -> f32 {
+///
+/// `side_col_w` is [`TX_MIC_COL_W`] or [`TX_LEVEL_COL_W`] — exactly one of the
+/// two rails is drawn, and they are not the same width.
+/// [`SdroxideApp::digi_tx_level_applies`] over the two things that decide it, so
+/// the rule can be tested without an application around it.
+fn digi_tx_level_applies_to(mode: Mode, caps: Option<&sdroxide_types::DeviceCaps>) -> bool {
+    let Some(caps) = caps else { return false };
+    if !(caps.audio_mode || caps.tx_audio) || !mode.takes_digi_tx_audio() {
+        return false;
+    }
+    mode != Mode::Cw || caps.cw_audio_keyed
+}
+
+fn tx_rows_w_for(ui: &egui::Ui, keyer: bool, side_col_w: f32) -> f32 {
     let (row1, row2) = tx_rows_fixed_w(ui, keyer);
     row1.max(row2)
         + STRIP_RAIL_W
         + TX_MIC_GAP
-        + TX_MIC_COL_W
+        + side_col_w
         + 2.0 * crate::chrome::MODULE_MARGIN_X
         + 4.0
 }
@@ -5394,6 +5563,56 @@ mod tests {
         });
     }
 
+    /// Which of the two rails the transmit box offers, and why each answer is
+    /// the one that does something (issue #186).
+    ///
+    /// The rail replaces the mic one, so getting this wrong does not merely add
+    /// a useless control — it takes away a working one, or leaves a dead one in
+    /// place of the control the operator went looking for.
+    #[test]
+    fn the_transmit_audio_rail_appears_where_it_does_something() {
+        use sdroxide_types::DeviceCaps;
+
+        // A CAT rig on its sound card: it modulates what we hand it.
+        let cat = DeviceCaps { tx_audio: true, ..DeviceCaps::default() };
+        // The same rig, with CW going out through its own keyer instead.
+        let cat_rig_keyer = DeviceCaps { tx_audio: true, ..DeviceCaps::default() };
+        let cat_mcw = DeviceCaps { tx_audio: true, cw_audio_keyed: true, ..DeviceCaps::default() };
+        // An SDR we modulate ourselves: the modulator and Drive own the level.
+        let sdr = DeviceCaps::default();
+
+        // The modes the report is about.
+        for mode in [Mode::Ft8, Mode::Rtty, Mode::Psk, Mode::Aprs, Mode::Rade] {
+            assert!(
+                digi_tx_level_applies_to(mode, Some(&cat)),
+                "{mode:?} transmits through this level and was not offered it"
+            );
+            assert!(
+                !digi_tx_level_applies_to(mode, Some(&sdr)),
+                "{mode:?} was offered a level that does nothing on an SDR"
+            );
+        }
+
+        // Voice and the receive-only modes never reach it.
+        for mode in [Mode::Usb, Mode::Lsb, Mode::Nfm, Mode::Am, Mode::Wefax, Mode::Drm] {
+            assert!(
+                !digi_tx_level_applies_to(mode, Some(&cat)),
+                "{mode:?} was offered a level it never uses"
+            );
+        }
+
+        // CW only where the sound card is in the path. With the rig's own keyer
+        // sending, CW leaves as text over the control port.
+        assert!(digi_tx_level_applies_to(Mode::Cw, Some(&cat_mcw)), "MCW was not offered a level");
+        assert!(
+            !digi_tx_level_applies_to(Mode::Cw, Some(&cat_rig_keyer)),
+            "a rig-keyed CW mode was offered an audio level it never touches"
+        );
+
+        // And before the capabilities have arrived, nothing is offered.
+        assert!(!digi_tx_level_applies_to(Mode::Ft8, None));
+    }
+
     /// Lay the condensed TX box's rows and mic column out with real widgets at
     /// desktop metrics and check each fits the width [`tx_rows_fixed_w`] and
     /// [`TX_MIC_COL_W`] price for it — which is what keeps
@@ -5478,10 +5697,35 @@ mod tests {
                         ui.min_rect().width()
                     })
                     .inner;
+                // The other rail that can stand in that column (issue #186),
+                // measured at the widest caption it can show — its caption is
+                // its readout, so this is the figure `TX_LEVEL_COL_W` has to
+                // cover.
+                let mut db = sdroxide_types::TX_AUDIO_LEVEL_MIN_DB;
+                let level_w = ui
+                    .vertical(|ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new(format!("{db:.0} dB")).size(10.5));
+                            ui.spacing_mut().slider_width = 45.0;
+                            crate::chrome::slider(
+                                ui,
+                                Slider::new(&mut db, sdroxide_types::TX_AUDIO_LEVEL_MIN_DB..=0.0)
+                                    .vertical()
+                                    .show_value(false),
+                            );
+                        });
+                        ui.min_rect().width()
+                    })
+                    .inner;
                 let (room1, room2) = (fixed1 + rail, fixed2 + rail);
                 assert!(row1 <= room1 + 0.5, "keyer={keyer}: row 1 took {row1} of {room1}");
                 assert!(row2 <= room2 + 0.5, "keyer={keyer}: row 2 took {row2} of {room2}");
                 assert!(mic_w <= TX_MIC_COL_W + 0.5, "the mic column took {mic_w}");
+                assert!(
+                    level_w <= TX_LEVEL_COL_W + 0.5,
+                    "the transmit-audio column took {level_w} of {TX_LEVEL_COL_W}"
+                );
             });
         }
     }
@@ -5648,7 +5892,11 @@ mod tests {
             + 4.0;
         let rx =
             rx_rows(ui, false, false, false, mode).w() + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0;
-        let tx = tx_rows_w_for(ui, mode.allows_voice_keyer());
+        // A CAT rig modulates our audio, so a digital mode there draws the
+        // transmit-audio rail rather than the mic one — and it is the wider of
+        // the two.
+        let side = if mode.takes_digi_tx_audio() { TX_LEVEL_COL_W } else { TX_MIC_COL_W };
+        let tx = tx_rows_w_for(ui, mode.allows_voice_keyer(), side);
         let display = chip_row_w(ui, &DISPLAY_VIEW_CHIPS).max(chip_row_w(ui, &DISPLAY_TOOL_CHIPS))
             + 2.0 * crate::chrome::MODULE_MARGIN_X;
         let system = system_rows_w(ui);

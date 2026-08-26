@@ -867,6 +867,38 @@ On a TX-capable rig the **Transmit** module appears:
 - **Drive** — transmit drive (0–100%).
 - **Tune** — the (lower) drive level used by TUNE.
 - **Mic** — microphone gain.
+- **TX audio** — how loud a digital mode is handed to a radio that modulates it
+  itself, in dB below full scale. It stands **in the Mic rail's place**, and
+  only in the modes where the microphone is not what goes on the air: select
+  FT8, RTTY, PSK or CW-as-MCW on a CAT rig and the rail changes from `Mic` to a
+  dB reading; go back to SSB and Mic returns. The two can never both apply — in
+  a digital mode the microphone is drained and discarded, so a Mic slider there
+  would move nothing — and the strip has room for one rail, so it shows the one
+  that works. (FreeDV RADE is the exception on both counts: the microphone *is*
+  the payload there, so RADE keeps Mic and reaches this level from the TX menu.)
+
+  **This level is kept per mode.** FT8, RTTY, PSK and MCW do not load a
+  transmitter the same way, and the figure you are setting is where your
+  waveform sits against the radio's ALC — so each mode remembers its own, saved
+  as you set it. A mode you have never touched starts from the level for the
+  carrier it goes out on, which is also what a mode added in a later release
+  inherits, so nothing ever comes up at full scale behind your back.
+
+  The adjustment on sideband is: **bring it down until the rig's ALC is barely
+  moving, then set the power at the radio.** ALC riding on a constant-envelope
+  digital mode is what splatters. On FM — VHF packet, APRS, RIFP — the same
+  control is the **deviation** instead: an FM transmitter turns audio level into
+  frequency swing and has no ALC to catch it, so full scale into a data input
+  set for voice over-deviates, which sounds completely normal to anyone
+  listening and decodes for nobody. Turn it down until other stations report
+  you, or set the level at the radio.
+
+  The same control is in each mode's setup window, where there is one, and the
+  radio's own input level is the other half of it either way.
+
+  On a radio sdroxide modulates itself — a Pluto, an HPSDR board, an SDR — none
+  of this applies and the rail does not appear: there the modulator and Drive
+  own the level.
 
 **Transmit EQ** (Settings → Radio, above the per-interface section, since it
 applies the same way whichever radio interface is selected) is a 3-band
@@ -981,7 +1013,11 @@ level and how much the limiter is working. In FM it sets **deviation** —
 sdroxide's FM modulator is constant-envelope, so Drive changes the power and
 does nothing to the audio, while Mic gain alone decides how wide the signal is.
 50% is unity gain, which puts a full-scale recording at the ±5 kHz peak
-deviation NFM wants; higher over-deviates and distorts however low Drive is.
+deviation NFM wants; higher over-deviates and distorts however low Drive is. In
+FreeDV RADE it sets how hard the microphone is fed to the vocoder, the same 50%
+being unity. In every other digital mode it does nothing at all — the burst is
+synthesized and the microphone is discarded — which is why the rail becomes
+**TX audio** there.
 
 ### 2.11 Voice keyer
 
@@ -1964,6 +2000,23 @@ values, and they fill the keyboard modes' CQ macros, the FT8/FT4/FT2 exchange, a
 everything the station reports or uploads. And every digital transmission goes
 through the normal transmit path, so the ham-band lockout and the usual
 transmit safety apply in every mode.
+
+#### Setting your transmit level
+
+On a radio that modulates the audio you hand it — a CAT rig on its sound card, a
+FLEX, an Icom on its network port — **Drive is not the audio control.** It
+reaches the radio's power register, and a data signal that is overdriving the
+transmitter will go on overdriving it wherever Drive sits. The control you want
+is **TX audio**, in the transmit module in place of the Mic rail
+([2.10](#210-transmit)), and the adjustment is: bring it down until the rig's
+ALC is barely moving, then set the power at the radio.
+
+**Each mode remembers its own level**, saved as you set it, because FT8, RTTY,
+PSK and MCW do not load a transmitter the same way. A mode you have never set
+starts from the level for the carrier it goes out on — sideband for most modes,
+FM for VHF packet, APRS and RIFP, where the same control is the deviation
+instead. All of it lives in `digi.json`
+([13](#13-configuration-files)).
 
 #### Bands with more than one agreed frequency
 
@@ -3348,32 +3401,24 @@ on your channel is sending a format this build does not read.
   network buffers more on top of that. Too little and the far end never locks —
   the transmission is on the air and nothing decodes it. Shared with the packet
   mode, since it is a property of the radio rather than of the protocol.
-- **TX audio** — how loud the over is handed to a radio that modulates it
-  itself: a CAT rig on its sound card, a FLEX, an Icom on its network port. A
-  radio sdroxide modulates itself always gets full scale, because there the
-  modulator and Drive own the level instead.
+- **TX audio** — APRS's own **deviation**, in dB below full scale, into a radio
+  that modulates the audio we hand it: a CAT rig on its sound card, a FLEX, an
+  Icom on its network port. A radio sdroxide modulates itself always gets full
+  scale, because there the modulator and Drive own the level instead.
 
-  There are **two of these levels and the row shows the one your current mode
-  uses**, because the number does two unrelated jobs:
+  An FM transmitter turns audio level into frequency swing and has no ALC to
+  catch it: 1200 baud packet wants about 3 kHz where voice wants 5, so full
+  scale into a data input set for voice over-deviates. An over that
+  over-deviates sounds completely normal to anyone listening and decodes for
+  nobody, so **this is the first thing to try when your frames are clean and
+  still nothing acknowledges them.** The radio's own input level is the other
+  half of it.
 
-  - **On FM — VHF packet, APRS, RIFP — it is the deviation.** An FM transmitter
-    turns audio level into frequency swing and has no ALC to catch it: 1200 baud
-    packet wants about 3 kHz where voice wants 5, so full scale into a data input
-    set for voice over-deviates. An over that over-deviates sounds completely
-    normal to anyone listening and decodes for nobody, so this is the first thing
-    to try when your frames are clean and still nothing acknowledges them.
-  - **On sideband — FT8, RTTY, PSK, HF packet, everything else — it is drive
-    into the modulator.** Bring it down until the rig's ALC is barely moving and
-    set the power at the radio: ALC riding on a constant-envelope digital mode is
-    what splatters. On these radios Drive reaches the rig's *power* register
-    rather than its audio, so this is the level.
-
-  Both are full scale by default, and the radio's own input level is the other
-  half of either. They are separate so that a deviation set for packet does not
-  quietly take 8 dB off your FT8 — which is what one shared number used to do,
-  invisibly, because it could only be reached from the APRS panel. A
-  configuration written before the split keeps its level on both sides until you
-  change one.
+  The level belongs to APRS alone — every mode keeps its own, so a deviation set
+  for 1200 baud never lands on your FT8. The same control is on the transmit
+  strip, in the Mic rail's place, where you can reach it without opening this
+  window; [2.10](#210-transmit) has the full description and the sideband half
+  of the story.
 - **Keep stations** — how long a station stays on the map after it was last
   heard, and what the map's fade is measured against.
 
@@ -10312,7 +10357,7 @@ sdroxide stores its settings under the per-user config directory:
 | --- | --- | --- |
 | `config.toml` | TOML | General settings: `device_args`, `sample_rate`, `cal_offset_db`, `spectrum_fft`, `spectrum_fps`, `server_bind`, `server_port`, `tx_ham_only`, `swr_guard` and `swr_limit` (the SWR guard, [§6.1](#61-general-station-audio-and-remote-access)), `audio_output`, `audio_input`, `dismissed_update` (the published release whose update banner was dismissed, [§6.3](#63-ui-display-preferences-and-voice-announcements)), `region` (`"R1"` / `"R2"` / `"R3"` — the IARU region every band plan follows, [§6.1](#61-general-station-audio-and-remote-access)), plus the `[ui]` display preferences (including `theme`, `button_style` and `window_style`), the `[speech]` announcement settings ([§6.3](#63-ui-display-preferences-and-voice-announcements)), the `[remote_access]` sign-in that server mode demands ([§8.3](#83-sign-in-who-may-operate-the-station), stored in plaintext) and the `[remote_server]` address the **Remote** tab dials ([§8.2](#82-connect-a-native-remote-client)). Belongs to the machine the engine runs on — except `[ui]`, `[speech]` and `[remote_server]`, which belong to the screen in front of you. |
 | `radio.json` | JSON | Which radio interface is selected and everything that configures it — the CAT/HPSDR/TCI/SmartSDR/RTL-SDR/rtl_tcp/SpyServer/RX-888/Airspy HF+/SDRplay/PlutoSDR sections, the converter offset and stated tuning ranges, and the radio's sound-card device names. |
-| `digi.json` | JSON | Digital-mode operator settings: your callsign and grid, FT8/FT4/FT2 TX period, auto-sequence and message templates, the transmit-frequency hold (`hold_tx_freq`) and the per-band transmit offsets it pins (`tx_audio_hz`), and the WSPR beacon's duty cycle, power and band-hop list. |
+| `digi.json` | JSON | Digital-mode operator settings: your callsign and grid, FT8/FT4/FT2 TX period, auto-sequence and message templates, the transmit-frequency hold (`hold_tx_freq`) and the per-band transmit offsets it pins (`tx_audio_hz`), the per-mode transmit-audio levels (`tx_audio_levels`, with `tx_audio_level_fm` / `tx_audio_level_ssb` as the level a mode with no entry of its own inherits), and the WSPR beacon's duty cycle, power and band-hop list. |
 | `memories.json` | JSON | Saved memory channels. |
 | `bandstacks.json` | JSON | Per-band memory of your last frequency/mode/filter (up to three per band). |
 | `bandplan.json` | JSON | The band plan itself, per IARU region: band edges, the CW/data/phone/beacon/all-modes sub-segments, and the PSK and RTTY skimmer windows — all in MHz. Written from the built-in IARU tables on first start and meant to be edited; narrow a band here and the transmit lockout narrows with it. Which region applies is `region` in `config.toml`. **RELOAD BAND PLAN** on the General tab applies an edit without a restart, and deleting the file restores the defaults. See [§6.1](#61-general-station-audio-and-remote-access). |

@@ -1820,6 +1820,15 @@ struct Engine {
     /// only while a digital mode is active.
     digi: Option<Box<dyn DigiEngine>>,
     digi_config: DigiConfig,
+    /// `digi_config` holds a change that is not on disk yet.
+    ///
+    /// Only `Command::SetDigiTxLevel` sets it: every other route through this
+    /// configuration saves as it goes, and can, because each is a discrete act
+    /// by the operator. The transmit-audio rail is a drag — one command per
+    /// frame for as long as it lasts — so it is applied at once and written by
+    /// [`Engine::flush_digi_config`] on the periodic tick and at shutdown, the
+    /// way the session is.
+    digi_dirty: bool,
     /// The band the running controller's transmit offset belongs to, so a move
     /// to another one can be noticed. `None` means "not yet applied", which is
     /// how a fresh controller asks for its band's stored offset: startup and a
@@ -2296,6 +2305,7 @@ fn engine_thread(
     // capabilities, so every backend reports it without having to remember to:
     // it is the trait's own answer, passed on.
     caps.center_is_dial = source.center_is_dial();
+    caps.cw_audio_keyed = source.cw_audio_keyed();
     let audio_mode = caps.audio_mode;
     let radio_fs = source.sample_rate();
     let audio_bw = source.display_bandwidth().unwrap_or(radio_fs / 2.0);
@@ -2582,6 +2592,7 @@ fn engine_thread(
         audio_nr_level: NrLevel::Off,
         digi: None,
         digi_config,
+        digi_dirty: false,
         digi_tx_band: None,
         digi_tx: false,
         hop_suspended: false,
@@ -3222,6 +3233,7 @@ fn engine_thread(
         if now >= next_session {
             next_session = now + SESSION_SAVE_INTERVAL;
             engine.save_session();
+            engine.flush_digi_config();
         }
     }
 }
@@ -3289,6 +3301,9 @@ impl Drop for Engine {
         // periodic tick because a clean quit is the common case, and it would
         // otherwise lose up to one tick's worth of tuning.
         self.save_session();
+        // And the transmit-audio rail, for the same reason: an operator who
+        // trims their level and quits has set it, not been trying it out.
+        self.flush_digi_config();
         // Finalize any in-progress recording so the MP3 file is closed cleanly
         // when the engine thread exits (all controllers gone / fatal error).
         if let Some(rec) = self.recorder.take() {
@@ -6033,6 +6048,9 @@ impl Engine {
                 if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
                     warn!("saving digi config: {e}");
                 }
+                // This write covers whatever the rail had queued, so the
+                // debounce has nothing left to flush.
+                self.digi_dirty = false;
                 self.mark_shared_store_write();
                 // The network features report the same operator identity, so a
                 // callsign or grid edit reaches them from here.
@@ -6079,6 +6097,29 @@ impl Engine {
                         }
                     }
                 }
+            }
+            SetDigiTxLevel { mode, level } => {
+                // Keyed on the mode the command carries, not on the dial: the
+                // rail is dragged while transmitting, and a mode change landing
+                // between the drag and this arm would write one mode's level
+                // onto another's entry (see `Command::SetDigiTxLevel`).
+                self.digi_config.set_tx_level(mode, level);
+                // The controller keeps its own copy and `DigiStatus.config` is
+                // built from it, so without this the echo below carries a stale
+                // map and every client seeds from the wrong number.
+                if let Some(d) = self.digi.as_mut() {
+                    d.set_config(self.digi_config.clone());
+                }
+                // Applied now, written later. A drag emits one of these per
+                // frame, and `save_digi_config` is an atomic write — temp file,
+                // fsync, rename — on the thread that is also pacing transmit
+                // blocks to real time. The one time an operator moves this
+                // control is while transmitting and watching ALC, which is
+                // exactly when that cost would land. `SetDigiAudioFreq` saves
+                // immediately because nudge chips fire a handful of times; a
+                // rail is not a chip.
+                self.digi_dirty = true;
+                self.emit_digi_status();
             }
             DigiCallCq => {
                 if let Some(d) = self.digi.as_mut() {
@@ -9014,6 +9055,29 @@ impl Engine {
         }
     }
 
+    /// Write `digi.json` if the transmit-audio rail has moved since the last
+    /// write. A no-op otherwise, which is every tick that is not during or just
+    /// after a drag.
+    ///
+    /// Deferred rather than written in the command arm for the reason
+    /// `digi_dirty` gives, and flushed from the same two places the session is —
+    /// the periodic tick and `Drop` — for the reason the session's own comment
+    /// gives: a clean quit is the common case, and without it a drag that ended
+    /// in the last few seconds would be lost.
+    ///
+    /// `digi.json` is a shared store, so the generation is bumped as
+    /// `SetDigiConfig` does: without it this engine reloads its own write the
+    /// next time another one touches the directory.
+    fn flush_digi_config(&mut self) {
+        if !std::mem::take(&mut self.digi_dirty) {
+            return;
+        }
+        if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
+            warn!("saving digi config: {e}");
+        }
+        self.mark_shared_store_write();
+    }
+
     /// Write the dial, mode, antennas and levels to `session.json` if any of
     /// them has moved since the last write, so the next start comes up here
     /// rather than on the default frequency and levels. A no-op on an engine
@@ -9108,6 +9172,10 @@ impl Engine {
     /// disk moves; nothing is written back from here, so two engines nudging
     /// each other cannot ping-pong.
     fn reload_shared_stores(&mut self) {
+        // Ours first. A level still sitting in `digi_config` waiting for the
+        // tick is not in the file another engine just wrote, so reading that
+        // file over it would discard the operator's last drag.
+        self.flush_digi_config();
         let memories = sdroxide_config::load_memories();
         if memories != self.memories {
             self.memories = memories;
@@ -9481,6 +9549,7 @@ impl Engine {
         self.source = source;
         self.caps = caps;
         self.caps.center_is_dial = self.source.center_is_dial();
+        self.caps.cw_audio_keyed = self.source.cw_audio_keyed();
         self.audio_mode = self.caps.audio_mode;
         self.radio_fs = self.source.sample_rate();
         self.audio_bw = self.source.display_bandwidth().unwrap_or(self.radio_fs / 2.0);
@@ -10491,20 +10560,19 @@ impl Engine {
     /// The operator's transmit-audio level for the over that is on the air, on a
     /// radio that modulates what we send it.
     ///
-    /// Two levels, because the number does two unrelated jobs and one value
-    /// could not do both (see [`sdroxide_types::DigiConfig::tx_audio_level_fm`]).
-    /// On FM it is the deviation; on sideband it is drive into the modulator,
-    /// and the thing that keeps a constant-envelope mode out of the rig's ALC.
+    /// This mode's own level if the operator has set one, else the level for
+    /// the carrier it goes out on — see
+    /// [`sdroxide_types::DigiConfig::tx_audio_levels`] for why an absent entry
+    /// inherits, and [`sdroxide_types::DigiConfig::tx_audio_level_fm`] for what
+    /// the two carrier defaults mean. On FM it is the deviation; on sideband it
+    /// is drive into the modulator, and the thing that keeps a constant-envelope
+    /// mode out of the rig's ALC.
     ///
-    /// Chosen by the carrier the mode actually goes out on rather than by which
-    /// panel the operator set it from — VHF packet, APRS and RIFP are FM data,
-    /// HF packet is audio on a sideband like any other keyboard mode — so a
-    /// deviation set for 1200 baud never lands on FT8.
+    /// Keyed on the mode on the air rather than on whichever panel set it, so a
+    /// deviation set for 1200 baud never lands on FT8 and an FT8 level never
+    /// lands on RTTY.
     fn digi_tx_audio_level(&self) -> f32 {
-        let cfg = &self.digi_config;
-        let fm = self.state.rx[0].mode.is_fm_carrier();
-        let level = if fm { cfg.tx_audio_level_fm } else { cfg.tx_audio_level_ssb };
-        level.clamp(0.05, 1.0)
+        self.digi_config.tx_level_for(self.state.rx[0].mode)
     }
 
     /// One block of transmit audio from the digital mode, at the rate the radio
@@ -10661,6 +10729,19 @@ impl Engine {
         if self.digi.as_ref().is_some_and(|d| d.wants_mic()) {
             self.fill_tx_audio_fifo_depth(TX_AUDIO_BLOCK);
             if !self.mic_fifo.is_empty() {
+                // Mic gain, on the one path where the microphone is the
+                // payload. It was missing here: both places that applied it are
+                // voice branches this never reaches, so the Mic slider did
+                // nothing at all to a digital-voice over and the vocoder was
+                // fed whatever the sound card delivered. Same 50 %-is-unity
+                // convention as the voice paths, so one setting means one thing
+                // whichever mode is transmitting.
+                let gain = self.state.tx.mic_gain * 2.0;
+                if (gain - 1.0).abs() > f32::EPSILON {
+                    for a in self.mic_fifo.iter_mut() {
+                        *a = (*a * gain).clamp(-1.0, 1.0);
+                    }
+                }
                 if let Some(d) = self.digi.as_mut() {
                     d.on_tx_mic(&self.mic_fifo);
                 }
@@ -11468,15 +11549,20 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
     Some(buf.into_inner())
 }
 
-/// Replace the fields of an incoming [`DigiConfig`] that the engine owns rather
-/// than the client, leaving every genuine setting as sent.
+/// Replace the fields of an incoming [`DigiConfig`] that a client's copy cannot
+/// be trusted to carry, leaving every genuine setting as sent.
 ///
-/// Only `tx_audio_hz` so far, the per-band transmit offsets. They ride in
-/// `DigiConfig` because that is what reaches the config file, not because a
-/// client has any business setting them, and the panel seeds its editable copy
-/// from the first status and owns it from then on. So an incoming map is always
-/// a stale snapshot, and taking it discards every offset learned since that
-/// client started.
+/// The property they share is not who *owns* the setting — it is that each has a
+/// write route of its own, outside `SetDigiConfig`. A panel seeds its editable
+/// copy from the first status and owns it from then on, so anything written by
+/// another route is missing from every copy seeded before that write. An
+/// incoming config is therefore always a stale snapshot of these two fields, and
+/// taking it discards everything learned since that client started.
+///
+/// - `tx_audio_hz`, the per-band transmit offsets, written by
+///   `Command::SetDigiAudioFreq`.
+/// - `tx_audio_levels`, the per-mode transmit-audio levels, written by
+///   `Command::SetDigiTxLevel`.
 ///
 /// Found the hard way, minutes after the offsets went in. 60 m's was set,
 /// recorded and saved; ticking Hold TX a moment later sent a copy seeded before
@@ -11486,6 +11572,7 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
 /// faithfully could be defeated by any of them.
 fn keep_engine_owned(mut incoming: DigiConfig, current: &DigiConfig) -> DigiConfig {
     incoming.tx_audio_hz = current.tx_audio_hz.clone();
+    incoming.tx_audio_levels = current.tx_audio_levels.clone();
     incoming
 }
 
@@ -11537,6 +11624,24 @@ mod digi_config_tests {
             "a chip toggle wiped the band offsets"
         );
         assert!(merged.hold_tx_freq, "and the edit the client actually made was lost");
+    }
+
+    /// The same trap, one map along (issue #186). The transmit-audio rail has
+    /// its own command, so a client seeded before the operator touched it sends
+    /// an empty map — and an hour of per-mode levels would go over the good
+    /// file on the next squelch nudge.
+    #[test]
+    fn a_client_config_cannot_wipe_the_per_mode_tx_levels() {
+        let mut current = DigiConfig::default();
+        current.set_tx_level(Mode::Ft8, 0.25);
+        current.set_tx_level(Mode::Rtty, 0.4);
+
+        let incoming = DigiConfig { digi_squelch: 3.0, ..DigiConfig::default() };
+
+        let merged = keep_engine_owned(incoming, &current);
+        assert_eq!(merged.tx_level_for(Mode::Ft8), 0.25, "a squelch nudge wiped the TX levels");
+        assert_eq!(merged.tx_level_for(Mode::Rtty), 0.4);
+        assert_eq!(merged.digi_squelch, 3.0, "and the edit the client actually made was lost");
     }
 }
 

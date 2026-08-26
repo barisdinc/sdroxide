@@ -1441,8 +1441,10 @@ pub struct DigiConfig {
 
     /// How loud a digital mode's transmit audio is handed to a radio that
     /// modulates it itself — a CAT rig on a sound card, a FLEX, an Icom on its
-    /// network port. 0.05 to 1.0, and 1.0 is what a radio we modulate ourselves
-    /// always gets, where the modulator and Drive own the level instead.
+    /// network port — for a mode with no entry of its own in
+    /// [`tx_audio_levels`](Self::tx_audio_levels). [`TX_AUDIO_LEVEL_MIN`] to
+    /// 1.0, and 1.0 is what a radio we modulate ourselves always gets, where
+    /// the modulator and Drive own the level instead.
     ///
     /// **Two of them, because the number does two unrelated jobs.** They were
     /// one until an operator set 40 % for FM packet and quietly took 8 dB off
@@ -1475,6 +1477,40 @@ pub struct DigiConfig {
     /// which this is the other half of.
     #[serde(default = "one")]
     pub tx_audio_level_ssb: f32,
+    /// The transmit-audio level the operator set for a particular mode, which
+    /// overrides the carrier default above (issue #186).
+    ///
+    /// Per mode because the carrier pair is still one number for every mode
+    /// riding that carrier, and an operator reported the obvious consequence:
+    /// FT8, RTTY, MCW and PSK each want a different figure into the same rig.
+    /// What is being set is where the waveform sits against the radio's ALC,
+    /// and that is a property of the waveform — a constant-envelope FT8 tone
+    /// and RTTY's two-tone shift do not load a modulator the same way.
+    ///
+    /// **An override, not a replacement.** A mode with no entry takes its
+    /// carrier's figure, which is what keeps this honest across an upgrade in
+    /// both directions: nobody's signal changes level when the map arrives,
+    /// because an empty map is exactly the old behaviour, and a mode appended
+    /// in a later release (as most of [`Mode`](crate::Mode)'s have been)
+    /// inherits the level the operator actually runs instead of springing back
+    /// to full scale the first time they select it. Materialising an entry per
+    /// mode would have got that second one wrong, which is issue #131's
+    /// symptom by a third road.
+    ///
+    /// The same override-over-default shape as
+    /// [`tx_audio_hz`](Self::tx_audio_hz), which falls back to the mode's usual
+    /// 1500 Hz, and [`js8_call`](Self::js8_call), which falls back to
+    /// [`my_call`](Self::my_call).
+    ///
+    /// `HashMap` rather than `BTreeMap` for [`tx_audio_hz`]'s reason, which
+    /// applies to [`Mode`](crate::Mode) exactly as it does to
+    /// [`Band`](crate::Band): declaration order is a postcard wire index with
+    /// later variants appended out of place, so a derived ordering would read
+    /// as something meaningful without being it.
+    ///
+    /// [`tx_audio_hz`]: Self::tx_audio_hz
+    #[serde(default)]
+    pub tx_audio_levels: std::collections::HashMap<crate::Mode, f32>,
 
     // ── WSPR ──
     /// WSPR: percentage of two-minute slots to transmit in, 0–100.
@@ -1661,6 +1697,7 @@ impl Default for DigiConfig {
             aprs_station_ttl_min: default_aprs_ttl(),
             tx_audio_level_fm: 1.0,
             tx_audio_level_ssb: 1.0,
+            tx_audio_levels: std::collections::HashMap::new(),
             rifp_session_timeout_s: 300,
             wspr_tx_percent: 0,
             wspr_power_dbm: wspr_default_power(),
@@ -1671,7 +1708,83 @@ impl Default for DigiConfig {
     }
 }
 
+/// The quietest a digital mode's transmit audio may be handed to a radio that
+/// modulates it itself: −40 dB, the bottom of
+/// [`DigiConfig::tx_audio_levels`]'s range.
+///
+/// A floor rather than zero because the control is the only level there is on
+/// those radios, and an operator who dragged it to the bottom would key a
+/// transmitter that radiates nothing — which looks exactly like a broken rig
+/// and is diagnosed by everything except the slider that caused it.
+///
+/// Forty decibels because that is what the adjustment actually needs. The
+/// figure it replaced was 0.05 (−26 dB), a percent-scaled floor whose two
+/// lowest steps were 1.6 dB apart; nothing could hold a value below it, so
+/// widening the range changes no station's level and only gives the ones that
+/// were already at the bottom somewhere further to go.
+pub const TX_AUDIO_LEVEL_MIN: f32 = 0.01;
+
+/// [`TX_AUDIO_LEVEL_MIN`] as the control shows it: −40 dB.
+pub const TX_AUDIO_LEVEL_MIN_DB: f32 = -40.0;
+
+/// A stored transmit-audio level as the control shows it, in dB below full
+/// scale.
+///
+/// The level is stored linear because that is what multiplies the samples, and
+/// shown in dB because that is what the adjustment is. A percent scale spends
+/// most of a rail's travel in the top of a range whose useful part is the
+/// bottom: 5 % and 6 % — two adjacent steps on the control this replaced — are
+/// 1.6 dB apart, while 50 % and 51 % are a sixth of that. An operator setting a
+/// data input against the rig's ALC is working in decibels, and so is the
+/// program they are comparing it against.
+#[must_use]
+pub fn tx_level_db(level: f32) -> f32 {
+    if level <= TX_AUDIO_LEVEL_MIN { TX_AUDIO_LEVEL_MIN_DB } else { 20.0 * level.min(1.0).log10() }
+}
+
+/// The inverse of [`tx_level_db`], clamped to the range the control offers.
+#[must_use]
+pub fn tx_level_from_db(db: f32) -> f32 {
+    if db <= TX_AUDIO_LEVEL_MIN_DB {
+        TX_AUDIO_LEVEL_MIN
+    } else {
+        10f32.powf(db.min(0.0) / 20.0).clamp(TX_AUDIO_LEVEL_MIN, 1.0)
+    }
+}
+
 impl DigiConfig {
+    /// The transmit-audio level for `mode` on a radio that modulates what we
+    /// send it: the operator's entry for that mode, else the level for the
+    /// carrier it goes out on.
+    ///
+    /// The fallback is the whole design. See
+    /// [`tx_audio_levels`](Self::tx_audio_levels) for why an absent entry
+    /// inherits rather than resetting, and
+    /// [`tx_audio_level_fm`](Self::tx_audio_level_fm) for why the carrier is
+    /// what picks between the two defaults.
+    #[must_use]
+    pub fn tx_level_for(&self, mode: crate::Mode) -> f32 {
+        self.tx_audio_levels
+            .get(&mode)
+            .copied()
+            .unwrap_or(if mode.is_fm_carrier() {
+                self.tx_audio_level_fm
+            } else {
+                self.tx_audio_level_ssb
+            })
+            .clamp(TX_AUDIO_LEVEL_MIN, 1.0)
+    }
+
+    /// Record the operator's transmit-audio level for one mode.
+    ///
+    /// Always an entry, even where the figure equals the carrier default: the
+    /// operator has said what this mode should run at, and a value that
+    /// silently went on tracking the default would move the next time they set
+    /// the default for something else.
+    pub fn set_tx_level(&mut self, mode: crate::Mode, level: f32) {
+        self.tx_audio_levels.insert(mode, level.clamp(TX_AUDIO_LEVEL_MIN, 1.0));
+    }
+
     /// The callsign APRS transmits under: the APRS-specific one if the
     /// operator set one, else the station callsign.
     ///
@@ -2169,6 +2282,63 @@ mod tests {
         let loaded: DigiConfig = serde_json::from_str(old).expect("an old config must still load");
         assert_eq!(loaded.my_call, "G4MQL");
         assert!(loaded.tx_audio_hz.is_empty(), "a band with no entry must have none");
+    }
+
+    #[test]
+    fn a_mode_keyed_tx_level_survives_the_config_file() {
+        // The same failure `a_band_keyed_offset_survives_the_config_file`
+        // guards, one map along: serde_json map keys must be strings, and a key
+        // type that serialised as anything else would make `save_digi_config`
+        // fail at the moment the operator moved the rail. `Mode` is a
+        // unit-variant enum with no rename attributes, so it serialises as its
+        // own name — pinned here rather than trusted.
+        let mut cfg = DigiConfig { my_call: "G4MQL".into(), ..DigiConfig::default() };
+        cfg.set_tx_level(crate::Mode::Ft8, 0.25);
+        cfg.set_tx_level(crate::Mode::Rtty, 0.4);
+        let text = serde_json::to_string(&cfg).expect("a mode-keyed map must serialise");
+        assert!(text.contains(r#""Ft8":0.25"#), "FT8's level is not in the file: {text}");
+
+        let back: DigiConfig = serde_json::from_str(&text).expect("and must load again");
+        assert_eq!(back.tx_level_for(crate::Mode::Ft8), 0.25);
+        assert_eq!(back.tx_level_for(crate::Mode::Rtty), 0.4);
+    }
+
+    #[test]
+    fn a_mode_with_no_level_of_its_own_takes_its_carrier_default() {
+        // The property the whole shape rests on. A digi.json written before
+        // this field existed carries no map at all, so every mode must come out
+        // exactly where the carrier pair left it — that is what makes "nobody's
+        // signal changes level on an update" true without a migration.
+        let old = r#"{"my_call":"G4MQL","tx_audio_level_fm":0.4,"tx_audio_level_ssb":0.9}"#;
+        let cfg: DigiConfig = serde_json::from_str(old).expect("an old config must still load");
+        assert!(cfg.tx_audio_levels.is_empty(), "a mode with no entry must have none");
+        assert_eq!(cfg.tx_level_for(crate::Mode::Ft8), 0.9, "sideband took the FM level");
+        assert_eq!(cfg.tx_level_for(crate::Mode::Rtty), 0.9);
+        assert_eq!(cfg.tx_level_for(crate::Mode::Cw), 0.9, "MCW is audio on a sideband");
+        assert_eq!(cfg.tx_level_for(crate::Mode::Aprs), 0.4, "APRS took the sideband level");
+        assert_eq!(cfg.tx_level_for(crate::Mode::Packet), 0.4);
+        assert_eq!(cfg.tx_level_for(crate::Mode::PacketHf), 0.9, "HF packet is not FM");
+
+        // And an entry beats the default for that mode alone.
+        let mut cfg = cfg;
+        cfg.set_tx_level(crate::Mode::Rtty, 0.2);
+        assert_eq!(cfg.tx_level_for(crate::Mode::Rtty), 0.2);
+        assert_eq!(cfg.tx_level_for(crate::Mode::Ft8), 0.9, "RTTY's level reached FT8");
+    }
+
+    #[test]
+    fn the_tx_level_floor_leaves_a_transmitter_that_radiates() {
+        // Dragging the rail to the bottom must not key a dead transmitter.
+        let mut cfg = DigiConfig::default();
+        cfg.set_tx_level(crate::Mode::Ft8, 0.0);
+        assert_eq!(cfg.tx_level_for(crate::Mode::Ft8), TX_AUDIO_LEVEL_MIN);
+        cfg.set_tx_level(crate::Mode::Ft8, 9.0);
+        assert_eq!(cfg.tx_level_for(crate::Mode::Ft8), 1.0);
+        // A carrier default from a hand-edited file is clamped on the way out
+        // too — `tx_level_for` is the only reader, so this is the one place it
+        // can be caught.
+        let wild = DigiConfig { tx_audio_level_ssb: 0.0, ..DigiConfig::default() };
+        assert_eq!(wild.tx_level_for(crate::Mode::Ft8), TX_AUDIO_LEVEL_MIN);
     }
 
     #[test]

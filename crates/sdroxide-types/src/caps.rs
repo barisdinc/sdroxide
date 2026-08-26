@@ -189,6 +189,22 @@ pub struct DeviceCaps {
     /// same reason as `shared_lo_rx`.
     #[serde(default)]
     pub diversity: bool,
+    /// CW goes out as *audio* on this radio, so the digital transmit-audio
+    /// level reaches it.
+    ///
+    /// False where the rig sends from its own keyer: there CW leaves as text
+    /// over the control port and the sound card is not in the path at all, so
+    /// a level control for it would be a control that does nothing. That is the
+    /// distinction `Mode::takes_digi_tx_audio` deliberately cannot make —
+    /// whether the audio is heard is a property of the radio, not of the mode.
+    ///
+    /// Reported by the source (`IqSource::cw_audio_keyed`) rather than read
+    /// from the CAT configuration, because a backend that is not a CAT rig has
+    /// no `cw_keying` field to read and still has an answer.
+    ///
+    /// Appended last, for the same reason as `shared_lo_rx`.
+    #[serde(default)]
+    pub cw_audio_keyed: bool,
 }
 
 impl DeviceCaps {

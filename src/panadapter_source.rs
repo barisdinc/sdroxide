@@ -208,6 +208,10 @@ impl PanadapterSource {
             // false here however the transceiver answers: the window belongs to
             // the receiver and the dial moves inside it.
             center_is_dial: false,
+            // The transceiver's, like the rest of the transmit half — and the
+            // engine overwrites it from `Self::cw_audio_keyed`, which says the
+            // same thing.
+            cw_audio_keyed: ctrl.cw_audio_keyed,
             // The receiver's, like the filter: if the radio painting the
             // picture is combining two aerials, this radio is listening to
             // what came out of that.

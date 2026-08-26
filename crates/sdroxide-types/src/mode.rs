@@ -264,6 +264,24 @@ impl Mode {
         matches!(self, Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs)
     }
 
+    /// True for the modes whose transmit audio is levelled by
+    /// [`crate::DigiConfig::tx_audio_levels`] — everything the digi engine
+    /// transmits.
+    ///
+    /// CW is in it for the same reason it joins the digi engine at all (see
+    /// `Engine::sync_digi_mode`): it is not a digital mode, but audio keying
+    /// puts its sidetone through the same transmit-block seam, so the level
+    /// reaches it. Whether it *applies* is a second question the mode cannot
+    /// answer — a rig sending from its own keyer takes text over CAT and never
+    /// hears our audio — and that one is `DeviceCaps::cw_audio_keyed`.
+    ///
+    /// Wefax is excluded because it never transmits: the charts are broadcast
+    /// by meteorological services and an amateur station has nothing to send
+    /// back.
+    pub fn takes_digi_tx_audio(self) -> bool {
+        (self.is_digital() && !self.is_rx_only()) || self == Mode::Cw
+    }
+
     /// True for the continuous keyboard text modes (PSK31 / RTTY / Olivia / Thor
     /// / FSQ), as opposed to the slotted FT8/FT4 modes. Drives which decode
     /// engine + panel is used.

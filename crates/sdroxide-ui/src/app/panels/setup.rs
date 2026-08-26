@@ -784,47 +784,60 @@ impl SdroxideApp {
                     }
 
                     // Last, and for every digital mode: the level into a radio
-                    // that modulates what we send it. One row, and which of the
-                    // two levels it edits follows the carrier this mode goes out
-                    // on — the same test the engine transmits by. It used to
-                    // live inside the APRS block, where an operator setting FM
-                    // deviation could not see that they were also turning down
-                    // their FT8.
+                    // that modulates what we send it. This mode's own — the
+                    // carrier caption below says what it inherited from if it
+                    // has never been set. It used to live inside the APRS
+                    // block, where an operator setting FM deviation could not
+                    // see that they were also turning down their FT8.
+                    //
+                    // Written straight out as `SetDigiTxLevel` rather than
+                    // through this window's `changed` flag: the map is one of
+                    // the fields the engine keeps against a stale client copy
+                    // (`keep_engine_owned`), so a `SetDigiConfig` carrying it
+                    // would be ignored. One write route, and the rail on the
+                    // transmit strip is the other end of it.
                     let fm = mode.is_fm_carrier();
-                    let level =
-                        if fm { &mut cfg.tx_audio_level_fm } else { &mut cfg.tx_audio_level_ssb };
                     ui.label("TX audio");
                     ui.horizontal(|ui| {
-                        let mut pct = (*level * 100.0).round();
+                        let mut db = sdroxide_types::tx_level_db(cfg.tx_level_for(mode)).round();
                         if ui
-                            .add(egui::DragValue::new(&mut pct).range(5.0..=100.0).suffix(" %"))
+                            .add(
+                                egui::DragValue::new(&mut db)
+                                    .range(sdroxide_types::TX_AUDIO_LEVEL_MIN_DB..=0.0)
+                                    .suffix(" dB"),
+                            )
                             .on_hover_text(if fm {
-                                "How loud the burst is handed to a radio that modulates it \
-                                 itself — and on FM that is the deviation, because an FM \
-                                 transmitter turns audio level into frequency swing and has \
-                                 no ALC to catch it. 1200 baud packet wants about 3 kHz \
-                                 where voice wants 5, so full scale into a data input set \
-                                 for voice over-deviates — which sounds completely normal \
-                                 to a listener and decodes for nobody. Turn it down until \
-                                 other stations report you, or set the level at the radio.\n\n\
-                                 The sideband modes keep a level of their own, so this one \
-                                 stays with FM."
+                                "How loud this mode's burst is handed to a radio that \
+                                 modulates it itself — and on FM that is the deviation, \
+                                 because an FM transmitter turns audio level into frequency \
+                                 swing and has no ALC to catch it. 1200 baud packet wants \
+                                 about 3 kHz where voice wants 5, so full scale into a data \
+                                 input set for voice over-deviates — which sounds completely \
+                                 normal to a listener and decodes for nobody. Turn it down \
+                                 until other stations report you, or set the level at the \
+                                 radio.\n\nThis level belongs to this mode alone. A mode you \
+                                 have never set starts from the FM figure, and the sideband \
+                                 modes start from their own — so a deviation set for 1200 \
+                                 baud never lands on FT8."
                             } else {
-                                "How loud the over is handed to a radio that modulates it \
-                                 itself — a CAT rig on its sound card, a FLEX, an Icom on \
-                                 its network port. On sideband this is drive into the \
-                                 modulator: bring it down until the rig's ALC is barely \
+                                "How loud this mode's over is handed to a radio that \
+                                 modulates it itself — a CAT rig on its sound card, a FLEX, \
+                                 an Icom on its network port. On sideband this is drive into \
+                                 the modulator: bring it down until the rig's ALC is barely \
                                  moving and set the power at the radio, because ALC riding \
                                  on a constant-envelope mode is what splatters. Drive \
                                  reaches the rig's power register here, not its audio, so \
-                                 this is the level.\n\nFM packet and APRS keep a level of \
-                                 their own — a deviation set for 1200 baud never lands on \
-                                 this."
+                                 this is the level.\n\nThis level belongs to this mode \
+                                 alone: FT8, RTTY, PSK and MCW each keep their own, because \
+                                 they do not load a modulator the same way. The same rail is \
+                                 on the transmit strip, where you can reach it while you are \
+                                 transmitting."
                             })
                             .changed()
                         {
-                            *level = (pct as f32 / 100.0).clamp(0.05, 1.0);
-                            changed = true;
+                            let level = sdroxide_types::tx_level_from_db(db);
+                            cfg.set_tx_level(mode, level);
+                            cmds.push(Command::SetDigiTxLevel { mode, level });
                         }
                         ui.label(
                             RichText::new(if fm { "deviation, on FM" } else { "drive, on SSB" })

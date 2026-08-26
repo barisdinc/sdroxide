@@ -739,4 +739,30 @@ pub enum Command {
 
     /// Packet: empty the terminal transcript. The link is untouched.
     PacketTermClear,
+
+    /// Set one mode's transmit-audio level, on a radio that modulates what we
+    /// send it (issue #186). `level` is linear, clamped to
+    /// [`sdroxide_types::TX_AUDIO_LEVEL_MIN`]`..=1.0` engine-side.
+    ///
+    /// [`sdroxide_types::TX_AUDIO_LEVEL_MIN`]: crate::TX_AUDIO_LEVEL_MIN
+    ///
+    /// The mode travels rather than being read off the dial when this arrives,
+    /// even though the engine knows it: this control is a rail an operator
+    /// drags while transmitting, and a mode change landing between the drag and
+    /// the command would write one mode's level onto another's entry. That
+    /// failure is silent, persistent, and corrupts exactly the thing the
+    /// setting exists to hold.
+    ///
+    /// Its own command rather than a whole [`DigiConfig`](crate::DigiConfig)
+    /// through `SetDigiConfig` because a drag emits one of these per frame, and
+    /// the configuration is kilobytes — which a remote client would be sending
+    /// over the wire for the length of every adjustment. That also makes
+    /// `tx_audio_levels` a field with a write route outside `SetDigiConfig`,
+    /// which is what puts it in the engine's `keep_engine_owned`.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetDigiTxLevel {
+        mode: Mode,
+        level: f32,
+    },
 }

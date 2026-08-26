@@ -92,8 +92,9 @@ pub use digi::{
     FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg, HOUND_ZONE_MAX_HZ, HellVariant, PACKET_HEARD_MAX,
     PACKET_TERM_LINE_MAX, PACKET_TERM_MAX, PacketBaud, PacketHeard, PacketLink, PacketLinkOwner,
     PacketStatus, PacketTermKind, PacketTermLine, QsoLive, QsoRecord, QsoStep, QueuedCall,
-    RTTY_CENTER_HZ, RadeStatus, ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log,
-    clock_health, cq_is_for_us, fmt_report, qso_log_to_adif, qso_log_to_text, utc_ymd_hms,
+    RTTY_CENTER_HZ, RadeStatus, TX_AUDIO_LEVEL_MIN, TX_AUDIO_LEVEL_MIN_DB, ThorMode,
+    TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health, cq_is_for_us,
+    fmt_report, qso_log_to_adif, qso_log_to_text, tx_level_db, tx_level_from_db, utc_ymd_hms,
     worked_before, ymd_hms_to_unix,
 };
 pub use drm::{

@@ -225,6 +225,135 @@ fn the_sideband_level_is_the_one_a_data_mode_uses() {
     );
 }
 
+// ── one level per mode (issue #186) ─────────────────────────────────────────
+//
+// A note on why these pick the modes they pick. `SetDigiTxLevel` *persists*,
+// and `isolate_config` gives the whole process one config directory — so an
+// entry written by one test is still in `digi.json` when the next one's engine
+// loads it, and there is no command that clears one again. Every measurement
+// below therefore sets the level it is measuring, rather than relying on a mode
+// having none; the single test that genuinely needs an absent entry owns a mode
+// (`Thor`) that nothing else here writes, as `the_sideband_level_is_the_one_a_
+// data_mode_uses` owns `Rtty`.
+
+/// Issue #186, reduced to an assertion: a level set for one mode applies to
+/// that mode and to nothing else.
+///
+/// The report is from a TS-590SG operator who found FT8, RTTY, MCW and PSK each
+/// wanting a different figure into the same rig, and one number serving all of
+/// them. What is being set is where the waveform sits against the radio's ALC,
+/// and that is a property of the waveform.
+///
+/// Both halves are asserted, because either alone is worthless: that PSK
+/// followed would pass on a build that scaled every mode together, and that
+/// Olivia held would pass on one where the per-mode level did nothing at all.
+/// Two continuous modes on the same carrier, so the only thing that can
+/// separate them is the map.
+#[test]
+fn a_level_set_for_one_mode_applies_to_it_and_stays_there() {
+    // One over, with both modes' levels stated outright.
+    let over = |mode: Mode, psk: f32, olivia: f32| {
+        peak_of(vec![
+            Command::SetDigiConfig(full_scale_station()),
+            Command::SetDigiTxLevel { mode: Mode::Psk, level: psk },
+            Command::SetDigiTxLevel { mode: Mode::Olivia, level: olivia },
+            Command::SetMode { rx: RxId::Main, mode },
+            Command::DigiTxActive(true),
+            Command::DigiTxText("cq cq de w1aw w1aw k".into()),
+        ])
+    };
+    let (psk_open, olivia_open) = (over(Mode::Psk, 1.0, 1.0), over(Mode::Olivia, 1.0, 1.0));
+    assert!(psk_open > 0.9, "PSK did not start wide open: {psk_open}");
+    assert!(olivia_open > 0.9, "Olivia did not start wide open: {olivia_open}");
+
+    // Turn PSK down. PSK follows...
+    let psk_down = over(Mode::Psk, 0.5, 1.0);
+    assert!(
+        (psk_down / psk_open - 0.5).abs() < 0.08,
+        "PSK's own level did not reach its over: {psk_down} against {psk_open}"
+    );
+    // ...and Olivia, on the same carrier, does not.
+    let olivia_held = over(Mode::Olivia, 0.5, 1.0);
+    assert!(
+        (olivia_held / olivia_open - 1.0).abs() < 0.08,
+        "a PSK level reached an Olivia over: {olivia_held} against {olivia_open}"
+    );
+}
+
+/// A mode the operator has never set takes its carrier's level, rather than
+/// springing back to full scale.
+///
+/// The property the whole shape rests on. It is what lets the map arrive
+/// without a migration — an empty one is exactly the old behaviour — and what
+/// stops a mode appended in a later release from putting a station's first over
+/// on the air at full scale into a rig set 8 dB lower.
+///
+/// THOR, because nothing else in this file writes a THOR entry: this is the one
+/// test here that measures an absence.
+#[test]
+fn a_mode_with_no_level_of_its_own_takes_the_carrier_default() {
+    let thor_at = |ssb: f32| {
+        peak_of(vec![
+            Command::SetDigiConfig(DigiConfig { tx_audio_level_ssb: ssb, ..DigiConfig::default() }),
+            Command::SetMode { rx: RxId::Main, mode: Mode::Thor },
+            Command::DigiTxActive(true),
+            Command::DigiTxText("cq cq de w1aw w1aw k".into()),
+        ])
+    };
+    let open = thor_at(1.0);
+    let half = thor_at(0.5);
+    assert!(open > 0.9, "the carrier default did not reach a mode with no entry: {open}");
+    assert!(
+        (half / open - 0.5).abs() < 0.08,
+        "half the carrier default should be half the amplitude: {half} against {open}"
+    );
+}
+
+/// Where a mode does have an entry, that entry is what transmits — the carrier
+/// default underneath it is not consulted.
+#[test]
+fn a_mode_with_a_level_of_its_own_transmits_at_it() {
+    let psk_at = |ssb: f32, own: f32| {
+        peak_of(vec![
+            Command::SetDigiConfig(DigiConfig { tx_audio_level_ssb: ssb, ..DigiConfig::default() }),
+            Command::SetDigiTxLevel { mode: Mode::Psk, level: own },
+            Command::SetMode { rx: RxId::Main, mode: Mode::Psk },
+            Command::DigiTxActive(true),
+            Command::DigiTxText("cq cq de w1aw w1aw k".into()),
+        ])
+    };
+    let open = psk_at(1.0, 1.0);
+    let own_down = psk_at(1.0, 0.5);
+    assert!(
+        (own_down / open - 0.5).abs() < 0.08,
+        "PSK's own level did not override the carrier default: {own_down} against {open}"
+    );
+    // The other way round: a wide-open entry over a turned-down default.
+    let own_over_quiet_default = psk_at(0.25, 1.0);
+    assert!(
+        own_over_quiet_default > 0.9,
+        "the carrier default was still being applied under an entry: {own_over_quiet_default}"
+    );
+}
+
+/// The floor leaves a transmitter that radiates.
+///
+/// A rail dragged to the bottom must not key a dead transmitter: that looks
+/// exactly like a broken rig, and is diagnosed by everything except the control
+/// that caused it.
+#[test]
+fn the_level_floor_still_puts_something_on_the_air() {
+    let peak = peak_of(vec![
+        Command::SetDigiConfig(full_scale_station()),
+        Command::SetDigiTxLevel { mode: Mode::Psk, level: 0.0 },
+        Command::SetMode { rx: RxId::Main, mode: Mode::Psk },
+        Command::DigiTxActive(true),
+        Command::DigiTxText("cq cq de w1aw w1aw k".into()),
+    ]);
+    assert!(peak > 0.0, "the transmitter went silent at the bottom of the rail");
+    assert!(peak < 0.1, "the floor is not attenuating: {peak}");
+}
+
 // ── the same over on a radio we modulate ourselves ───────────────────────────
 
 /// An I/Q transmitter: no sound card, no power register of its own, so Drive is

@@ -716,7 +716,31 @@ use sdroxide_types::{
 /// The handshake's equality test is what stops it trying. `digi.json` needs no
 /// migration: all three carry `#[serde(default)]`, so a config written by v93
 /// loads unchanged.
-pub const PROTO_VERSION: u16 = 94;
+///
+/// **95** — the digital modes' transmit-audio level is per mode (issue #186).
+/// [`sdroxide_types::DigiConfig`] gains `tx_audio_levels`, a map from
+/// [`Mode`](sdroxide_types::Mode) to the level the operator set for it, placed
+/// beside the two carrier levels it overrides rather than at the tail — the same
+/// reasoning as v94's placement, since postcard numbers fields by position and a
+/// v94 peer desynchronises either way. `DigiConfig` rides inside `DigiStatus` and
+/// inside `Command::SetDigiConfig`, so this is not an append a v94 client can
+/// survive; the handshake's equality test is what stops it trying.
+///
+/// The two carrier levels **stay**, as the level for a mode with no entry of its
+/// own, which is what makes this the rare wire change that needs no config
+/// migration at all: an empty map is exactly v94's behaviour, so nobody's signal
+/// changes level on the update, and a mode appended in a later release inherits
+/// the level the operator actually runs instead of springing back to full scale.
+///
+/// [`sdroxide_types::Command`] gains `SetDigiTxLevel`, appended for the usual
+/// reason. It carries the mode rather than letting the engine read it off the
+/// dial, because the control is a rail dragged while transmitting and a mode
+/// change landing mid-drag would otherwise write one mode's level onto another's.
+///
+/// [`sdroxide_types::DeviceCaps`] gains `cw_audio_keyed`, appended: a client has
+/// to know whether CW leaves as audio or as text over the control port before it
+/// can decide whether that level reaches CW at all.
+pub const PROTO_VERSION: u16 = 95;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1688,6 +1712,56 @@ mod tests {
                 ClientMsg::Command(Command::SetRadioConfig { cfg: Box::new(cfg.clone()), reopen });
             assert_eq!(decode::<ClientMsg>(&encode(&c).unwrap()).unwrap(), c);
         }
+    }
+
+    /// The per-mode transmit-audio level, over the wire in both directions
+    /// (issue #186).
+    ///
+    /// Filled rather than left at its default on purpose: `DigiConfig` rides
+    /// whole inside `DigiStatus`, postcard numbers fields by position, and a map
+    /// placed among the scalars is exactly the shape that decodes into garbage
+    /// rather than failing outright if the two ends disagree. An empty map would
+    /// encode as a length of zero and prove nothing.
+    #[test]
+    fn roundtrip_per_mode_tx_level() {
+        use sdroxide_types::{DigiConfig, Mode};
+
+        let mut cfg = DigiConfig { my_call: "OE1XYZ".into(), ..DigiConfig::default() };
+        cfg.set_tx_level(Mode::Ft8, 0.25);
+        cfg.set_tx_level(Mode::Rtty, 0.4);
+        cfg.set_tx_level(Mode::Aprs, 0.6);
+
+        // The command that writes one, and the configuration that carries them
+        // all back.
+        let m = ClientMsg::Command(Command::SetDigiTxLevel { mode: Mode::Ft8, level: 0.25 });
+        assert_eq!(decode::<ClientMsg>(&encode(&m).unwrap()).unwrap(), m);
+
+        let m = ClientMsg::Command(Command::SetDigiConfig(cfg.clone()));
+        assert_eq!(decode::<ClientMsg>(&encode(&m).unwrap()).unwrap(), m);
+
+        let status = DigiStatus::idle(cfg);
+        let m = ServerMsg::Ft8Status(status);
+        let back = decode::<ServerMsg>(&encode(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let ServerMsg::Ft8Status(s) = back else { panic!("not a status") };
+        assert_eq!(s.config.tx_level_for(Mode::Ft8), 0.25);
+        assert_eq!(s.config.tx_level_for(Mode::Rtty), 0.4);
+        assert_eq!(s.config.tx_level_for(Mode::Aprs), 0.6);
+        // And a mode with no entry still reaches the carrier default across the
+        // wire, which is the property that makes the map need no migration.
+        assert_eq!(s.config.tx_level_for(Mode::Psk), 1.0);
+    }
+
+    /// Whether CW leaves as audio is a capability, and the client needs it to
+    /// decide whether the transmit-audio level reaches CW at all.
+    #[test]
+    fn roundtrip_cw_audio_keyed_capability() {
+        let caps = DeviceCaps { cw_audio_keyed: true, ..DeviceCaps::default() };
+        let m = ServerMsg::Capabilities(caps);
+        let back = decode::<ServerMsg>(&encode(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let ServerMsg::Capabilities(c) = back else { panic!("not capabilities") };
+        assert!(c.cw_audio_keyed);
     }
 
     /// Device questions and their answers, both ways.
