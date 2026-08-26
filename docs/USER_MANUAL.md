@@ -605,22 +605,37 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 
 **Display module:**
 
-- **FIT** — keep the waterfall floor and ceiling set for the best contrast.
-  Lit, the levels are refitted by themselves: when you change band, once a pan
-  or zoom has settled, and whenever what the band is doing has drifted far
-  enough that the waterfall has gone flat or blown out. An automatic refit is
-  eased in over about five seconds, aimed at a rolling average of the levels, so
-  a station coming up for a moment doesn't move the contrast — and no more than
-  one refit is started every five seconds. Switching FIT **on** fits at once,
-  which is also how to ask for a one-off fit: click it off and on again.
-  Switching it off leaves the levels wherever you set them (the floor and
-  ceiling in the FFT popup are yours to keep only while FIT is off).
-- **PEAK** — show a decaying peak-hold trace over the spectrum.
-- **SPEC** — opens the **Layers** popup, which switches the two halves of the
-  panadapter on and off independently: **SPECTRUM** (the spectrum line) and
-  **WATERFALL** (the scrolling display below it). All four displays are
-  available — spectrum only, waterfall only, both, or neither — and the button is
-  lit while both layers are shown.
+- **☀ 3D** — open the [solar system 3D view](#7-solar-system-3d-view): a second
+  window in the native app, a second browser tab in the web client.
+- **SPEC** — opens the **panadapter popup**, which holds everything the
+  panadapter is drawn by, in two boxes: one for the **spectrum** line across
+  the top, one for the **waterfall** under it. The button is lit while both
+  layers are shown.
+
+  In the **Spectrum** box:
+
+  - **SHOW SPECTRUM** — draw the spectrum line, or leave the height to the
+    waterfall.
+  - **PEAK HOLD** — trace the highest level each column has reached over the
+    live line, decaying back down.
+  - **reaction** — how quickly the line follows the band: **Slow**, **Medium**
+    or **Fast**. Slower averages more frames into each other, which steadies
+    the line and holds a weak carrier still long enough to read. The waterfall
+    is not touched by it — those rows get every frame either way.
+  - **detail** — how many columns the panadapter *and its waterfall* are drawn
+    with; the width in force is named beside the chips. See
+    [Panadapter detail](#panadapter-detail) below.
+
+  In the **Waterfall** box:
+
+  - **SHOW WATERFALL** — draw the scrolling waterfall, or leave the height to
+    the spectrum line.
+  - **scroll** — how fast it scrolls. See
+    [Waterfall scroll speed](#waterfall-scroll-speed) below.
+
+  The two SHOW switches are independent, so all four displays are available —
+  spectrum only, waterfall only, both, or neither.
+
   - With one of them off the other takes the full height, with the frequency
     scale still along its edge; dragging that scale brings the hidden layer
     back at the split you drag to. Skimmer and spot boxes move onto the
@@ -629,6 +644,10 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
     operating panel under it — the digital modes, and CW — the panel takes the
     whole height; in the other modes the area is simply left empty. The SPEC
     button is the way back.
+
+  Detail and the two speeds are this screen's own preference rather than the
+  radio's: a remote client picks its own, and neither the station nor another
+  client is touched. They are remembered between sessions.
 - **WIDE** — show or hide the **full-band strip**: a shallow second waterfall
   above the panadapter covering everything the receiver can see at once, with a
   blue outline around the slice the panadapter is receiving and an amber line on
@@ -643,12 +662,20 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   all the hardware delivers — and the setting is remembered between sessions.
   The strip is not shown in the digital modes, whose layout gives the height to
   the operating panel instead.
+- **FIT** — keep the waterfall floor and ceiling set for the best contrast.
+  Lit, the levels are refitted by themselves: when you change band, once a pan
+  or zoom has settled, and whenever what the band is doing has drifted far
+  enough that the waterfall has gone flat or blown out. An automatic refit is
+  eased in over about five seconds, aimed at a rolling average of the levels, so
+  a station coming up for a moment doesn't move the contrast — and no more than
+  one refit is started every five seconds. Switching FIT **on** fits at once,
+  which is also how to ask for a one-off fit: click it off and on again.
+  Switching it off leaves the levels wherever you set them (the floor and
+  ceiling in the FFT popup are yours to keep only while FIT is off).
 - **SKIM** — opens the skimmer popup (per-skimmer on/off and squelch); lit while
   any skimmer runs. See [Skimmers](#4-skimmers).
 - **SCAN** — opens the scanner window; lit while a scan is running, green while
   it has stopped on a signal. See [Scanning](#213-scanning).
-- **☀ 3D** — open the [solar system 3D view](#7-solar-system-3d-view): a second
-  window in the native app, a second browser tab in the web client.
 
 **FFT module:**
 
@@ -659,8 +686,7 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 
   A word on what the larger sizes buy. The transform is pooled down to the
   panadapter's own columns — 2048 of them by default, more on a screen that can
-  show more (**Panadapter detail** in
-  [§6.3](#63-ui-display-preferences-and-voice-announcements)) — so up to that
+  show more ([Panadapter detail](#panadapter-detail), on the SPEC popup) — so up to that
   width a bigger FFT is more columns, and past it, it is *sharper* ones: each
   column becomes the strongest of more bins, so a weak carrier stands further
   out of the noise instead of being averaged into it. That is why the largest
@@ -702,6 +728,63 @@ dragging the frequency-scale strip between them, and hide either or both of
 them altogether from the **SPEC** popup in the Display module.
 
 ![Waterfall colour schemes](images/05-colormaps.png)
+
+#### Panadapter detail
+
+How many columns the panadapter and its waterfall are drawn with, on the
+**detail** row of the SPEC popup. **AUTO** is the default and is what nearly
+everyone should leave it on: it reads this machine's graphics — the largest
+texture it will hold, whether it is drawing on a real GPU or in software, which
+renderer is in use, whether the radio is across a network — together with how
+wide the panadapter actually is *in pixels*, and picks the most the machine can
+carry. The number it settled on is shown beside the chips.
+
+The steps are **2048**, **4096** and **8192** columns. 2048 is what every
+sdroxide before this one drew, and about what a 1080p panadapter can show; 4096
+is one column per pixel of a 4K panel, which is the point of the setting; 8192
+is two per pixel, which keeps a carrier sharp while the view is panned off the
+pixel grid. A step this machine cannot hold is shown greyed, with the reason on
+hover — a Raspberry Pi, an older graphics chip, a browser without WebGPU and a
+machine drawing without a GPU at all are all held to 2048, because a wider
+waterfall there costs the frame rate and buys a picture the renderer cannot draw
+anyway.
+
+AUTO stops at 4096 even on a very large screen; 8192 is there to be chosen.
+AUTO also stays at 2048 when the radio is on the other end of a network,
+because every column is a byte in every frame — 4096 columns at 60 fps is
+about a quarter of a megabyte a second — and there is no way to measure the
+link from this end. On a LAN, set it by hand.
+
+Detail costs memory on the graphics card: 8 MB per radio tab at 2048, 16 at
+4096, 32 at 8192. Changing it restarts the waterfall's history from black,
+once.
+
+#### Waterfall scroll speed
+
+How fast the waterfall scrolls, in lines a second, on the **scroll** row of the
+SPEC popup: **Slow** (5), **Medium** (28), **Fast** (56), **Faster** (112) or
+**Fastest** (224). Faster trades screen time for vertical resolution, which is
+what you want when a CW or FT8 trace is smearing into the line above it; Slow
+keeps several minutes of band on screen at once.
+
+The two fastest settings are past the rate any screen redraws at, and that is
+deliberate: the radio clocks the waterfall's lines itself rather than one per
+redraw, so 224 a second is 224 *different* lines rather than 56 of them drawn
+four times. Each line is also the **strongest** thing its slice of time
+contained rather than a snapshot at the end of it, so a CW dot or the edge of
+a burst that is shorter than the gap between two lines still gets drawn
+instead of falling between them.
+
+What limits it is the receiver, not the screen. A line can never show more
+than one transform of the FFT, and a front end produces `sample rate ÷ half
+the FFT size` of those a second — an RX-888 at 8 MHz through a 32768-point
+window makes about 500, so it can feed any of these settings, while a 24 kHz
+I.F. through the same window makes under one and repeats lines at every
+setting. Two costs worth knowing: the waterfall keeps a fixed number of
+lines, so history shortens as the rate rises (73 seconds at Medium, 9 at
+Fastest), and to a *remote* client every line is a byte per column on the
+link.
+
 
 ### 2.9 The S-meter
 
@@ -7566,58 +7649,10 @@ spoken announcements below them under `[speech]`:
   on modest graphics: the radio itself is unaffected (the engine still processes
   every sample and audio never stutters), you simply see fewer spectrum frames,
   and the waterfall repeats rows to keep its scroll speed.
-- **Panadapter detail** — how many columns the panadapter and its waterfall are
-  drawn with. **Auto** is the default and is what nearly everyone should leave
-  it on: it reads this machine's graphics — the largest texture it will hold,
-  whether it is drawing on a real GPU or in software, which renderer is in use,
-  whether the radio is across a network — together with how wide the panadapter
-  actually is *in pixels*, and picks the most the machine can carry. The number
-  it settled on is shown beside the dropdown.
-
-  The steps are **Standard (2048)**, **High (4096)** and **Ultra (8192)**.
-  Standard is what every sdroxide before this one drew, and about what a 1080p
-  panadapter can show; High is one column per pixel of a 4K panel, which is the
-  point of the setting; Ultra is two per pixel, which keeps a carrier sharp
-  while the view is panned off the pixel grid. A step this machine cannot hold
-  is shown greyed, with the reason on hover — a Raspberry Pi, an older graphics
-  chip, a browser without WebGPU and a machine drawing without a GPU at all are
-  all held to Standard, because a wider waterfall there costs the frame rate and
-  buys a picture the renderer cannot draw anyway.
-
-  Auto stops at High even on a very large screen; Ultra is there to be chosen.
-  Auto also stays at Standard when the radio is on the other end of a network,
-  because every column is a byte in every frame — 4096 columns at 60 fps is
-  about a quarter of a megabyte a second — and there is no way to measure the
-  link from this end. On a LAN, set it by hand.
-
-  Detail costs memory on the graphics card: 8 MB per radio tab at Standard,
-  16 at High, 32 at Ultra. Changing it restarts the waterfall's history from
-  black, once.
-- **Waterfall scroll speed** — how fast the waterfall scrolls, in lines a
-  second: **Slow** (5), **Medium** (28), **Fast** (56), **Faster** (112) or
-  **Fastest** (224). Faster trades screen time for vertical resolution, which is
-  what you want when a CW or FT8 trace is smearing into the line above it; Slow
-  keeps several minutes of band on screen at once.
-
-  The two fastest settings are past the rate any screen redraws at, and that is
-  deliberate: the radio clocks the waterfall's lines itself rather than one per
-  redraw, so 224 a second is 224 *different* lines rather than 56 of them drawn
-  four times. Each line is also the **strongest** thing its slice of time
-  contained rather than a snapshot at the end of it, so a CW dot or the edge of
-  a burst that is shorter than the gap between two lines still gets drawn
-  instead of falling between them.
-
-  What limits it is the receiver, not the screen. A line can never show more
-  than one transform of the FFT, and a front end produces `sample rate ÷ half
-  the FFT size` of those a second — an RX-888 at 8 MHz through a 32768-point
-  window makes about 500, so it can feed any of these settings, while a 24 kHz
-  I.F. through the same window makes under one and repeats lines at every
-  setting. Two costs worth knowing: the waterfall keeps a fixed number of
-  lines, so history shortens as the rate rises (73 seconds at Medium, 9 at
-  Fastest), and to a *remote* client every line is a byte per column on the
-  link.
-- **Spectrum update speed** — how quickly the spectrum trace reacts; slower is
-  more averaged and smoother.
+- **Panadapter detail**, the spectrum's **reaction** and the waterfall's
+  **scroll** speed are not here: they moved to the **SPEC** popup in the Display
+  module, beside the picture they change — see
+  [§2.8](#28-the-display-and-fft-controls).
 - **Waterfall palette** — the waterfall colour scheme (see
   [2.8](#28-the-display-and-fft-controls) and the [appendix](#waterfall-colour-schemes)).
 - **Spectrum background** — a vertical gradient behind the spectrum line, filled
@@ -9483,7 +9518,7 @@ row of menu buttons:
 | **VFO** | A↔B, A→B, SPLIT, SUB, and the RIT/XIT offsets |
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |
-| **DISP** | FIT, PEAK, WIDE, the spectrum/waterfall layers, the skimmers, and the spectrum floor/ceiling and FFT size |
+| **DISP** | ☀ 3D, WIDE, FIT, the panadapter boxes (the spectrum and waterfall switches, peak hold, their speeds and the detail), the skimmers, and the spectrum floor/ceiling and FFT size |
 | **SYS** | LOG, SPOTS, AWARDS, BANDS, MEM, SETTINGS, HELP |
 
 A menu stays open until you tap outside it or tap its button again — the top-bar

@@ -15,6 +15,22 @@ use crate::widgets::spectrum_view;
 
 use crate::app::SdroxideApp;
 
+/// What this machine will actually draw, so the SPEC popup's detail row can
+/// show the operator what `Auto` decided and grey what the renderer cannot
+/// hold. Built by [`SdroxideApp::detail_report`].
+///
+/// Worked out here rather than in `sdroxide-types`, where
+/// [`sdroxide_types::UiSettings`] lives: that crate must never learn about
+/// wgpu.
+pub(in crate::app) struct DetailReport {
+    /// Columns in force right now, whatever the setting says.
+    pub chosen: u32,
+    /// The widest the operator may pick on this renderer.
+    pub ceiling: u32,
+    /// One sentence naming what bound it, for the hover on a greyed chip.
+    pub reason: String,
+}
+
 /// Viewport/FFT config updates are sent once the view has been stable this
 /// long (seconds of egui time — `std::time::Instant` panics on wasm).
 pub(in crate::app) const CFG_DEBOUNCE_S: f64 = 0.25;
@@ -272,16 +288,16 @@ impl SdroxideApp {
         }
     }
 
-    /// What the settings window shows next to the detail combo: the width in
-    /// force, the widest that may be picked, and one sentence naming whatever
-    /// stopped it going higher.
+    /// What the detail row of the SPEC popup shows beside its chips: the width
+    /// in force, the widest that may be picked, and one sentence naming
+    /// whatever stopped it going higher.
     ///
-    /// The sentence is the point. A greyed row with no explanation is a bug
-    /// report; a greyed row that says *why* is an answer.
+    /// The sentence is the point. A greyed chip with no explanation is a bug
+    /// report; a greyed chip that says *why* is an answer.
     pub(in crate::app) fn detail_report(
         &self,
         detail: sdroxide_types::SpectrumDetail,
-    ) -> crate::app::settings::ui_tab::DetailReport {
+    ) -> DetailReport {
         let ceiling =
             self.display_class.map_or(waterfall_gpu::DEFAULT_TEX_W, waterfall_gpu::manual_ceiling);
         let reason = match self.display_class {
@@ -301,11 +317,7 @@ impl SdroxideApp {
             ),
             Some(_) => "Wider than this renderer can draw.".to_string(),
         };
-        crate::app::settings::ui_tab::DetailReport {
-            chosen: self.bins_for_detail(detail),
-            ceiling,
-            reason,
-        }
+        DetailReport { chosen: self.bins_for_detail(detail), ceiling, reason }
     }
 
     pub(in crate::app) fn desired_spectrum_cfg(&self) -> SpectrumConfig {

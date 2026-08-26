@@ -26,7 +26,7 @@ use sdroxide_types::{
     AgcMode, BURST_MS_RANGE, Band, Command, CwSkimmerDecoder, DCS_CODES, DIV_FREEZE_ELEMENT,
     DIV_MODE_ELEMENT, DIV_RATE_ELEMENT, DIV_RESET_ELEMENT, DeviceCaps, Direction, DiversityMode,
     GainElement, MAX_OFFSET_HZ, Mode, NrEngine, NrLevel, NrStrength, RadioState, RxId, Shift,
-    SkimmerKind, SubTone, ToneMode, Vfo,
+    SkimmerKind, SpectrumDetail, Speed, SubTone, ToneMode, Vfo,
 };
 
 use crate::widgets::{freq_display, smeter};
@@ -1180,7 +1180,10 @@ impl SdroxideApp {
 
     /// The DISP menu: waterfall, spectrum and skimmer controls.
     fn disp_menu(&mut self, ui: &mut egui::Ui, btn: egui::Response, cmds: &mut Vec<Command>) {
-        let btn = btn.on_hover_text("Waterfall contrast, FFT size, peak hold and the skimmers");
+        let btn = btn.on_hover_text(
+            "The panadapter — its two layers, their speeds and detail, peak hold — plus \
+             waterfall contrast, FFT size and the skimmers",
+        );
         crate::chrome::menu_popup(ui, &btn, |ui| {
             crate::chrome::menu_caption(ui, "Display");
             self.display_controls(ui, cmds, true);
@@ -3413,17 +3416,17 @@ impl SdroxideApp {
         }
     }
 
-    /// The chips that pick what the main view draws — the condensed Display
-    /// box's top row, and the head of the DISP menu's row. `extra` stretches
-    /// each chip past its label; the popup passes 0, which draws exactly the
-    /// chip it always drew.
+    /// The solar view and the chips that pick what the panadapter draws — the
+    /// condensed Display box's top row, and the head of the DISP menu's row.
+    /// `extra` stretches each chip past its label; the popup passes 0, which
+    /// draws exactly the chip it always drew.
     ///
     /// `narrow` marks the menu, which cannot open SPEC's popup — a popup
     /// opened from a popup counts as a click outside the first and closes it,
-    /// exactly as for SKIM and FFT below — so the menu leaves the chip out
-    /// here and [`Self::display_controls`] inlines the layer chips instead.
+    /// exactly as for SKIM and FFT below — so the menu leaves the chip out here
+    /// and [`Self::display_controls`] inlines its contents instead.
     fn display_view_chips(&mut self, ui: &mut egui::Ui, narrow: bool, extra: f32) {
-        let [fit, peak, spec, wide] = DISPLAY_VIEW_CHIPS;
+        let [_, spec, wide] = DISPLAY_VIEW_CHIPS;
         // Only a front end with a full-band lane has ever sent one of these, so
         // its presence is what says the strip is on offer at all — there is no
         // capability flag for it, and inventing one would mean a wire-format
@@ -3432,28 +3435,7 @@ impl SdroxideApp {
         // A phone draws the waterfall alone, so the two chips that choose what
         // else is drawn have nothing to control there.
         let picks_layers = !crate::layout::tier(ui.ctx()).waterfall_only();
-        // Lit while the floor/ceiling are kept fitted by themselves. Switching
-        // it on fits immediately, which is also how a one-off fit is asked for:
-        // click it off and on again.
-        if chip_stretched(ui, self.view.auto_fit, fit, extra)
-            .on_hover_text(
-                "Keep the floor/ceiling set for best waterfall contrast — eased back into place \
-                 on a band change, after a pan or zoom, and when the levels drift. Switch it on \
-                 to fit at once; switch it off to keep the levels where you set them.",
-            )
-            .clicked()
-        {
-            self.view.auto_fit = !self.view.auto_fit;
-            if self.view.auto_fit {
-                self.fit_levels_now(ui.input(|i| i.time));
-            }
-        }
-        if chip_stretched(ui, self.view.peak_hold, peak, extra)
-            .on_hover_text("Decaying peak-hold trace")
-            .clicked()
-        {
-            self.view.peak_hold = !self.view.peak_hold;
-        }
+        self.solar_button(ui, extra);
         if picks_layers && !narrow {
             self.layers_button(ui, spec, extra);
         }
@@ -3493,8 +3475,7 @@ impl SdroxideApp {
                 ui.set_opacity(alpha);
                 crate::chrome::window_body_bg(ui);
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                crate::chrome::menu_caption(ui, "Layers");
-                self.layer_chips(ui);
+                self.panadapter_controls(ui);
             });
         if let Some(r) = &resp {
             crate::chrome::paint_popup_cut_border(ui.ctx(), &r.response, alpha);
@@ -3504,34 +3485,160 @@ impl SdroxideApp {
         }
     }
 
-    /// One chip per panadapter layer, switched independently — spectrum,
-    /// waterfall, both, or neither. Switching both off is a display in its own
-    /// right and not a state to be talked out of: the panadapter is not drawn
-    /// at all, a mode with an operating panel gives it the whole height, and
-    /// this chip in the Display module is the way back.
+    /// The SPEC popup's body, and what the DISP menu inlines in its place:
+    /// everything the panadapter is drawn by, in two boxes — one for the
+    /// spectrum line across the top, one for the waterfall under it — so each
+    /// setting sits with the half of the picture it changes.
+    ///
+    /// The two switches are labelled SHOW … rather than named after their
+    /// layer: lit-means-drawn only reads as a switch once you already know
+    /// what the chip does, and one of the four displays they reach — both off,
+    /// no panadapter at all — is not a place to arrive at by guessing.
+    /// Reaching it deliberately stays allowed, and is not a state to be talked
+    /// out of: a mode with an operating panel gives it the whole height, and
+    /// this popup is the way back.
+    ///
+    /// The detail and the two speeds are this screen's own preferences rather
+    /// than the radio's ([`sdroxide_types::UiSettings`]), which is why they are
+    /// written and persisted here instead of going out as a [`Command`].
+    /// Everything that reads them picks them up again next frame, the engine's
+    /// spectrum config among it.
     ///
     /// Its own function because the DISP menu has to inline it rather than
     /// open it as a popup, for the reason given on [`Self::skimmer_controls`].
-    fn layer_chips(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let (spec_on, wf_on) = (self.view.spectrum_visible(), self.view.waterfall_visible());
-            if crate::chrome::chip(ui, spec_on, "SPECTRUM")
-                .on_hover_text("The spectrum line above the waterfall")
-                .clicked()
-            {
-                self.view.set_spectrum_visible(!spec_on);
+    fn panadapter_controls(&mut self, ui: &mut egui::Ui) {
+        // A phone draws the waterfall alone: there is no spectrum line to
+        // switch on, to peak-hold, or to slow down, so its box is left out —
+        // and the detail row, which sizes both layers, moves into the box that
+        // is still there rather than going with it.
+        let picks_layers = !crate::layout::tier(ui.ctx()).waterfall_only();
+        let w = panadapter_group_w(ui);
+        let mut cfg = self.ui_settings;
+        if picks_layers {
+            crate::chrome::menu_group(ui, "Spectrum", w, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let on = self.view.spectrum_visible();
+                    if crate::chrome::chip(ui, on, "SHOW SPECTRUM")
+                        .on_hover_text(
+                            "Draw the spectrum line across the top of the panadapter. \
+                             Switched off, the waterfall takes the whole height.",
+                        )
+                        .clicked()
+                    {
+                        self.view.set_spectrum_visible(!on);
+                    }
+                    if crate::chrome::chip(ui, self.view.peak_hold, "PEAK HOLD")
+                        .on_hover_text(
+                            "Trace the highest level each column has reached over the live \
+                             line, decaying back down — what the band did while you were \
+                             looking elsewhere",
+                        )
+                        .clicked()
+                    {
+                        self.view.peak_hold = !self.view.peak_hold;
+                    }
+                });
+                speed_row(
+                    ui,
+                    "reaction",
+                    &mut cfg.spectrum_speed,
+                    &Speed::ALL,
+                    "How quickly the spectrum line follows the band. Slower averages more \
+                     frames into each other: a steadier line, and a weak carrier that stands \
+                     still long enough to read. The waterfall is not touched by it — those \
+                     rows get every frame either way.",
+                );
+                self.detail_row(ui, &mut cfg);
+            });
+        }
+        crate::chrome::menu_group(ui, "Waterfall", w, |ui| {
+            if picks_layers {
+                let on = self.view.waterfall_visible();
+                if crate::chrome::chip(ui, on, "SHOW WATERFALL")
+                    .on_hover_text(
+                        "Draw the scrolling waterfall below the spectrum. Switched off, the \
+                         spectrum line takes the whole height.",
+                    )
+                    .clicked()
+                {
+                    self.view.set_waterfall_visible(!on);
+                }
             }
-            if crate::chrome::chip(ui, wf_on, "WATERFALL")
-                .on_hover_text("The scrolling waterfall below the spectrum")
-                .clicked()
-            {
-                self.view.set_waterfall_visible(!wf_on);
+            speed_row(
+                ui,
+                "scroll",
+                &mut cfg.waterfall_speed,
+                &Speed::WATERFALL,
+                "How fast the waterfall scrolls, in lines a second: Slow 5, Medium 28, Fast \
+                 56, Faster 112, Fastest 224. The engine clocks these itself, so the two \
+                 fastest are real detail rather than the same line drawn twice — as far as \
+                 the receiver can feed them: a line can never show more than one transform, \
+                 and a narrow front end makes only a few dozen a second. They cost history, \
+                 since the waterfall keeps a fixed number of lines — 73 seconds at Medium, 9 \
+                 at Fastest.",
+            );
+            if !picks_layers {
+                self.detail_row(ui, &mut cfg);
             }
+        });
+        if cfg != self.ui_settings {
+            self.ui_settings = cfg;
+            crate::app::persist::persist_ui_settings(&self.ui_settings);
+        }
+    }
+
+    /// The detail row of [`Self::panadapter_controls`]: how many columns the
+    /// panadapter is asked for, and the width that choice actually comes out at
+    /// on this machine.
+    ///
+    /// A step this renderer cannot hold is drawn greyed with its reason on the
+    /// hover rather than left out. A ladder with rungs missing reads as a bug;
+    /// a ladder with rungs out of reach reads as the truth.
+    fn detail_row(&self, ui: &mut egui::Ui, cfg: &mut sdroxide_types::UiSettings) {
+        let report = self.detail_report(cfg.spectrum_detail);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("detail").size(10.0).color(crate::theme::CYAN_DIM()))
+                .on_hover_text(
+                    "How many columns the panadapter and its waterfall are drawn with. Auto \
+                     reads this machine's renderer and the size of the panadapter and picks \
+                     the most it can carry — a 4K screen wants 4096. Every column is a byte \
+                     in every frame, so a client connected to a remote station pays for the \
+                     detail on its link: 4096 columns at 60 fps is about a quarter of a \
+                     megabyte a second, twice the standard width.",
+                );
+            for d in SpectrumDetail::ALL {
+                let over = d.columns().is_some_and(|c| c > report.ceiling);
+                let r = crate::chrome::chip_enabled(
+                    ui,
+                    !over,
+                    cfg.spectrum_detail == d,
+                    &detail_chip_label(d),
+                );
+                if over {
+                    r.on_disabled_hover_text(&report.reason);
+                } else {
+                    let hint = match d.columns() {
+                        None => "Read this machine and this screen, take the most they can \
+                                 carry, and follow them if they change"
+                            .to_string(),
+                        Some(c) => format!("{c} columns, whatever Auto would have picked here"),
+                    };
+                    if r.on_hover_text(hint).clicked() {
+                        cfg.spectrum_detail = d;
+                    }
+                }
+            }
+            ui.label(
+                RichText::new(format!("{} columns", report.chosen))
+                    .size(10.0)
+                    .color(Color32::from_gray(150)),
+            )
+            .on_hover_text("The width in force right now, whatever the row above asks for");
         });
     }
 
-    /// The solar, skimmer and FFT chips — the condensed Display box's bottom
-    /// row, and the tail of the DISP menu's row.
+    /// The level fit, the skimmers and the FFT popup — the condensed Display
+    /// box's bottom row, and the tail of the DISP menu's row.
     fn display_tool_chips(
         &mut self,
         ui: &mut egui::Ui,
@@ -3539,8 +3646,23 @@ impl SdroxideApp {
         narrow: bool,
         extra: f32,
     ) {
-        let [_, _, fft] = DISPLAY_TOOL_CHIPS;
-        self.solar_button(ui, extra);
+        let [fit, _, fft] = DISPLAY_TOOL_CHIPS;
+        // Lit while the floor/ceiling are kept fitted by themselves. Switching
+        // it on fits immediately, which is also how a one-off fit is asked for:
+        // click it off and on again.
+        if chip_stretched(ui, self.view.auto_fit, fit, extra)
+            .on_hover_text(
+                "Keep the floor/ceiling set for best waterfall contrast — eased back into place \
+                 on a band change, after a pan or zoom, and when the levels drift. Switch it on \
+                 to fit at once; switch it off to keep the levels where you set them.",
+            )
+            .clicked()
+        {
+            self.view.auto_fit = !self.view.auto_fit;
+            if self.view.auto_fit {
+                self.fit_levels_now(ui.input(|i| i.time));
+            }
+        }
         // In a box these two hang off chips of their own. A menu inlines
         // them below instead: a popup opened from a popup counts as a click
         // outside the first and closes it.
@@ -3580,11 +3702,11 @@ impl SdroxideApp {
             self.display_tool_chips(ui, cmds, narrow, 0.0);
         });
         if narrow {
-            // A phone draws the waterfall alone, so there are no layers to pick.
-            if !crate::layout::tier(ui.ctx()).waterfall_only() {
-                crate::chrome::menu_caption(ui, "Layers");
-                self.layer_chips(ui);
-            }
+            // Unconditional, unlike the SPEC chip above, which a phone leaves
+            // out: the panadapter box holds more than the layer switches it is
+            // the only home for, and it hides the switches itself where there
+            // are no layers to pick.
+            self.panadapter_controls(ui);
             crate::chrome::menu_caption(ui, "Skimmers");
             self.skimmer_controls(ui, cmds);
             self.spectrum_controls(ui);
@@ -3595,7 +3717,7 @@ impl SdroxideApp {
     /// rows plus the box margins.
     fn display_rows_w(&self, ui: &egui::Ui) -> f32 {
         let row1: &[&str] =
-            if self.wide_frame.is_some() { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..3] };
+            if self.wide_frame.is_some() { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..2] };
         chip_row_w(ui, row1).max(chip_row_w(ui, &DISPLAY_TOOL_CHIPS))
             + 2.0 * crate::chrome::MODULE_MARGIN_X
     }
@@ -3605,7 +3727,7 @@ impl SdroxideApp {
     fn display_condensed(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
         let inner = w - 2.0 * crate::chrome::MODULE_MARGIN_X;
         let row1: &[&str] =
-            if self.wide_frame.is_some() { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..3] };
+            if self.wide_frame.is_some() { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..2] };
         let extra1 = ((inner - chip_row_w(ui, row1)) / row1.len() as f32).max(0.0);
         let extra2 = ((inner - chip_row_w(ui, &DISPLAY_TOOL_CHIPS))
             / DISPLAY_TOOL_CHIPS.len() as f32)
@@ -3958,15 +4080,17 @@ const SYSTEM_CHIPS: [&str; 11] = [
 /// to be revisited together.
 const SYSTEM_SPLIT: usize = 6;
 
-/// The Display box's view-layer chips (top row); the last is drawn only for a
-/// front end with a full-band lane.
-const DISPLAY_VIEW_CHIPS: [&str; 4] = ["FIT", "PEAK", "SPEC", "WIDE"];
+/// The Display box's top row: the solar view, then the chips that choose what
+/// the panadapter draws — the last of those only on a front end with a
+/// full-band lane. Peak hold used to stand here too and now lives in SPEC's
+/// popup, beside the spectrum line it is drawn over. Visible to the app module
+/// because [`SdroxideApp::solar_button`], which draws its first chip, lives in
+/// `app::solar`.
+pub(in crate::app) const DISPLAY_VIEW_CHIPS: [&str; 3] = ["☀ 3D", "SPEC", "WIDE"];
 
-/// The Display box's tool chips (bottom row): the solar view, the skimmers,
-/// and the FFT/levels popup. Read by the measurement and by each chip's own
-/// draw site — [`SdroxideApp::solar_button`] included, which is why it is
-/// visible to the app module.
-pub(in crate::app) const DISPLAY_TOOL_CHIPS: [&str; 3] = ["☀ 3D", "SKIM", "FFT"];
+/// The Display box's bottom row: the level fit, the skimmers, and the
+/// FFT/levels popup. Read by the measurement and by each chip's own draw site.
+const DISPLAY_TOOL_CHIPS: [&str; 3] = ["FIT", "SKIM", "FFT"];
 
 /// The keying chips' shared size: PTT and TUNE drawn to the wider of the two
 /// labels, so the chips match and the level blocks beside them start on the
@@ -4272,6 +4396,82 @@ fn readout_for(state: &RadioState, tx_on: bool) -> (f64, Option<Color32>, f64) {
         return (dial + offset, Some(crate::theme::ALERT()), offset);
     }
     (dial, None, 0.0)
+}
+
+/// One row of the SPEC popup: a caption naming the setting, then a chip per
+/// step of it. Chips rather than a `ComboBox` for the reason
+/// [`SdroxideApp::spectrum_controls`] gives — a combo opened inside a popup
+/// counts as a click outside it and closes it under the operator.
+///
+/// The caption carries the explanation, and each chip only what that step
+/// does: the caption is where an operator who does not yet know what the row
+/// is for will point, and a paragraph repeated on every chip is a paragraph
+/// nobody reads.
+fn speed_row(ui: &mut egui::Ui, caption: &str, value: &mut Speed, steps: &[Speed], hint: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(caption).size(10.0).color(crate::theme::CYAN_DIM()))
+            .on_hover_text(hint);
+        for step in steps {
+            if crate::chrome::chip(ui, value == step, step.label().to_uppercase()).clicked() {
+                *value = *step;
+            }
+        }
+    });
+}
+
+/// What a [`SpectrumDetail`] step is called on its chip: the column count it
+/// asks for, which is the whole of what it means. Read off `columns()` rather
+/// than written out again, so the chips can never disagree with the widths.
+fn detail_chip_label(d: SpectrumDetail) -> String {
+    match d.columns() {
+        Some(c) => c.to_string(),
+        None => "AUTO".to_string(),
+    }
+}
+
+/// The width both of the SPEC popup's boxes are drawn at: the widest row
+/// either of them holds, or as much of it as a popup may be wide. Priced
+/// rather than left to auto-size, so the two come out matching — a short box
+/// beside a long one reads as an unfinished one — and so their rows wrap
+/// against a width the layout knows. The rows are measured with one gap per
+/// chip rather than one between them, which leaves the margin that keeps the
+/// longest row off the edge.
+fn panadapter_group_w(ui: &egui::Ui) -> f32 {
+    let gap = ui.spacing().item_spacing.x;
+    let chips = |labels: &[&str]| -> f32 {
+        labels.iter().map(|l| crate::chrome::chip_width(ui, l, None) + gap).sum()
+    };
+    let caption =
+        |t: &str| crate::chrome::text_width(ui, t, egui::FontId::proportional(10.0)) + gap;
+    let speeds = |steps: &[Speed]| -> f32 {
+        steps
+            .iter()
+            .map(|s| crate::chrome::chip_width(ui, &s.label().to_uppercase(), None) + gap)
+            .sum()
+    };
+    let detail: f32 = SpectrumDetail::ALL
+        .iter()
+        .map(|d| crate::chrome::chip_width(ui, &detail_chip_label(*d), None) + gap)
+        .sum();
+    let widest = [
+        chips(&["SHOW SPECTRUM", "PEAK HOLD"]),
+        caption("reaction") + speeds(&Speed::ALL),
+        caption("scroll") + speeds(&Speed::WATERFALL),
+        caption("detail") + detail + caption("8192 columns"),
+    ]
+    .into_iter()
+    .fold(0.0f32, f32::max);
+    // Never wider than a menu's body, which is capped at the screen and at 430
+    // points whatever the screen (see `chrome::menu_popup`). The DISP menu
+    // inlines these boxes, and a box priced past its body would be *clipped*
+    // there rather than wrapped — on a phone, whose touch metrics make every
+    // chip roomier, the detail row is exactly the row that would go over.
+    // Taken from the screen rather than from `available_width`, which inside
+    // an auto-sizing popup is the width the popup came out as last frame: a
+    // box measured against that shrinks the popup, which shrinks the next
+    // measurement, and it never grows back.
+    let cap = (ui.ctx().content_rect().width() - 40.0).clamp(140.0, 414.0);
+    widest.min(cap)
 }
 
 /// The natural width of a row of chips inside a condensed box: each chip at
@@ -5126,7 +5326,7 @@ mod tests {
             let (ctx, input) = desktop_ctx();
             let _ = ctx.run_ui(input, |ui| {
                 let row1: &[&str] =
-                    if has_wide { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..3] };
+                    if has_wide { &DISPLAY_VIEW_CHIPS } else { &DISPLAY_VIEW_CHIPS[..2] };
                 let room = chip_row_w(ui, row1).max(chip_row_w(ui, &DISPLAY_TOOL_CHIPS));
                 for row in [row1, &DISPLAY_TOOL_CHIPS[..]] {
                     ui.horizontal(|ui| {

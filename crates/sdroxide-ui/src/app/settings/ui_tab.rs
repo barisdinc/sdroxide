@@ -1,9 +1,16 @@
-//! The UI tab: frame rate, spectrum averaging, waterfall speed and palette,
-//! and the spoken announcements.
+//! The UI tab: layout, theme and font sizes, the frame rate, the waterfall's
+//! palette and the colours the overlays are drawn in, and the spoken
+//! announcements.
 //!
-//! These take effect live — the frame rate and averaging reach the engine
-//! through the spectrum-config diff on the next frame, and the waterfall speed
-//! is read straight out of the settings each frame.
+//! These take effect live — the frame rate reaches the engine through the
+//! spectrum-config diff on the next frame, and the rest is read straight out of
+//! the settings each frame.
+//!
+//! The panadapter's own settings — its detail, the spectrum's reaction and the
+//! waterfall's scroll speed — used to be here and are now on the SPEC popup,
+//! beside the picture they change (`SdroxideApp::panadapter_controls`). They
+//! are still the same [`sdroxide_types::UiSettings`] fields, written and
+//! persisted the same way.
 
 use eframe::egui::{self, Color32, ComboBox, RichText};
 use sdroxide_types::{BandplanKind, CallsignStyle, FreqStyle, SpeechSettings, SpotKind, Verbosity};
@@ -15,30 +22,26 @@ use crate::app::settings::general::device_combo;
 use crate::app::speech::SpeechStatus;
 use crate::chrome::StyledCombo;
 
-/// What this machine will actually draw, so the detail combo can show the
-/// operator what `Auto` decided and grey what the renderer cannot hold.
-///
-/// Passed in rather than worked out here because `sdroxide-types`, where
-/// [`sdroxide_types::UiSettings`] lives, must never learn about wgpu.
-pub(in crate::app) struct DetailReport {
-    /// Columns in force right now, whatever the setting says.
-    pub chosen: u32,
-    /// The widest the operator may pick on this renderer.
-    pub ceiling: u32,
-    /// One sentence naming what bound it, for the hover on a greyed row.
-    pub reason: String,
-}
-
 pub(in crate::app) fn settings_ui_tab(
     ui: &mut egui::Ui,
     cfg: &mut sdroxide_types::UiSettings,
-    detail: &DetailReport,
     cloud_march: Option<&mut bool>,
 ) {
-    use sdroxide_types::{
-        ChromeStyle, FontSize, LayoutMode, SpectrumDetail, Speed, UiSettings, UiTheme,
-    };
+    use sdroxide_types::{ChromeStyle, FontSize, LayoutMode, UiSettings, UiTheme};
     ui.label(RichText::new("Display").size(14.0).strong().color(crate::theme::CYAN()));
+    ui.add_space(6.0);
+    // Said here because this is where they used to be, and where an operator
+    // who remembers them will come looking. They moved to the panadapter's own
+    // button, beside the picture they change — see
+    // `SdroxideApp::panadapter_controls`.
+    ui.label(
+        RichText::new(
+            "Panadapter detail, the spectrum's reaction and the waterfall's scroll speed are \
+             set from the SPEC button on the display strip — the DISP menu on a narrow window.",
+        )
+        .size(11.0)
+        .weak(),
+    );
     ui.add_space(6.0);
     egui::Grid::new("ui-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Layout");
@@ -77,58 +80,6 @@ pub(in crate::app) fn settings_ui_tab(
                     ui.selectable_value(&mut cfg.frame_rate_fps, f, format!("{f} fps"));
                 }
             });
-        ui.end_row();
-
-        ui.label("Panadapter detail").on_hover_text(
-            "How many columns the panadapter and its waterfall are drawn with. \
-             Auto reads this machine's renderer and the size of the panadapter \
-             and picks the most it can carry — a 4K screen wants 4096. Every \
-             column is a byte in every frame, so a client connected to a remote \
-             station pays for the detail on its link: 4096 columns at 60 fps is \
-             about a quarter of a megabyte a second, twice the standard width.",
-        );
-        ui.horizontal(|ui| {
-            // Hand-rolled rather than `enum_combo`, so a step this renderer
-            // cannot hold is shown greyed with its reason instead of being
-            // hidden. A ladder with rungs missing reads as a bug; a ladder with
-            // rungs out of reach reads as the truth.
-            ComboBox::from_id_salt("ui-detail")
-                .selected_text(cfg.spectrum_detail.label())
-                .show_styled(ui, |ui| {
-                    for d in SpectrumDetail::ALL {
-                        let over = d.columns().is_some_and(|c| c > detail.ceiling);
-                        ui.add_enabled_ui(!over, |ui| {
-                            let r = ui.selectable_label(cfg.spectrum_detail == d, d.label());
-                            if over {
-                                r.on_disabled_hover_text(&detail.reason);
-                            } else if r.clicked() {
-                                cfg.spectrum_detail = d;
-                            }
-                        });
-                    }
-                });
-            ui.label(
-                RichText::new(format!("{} columns", detail.chosen))
-                    .size(11.0)
-                    .color(Color32::from_gray(150)),
-            );
-        });
-        ui.end_row();
-
-        ui.label("Waterfall scroll speed").on_hover_text(
-            "How fast the waterfall scrolls, in lines a second: Slow 5, Medium 28, \
-             Fast 56, Faster 112, Fastest 224. The engine clocks these itself, so \
-             the two fastest are real detail rather than the same line drawn \
-             twice — as far as the receiver can feed them: a line can never show \
-             more than one transform, and a narrow front end makes only a few \
-             dozen a second. They cost history, since the waterfall keeps a fixed \
-             number of lines — 73 seconds at Medium, 9 at Fastest.",
-        );
-        enum_combo(ui, "ui-wf", &mut cfg.waterfall_speed, &Speed::WATERFALL, Speed::label);
-        ui.end_row();
-
-        ui.label("Spectrum update speed");
-        enum_combo(ui, "ui-spec", &mut cfg.spectrum_speed, &Speed::ALL, Speed::label);
         ui.end_row();
 
         ui.label("Waterfall palette");
