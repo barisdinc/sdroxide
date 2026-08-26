@@ -2682,6 +2682,38 @@ pub(in crate::app) fn settings_smartsdr_tab(
         );
         ui.end_row();
 
+        ui.label("GUI client ID").on_hover_text(
+            "The identity the radio restores this session's slices and panadapters to. \
+             Left empty it is derived from the station name — stable, but the same on \
+             every sdroxide that kept the default name, and a radio settles a duplicate \
+             by throwing the earlier client off. sdroxide spots that on the wire and \
+             falls back to a one-session identity, which costs the restore; put a UUID \
+             of your own here to keep it.",
+        );
+        crate::chrome::field(
+            ui,
+            egui::TextEdit::singleline(&mut cfg.smartsdr.gui_client_id)
+                .desired_width(280.0)
+                .hint_text("optional, e.g. a UUID of your own"),
+        );
+        ui.end_row();
+
+        ui.label("Network MTU").on_hover_text(
+            "Largest datagram the radio may send. 1450 is what SmartSDR itself asks for. \
+             Lower it on a path with a smaller MTU — a VPN or a tunnel — where the \
+             fragments are dropped and no spectrum arrives at all.",
+        );
+        let mut mtu = cfg.smartsdr.network_mtu as f64;
+        if crate::chrome::field(
+            ui,
+            egui::DragValue::new(&mut mtu).speed(10.0).range(576.0..=9000.0).suffix(" B"),
+        )
+        .changed()
+        {
+            cfg.smartsdr.network_mtu = mtu.round() as u32;
+        }
+        ui.end_row();
+
         ui.label("");
         // Both run here: the test opens its own connection from this machine,
         // and the trace is of this process's own session.

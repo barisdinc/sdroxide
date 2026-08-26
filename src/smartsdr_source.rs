@@ -11,6 +11,7 @@
 //! this one has never been run against real hardware, which is why every
 //! connection carries a diagnostic trace.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
@@ -23,6 +24,32 @@ use crate::session_trace::TraceStore;
 /// See [`crate::session_trace`] — including why there is one per radio rather
 /// than one for the process.
 static TRACES: TraceStore = TraceStore::new();
+
+/// Radios that have thrown one of our sessions off for a duplicate GUI client
+/// id, keyed the same way as [`TRACES`].
+///
+/// The engine reconnects a dead source on its own ([`IqSource::needs_reopen`]),
+/// and reconnecting under the id we were just evicted over does not recover the
+/// session — it evicts whoever took it, who reconnects and evicts us back. Two
+/// sdroxide windows, or one that overlapped its own reconnect, then trade the
+/// radio forever at a few seconds a turn.
+///
+/// So the eviction is remembered for the life of the process and the next
+/// connection to that radio goes out under a transient identity, which nobody
+/// can be holding. The cost is the radio's slice restore, which an operator who
+/// wants it back can buy with an explicit `gui_client_id` in the config.
+static EVICTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn evicted_here(key: &str) -> bool {
+    EVICTED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k == key)
+}
+
+fn remember_eviction(key: &str) {
+    let mut list = EVICTED.lock().unwrap_or_else(|e| e.into_inner());
+    if !list.iter().any(|k| k == key) {
+        list.push(key.to_string());
+    }
+}
 
 /// Which FlexRadio a session was with: the address it was dialled at, the one
 /// thing both the source and the tab asking for the report can spell.
@@ -68,17 +95,39 @@ impl SmartSdrSource {
             })?
             .to_string();
 
-        let handle =
-            FlexHandle::connect(&address, cfg.iq_sample_rate_hz, cfg.iq_channel, &cfg.station)?;
+        let key = session_key(cfg);
+        let handle = FlexHandle::connect_with(&sdroxide_smartsdr::ConnectOptions {
+            address: address.clone(),
+            iq_rate_hz: cfg.iq_sample_rate_hz,
+            iq_channel: cfg.iq_channel,
+            station: cfg.station.clone(),
+            client_id: cfg.gui_client_id.clone(),
+            transient_identity: evicted_here(&key),
+            network_mtu: cfg.network_mtu,
+        })?;
         let trace = handle.trace.clone();
 
-        // The radio creates every DAX IQ stream at 48 kHz and only moves on a
-        // follow-up command; if it refused that, the engine would run its whole
-        // DSP chain at a rate the samples are not arriving at, which sounds like
-        // a badly detuned receiver rather than like an error. Say so instead.
         let mut warning = None;
         let actual = wait_for_rate(&handle, cfg.iq_sample_rate_hz);
-        if (actual - cfg.iq_sample_rate_hz).abs() > 1.0 {
+
+        // Nothing at all is a different fault from the wrong rate, and it is the
+        // one an operator can act on: the control link is up (we got this far),
+        // so what is missing is the radio's UDP reaching us. Naming the port it
+        // was told to use is the difference between "it doesn't work" and a
+        // firewall rule.
+        if handle.trace.stream_counters().is_empty() {
+            warning = Some(format!(
+                "connected, but no VITA-49 data has arrived from the radio. \
+                 Its spectrum rides UDP, which the control link does not — check that \
+                 UDP from {address} can reach this machine (host firewall, VPN, or a \
+                 router between the two)."
+            ));
+            tracing::warn!(target: "smartsdr", "{}", warning.as_deref().unwrap_or(""));
+        } else if (actual - cfg.iq_sample_rate_hz).abs() > 1.0 {
+            // The radio creates every DAX IQ stream at 48 kHz and only moves on a
+            // follow-up command; if it refused that, the engine would run its whole
+            // DSP chain at a rate the samples are not arriving at, which sounds like
+            // a badly detuned receiver rather than like an error. Say so instead.
             warning = Some(format!(
                 "the radio is streaming {:.0} kHz IQ, not the {:.0} kHz requested — \
                  DAX IQ channel {} may be shared, or the radio declined the rate",
@@ -101,7 +150,7 @@ impl SmartSdrSource {
             scratch: Vec::new(),
             label,
             handle,
-            key: session_key(cfg),
+            key,
             if_offset: 0.0,
             last_telem: None,
             trace,
@@ -250,8 +299,18 @@ impl IqSource for SmartSdrSource {
     /// The control thread stops when the radio closes the TCP session (powered
     /// off, or another client evicted ours); the engine then reconnects on its
     /// own.
+    ///
+    /// An eviction is filed on the way past. The engine's retry has no idea why
+    /// the session ended, and reconnecting under an id we were just thrown off
+    /// for would only start the trade again — see [`EVICTED`].
     fn needs_reopen(&self) -> bool {
-        !self.handle.is_alive()
+        if self.handle.is_alive() {
+            return false;
+        }
+        if self.handle.evicted_for_duplicate_id() {
+            remember_eviction(&self.key);
+        }
+        true
     }
 
     fn set_if_offset(&mut self, hz: f64) {

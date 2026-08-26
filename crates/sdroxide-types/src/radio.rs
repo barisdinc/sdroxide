@@ -1648,10 +1648,25 @@ pub struct SmartSdrConfig {
     /// Which of the radio's four DAX IQ channels to claim. Change it only when
     /// something else on the network is already using channel 1.
     pub iq_channel: u32,
-    /// Station name reported to the radio, shown against our session in
-    /// SmartSDR's client list and used to derive our stable GUI client id — so
-    /// changing it makes the radio treat us as a new client.
+    /// Station name reported to the radio and shown against our session in
+    /// SmartSDR's client list.
     pub station: String,
+    /// GUI client id to register under, if the operator has fixed one.
+    ///
+    /// The radio remembers a GUI client by this id and restores its slices and
+    /// panadapters to it, so a stable one is worth having. Empty — the default —
+    /// derives it from [`Self::station`], which is stable but *not* unique:
+    /// every sdroxide that never renamed its station derives the same id, and a
+    /// radio resolves a duplicate id by evicting whoever had it first. The
+    /// backend detects that on the wire and falls back to a per-session id;
+    /// setting a UUID of your own here is how to keep the session restore as
+    /// well. Any string the radio accepts will do, but SmartSDR expects a UUID.
+    pub gui_client_id: String,
+    /// Largest datagram the radio may send, in bytes. FlexLib's default is 1450.
+    /// Lower it on a path with a smaller MTU — a VPN or a tunnel — where
+    /// fragmented VITA-49 packets are dropped and the spectrum simply never
+    /// arrives.
+    pub network_mtu: u32,
 }
 
 impl Default for SmartSdrConfig {
@@ -1662,6 +1677,8 @@ impl Default for SmartSdrConfig {
             iq_sample_rate_hz: 192_000.0,
             iq_channel: 1,
             station: "sdroxide".into(),
+            gui_client_id: String::new(),
+            network_mtu: 1450,
         }
     }
 }

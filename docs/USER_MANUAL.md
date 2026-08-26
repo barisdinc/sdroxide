@@ -5591,14 +5591,49 @@ radio modulates.
 - **Station name** — shown against this session in the radio's client list. The
   radio also remembers a client by it and restores that client's slices, so
   renaming makes the radio treat sdroxide as a new one.
+- **GUI client ID** — the identity the radio files those restored slices under.
+  Leave it empty and sdroxide derives one from the station name, which is stable
+  across restarts but *not* unique: every sdroxide that kept the default station
+  name derives the same one. See **Two clients, one identity** below.
+- **Network MTU** — the largest datagram the radio may put on the wire, 1450 by
+  default, which is what SmartSDR itself asks for. Lower it if the radio reaches
+  you through a VPN or a tunnel with a smaller MTU: the spectrum rides UDP, and
+  a path that drops IP fragments delivers *nothing* rather than delivering less.
 - **Test connection** — checks the radio answers *without* registering as a GUI
-  client, so it will not disturb a SmartSDR session already running.
+  client, so it will not disturb a SmartSDR session already running. It also
+  does not exercise the streaming path, which is a separate thing that can fail
+  — see **No spectrum** below.
 - **Copy diagnostic report** — see below.
 
 Tuning moves the radio's own slice, so its front panel and any second client
 follow your dial rather than the other way round. TX power and TUNE power
 command the radio's `rfpower`/`tunepower`, and SWR and forward power come back
 from the radio's meters while you transmit.
+
+**Two clients, one identity.** A FlexRadio identifies a GUI client by a UUID,
+and settles two clients arriving with the same one by disconnecting whoever had
+it first — reporting `duplicate_client_id` and handing the newcomer their
+slices. Because the default identity is derived from the station name, and the
+station name defaults to `sdroxide`, two sdroxide installations on one radio
+arrive holding the same UUID, as do two windows of one installation. Left alone
+that is not an eviction but a tug-of-war, each side reconnecting and throwing
+the other off every few seconds.
+
+sdroxide asks the radio who is already connected before it registers, and takes
+a one-session identity instead of evicting anyone it finds holding its UUID. If
+the radio evicts *it* anyway, it remembers that and reconnects transiently
+rather than fighting back. The cost either way is the radio's session restore —
+a transient identity is one the radio has never seen, so it has no slices filed
+under it. Set a **GUI client ID** of your own (any UUID will do) to keep the
+restore and still be distinct from every other sdroxide.
+
+**No spectrum.** The control link is TCP and the spectrum is UDP, so a radio can
+answer everything you ask it and still send you nothing. If the panadapter stays
+empty while the frequency readout tracks the radio, suspect the UDP path: a host
+firewall, a VPN, or an MTU smaller than the **Network MTU** setting. sdroxide
+says so on connect when no VITA-49 data arrives at all, and the diagnostic
+report's `--- streams ---` section is where to confirm it — an empty one means
+not a single packet reached this machine.
 
 Receive covers 30 kHz to 54 MHz, and to 165 MHz on the models with a VHF
 receiver (the 6600, the 6700 and the 8000 family). On those, transmit is offered
@@ -10973,6 +11008,15 @@ All in [§6.2.6](#626-smartsdr-flexradio-network-radios):
 - **192 kHz is the radio's DAX IQ maximum**, so that is the widest span.
 - The radio remembers a client by its **Station name** — renaming makes it
   treat sdroxide as a brand-new client.
+- Two sdroxide installations that both kept the default station name arrive at
+  the radio holding the same identity, and a FLEX settles that by disconnecting
+  the first one. sdroxide detects it and takes a one-session identity instead,
+  which works but loses the radio's slice restore. Give each a **GUI client ID**
+  of its own to keep it.
+- **A connection that tests fine but shows no spectrum is a UDP problem**, not
+  a control one: check a host firewall, a VPN, or the **Network MTU** setting.
+  The diagnostic report's `--- streams ---` section says whether any packet
+  arrived at all.
 
 ### 15.14 RTL-SDR dongles (Blog V3 / V4 and generic)
 
