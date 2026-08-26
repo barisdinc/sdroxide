@@ -5354,6 +5354,7 @@ dependencies = [
  "sdroxide-ism",
  "sdroxide-kiss",
  "sdroxide-net",
+ "sdroxide-qo100",
  "sdroxide-rigctld",
  "sdroxide-rotator",
  "sdroxide-skimmer",

@@ -27,6 +27,7 @@ use sdroxide_dsp::{
     make_modulator,
 };
 use sdroxide_ism::{IsmAction, IsmController};
+use sdroxide_qo100::Qo100Controller;
 use sdroxide_rigctld::{RigState, RigctldController};
 use sdroxide_skimmer::{SkimmerAction, SkimmerController};
 use sdroxide_tci::server::{ServerRequest, TciServerController, TciStateSnapshot};
@@ -1962,6 +1963,20 @@ struct Engine {
     /// panel that connected while the lane was down would sit on "starting the
     /// decoder" forever.
     adsb_idle_sent: Option<Option<String>>,
+    /// QO-100 beacon decoder: a fixed downconversion onto
+    /// [`sdroxide_types::QO100_BEACON_HZ`] plus a worker-thread demodulator,
+    /// present only while the decoder is enabled. Simpler than the ISM
+    /// window: the target frequency never moves, so retuning it is always
+    /// just re-seating the mixer — see `sync_qo100_window`.
+    qo100_ddc: Option<Ddc>,
+    qo100: Option<Qo100Controller>,
+    qo100_buf: Vec<Complex32>,
+    /// The stream rate `qo100_ddc` was built to decimate — the same reason
+    /// `ism_in_rate` exists.
+    qo100_in_rate: f64,
+    /// The operator's persisted QO-100 preference, kept apart from
+    /// `state.qo100` for the same reason as `skim_cfg`.
+    qo100_cfg: sdroxide_types::Qo100Settings,
     /// Open capture file for `--record-iq`, and the interleaving scratch it is
     /// written from.
     iq_rec: Option<std::io::BufWriter<std::fs::File>>,
@@ -2750,6 +2765,13 @@ fn engine_thread(
         adsb_cfg,
         adsb_home: None,
         adsb_idle_sent: None,
+        qo100_ddc: None,
+        qo100: None,
+        qo100_buf: Vec::new(),
+        qo100_in_rate: 0.0,
+        // Session-scoped only, unlike `skim_cfg`/`ism_cfg` — see
+        // `sync_qo100`'s doc for why this one is not read back from disk.
+        qo100_cfg: sdroxide_types::Qo100Settings::default(),
         iq_rec,
         iq_rec_buf: Vec::new(),
         scan_cfg,
@@ -2856,6 +2878,7 @@ fn engine_thread(
         engine.sync_ism(); // likewise, from ism.json
         engine.sync_adsb_home();
         engine.sync_adsb(); // and the aircraft lane, if the mode is already ADS-B
+        engine.sync_qo100(); // a no-op today: `qo100_cfg` starts disabled and is never loaded
     }
     // Start any enabled network spot feeds from the persisted config. The
     // operator identity comes from the digi config — one identity for the whole
@@ -3034,6 +3057,7 @@ fn engine_thread(
         engine.poll_skimmer();
         engine.poll_ism();
         engine.poll_adsb();
+        engine.poll_qo100();
         engine.poll_scanner();
         engine.poll_tci_server();
         engine.poll_rigctld();
@@ -3744,6 +3768,15 @@ impl Engine {
                 d.on_rx_iq(&self.adsb_buf);
             }
         }
+        // ...and the QO-100 beacon decoder from its own fixed downconversion
+        // onto the beacon frequency.
+        if let Some(ddc) = self.qo100_ddc.as_mut() {
+            self.qo100_buf.clear();
+            ddc.process(iq, &mut self.qo100_buf);
+            if let Some(c) = self.qo100.as_ref() {
+                c.on_rx_iq(&self.qo100_buf);
+            }
+        }
         // Feed TCI clients: the same clean tap the digital decoders use (so
         // muting or turning down sdroxide can't silence somebody's decoder),
         // resampled to the 48 kHz TCI mandates.
@@ -4161,6 +4194,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_qo100_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
             }
@@ -4367,6 +4401,10 @@ impl Engine {
         // target rather than a plan of them: 1090 MHz is where it has to be, and
         // the only question is whether the new span still reaches it.
         self.sync_adsb_window();
+        // The QO-100 window, unlike the ISM one, *does* follow the hardware
+        // centre — its one target frequency never moves, so re-seating the
+        // mixer is all a retune ever needs.
+        self.sync_qo100_window();
         // Re-seat the DDCs on the new centre. Without this the main receiver
         // keeps the offset it had against the old one, which is exactly how a
         // rig-initiated retune ends up demodulating somewhere the readout does
@@ -6507,6 +6545,21 @@ impl Engine {
                 }
             }
 
+            SetQo100Config(cfg) => {
+                self.state.qo100 = cfg;
+                // Remembered before `sync_qo100` may force the live state off
+                // on an audio-mode source, so a swap back restores what was
+                // chosen — the same reason `ism_cfg` exists. Not saved to
+                // disk: unlike the ISM decoder, there is nothing here worth
+                // surviving a restart — the search width defaults to
+                // something sane, and the decoder itself defaults off.
+                self.qo100_cfg = cfg;
+                self.sync_qo100();
+                if let Some(c) = self.qo100.as_ref() {
+                    c.set_config(cfg);
+                }
+            }
+
             ReloadIsmDecoders => {
                 // Seeded here as well as at startup, so deleting the file to get
                 // the commented example back works without a restart.
@@ -7297,6 +7350,76 @@ impl Engine {
         self.ism_center_hz = center;
         if let Some(d) = self.ism.as_ref() {
             d.set_window(center, want_rate);
+        }
+    }
+
+    /// The QO-100 beacon decoder's downconverter output rate. Comfortably
+    /// oversampled against the 800 chip/s the beacon transmits at — see
+    /// `sdroxide_qo100::bpsk`'s module doc for why the decoder wants that
+    /// margin — and far short of what the ISM plan or the skimmer ask for, so
+    /// it costs the engine almost nothing to leave running.
+    const QO100_TARGET_RATE_HZ: f64 = 16_000.0;
+
+    /// Construct or tear down the QO-100 beacon decoder, mirroring
+    /// [`Self::sync_ism`]'s shape. Simpler than the ISM window: the target
+    /// frequency ([`sdroxide_types::QO100_BEACON_HZ`]) never moves and the
+    /// rate it downconverts to never changes with the band, so nothing here
+    /// ever has to *choose* where the window goes — only whether it exists
+    /// and, in [`Self::sync_qo100_window`], where the hardware centre has
+    /// put it relative to the beacon.
+    fn sync_qo100(&mut self) {
+        // Wideband-only, for the same reason as the skimmers and ISM: a CAT
+        // rig on a sound card hands over demodulated audio, not IQ to mix a
+        // downconverter from.
+        if self.audio_mode {
+            self.state.qo100.enabled = false;
+        }
+        match (self.state.qo100.enabled, self.qo100.is_some()) {
+            (true, false) => {
+                let mut ddc = Ddc::new(self.state.sample_rate, Self::QO100_TARGET_RATE_HZ);
+                ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+                let out_rate = ddc.out_rate();
+                self.qo100 = Some(Qo100Controller::new(out_rate, self.state.qo100));
+                self.qo100_ddc = Some(ddc);
+                self.qo100_in_rate = self.state.sample_rate;
+                info!(rate = out_rate, "QO-100 beacon decoder started");
+            }
+            (false, true) => {
+                self.qo100 = None;
+                self.qo100_ddc = None;
+                self.qo100_buf.clear();
+                info!("QO-100 beacon decoder stopped");
+            }
+            (true, true) => self.sync_qo100_window(),
+            _ => {}
+        }
+    }
+
+    /// Re-seat the downconverter's mixer after a retune, and rebuild it
+    /// outright if the sample rate feeding it has changed — a `Ddc` bakes its
+    /// input rate into both the NCO and the decimation chain and neither can
+    /// be changed in place, the same reason `sync_ism_window` rebuilds on a
+    /// rate change.
+    fn sync_qo100_window(&mut self) {
+        if self.qo100_ddc.is_none() {
+            return;
+        }
+        if (self.state.sample_rate - self.qo100_in_rate).abs() >= 1.0 {
+            let mut ddc = Ddc::new(self.state.sample_rate, Self::QO100_TARGET_RATE_HZ);
+            ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+            self.qo100_ddc = Some(ddc);
+            self.qo100_in_rate = self.state.sample_rate;
+            return;
+        }
+        let Some(ddc) = self.qo100_ddc.as_mut() else { return };
+        ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+    }
+
+    /// Drain the QO-100 beacon decoder's latest status and forward it.
+    fn poll_qo100(&mut self) {
+        let Some(c) = self.qo100.as_ref() else { return };
+        if let Some(status) = c.poll() {
+            let _ = self.event_tx.send(RadioEvent::Qo100Status(status));
         }
     }
 
@@ -9837,6 +9960,7 @@ impl Engine {
         self.sync_skimmer();
         self.sync_ism();
         self.sync_adsb();
+        self.sync_qo100();
         self.sync_audio_tap();
         self.sync_tci_iq();
         info!(factor, rate = self.state.sample_rate, "front-end decimation");
@@ -10199,6 +10323,7 @@ impl Engine {
             self.sync_skimmer();
             self.sync_ism();
             self.sync_adsb();
+            self.sync_qo100();
         }
         // Re-derive the TCI streams at the new device rate and push a fresh
         // state burst, so connected clients follow the swap.
@@ -11786,6 +11911,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_qo100_window();
                 true
             }
             Err(e) => {

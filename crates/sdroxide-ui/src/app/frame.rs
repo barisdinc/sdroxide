@@ -1206,6 +1206,7 @@ impl SdroxideApp {
                 RadioEvent::IsmReports(r) => self.ism_reports = r,
                 RadioEvent::IsmStatus(st) => self.ism_status = Some(st),
                 RadioEvent::AdsbStatus(st) => self.adsb_status = Some(st),
+                RadioEvent::Qo100Status(st) => self.qo100_status = Some(st),
                 RadioEvent::SstvStatus(s) => {
                     // Adopt a *newly* detected RX mode for the next transmit, but
                     // don't re-apply a steady detection every frame — that would

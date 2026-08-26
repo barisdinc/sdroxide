@@ -360,6 +360,10 @@ pub struct SdroxideApp {
     /// How the device list is ordered, and which way round.
     ism_sort: ism::IsmSort,
     ism_sort_desc: bool,
+    /// The QO-100 beacon decoder's live status — lock state, measured
+    /// frequency offset, decoded telemetry — as last reported by the engine.
+    /// `None` until the decoder has been enabled at least once this session.
+    qo100_status: Option<sdroxide_types::Qo100Status>,
     show_settings: bool,
     /// Scroll the Settings window back to its tab bar on the frame it opens.
     /// The window's scroll offset is egui memory, which outlives both the
@@ -1096,6 +1100,7 @@ impl SdroxideApp {
             ism_status: None,
             ism_sort: ism::IsmSort::default(),
             ism_sort_desc: true,
+            qo100_status: None,
             show_settings: false,
             settings_scroll_top: true,
             voice: sdroxide_types::VoiceStatus::default(),
