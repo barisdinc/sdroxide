@@ -226,6 +226,10 @@ fn a_view_wider_than_the_passband_stays_on_the_scope() {
     about(frame.span_hz, hi - lo, "the scope serves the window it was asked for");
     // The scope arrives finished, so the client scrolls it on its own clock.
     assert!(!frame.rows_clocked, "a finished sweep must not claim to clock rows");
+    // ...and it must not carry any either: the client repeats the spectrum on
+    // its own wall clock for such a lane, and rows sent alongside that
+    // instruction are a picture it would draw twice.
+    assert!(frame.rows.is_empty(), "a lane that does not clock rows handed some out");
 }
 
 #[test]

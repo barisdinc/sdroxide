@@ -43,6 +43,47 @@ impl SpectrumFrame {
         if self.bins.is_empty() { 0 } else { self.rows.len() / self.bins.len() }
     }
 
+    /// Take on the waterfall rows of a frame this one supersedes.
+    ///
+    /// A frame is a picture and only the newest one is worth drawing, so every
+    /// hop between the engine and the screen keeps the latest and drops the
+    /// rest. A *row* is not like that: it is a slice of the band at a moment
+    /// that will not come again, and the waterfall's time axis is drawn on the
+    /// assumption that every row clocked reaches the texture. Dropping the
+    /// frame that carried some is what makes the timestamps outrun the picture
+    /// — visibly, and cumulatively, on any client that cannot hold the frame
+    /// rate it asked for.
+    ///
+    /// So a superseded frame hands its rows on, oldest first, and the picture
+    /// is the only thing thrown away. Only from the same axis: rows pooled at
+    /// another centre, span or width are not this frame's history, and laying
+    /// them under it would draw one band's past beneath another's present.
+    pub fn carry_rows_from(&mut self, dropped: &SpectrumFrame) {
+        if dropped.rows.is_empty()
+            || !dropped.rows_clocked
+            || !self.rows_clocked
+            || dropped.bins.len() != self.bins.len()
+            || dropped.center_hz != self.center_hz
+            || dropped.span_hz != self.span_hz
+        {
+            return;
+        }
+        let mut rows = dropped.rows.clone();
+        rows.append(&mut self.rows);
+        self.rows = rows;
+        // Bounded for the reason the engine bounds its own batch: a client that
+        // has stopped drawing altogether — a tab switched away, a stalled
+        // compositor — must cost the rows it happened over and no more.
+        // Replaying a whole backlog into the texture in one repaint would draw
+        // seconds of band in a single frame and put the time axis out by that
+        // much, which is the fault this is here to prevent.
+        let cols = self.bins.len();
+        let over = self.row_count().saturating_sub(MAX_CARRIED_ROWS);
+        if over > 0 {
+            self.rows.drain(..over * cols);
+        }
+    }
+
     pub fn freq_at_bin(&self, bin: usize) -> f64 {
         let n = self.bins.len().max(1) as f64;
         self.center_hz - self.span_hz / 2.0 + (bin as f64 + 0.5) / n * self.span_hz
@@ -66,6 +107,15 @@ pub const DEFAULT_DISPLAY_BINS: u32 = 2048;
 /// texture on the client. No display is wider, so past here only the bill grows.
 /// Mirrored by `sdroxide_ui::waterfall_gpu::MAX_TEX_W` at the other end.
 pub const MAX_DISPLAY_BINS: u32 = 8192;
+
+/// The most waterfall rows one frame may carry forward from the frames it
+/// superseded — see [`SpectrumFrame::carry_rows_from`].
+///
+/// The client's counterpart to the engine's own batch cap, and the same
+/// reasoning: a backlog longer than this is not a hitch to be made good, it is
+/// a client that stopped drawing, and replaying it would move the waterfall by
+/// more time than the axis beside it admits to.
+pub const MAX_CARRIED_ROWS: usize = 64;
 
 /// Waterfall rows a second when nobody has said otherwise: the historic
 /// `Medium` scroll rate, so an unconfigured engine scrolls as it always did.
@@ -209,5 +259,74 @@ mod tests {
         assert_eq!(f.row_count(), 0);
         f.bins.clear();
         assert_eq!(f.row_count(), 0, "a frame with no columns has no rows either");
+    }
+
+    fn frame(seq: u32, rows: usize) -> SpectrumFrame {
+        SpectrumFrame {
+            seq,
+            center_hz: 14_100_000.0,
+            span_hz: 192_000.0,
+            db_floor: -120.0,
+            db_ceil: -20.0,
+            bins: vec![0; 8],
+            rows: (0..rows).flat_map(|r| [seq as u8, r as u8].repeat(4)).collect(),
+            rows_clocked: true,
+        }
+    }
+
+    /// The waterfall's time axis assumes every row clocked reaches the screen,
+    /// so a frame that is thrown away for being out of date hands its rows to
+    /// the one that replaced it — oldest first, since that is the order they
+    /// are written in.
+    #[test]
+    fn a_superseded_frame_hands_its_rows_on() {
+        let old = frame(1, 2);
+        let mut new = frame(2, 3);
+        new.carry_rows_from(&old);
+        assert_eq!(new.row_count(), 5);
+        assert_eq!(&new.rows[..8], &old.rows[..8], "the older rows go first");
+        assert_eq!(&new.rows[16..], &frame(2, 3).rows[..], "and the new ones after them");
+    }
+
+    /// Rows pooled on another axis are not this picture's history: a retune, a
+    /// zoom or a width change starts the waterfall again rather than laying one
+    /// band's past under another's present.
+    #[test]
+    fn rows_from_another_axis_are_not_carried() {
+        for spoil in [
+            (|f: &mut SpectrumFrame| f.center_hz += 1.0) as fn(&mut SpectrumFrame),
+            |f| f.span_hz *= 2.0,
+            |f| f.bins.push(0),
+            |f| f.rows_clocked = false,
+        ] {
+            let mut old = frame(1, 2);
+            spoil(&mut old);
+            let mut new = frame(2, 3);
+            new.carry_rows_from(&old);
+            assert_eq!(new.row_count(), 3, "rows from a different picture were carried over");
+        }
+        // ...and a lane that does not clock rows at all scrolls on the
+        // client's own wall clock, so there is nothing here to carry.
+        let mut new = frame(2, 3);
+        new.rows_clocked = false;
+        new.carry_rows_from(&frame(1, 2));
+        assert_eq!(new.row_count(), 3);
+    }
+
+    /// A client that has stopped drawing must cost the rows it stopped over
+    /// and no more: a backlog dumped into the texture at once would move the
+    /// waterfall by more time than the axis beside it says has passed.
+    #[test]
+    fn a_backlog_cannot_grow_without_bound() {
+        let mut carried = frame(0, 1);
+        for seq in 1..200u32 {
+            let mut next = frame(seq, 1);
+            next.carry_rows_from(&carried);
+            carried = next;
+        }
+        assert_eq!(carried.row_count(), MAX_CARRIED_ROWS);
+        // What is dropped is the oldest, so the newest row is still the one
+        // that just arrived.
+        assert_eq!(carried.rows[carried.rows.len() - 8..][0], 199);
     }
 }

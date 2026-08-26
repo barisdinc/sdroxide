@@ -746,7 +746,18 @@ impl CallbackTrait for WaterfallCallback {
             // repeat the current spectrum at `rows_to_write`, which the app
             // derives from elapsed wall-clock × the scroll rate.
             let cols = frame.bins.len();
-            let carried = if r.last_rows_seq == Some(frame.seq) { 0 } else { frame.row_count() };
+            // `rows_clocked` first: it selects the fallback below, which
+            // repeats the current spectrum `rows_to_write` times and reads
+            // nothing out of `rows`. A frame that carried rows *and* asked for
+            // the fallback would take the other branch and index past them.
+            // Engines here never send that pair (`Engine::attach_rows`), but
+            // this is a render callback reading a struct off the network, and
+            // the cost of not trusting it is one `&&`.
+            let carried = if !frame.rows_clocked || r.last_rows_seq == Some(frame.seq) {
+                0
+            } else {
+                frame.row_count()
+            };
             // A frame's rows belong to it, so consuming them is per frame and
             // not per repaint — including on a remap, where they were pooled on
             // the axis that has just been rewritten and are dropped rather than

@@ -4996,6 +4996,17 @@ impl Engine {
         // rate most frames carry none, and the client has to know that as
         // "wait for the next one" rather than as "scroll this yourself".
         frame.rows_clocked = self.clocks_rows();
+        // A lane that has just stopped clocking still has whatever it batched
+        // before it stopped — the operator keying up, or zooming the audio
+        // scope in. Those rows go nowhere: the client is about to scroll this
+        // frame on its own wall clock, and rows handed to it alongside that
+        // instruction are a picture drawn twice over. "Does not clock rows"
+        // and "carries rows" are contradictory, and the invariant is worth
+        // holding at the one place that can break it.
+        if !frame.rows_clocked {
+            self.row_batch.clear();
+            return;
+        }
         if self.row_axis == Some((frame.center_hz, frame.span_hz, frame.bins.len())) {
             frame.rows = std::mem::take(&mut self.row_batch);
         } else {

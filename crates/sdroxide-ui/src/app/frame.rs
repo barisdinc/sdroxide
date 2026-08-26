@@ -968,6 +968,10 @@ impl SdroxideApp {
         while let Some(answer) = self.ctrl.poll_probe() {
             self.apply_probe_answer(ctx, answer);
         }
+        // Whether a panadapter frame has already landed in this pass, so the
+        // next one knows it is superseding a picture nothing will ever draw —
+        // see the `Spectrum` arm below.
+        let mut superseded = false;
         while let Some(ev) = self.ctrl.poll_event() {
             match ev {
                 RadioEvent::Capabilities(c) => {
@@ -1027,7 +1031,25 @@ impl SdroxideApp {
                         self.speech.announcer.on_state(&self.state, now);
                     }
                 }
-                RadioEvent::Spectrum(f) => {
+                RadioEvent::Spectrum(mut f) => {
+                    // This runs once per repaint and only the frame it leaves
+                    // here is drawn, so anything it replaces mid-pass is a
+                    // picture nobody sees. Its *rows* are another matter: the
+                    // waterfall's time axis is spaced on the assumption that
+                    // every row the engine clocked reaches the texture, so
+                    // dropping them makes the timestamps outrun the picture by
+                    // exactly the time thrown away, and go on doing it. They
+                    // ride on with the frame that superseded them instead.
+                    //
+                    // A client redrawing more slowly than it asked the engine
+                    // to publish is the ordinary case for this, and the browser
+                    // client is where it shows: its socket delivers in bursts
+                    // between animation frames, so several frames routinely
+                    // arrive in one pass.
+                    if superseded && let Some(prev) = self.frame.as_deref() {
+                        f.carry_rows_from(prev);
+                    }
+                    superseded = true;
                     self.frame = Some(std::sync::Arc::new(f));
                     self.last_spectrum_at = now;
                 }
