@@ -55,6 +55,44 @@ struct Uniforms {
     _pad: [f32; 3],
 }
 
+/// What a history already drawn on one frequency axis has to do to hold a
+/// frame drawn on another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HistoryMove {
+    /// Slide along the axis by this many whole texture columns, positive
+    /// towards higher frequencies. Whole because a fractional slide has to
+    /// interpolate, and this runs on *every frame* of a pan that carries the
+    /// window (issue #133): rounding it to a column keeps the move exact, so
+    /// the history stays as sharp through a drag as it was before it.
+    Shift(f64),
+    /// The span changed, so nothing lines up column for column and the whole
+    /// picture has to be resampled. A zoom, and rare enough to pay for.
+    Rescale,
+}
+
+/// How a `cols`-wide history on the `have` axis has to move to hold a frame on
+/// the `want` axis, both `(centre, span)` in Hz. `None` when it does not have
+/// to move at all.
+///
+/// The interesting answer is that `None`. A move of less than half a column is
+/// a picture nobody can tell from the one already there, and before this every
+/// one of them resampled the entire history — including the fractions of a
+/// hertz a satellite's Doppler correction walks through, which blurred the
+/// waterfall to a wash for no visible motion at all (issue #177).
+fn history_move(have: (f64, f64), want: (f64, f64), cols: f64) -> Option<HistoryMove> {
+    let ((have_center, have_span), (center, span)) = (have, want);
+    if span <= 0.0 {
+        return None;
+    }
+    if (span - have_span).abs() > span * 1e-6 {
+        return Some(HistoryMove::Rescale);
+    }
+    match ((center - have_center) / span * cols).round() {
+        0.0 => None,
+        by => Some(HistoryMove::Shift(by)),
+    }
+}
+
 /// What every radio's waterfall shares: compiled pipelines, bind-group
 /// layouts and samplers. Built once in [`init`].
 struct Shared {
@@ -65,6 +103,14 @@ struct Shared {
     linear: wgpu::Sampler,
     lut_sampler: wgpu::Sampler,
     remap_sampler: wgpu::Sampler,
+    /// The same, unfiltered — for the case a moving window makes the common
+    /// one: a shift along the frequency axis with the span unchanged. Snapped
+    /// to whole columns (see [`WaterfallCallback::prepare`]) it lands on texel
+    /// centres, so nearest returns each column exactly as it was and the
+    /// history survives being shifted sixty times a second. Interpolating
+    /// instead spreads every column a little further into its neighbours each
+    /// time, and a few seconds of dragging blurs the picture into a wash.
+    remap_nearest: wgpu::Sampler,
 }
 
 /// How many rows this repaint appends.
@@ -81,6 +127,14 @@ struct Shared {
 fn rows_to_append(clocked: bool, carried: usize, wall_clock: u32) -> u32 {
     if clocked { carried as u32 } else { wall_clock.min(MAX_FALLBACK_ROWS) }
 }
+
+/// The most rows one repaint may append, whichever way they were clocked.
+///
+/// The size of the staging buffer, so it has to bound the engine's own batch
+/// cap (`MAX_BATCH_ROWS`, 64) as well as the wall-clock fallback below — and a
+/// frame off the network is a struct this callback did not build, so the count
+/// is clamped rather than trusted.
+const MAX_APPEND_ROWS: u32 = 64;
 
 /// The most rows one repaint may scroll on the wall clock.
 ///
@@ -224,6 +278,17 @@ struct WaterfallResources {
     /// frame would be written again on every redraw and the waterfall would run
     /// at the frame rate times however fast the compositor felt like going.
     last_rows_seq: Option<u32>,
+    /// Staging for the rows appended each frame, copied into the history from
+    /// inside the encoder rather than written straight to the texture.
+    ///
+    /// Ordering is the whole reason. Queue writes are applied *before* any of
+    /// the encoder's passes in the same submit, so a row written directly
+    /// would land underneath the remap pass below and be rewritten away —
+    /// which is why appending used to be skipped whenever the geometry moved.
+    /// A copy recorded on the encoder runs in the order it was recorded, so
+    /// the rows survive a remap and the waterfall keeps scrolling through a
+    /// pan that moves the window (issue #177).
+    row_buf: wgpu::Buffer,
     /// Ping-pong history textures. `active` is the live one; the other is the
     /// scratch target for the frequency-remap pass on a geometry change.
     hist: [wgpu::Texture; 2],
@@ -233,6 +298,9 @@ struct WaterfallResources {
     // clearing it, so zoom/retune keeps the existing waterfall on screen.
     remap_uniforms: wgpu::Buffer,
     remap_bg: [wgpu::BindGroup; 2],
+    /// The same pair bound to the unfiltered sampler, for a shift along the
+    /// frequency axis — see [`Shared::remap_nearest`].
+    shift_bg: [wgpu::BindGroup; 2],
     lut_tex: wgpu::Texture,
     uniforms: wgpu::Buffer,
     write_row: u32,
@@ -401,6 +469,12 @@ pub fn init(rs: &RenderState) {
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
+    let remap_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("waterfall-remap-nearest"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    });
     let remap_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("waterfall-remap-pl"),
         bind_group_layouts: &[Some(&remap_layout)],
@@ -437,6 +511,7 @@ pub fn init(rs: &RenderState) {
             linear,
             lut_sampler,
             remap_sampler,
+            remap_nearest,
         },
         per: HashMap::new(),
     });
@@ -525,13 +600,20 @@ impl WaterfallResources {
         };
         let bind_group = [make_bg(0), make_bg(1)];
 
+        let row_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("waterfall-rows"),
+            size: u64::from(tex_w) * u64::from(MAX_APPEND_ROWS),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
         let remap_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("waterfall-remap-uniforms"),
             size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let make_remap_bg = |i: usize| {
+        let make_remap_bg = |i: usize, sampler: &wgpu::Sampler| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("waterfall-remap-bg"),
                 layout: &shared.remap_layout,
@@ -546,22 +628,27 @@ impl WaterfallResources {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&shared.remap_sampler),
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     },
                 ],
             })
         };
-        let remap_bg = [make_remap_bg(0), make_remap_bg(1)];
+        let remap_bg =
+            [make_remap_bg(0, &shared.remap_sampler), make_remap_bg(1, &shared.remap_sampler)];
+        let shift_bg =
+            [make_remap_bg(0, &shared.remap_nearest), make_remap_bg(1, &shared.remap_nearest)];
 
         WaterfallResources {
             tex_w,
             bind_group,
+            row_buf,
             hist,
             hist_view,
             active: 0,
             last_rows_seq: None,
             remap_uniforms,
             remap_bg,
+            shift_bg,
             lut_tex,
             uniforms,
             write_row: 0,
@@ -614,7 +701,12 @@ impl CallbackTrait for WaterfallCallback {
             return Vec::new();
         };
         let WaterfallRegistry { shared, per } = reg;
-        let want_w = self.tex_w.clamp(DEFAULT_TEX_W, MAX_TEX_W);
+        // Rounded up to the 256 bytes a buffer-to-texture copy wants a row to
+        // be a multiple of. Every width actually on offer is a power of two
+        // well above that, so this changes nothing today; it is here so a new
+        // one cannot make the copy below fail a validation rule that has
+        // nothing to do with waterfalls.
+        let want_w = self.tex_w.clamp(DEFAULT_TEX_W, MAX_TEX_W).next_multiple_of(256);
         let r = per
             .entry(self.wf_id)
             .or_insert_with(|| WaterfallResources::new(device, shared, want_w));
@@ -650,24 +742,34 @@ impl CallbackTrait for WaterfallCallback {
 
         if let Some(frame) = &self.frame {
             // The history is stored on one frequency mapping. When the frame's
-            // span/center changes (zoom/retune), remap the existing history onto
-            // the new axis instead of clearing it, so the waterfall continues.
-            let geom_changed = frame.span_hz > 0.0
-                && ((frame.center_hz - r.last_center).abs() > frame.span_hz * 1e-6
-                    || (frame.span_hz - r.last_span).abs() > frame.span_hz * 1e-6);
-            let mut remapped = false;
-            if geom_changed {
+            // span/centre moves off it (zoom, retune, a pan carrying the
+            // window), remap the existing history onto the new axis instead of
+            // clearing it, so the waterfall continues.
+            let cols = f64::from(r.tex_w);
+            let mv =
+                history_move((r.last_center, r.last_span), (frame.center_hz, frame.span_hz), cols);
+            if let Some(mv) = mv {
                 if r.last_span > 0.0 {
                     // Destination column (new axis) -> source column (old axis):
                     // u_src = u_dst * (new_span/old_span) + (new_base-old_base)/old_span.
-                    let old_base = r.last_center - r.last_span / 2.0;
-                    let new_base = frame.center_hz - frame.span_hz / 2.0;
-                    let rm: [f32; 4] = [
-                        (frame.span_hz / r.last_span) as f32,
-                        ((new_base - old_base) / r.last_span) as f32,
-                        0.0,
-                        0.0,
-                    ];
+                    let (scale, offset, bg) = match mv {
+                        HistoryMove::Rescale => {
+                            let old_base = r.last_center - r.last_span / 2.0;
+                            let new_base = frame.center_hz - frame.span_hz / 2.0;
+                            (
+                                (frame.span_hz / r.last_span) as f32,
+                                ((new_base - old_base) / r.last_span) as f32,
+                                &r.remap_bg,
+                            )
+                        }
+                        // A pure shift: the bases differ by whole columns and
+                        // nothing else, so every destination column lands on a
+                        // source texel centre and nearest sampling copies it
+                        // whole. `1 / tex_w` is exact in binary, so the offset
+                        // is too.
+                        HistoryMove::Shift(by) => (1.0, (by / cols) as f32, &r.shift_bg),
+                    };
+                    let rm: [f32; 4] = [scale, offset, 0.0, 0.0];
                     let bytes: [u8; 16] = unsafe { std::mem::transmute(rm) };
                     queue.write_buffer(&r.remap_uniforms, 0, &bytes);
                     let (src, dst) = (r.active, 1 - r.active);
@@ -689,11 +791,10 @@ impl CallbackTrait for WaterfallCallback {
                             multiview_mask: None,
                         });
                         pass.set_pipeline(&shared.remap_pipeline);
-                        pass.set_bind_group(0, &r.remap_bg[src], &[]);
+                        pass.set_bind_group(0, &bg[src], &[]);
                         pass.draw(0..3, 0..1);
                     }
                     r.active = dst;
-                    remapped = true;
                 } else {
                     // First frame on this history: nothing to remap, just start
                     // clean. A clear pass rather than uploading a texture's
@@ -703,10 +804,6 @@ impl CallbackTrait for WaterfallCallback {
                     // the widest tier) held for the life of the tab to be used
                     // once.
                     //
-                    // It also has to count as a remap: queue writes land
-                    // *before* this encoder's passes in the submit, so a row
-                    // appended below would be cleared away again. The flag
-                    // already exists to say exactly that.
                     // Recorded by being dropped: a pass that binds nothing
                     // still carries out its `LoadOp`.
                     drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -725,16 +822,21 @@ impl CallbackTrait for WaterfallCallback {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     }));
-                    remapped = true;
                 }
-                r.last_center = frame.center_hz;
+                // Where the texture now is, which after a snapped shift is the
+                // frame's axis to within half a column and not exactly on it.
+                // Recording the frame's instead would hand that half column to
+                // the next shift, and a drag would round it away frame after
+                // frame until the picture had crept a long way from the band
+                // it is labelled with.
+                r.last_center = match mv {
+                    HistoryMove::Shift(by) if r.last_span > 0.0 => {
+                        r.last_center + by * frame.span_hz / cols
+                    }
+                    _ => frame.center_hz,
+                };
                 r.last_span = frame.span_hz;
             }
-            // Skip appending on the remap frame: rows are written via the queue
-            // (applied before the encoder's remap pass in this submit), so they
-            // would be overwritten. The next frame resumes normally — one
-            // skipped row per zoom is imperceptible.
-            //
             // Where the frame carries its own rows they *are* the scroll: the
             // engine clocked them at the rate this client asked for, each one
             // the loudest thing its slice of time contained, and they are
@@ -759,51 +861,67 @@ impl CallbackTrait for WaterfallCallback {
                 frame.row_count()
             };
             // A frame's rows belong to it, so consuming them is per frame and
-            // not per repaint — including on a remap, where they were pooled on
-            // the axis that has just been rewritten and are dropped rather than
-            // laid over the new one.
+            // not per repaint.
             if carried > 0 {
                 r.last_rows_seq = Some(frame.seq);
             }
-            let n = rows_to_append(frame.rows_clocked, carried, self.rows_to_write);
-            if !remapped && n > 0 && cols > 0 {
+            let n = rows_to_append(frame.rows_clocked, carried, self.rows_to_write)
+                .min(MAX_APPEND_ROWS);
+            if n > 0 && cols > 0 {
                 // Resample to texture width where the frame is not already it.
                 // Routine rather than exceptional: the engine clamps the width
                 // it is asked for against its own FFT, and a station serving two
                 // clients answers whichever spoke last.
-                let widen = |src: &[u8]| -> Vec<u8> {
-                    if src.len() == r.tex_w as usize {
-                        src.to_vec()
+                let w = r.tex_w as usize;
+                let widen = |src: &[u8], dst: &mut [u8]| {
+                    if src.len() == w {
+                        dst.copy_from_slice(src);
                     } else {
-                        (0..r.tex_w as usize)
-                            .map(|i| src[i * src.len() / r.tex_w as usize])
-                            .collect()
+                        for (i, d) in dst.iter_mut().enumerate() {
+                            *d = src[i * src.len() / w];
+                        }
                     }
                 };
-                // The fallback writes one row over and over, so widen it once.
-                let repeated = (carried == 0).then(|| widen(&frame.bins));
+                let mut block = vec![0u8; w * n as usize];
                 for i in 0..n as usize {
-                    let row = match &repeated {
-                        Some(r) => r.clone(),
-                        None => widen(&frame.rows[i * cols..(i + 1) * cols]),
+                    // The fallback repeats the current spectrum; a clocking
+                    // lane has a row of its own for each.
+                    let src = if carried == 0 {
+                        &frame.bins[..]
+                    } else {
+                        &frame.rows[i * cols..(i + 1) * cols]
                     };
-                    queue.write_texture(
+                    widen(src, &mut block[i * w..(i + 1) * w]);
+                }
+                queue.write_buffer(&r.row_buf, 0, &block);
+                // Recorded on the encoder, so it runs after the remap pass
+                // above and the rows land on the axis they were clocked for.
+                // In two copies where the ring wraps: a texture copy is one
+                // rectangle and the newest row may be the last in the ring.
+                let mut done = 0u32;
+                while done < n {
+                    let at = (r.write_row + done) % TEX_H;
+                    let run = (n - done).min(TEX_H - at);
+                    encoder.copy_buffer_to_texture(
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &r.row_buf,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: u64::from(done) * r.tex_w as u64,
+                                bytes_per_row: Some(r.tex_w),
+                                rows_per_image: Some(run),
+                            },
+                        },
                         wgpu::TexelCopyTextureInfo {
                             texture: &r.hist[r.active],
                             mip_level: 0,
-                            origin: wgpu::Origin3d { x: 0, y: r.write_row, z: 0 },
+                            origin: wgpu::Origin3d { x: 0, y: at, z: 0 },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        &row,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(r.tex_w),
-                            rows_per_image: None,
-                        },
-                        wgpu::Extent3d { width: r.tex_w, height: 1, depth_or_array_layers: 1 },
+                        wgpu::Extent3d { width: r.tex_w, height: run, depth_or_array_layers: 1 },
                     );
-                    r.write_row = (r.write_row + 1) % TEX_H;
+                    done += run;
                 }
+                r.write_row = (r.write_row + n) % TEX_H;
             }
         }
 
@@ -832,6 +950,66 @@ impl CallbackTrait for WaterfallCallback {
         pass.set_pipeline(&reg.shared.pipeline);
         pass.set_bind_group(0, &r.bind_group[r.active], &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod history_move_tests {
+    use super::{HistoryMove, history_move};
+
+    /// A 2048-column history over 2 MHz: a column is a bit under a kilohertz.
+    const COLS: f64 = 2048.0;
+    const SPAN: f64 = 2_000_000.0;
+
+    /// The panadapter drag this was written for: the window follows the
+    /// gesture, so the centre arrives a few columns further along every frame
+    /// and the history slides by exactly that many.
+    #[test]
+    fn a_window_that_moved_slides_by_whole_columns() {
+        let col = SPAN / COLS;
+        let mv = history_move((14e6, SPAN), (14e6 + 3.0 * col, SPAN), COLS);
+        assert_eq!(mv, Some(HistoryMove::Shift(3.0)));
+        let mv = history_move((14e6, SPAN), (14e6 - 3.0 * col, SPAN), COLS);
+        assert_eq!(mv, Some(HistoryMove::Shift(-3.0)));
+    }
+
+    /// The whole point: a move too small to reach a column is not a move.
+    /// Doppler on a satellite pass walks the centre a few hertz at a time, and
+    /// resampling the history for each of those is how it used to be blurred
+    /// away while the picture stood still.
+    #[test]
+    fn a_move_under_half_a_column_is_not_a_move() {
+        assert_eq!(history_move((14e6, SPAN), (14e6 + 400.0, SPAN), COLS), None);
+        assert_eq!(history_move((14e6, SPAN), (14e6 - 400.0, SPAN), COLS), None);
+        // Just over half a column is, though — the residue is not allowed to
+        // sit there for ever.
+        assert_eq!(
+            history_move((14e6, SPAN), (14e6 + 500.0, SPAN), COLS),
+            Some(HistoryMove::Shift(1.0))
+        );
+    }
+
+    /// A zoom changes the span, and then nothing lines up column for column.
+    #[test]
+    fn a_zoom_has_to_resample() {
+        assert_eq!(
+            history_move((14e6, SPAN), (14e6, SPAN / 2.0), COLS),
+            Some(HistoryMove::Rescale)
+        );
+    }
+
+    /// The first frame on an empty history: there is no axis to move from, and
+    /// the caller reads this as "start clean".
+    #[test]
+    fn an_empty_history_asks_to_be_rescaled() {
+        assert_eq!(history_move((0.0, 0.0), (14e6, SPAN), COLS), Some(HistoryMove::Rescale));
+    }
+
+    /// A frame with no span at all is not an axis; nothing is done to the
+    /// history on the strength of it.
+    #[test]
+    fn a_frame_with_no_span_moves_nothing() {
+        assert_eq!(history_move((14e6, SPAN), (14e6, 0.0), COLS), None);
     }
 }
 

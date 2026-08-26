@@ -232,6 +232,52 @@ pub struct WfTuning {
     pub wf_id: u64,
 }
 
+/// Slide a per-bin state array along with a window that has moved, and say
+/// whether anything was left to slide.
+///
+/// A front end whose centre has moved is not showing a new picture: the span
+/// and the bin count are the same, so the bins are the same width and the move
+/// is a whole number of them. Everything still inside the window keeps its
+/// history, and only the strip that has just scrolled in is taken raw from the
+/// frame — the one place that side of the band exists at all.
+///
+/// This is what a panadapter drag does once the view is the whole span: the
+/// window follows the gesture (issue #133), so the centre changes on *every*
+/// frame for as long as the drag lasts. Treating each of those as a fresh
+/// mapping threw the smoothing and the peak hold away sixty times a second,
+/// and the trace went from smoothed to raw for the length of the drag
+/// (issue #177).
+///
+/// Returns false when the window has moved further than its own width and
+/// there is nothing to keep; the caller then starts again from the frame.
+fn slide_bins(bins: &mut [f32], from_center: f64, f: &SpectrumFrame) -> bool {
+    let n = bins.len();
+    if n == 0 || n != f.bins.len() || f.span_hz <= 0.0 {
+        return false;
+    }
+    let bin_hz = f.span_hz / n as f64;
+    let d = ((f.center_hz - from_center) / bin_hz).round();
+    if d.abs() >= n as f64 {
+        return false;
+    }
+    // Bin `j` on the new axis is where bin `j + d` was on the old one.
+    let d = d as isize;
+    if d > 0 {
+        let d = d as usize;
+        bins.copy_within(d.., 0);
+        for (b, &raw) in bins[n - d..].iter_mut().zip(&f.bins[n - d..]) {
+            *b = raw as f32;
+        }
+    } else if d < 0 {
+        let d = -d as usize;
+        bins.copy_within(..n - d, d);
+        for (b, &raw) in bins[..d].iter_mut().zip(&f.bins[..d]) {
+            *b = raw as f32;
+        }
+    }
+    true
+}
+
 /// Exponentially-smoothed spectrum for the trace line, folded once per new
 /// frame. Kept separate from the (un-averaged) frame the waterfall consumes so
 /// the "spectrum update speed" setting never blurs the waterfall.
@@ -255,11 +301,13 @@ impl SpectrumSmooth {
             return; // same frame redrawn
         }
         self.last_seq = Some(f.seq);
-        let mapping_changed = self.bins.len() != f.bins.len()
-            || (self.center - f.center_hz).abs() > f.span_hz * 1e-6
-            || (self.span - f.span_hz).abs() > f.span_hz * 1e-6;
+        let rescaled =
+            self.bins.len() != f.bins.len() || (self.span - f.span_hz).abs() > f.span_hz * 1e-6;
+        let moved = (self.center - f.center_hz).abs() > f.span_hz * 1e-6;
+        // A window that has only moved keeps its average; see [`slide_bins`].
+        let mapping_changed = rescaled || (moved && !slide_bins(&mut self.bins, self.center, f));
+        self.center = f.center_hz;
         if mapping_changed || alpha >= 0.999 {
-            self.center = f.center_hz;
             self.span = f.span_hz;
             self.bins = f.bins.iter().map(|&b| b as f32).collect();
             if mapping_changed {
@@ -825,11 +873,13 @@ impl PeakHold {
             return; // same frame redrawn — nothing new to fold in
         }
         self.last_seq = Some(f.seq);
-        let mapping_changed = self.bins.len() != f.bins.len()
-            || (self.center - f.center_hz).abs() > f.span_hz * 1e-6
-            || (self.span - f.span_hz).abs() > f.span_hz * 1e-6;
+        let rescaled =
+            self.bins.len() != f.bins.len() || (self.span - f.span_hz).abs() > f.span_hz * 1e-6;
+        let moved = (self.center - f.center_hz).abs() > f.span_hz * 1e-6;
+        // The held peaks travel with the window too — see [`slide_bins`].
+        let mapping_changed = rescaled || (moved && !slide_bins(&mut self.bins, self.center, f));
+        self.center = f.center_hz;
         if mapping_changed {
-            self.center = f.center_hz;
             self.span = f.span_hz;
             self.bins = f.bins.iter().map(|&b| b as f32).collect();
             self.generation = self.generation.wrapping_add(1);
@@ -2724,6 +2774,77 @@ pub(crate) fn freq_gridlines(lo_hz: f64, hi_hz: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame of `bins` bins over 800 Hz centred on `center`: one bin per
+    /// 100 Hz, so the arithmetic in these tests is readable.
+    fn frame_at(center: f64, bins: Vec<u8>) -> SpectrumFrame {
+        SpectrumFrame {
+            seq: 0,
+            center_hz: center,
+            span_hz: 100.0 * bins.len() as f64,
+            db_floor: -120.0,
+            db_ceil: -20.0,
+            bins,
+            rows: Vec::new(),
+            rows_clocked: false,
+        }
+    }
+
+    /// The window moves up two bins: the trace's own history moves down two,
+    /// and the two bins of band that have just come into view are taken from
+    /// the frame because that is the only place they exist.
+    #[test]
+    fn a_smoothed_trace_travels_with_the_window() {
+        let mut bins = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let f = frame_at(1200.0, vec![91, 92, 93, 94, 95, 96, 97, 98]);
+        assert!(slide_bins(&mut bins, 1000.0, &f));
+        assert_eq!(bins, [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 97.0, 98.0]);
+    }
+
+    /// And the same the other way down the band.
+    #[test]
+    fn a_trace_travels_the_other_way_too() {
+        let mut bins = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let f = frame_at(900.0, vec![91, 92, 93, 94, 95, 96, 97, 98]);
+        assert!(slide_bins(&mut bins, 1000.0, &f));
+        assert_eq!(bins, [91.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    /// A window that has moved clear of where it was has nothing left to
+    /// carry, and the caller starts again from the frame.
+    #[test]
+    fn a_window_moved_clear_of_itself_keeps_nothing() {
+        let mut bins = [1.0, 2.0, 3.0, 4.0];
+        let f = frame_at(2000.0, vec![9, 9, 9, 9]);
+        assert!(!slide_bins(&mut bins, 1000.0, &f));
+    }
+
+    /// What the drag looked like before this: the average was thrown away on
+    /// every frame the window moved, which is every frame of the drag, so the
+    /// trace ran raw for as long as the operator held the mouse down. One
+    /// step of the fold has to carry the history across the move.
+    #[test]
+    fn the_average_survives_a_window_that_moves_every_frame() {
+        let mut smooth = SpectrumSmooth::default();
+        // Settle on a steady band well away from the noisy bin 4.
+        for seq in 0..40u32 {
+            let mut f = frame_at(1000.0, vec![100; 8]);
+            f.seq = seq;
+            smooth.update(&f, 0.2);
+        }
+        // Now move the window one bin per frame while bin 4 of each frame is
+        // wildly off. Smoothed, its excursion has to stay small.
+        let mut worst: f32 = 0.0;
+        for (i, seq) in (40..60u32).enumerate() {
+            let mut bins = vec![100u8; 8];
+            bins[4] = 250;
+            let mut f = frame_at(1000.0 + 100.0 * i as f64, bins);
+            f.seq = seq;
+            smooth.update(&f, 0.2);
+            worst = worst.max(smooth.bins[4]);
+        }
+        assert!(worst < 160.0, "the average was restarted mid-drag: bin reached {worst}");
+    }
 
     /// Zoom the view about its own centre, the way a wheel notch over the
     /// middle of the panadapter does.

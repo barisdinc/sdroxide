@@ -5053,7 +5053,7 @@ impl Engine {
             return;
         };
         let axis = (row.center_hz, row.span_hz, row.bins.len());
-        if self.row_axis != Some(axis) {
+        if self.row_axis != Some(axis) && !self.slide_batch(axis) {
             self.row_batch.clear();
             self.row_axis = Some(axis);
         }
@@ -5087,11 +5087,32 @@ impl Engine {
             self.row_batch.clear();
             return;
         }
-        if self.row_axis == Some((frame.center_hz, frame.span_hz, frame.bins.len())) {
+        let axis = (frame.center_hz, frame.span_hz, frame.bins.len());
+        if self.row_axis == Some(axis) || self.slide_batch(axis) {
             frame.rows = std::mem::take(&mut self.row_batch);
         } else {
             self.row_batch.clear();
         }
+    }
+
+    /// Carry the batched rows onto a window that has moved, and say whether
+    /// they could be.
+    ///
+    /// A centre that has moved is not a different picture, and this is the
+    /// common case rather than the exotic one: a panadapter drag with the view
+    /// fully zoomed out moves the window once per displayed frame (issue
+    /// #133), so between one row and the next — and between the last row and
+    /// the frame it belongs to — the axis has usually shifted. Throwing the
+    /// batch away each time cost about a third of the rows at the medium
+    /// scroll rate, measured, and the waterfall then scrolled slower than its
+    /// own time labels for as long as the drag lasted (issue #177).
+    fn slide_batch(&mut self, to: (f64, f64, usize)) -> bool {
+        let Some(from) = self.row_axis else { return false };
+        if !slide_rows(&mut self.row_batch, from, to) {
+            return false;
+        }
+        self.row_axis = Some(to);
+        true
     }
 
     /// Whether the lane about to be published clocks its own waterfall rows.
@@ -11621,6 +11642,98 @@ mod stereo_tests {
                 assert!(out.iter().all(|s| s.is_finite()), "{level:?} produced non-finite audio");
             }
         }
+    }
+}
+
+/// Slide a batch of pooled waterfall rows from one window onto another, and
+/// say whether it could be done at all.
+///
+/// Only a move: the span and the column count have to match, and then the bins
+/// are the same width and the move is a whole number of them. Each row keeps
+/// whatever of the band is still inside the window, and the strip that has
+/// just come into view is filled with the floor — the same "nothing here yet"
+/// a client's own history remap leaves along the edge it has just uncovered.
+///
+/// False for a zoom, a width change, or a move further than the window is
+/// wide: there is nothing of the old picture left to carry, and the caller
+/// starts the batch again.
+fn slide_rows(batch: &mut [u8], from: (f64, f64, usize), to: (f64, f64, usize)) -> bool {
+    let (to_center, span, cols) = to;
+    if cols == 0 || from.2 != cols || span <= 0.0 || (from.1 - span).abs() > span * 1e-6 {
+        return false;
+    }
+    let d = ((to_center - from.0) / (span / cols as f64)).round();
+    if d.abs() >= cols as f64 {
+        return false;
+    }
+    let d = d as isize;
+    if d != 0 {
+        // Column `j` on the new axis is where column `j + d` was on the old.
+        for row in batch.chunks_exact_mut(cols) {
+            if d > 0 {
+                let d = d as usize;
+                row.copy_within(d.., 0);
+                row[cols - d..].fill(0);
+            } else {
+                let d = d.unsigned_abs();
+                row.copy_within(..cols - d, d);
+                row[..d].fill(0);
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod slide_rows_tests {
+    use super::slide_rows;
+
+    /// 8 columns over 800 Hz centred on 1000: one column per 100 Hz.
+    fn axis(center: f64) -> (f64, f64, usize) {
+        (center, 800.0, 8)
+    }
+
+    /// The window moves up by two columns, so the picture moves down by two
+    /// and the top two columns are band nobody has heard yet.
+    #[test]
+    fn a_window_that_moved_up_carries_its_rows_down() {
+        let mut rows = vec![1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18];
+        assert!(slide_rows(&mut rows, axis(1000.0), axis(1200.0)));
+        assert_eq!(rows[..8], [3, 4, 5, 6, 7, 8, 0, 0]);
+        assert_eq!(rows[8..], [13, 14, 15, 16, 17, 18, 0, 0]);
+    }
+
+    /// And the other way.
+    #[test]
+    fn a_window_that_moved_down_carries_them_up() {
+        let mut rows = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(slide_rows(&mut rows, axis(1000.0), axis(900.0)));
+        assert_eq!(rows, [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    /// Less than half a column is no move at all — a fractional shift applied
+    /// every frame would blur the batch away for nothing.
+    #[test]
+    fn a_move_shorter_than_a_column_leaves_the_rows_alone() {
+        let mut rows = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(slide_rows(&mut rows, axis(1000.0), axis(1040.0)));
+        assert_eq!(rows, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// A zoom is not a move, and neither is a width change: nothing lines up
+    /// column for column, so the caller has to start again.
+    #[test]
+    fn a_zoom_or_a_width_change_cannot_be_slid() {
+        let mut rows = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(!slide_rows(&mut rows, axis(1000.0), (1000.0, 400.0, 8)));
+        assert!(!slide_rows(&mut rows, axis(1000.0), (1000.0, 800.0, 4)));
+    }
+
+    /// Past the width of the window there is nothing left to carry.
+    #[test]
+    fn a_move_clear_of_the_window_keeps_nothing() {
+        let mut rows = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(!slide_rows(&mut rows, axis(1000.0), axis(1900.0)));
     }
 }
 
