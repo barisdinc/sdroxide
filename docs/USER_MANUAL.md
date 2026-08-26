@@ -6177,18 +6177,20 @@ software speaks. No licence for RS-BA1 is needed, and no computer at the radio
 end: sdroxide talks to the transceiver directly.
 
 It covers every Icom with a network port — the **IC-7300MK2**, **IC-705**,
-**IC-9700**, **IC-7610**, **IC-905** and **IC-R8600** — because the protocol is
-the same on all of them and the radio reports its own CI-V address when the
-session opens. There is nothing to choose from a model list.
+**IC-7760**, **IC-9700**, **IC-7610**, **IC-905** and **IC-R8600** — because the
+protocol is the same on all of them and the radio reports its own CI-V address
+when the session opens. There is nothing to choose from a model list. On the
+two-box **IC-7760** it is the **[LAN] port on the RF deck** that speaks this
+protocol, not the one on the controller.
 
 One connection carries three things:
 
 - **Control** — the whole CI-V command set, tunnelled over the network. Dial,
   mode, PTT, the S-meter, SWR and the radio's own CW keyer.
 - **Audio**, both ways, at up to 48 kHz.
-- **The radio's spectrum scope** — its own 475-point sweep, up to ±500 kHz wide.
-  On the AF path this is the *main* panadapter; on the 12 kHz IF it is the
-  full-band waterfall above it.
+- **The radio's spectrum scope** — its own sweep, 475 points on most models and
+  689 on an IC-7760, up to ±500 kHz wide. On the AF path this is the *main*
+  panadapter; on the 12 kHz IF it is the full-band waterfall above it.
 
 ##### On the radio, first
 
@@ -6198,11 +6200,23 @@ Three settings, all under **MENU » SET**:
 2. **Network > Network User1 (or User2)** — set a **network user name** and
    **password**, and enter the same pair in sdroxide.
 3. **Connectors > MOD Input > DATA OFF MOD** and **DATA MOD** — **LAN** (on an
-   IC-705, **WLAN**), or transmit audio is not heard. sdroxide writes this for
-   you on a model whose menu numbering it knows — currently the **IC-7300MK2**
-   and the **IC-705** — and on any other it says so in the status line and
-   leaves the menu alone. Not on a receiver: an **IC-R8600** has no modulation
-   input to set, so neither the write nor the warning appears.
+   IC-705, **WLAN**), or transmit audio is not heard. An **IC-7760** has three
+   data slots rather than one, **DATA1 MOD** through **DATA3 MOD**, and all of
+   them want LAN. sdroxide writes this for you on a model whose menu numbering
+   it knows — currently the **IC-7300MK2**, the **IC-705** and the **IC-7760** —
+   and on any other it says so in the status line and leaves the menu alone. Not
+   on a receiver: an **IC-R8600** has no modulation input to set, so neither the
+   write nor the warning appears.
+
+   The numbering is what sdroxide has to know, and it is not the menu path: it
+   is a flat index the manufacturer renumbers between models, with the radio's
+   calibration marker a few places away from the modulation block. That is why
+   an unrecognised model is asked to set the item by hand rather than guessed
+   at. A radio whose CI-V address you have changed in **Connectors > CI-V** is
+   still recognised: the name it reports is matched too, and either piece of
+   evidence on its own is enough. Only when the two name *different* Icoms —
+   a network radio name typed over the model's — does sdroxide fall back to the
+   address alone.
 
 A receiver in the **IC-R** line gets no PTT, drive, tune or SWR controls at all,
 whatever its capability block says — at least one of them advertises a transmit
@@ -6213,23 +6227,27 @@ announce itself on the network, so there is no Discover button.
 
 ##### How wide the waterfall gets
 
-**No Icom outputs I/Q, over any interface** — not over USB, not over the network.
-That sets a hard ceiling on what any program, sdroxide or RS-BA1 alike, can show:
+**No Icom outputs I/Q over the network.** One outputs it at all: the IC-7760's
+RF deck has a USB 3.0 socket that streams 1.92 Msps I/Q, but only through a
+manufacturer-supplied FTDI driver on Windows, and nothing of it reaches the
+[LAN] port beside it. So over the network the ceiling is the same on every model,
+for sdroxide and RS-BA1 alike:
 
 - On **AF** the radio has already demodulated, so the audio stream is not a
   picture of the band at all — it is a picture of what came through the rig's
   filter, one-sided and never wider than that filter. The **panadapter is
   therefore the radio's own scope**: centred on the dial, as wide as **Scope
   span**, and the same view SDR-Control and RS-BA1 give. It is a picture the
-  radio draws and sends as 475 finished magnitude bins, so clicking it tunes but
-  nothing can be demodulated, notched or skimmed *inside* it without moving the
-  dial.
+  radio draws and sends as finished magnitude bins — 475 of them, or 689 on an
+  IC-7760 — so clicking it tunes but nothing can be demodulated, notched or
+  skimmed *inside* it without moving the dial.
 - On the **12 kHz IF** the panadapter is real spectrum — about **±12 kHz** around
   the dial at 48000 Hz — which can be demodulated, notched, decoded and skimmed.
   The scope then lives in the strip above it instead.
 - **Zoom in past the rig's filter and the audio takes over.** The scope is 475
   points across whatever **Scope span** is set to — 1053 Hz per point at ±250 kHz,
-  105 Hz at ±25 kHz — and it arrives about four times a second whatever the span,
+  105 Hz at ±25 kHz, and about a third finer than that on an IC-7760's 689 —
+  and it arrives about four times a second whatever the span,
   so past a point zooming magnifies rather than resolves and a signal stays one
   block wide. Once the visible window fits inside the rig's passband the
   panadapter is drawn from the demodulated audio instead: 48 kHz through the
@@ -6246,8 +6264,9 @@ That sets a hard ceiling on what any program, sdroxide or RS-BA1 alike, can show
   to **1 MHz** across. On AF that is worth leaving on once you zoom the
   panadapter into part of the sweep, since the strip keeps the whole of it.
 
-Because the scope is uncalibrated — Icom publishes a 0..160 amplitude scale with
-no dB per step — its levels are ranged automatically rather than from the
+Because the scope is uncalibrated — Icom publishes a 0..160 amplitude scale
+(0..200 on an IC-7760) with no dB per step — its levels are ranged
+automatically rather than from the
 **FIT** / floor-and-ceiling controls, which govern the audio-band panadapter and
 every other front end as before.
 
@@ -10718,7 +10737,7 @@ All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
 - Two Icoms are two of the same USB codec under one name — the device list
   tags the second (`[#a3f1]`-style) so they can be told apart.
 
-### 15.4 Icom over LAN (IC-705, IC-7300MK2, IC-7610, IC-9700, IC-905)
+### 15.4 Icom over LAN (IC-705, IC-7300MK2, IC-7610, IC-7760, IC-9700, IC-905)
 
 All in [§6.2.10](#6210-icom-lan-network-radios):
 
@@ -10726,11 +10745,11 @@ All in [§6.2.10](#6210-icom-lan-network-radios):
   = ON, a **Network User1/User2** name and password (the same pair goes in
   sdroxide), and **Connectors > MOD Input**: `DATA OFF MOD` and `DATA MOD` =
   `LAN` (`WLAN` on an IC-705). sdroxide writes the third one for you only on
-  the IC-7300MK2 and IC-705; on other models it says so and leaves the menu
-  alone.
+  the IC-7300MK2, IC-705 and IC-7760; on other models it says so and leaves the
+  menu alone.
 - No discovery — read the IP off the radio's **Network** screen. Port 50001
   unless changed there.
-- **No Icom outputs I/Q on any interface.** The full-band view is the radio's
+- **No Icom outputs I/Q over the network.** The full-band view is the radio's
   own scope; the panadapter on AF is the demodulated audio, on the 12 kHz IF
   (which needs the **48000 Hz** audio rate) about ±12 kHz around the dial.
 - **CW keying** `Sound card (MCW)` keeps the radio in plain USB, the same

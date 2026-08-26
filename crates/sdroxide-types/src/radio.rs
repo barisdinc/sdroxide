@@ -423,6 +423,7 @@ pub enum IcomModel {
     Ic7300,
     Ic7300Mk2,
     Ic705,
+    Ic7760,
     Ic905,
     Ic9700,
     Ic7610,
@@ -438,10 +439,11 @@ pub enum IcomModel {
 }
 
 impl IcomModel {
-    pub const ALL: [IcomModel; 15] = [
+    pub const ALL: [IcomModel; 16] = [
         IcomModel::Ic7300,
         IcomModel::Ic7300Mk2,
         IcomModel::Ic705,
+        IcomModel::Ic7760,
         IcomModel::Ic905,
         IcomModel::Ic9700,
         IcomModel::Ic7610,
@@ -461,6 +463,7 @@ impl IcomModel {
             IcomModel::Ic7300 => "IC-7300",
             IcomModel::Ic7300Mk2 => "IC-7300MK2",
             IcomModel::Ic705 => "IC-705",
+            IcomModel::Ic7760 => "IC-7760",
             IcomModel::Ic905 => "IC-905",
             IcomModel::Ic9700 => "IC-9700",
             IcomModel::Ic7610 => "IC-7610",
@@ -483,6 +486,7 @@ impl IcomModel {
             IcomModel::Ic7300 => 0x94,
             IcomModel::Ic7300Mk2 => 0xB6,
             IcomModel::Ic705 => 0xA4,
+            IcomModel::Ic7760 => 0xB2,
             IcomModel::Ic905 => 0xAC,
             IcomModel::Ic9700 => 0xA2,
             IcomModel::Ic7610 => 0x98,
@@ -496,6 +500,19 @@ impl IcomModel {
             IcomModel::Ic7000 => 0x70,
             IcomModel::Other => return None,
         })
+    }
+
+    /// Top of this model's `27 00` scope amplitude scale.
+    ///
+    /// `160` across the IC-7300 generation; the IC-7760 sweeps a taller
+    /// `0 ~ 200`. Icom documents no dB per step for either, so this only says
+    /// what "full scale" means — reading the wrong one puts the whole trace
+    /// 20 dB out, which the panadapter's auto-levelling then hides.
+    pub fn scope_full_scale(self) -> u8 {
+        match self {
+            IcomModel::Ic7760 => 200,
+            _ => 160,
+        }
     }
 
     /// The `1A` sub-command that switches DATA mode on this model, or `None`

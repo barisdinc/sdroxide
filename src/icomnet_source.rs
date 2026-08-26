@@ -7,8 +7,11 @@
 //!
 //! # Two receive paths
 //!
-//! No Icom offers I/Q, over any interface. What the LAN gives instead is two
-//! different things, and the operator picks between them:
+//! No Icom offers I/Q over its network port — the IC-7760's RF deck has a USB
+//! 3.0 socket that does, at 1.92 Msps, but it is reached through a
+//! manufacturer-supplied FTDI D3XX driver and shares nothing with this
+//! protocol. What the LAN gives instead is two different things, and the
+//! operator picks between them:
 //!
 //! * **AF** — the radio demodulates and we get audio, exactly as with a CAT rig
 //!   and a sound card. `caps.audio_mode` is set, and the *main* panadapter is
@@ -32,11 +35,15 @@
 //!
 //! # Status
 //!
-//! An IC-705 has received through this over WiFi, on the 12 kHz IF. Everything
-//! else — transmit, the other models' menu numbering, the meters — is still
-//! only exercised against `sdroxide_icomnet::sim`, and the session trace is
-//! copyable from the settings tab so a user with a radio can report what
-//! actually happened.
+//! An IC-705 has received through this over WiFi, on the 12 kHz IF. An IC-7760
+//! has connected over its RF deck's LAN port and streamed audio, its dial, its
+//! meter and its scope (issue #183) — but that session ran *before* the model
+//! was in the table, so what the trace proves is the transport, not the menu
+//! writes or the 689-bin sweep now built from its CI-V reference guide.
+//! Everything else — transmit, the other models' menu numbering, the meters —
+//! is still only exercised against `sdroxide_icomnet::sim`, and the session
+//! trace is copyable from the settings tab so a user with a radio can report
+//! what actually happened.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -122,10 +129,11 @@ const SCOPE_STALL: Duration = Duration::from_secs(3);
 const SCOPE_RETRY: Duration = Duration::from_secs(2);
 const SCOPE_RETRY_MAX: Duration = Duration::from_secs(30);
 
-/// The scope's amplitude scale is 0..=160 with no documented dB per step. The
-/// engine's `auto_levels` normalises whatever it is given, so this only has to
-/// put the trace in a plausible range and keep it linear; the constant is a
-/// calibration knob for whoever first sees one against a known signal.
+/// The scope's amplitude scale runs from 0 to the model's own full scale, and
+/// Icom documents no dB per step for any of them. The engine's `auto_levels`
+/// normalises whatever it is given, so this only has to put the trace in a
+/// plausible range and keep it linear; the constant is a calibration knob for
+/// whoever first sees one against a known signal.
 const SCOPE_DB_PER_UNIT: f32 = 0.5;
 
 pub struct IcomNetSource {
@@ -333,9 +341,12 @@ impl IcomNetSource {
         // naturally not in the table.
         if cfg.set_mod_input_on_open && self.can_transmit() {
             match model.lan_mod_input {
-                Some((data_off, data_on, lan)) => {
-                    self.send(civ::set_menu_frame(self.civ_addr, data_off, &[lan]));
-                    self.send(civ::set_menu_frame(self.civ_addr, data_on, &[lan]));
+                Some((items, lan)) => {
+                    // DATA-OFF and every DATA slot the radio has: two on an
+                    // IC-7300MK2, four on an IC-7760.
+                    for item in items {
+                        self.send(civ::set_menu_frame(self.civ_addr, *item, &[lan]));
+                    }
                 }
                 None => notes.push(
                     "sdroxide does not know this model's menu numbering, so it cannot switch \
@@ -679,15 +690,18 @@ impl IqSource for IcomNetSource {
 
     /// The radio's own scope, as the full-band panadapter.
     ///
-    /// These are finished magnitude bins on the radio's 0..=160 scale, not
-    /// anything derived from I/Q — there is no I/Q on this interface. Mapping
-    /// them onto a dB axis is a linear guess with an uncalibrated slope; the
-    /// engine's auto-levelling makes the picture right even where the absolute
-    /// numbers are not.
+    /// These are finished magnitude bins on the radio's own scale — 0..=160 on
+    /// the IC-7300 generation, 0..=200 on an IC-7760 — not anything derived
+    /// from I/Q, of which there is none on this interface. Mapping them onto a
+    /// dB axis is a linear guess with an uncalibrated slope; the engine's
+    /// auto-levelling makes the picture right even where the absolute numbers
+    /// are not, which is also why reading the top of the scale off the wrong
+    /// model is a 20 dB offset rather than a broken trace.
     fn wide_spectrum_db(&mut self, out: &mut Vec<f32>) -> Option<(f64, f64)> {
         let (center, span, bins) = self.scope_frame.take()?;
+        let full = f32::from(self.dev.info().model.scope_full_scale);
         out.clear();
-        out.extend(bins.iter().map(|&b| (f32::from(b) - 160.0) * SCOPE_DB_PER_UNIT));
+        out.extend(bins.iter().map(|&b| (f32::from(b) - full) * SCOPE_DB_PER_UNIT));
         Some((center, span))
     }
 
@@ -1261,6 +1275,78 @@ mod tests {
         // And never the USB port's copy of the same setting, one item block
         // earlier — that would leave the network stream on AF.
         assert!(!menu(0x01, 0x09, 0x01), "the USB output select is not ours to write");
+    }
+
+    /// Field report, issue #183: an IC-7760 over its RF deck's LAN port came
+    /// up with both "menu numbering unknown" notes, so its LAN output stayed on
+    /// AF — a 3 kHz-wide audio FFT where the operator had asked for the 12 kHz
+    /// IF — and nothing it transmitted was modulated by sdroxide at all.
+    #[test]
+    fn an_ic7760_gets_its_own_menu_numbers_and_every_one_of_its_data_slots() {
+        let sim = Sim::start(SimOptions {
+            civ_address: 0xB2,
+            radio_name: "IC-7760".into(),
+            scope: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut c = cfg(&sim);
+        c.rx_source = IcomRxSource::If12k;
+        let src = IcomNetSource::open(&c).expect("open");
+        assert_eq!(src.open_status(), None, "nothing left for the operator to do by hand");
+
+        let menu = |hi: u8, lo: u8, value: u8| {
+            sim.civ_frames().iter().any(|f| {
+                f.len() >= 10
+                    && f[4] == 0x1A
+                    && f[5] == 0x05
+                    && f[6] == hi
+                    && f[7] == lo
+                    && f[8] == value
+            })
+        };
+        wait_for("the IC-7760 menu writes", || {
+            // LAN AF/IF Output > Output Select = IF, and DATA OFF plus all
+            // three DATA slots to LAN — which is `09` on this radio.
+            menu(0x01, 0x23, 0x01)
+                && menu(0x01, 0x29, 0x09)
+                && menu(0x01, 0x30, 0x09)
+                && menu(0x01, 0x31, 0x09)
+                && menu(0x01, 0x32, 0x09)
+        });
+        // Never the [USB B] port's or the LINE-OUT socket's copy of the output
+        // select, and never the MK2's or the IC-705's value for "LAN" — `03`
+        // is ACC on this radio and `05` is MIC+LINE-IN.
+        assert!(!menu(0x01, 0x03, 0x01), "the USB output select is not ours to write");
+        assert!(!menu(0x01, 0x10, 0x01), "the LINE-OUT output select is not ours either");
+        assert!(!menu(0x01, 0x29, 0x03) && !menu(0x01, 0x29, 0x05), "another model's LAN value");
+    }
+
+    /// The IC-7760 is the first LAN Icom whose sweep is neither 475 bins nor a
+    /// 0..=160 scale: 689 points on 0..=200. Reading the old shape would draw
+    /// the right band at the wrong width and 20 dB out.
+    #[test]
+    fn an_ic7760_sweep_arrives_as_689_bins_on_its_own_taller_scale() {
+        let sim = Sim::start(SimOptions {
+            civ_address: 0xB2,
+            radio_name: "IC-7760".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+
+        let mut buf = vec![Complex32::default(); 1024];
+        let mut bins = Vec::new();
+        wait_for("a scope sweep", || {
+            let _ = src.read(&mut buf);
+            src.wide_spectrum_db(&mut bins).is_some()
+        });
+        assert_eq!(bins.len(), 689, "the whole sweep, in the one frame a LAN Icom sends");
+        // The simulator plants its peak just below full scale, so the loudest
+        // bin has to land just below 0 dB. On the 0..=160 scale the other
+        // models use, the same byte would come out well above it.
+        let peak = bins.iter().copied().fold(f32::MIN, f32::max);
+        assert!((-10.0..0.0).contains(&peak), "peak came back at {peak} dB");
     }
 
     #[test]
