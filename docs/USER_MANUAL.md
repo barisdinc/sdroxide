@@ -3317,6 +3317,16 @@ The skimmers decode many signals at once across a wide (~192 kHz) window and
 label each one on the waterfall. There are three: **CW**, **PSK31**, and
 **RTTY**.
 
+**Where they listen.** The window follows the waterfall: it is placed on the part
+of the band you are looking at, and only signals actually on screen are tracked
+and decoded. On a narrow receiver that is the whole span and there is nothing to
+choose, but a wide front end — an RX-888 handing over megahertz at a time —
+delivers far more band than a skimmer's window covers, and the window goes where
+you are rather than sitting in the middle of the span. Pan across the band and it
+follows, once the pan has left the window it was on; zoom out past 192 kHz and it
+keeps your dial covered, so the part of a band-wide view that gets skimmed is the
+part you are tuned into.
+
 ![The skimmer labelling signals on the waterfall](images/10-skimmer.png)
 
 - The **SKIM** button in the Display module opens the skimmer popup: one row per

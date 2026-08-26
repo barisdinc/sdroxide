@@ -1883,6 +1883,13 @@ struct Engine {
     /// The client's visible waterfall window, in absolute Hz; `None` until a
     /// client says otherwise (a headless server skims the whole window).
     skim_view: Option<(f64, f64)>,
+    /// Where the skim window is currently centred, in absolute Hz, so a retune
+    /// or a pan can tell whether it has to move. Meaningless while `skim_ddc`
+    /// is `None`.
+    skim_center_hz: f64,
+    /// The front-end rate the skim chain was built from — the one thing about
+    /// it that cannot be retuned in place. See [`Engine::sync_skim_window`].
+    skim_in_rate: f64,
     /// The operator's persisted skimmer preference. Distinct from
     /// `state.skimmer`, which is the *live* setting and is forced off on an
     /// audio-mode source — this is what a wideband source gets restored to.
@@ -1891,7 +1898,7 @@ struct Engine {
     /// plan, plus a worker thread, present only while the decoder is enabled.
     ///
     /// A second window rather than a share of the skimmer's: that one is 192 kHz
-    /// wide and pinned to the hardware centre, and the ISM plan needs about
+    /// wide and follows the operator's waterfall, and the ISM plan needs about
     /// 1.5 MHz placed on 868.9 MHz.
     ism_ddc: Option<Ddc>,
     ism: Option<IsmController>,
@@ -2136,9 +2143,85 @@ struct Engine {
     shared_gen_seen: u64,
 }
 
-/// Target width of the CW skimmer window (Hz); the Ddc snaps to the nearest
+/// Target width of the skimmers' window (Hz); the Ddc snaps to the nearest
 /// integer decimation of the device rate.
+///
+/// Not the width of the front end, and deliberately so. Every stage below is
+/// sized from this rate — the detector's bins are `rate / 4096`, and DeepCW's
+/// front end builds a transform proportional to it — so a window as wide as an
+/// RX-888's span would put 8 kHz in a bin and cost a transform to match. 192 kHz
+/// resolves CW to about 47 Hz and covers a whole HF band; where the operator is
+/// looking at more than that, [`skim_center_for`] decides which part of it gets
+/// skimmed.
 const SKIM_TARGET_HZ: f64 = 192_000.0;
+
+/// Where the skim window belongs, in absolute Hz.
+///
+/// The window is a decimation of the front end's stream, not a second receiver:
+/// it is one slice of what is arriving, and something has to choose which. It
+/// used to be pinned to the hardware centre, which is right on a front end whose
+/// span is a band and wrong on one whose span is all of HF — an RX-888 handed
+/// 32 Msps centres on 16.2 MHz, so the skimmers sat in the middle of nowhere
+/// while the operator watched 20 m, found nothing to decode and looked broken.
+///
+/// So it follows the waterfall instead:
+///
+/// * A view that fits inside the window is centred in it, and the slack either
+///   side is what a pan travels through before anything has to move.
+/// * A view wider than the window keeps the dial in it — of a band-wide screen,
+///   the part the operator cares about is where they are listening — clamped so
+///   the window stays inside the view rather than hanging off the edge of it.
+/// * With no view at all (a headless server, nobody watching) the window stays
+///   where it is, and a fresh one starts on the hardware centre.
+///
+/// `current` is where the window is now, and gets the benefit of the doubt:
+/// moving it costs every track in it and every callsign half-read, so one that
+/// still covers what is on screen stays put. Hence a rule and not just an
+/// arithmetic centre — a drag that re-cut the window every frame would decode
+/// nothing at all.
+fn skim_center_for(
+    view: Option<(f64, f64)>,
+    dial_hz: f64,
+    dev_center_hz: f64,
+    dev_span_hz: f64,
+    win_hz: f64,
+    current: Option<f64>,
+) -> f64 {
+    let half = win_hz / 2.0;
+    let (dev_lo, dev_hi) = (dev_center_hz - dev_span_hz / 2.0, dev_center_hz + dev_span_hz / 2.0);
+    // Nothing to choose: the window is everything the front end delivers.
+    if !(win_hz.is_finite() && dev_span_hz.is_finite()) || win_hz >= dev_span_hz {
+        return dev_center_hz;
+    }
+    let Some((lo, hi)) = view else { return current.unwrap_or(dev_center_hz) };
+    // What of the view the front end actually reaches. A client whose window
+    // runs past the end of the span is asking for spectrum nobody has.
+    let (lo, hi) = (lo.max(dev_lo), hi.min(dev_hi));
+    if hi <= lo {
+        return current.unwrap_or(dev_center_hz);
+    }
+    let want = if hi - lo <= win_hz || !(lo..=hi).contains(&dial_hz) {
+        (lo + hi) / 2.0
+    } else {
+        dial_hz.clamp(lo + half, hi - half)
+    };
+    // The window is an NCO offset inside the stream, so both its edges have to
+    // stay inside what was sampled.
+    let want = want.clamp(dev_lo + half, dev_hi - half);
+    let Some(cur) = current else { return want };
+    // How much of the screen a window centred there would reach.
+    let covered = |c: f64| (hi.min(c + half) - lo.max(c - half)).max(0.0);
+    let holds = cur - half >= dev_lo - 1.0
+        && cur + half <= dev_hi + 1.0
+        && covered(cur) >= covered(want) - 1.0
+        // On a screen wider than the window, covering it is all a placement can
+        // do and every placement does it — so the dial decides, with a dead band
+        // wide enough that ordinary tuning does not keep re-cutting the window.
+        && (hi - lo <= win_hz
+            || !(lo..=hi).contains(&dial_hz)
+            || (dial_hz - cur).abs() <= win_hz / 4.0);
+    if holds { cur } else { want }
+}
 
 /// How soon after noticing a disconnected front-end the first reconnect attempt
 /// runs, and the ceiling the spacing doubles up to while attempts keep failing.
@@ -2513,6 +2596,8 @@ fn engine_thread(
         skimmer: None,
         skim_buf: Vec::new(),
         skim_view: None,
+        skim_center_hz: 0.0,
+        skim_in_rate: 0.0,
         skim_cfg,
         ism_ddc: None,
         ism: None,
@@ -3880,10 +3965,7 @@ impl Engine {
                 // while the dial plainly read 868.88 MHz. Switching the decoder
                 // off and on rebuilt it and it worked, which is the tell: the
                 // window was stale, not wrong.
-                if let Some(sk) = self.skimmer.as_ref() {
-                    sk.set_center(hz);
-                }
-                self.sync_skimmer_view();
+                self.sync_skim_window();
                 self.sync_ism_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
@@ -4067,13 +4149,11 @@ impl Engine {
         // Where the hardware demonstrably is, is by definition a frequency it
         // took — this is the dial the rig itself just reported.
         self.good_vfo_hz = self.state.active_freq_hz();
-        // The skim window follows the hardware centre; re-label spots and clear
-        // tracks so nothing straddles the old and new axes (as `retune_named`
-        // does for a retune we asked for).
-        if let Some(sk) = self.skimmer.as_ref() {
-            sk.set_center(center);
-        }
-        self.sync_skimmer_view();
+        // The skim window is placed against the hardware centre, so it has to be
+        // re-placed against the new one — and re-labelled and cleared if it
+        // really moved, so no track straddles the old and new axes (as
+        // `retune_named` does for a retune we asked for).
+        self.sync_skim_window();
         // The ISM window does *not* follow the hardware centre: its channels are
         // at fixed frequencies, so it stays on them for as long as the new span
         // still reaches, and only slides when it has to.
@@ -5853,7 +5933,10 @@ impl Engine {
                 let view = view.filter(|(lo, hi)| hi > lo && lo.is_finite() && hi.is_finite());
                 if self.skim_view != view {
                     self.skim_view = view;
-                    self.sync_skimmer_view();
+                    // Not just the gate: the window itself follows the operator's
+                    // waterfall, and a pan far enough out of it moves the whole
+                    // slice of band the skimmers are reading.
+                    self.sync_skim_window();
                 }
             }
             SetSpectrumCfg(new_cfg) => {
@@ -6610,9 +6693,9 @@ impl Engine {
 
     /// Construct or tear down the wideband skimmer worker: it runs while at
     /// least one kind (CW / PSK / RTTY) is enabled. The skim window is a
-    /// dedicated decimation of the raw IQ centered on the device center (offset
-    /// 0), so tuning the VFO within the span doesn't disturb the streaming
-    /// decoders.
+    /// dedicated decimation of the raw IQ, placed on the part of the band the
+    /// operator is looking at ([`skim_center_for`]) and kept there by
+    /// [`Engine::sync_skim_window`].
     fn sync_skimmer(&mut self) {
         // Wideband-only: an audio-mode source (a CAT rig on a sound card) has
         // only a narrow audio slice, so the skimmers stay off there — and the
@@ -6623,13 +6706,18 @@ impl Engine {
         }
         match (self.state.skimmer.any_enabled(), self.skimmer.is_some()) {
             (true, false) => {
-                let ddc = Ddc::new(self.state.sample_rate, SKIM_TARGET_HZ);
+                let (ddc, center) = self.build_skim_window();
                 let rate = ddc.out_rate();
-                self.skimmer =
-                    Some(SkimmerController::new(rate, self.state.center_hz, self.state.skimmer));
+                self.skimmer = Some(SkimmerController::new(
+                    rate,
+                    center,
+                    self.state.center_hz - center,
+                    self.state.skimmer,
+                ));
                 self.skim_ddc = Some(ddc);
+                self.skim_center_hz = center;
                 self.sync_skimmer_view();
-                info!(rate, "skimmer started");
+                info!(rate, center, "skimmer started");
             }
             (false, true) => {
                 self.skimmer = None;
@@ -6641,11 +6729,82 @@ impl Engine {
         }
     }
 
+    /// A down-converter for the skim window as it should be placed *now*,
+    /// already mixed onto it, and the absolute frequency it is centred on.
+    ///
+    /// The one place the chain is built, so the rate it was built from is always
+    /// recorded with it.
+    fn build_skim_window(&mut self) -> (Ddc, f64) {
+        let mut ddc = Ddc::new(self.state.sample_rate, SKIM_TARGET_HZ);
+        let center = self.skim_window_center_hz(ddc.out_rate(), None);
+        ddc.set_offset_hz(center - self.state.center_hz);
+        self.skim_in_rate = self.state.sample_rate;
+        (ddc, center)
+    }
+
+    /// Where the skim window should sit for a window of `rate`, given where the
+    /// operator is looking and where it is now.
+    fn skim_window_center_hz(&self, rate: f64, current: Option<f64>) -> f64 {
+        skim_center_for(
+            self.skim_view,
+            self.state.rx_freq_hz(),
+            self.state.center_hz,
+            self.state.sample_rate,
+            rate,
+            current,
+        )
+    }
+
+    /// Re-place the skim window after a retune, a pan or a rate change, and hand
+    /// the skimmers the view they are gated to.
+    ///
+    /// The rate is the one thing that cannot be re-pointed: the detector's bin
+    /// width, its frame clock, the WPM it reads off that clock and DeepCW's whole
+    /// front end are all built from it, and none can be retuned in place. So a
+    /// chain built for a rate the front end has left is rebuilt rather than kept
+    /// — the mistake issue #142 was in the ISM lane, where a stale window went
+    /// quiet and only switching the decoder off and on put it right.
+    ///
+    /// Everything else moves in place. The NCO offset is re-seated on every call,
+    /// even where the window has not moved in absolute terms: it is measured from
+    /// the hardware centre, and on a front end wide enough to keep the view in
+    /// sight either side of a retune that centre is exactly what just moved.
+    fn sync_skim_window(&mut self) {
+        let Some(ddc) = self.skim_ddc.as_ref() else { return };
+        let want_rate = Ddc::rate_for(self.state.sample_rate, SKIM_TARGET_HZ);
+        if (want_rate - ddc.out_rate()).abs() >= 1.0
+            || (self.state.sample_rate - self.skim_in_rate).abs() >= 1.0
+        {
+            self.skimmer = None;
+            self.skim_ddc = None;
+            self.skim_buf.clear();
+            self.sync_skimmer();
+            return;
+        }
+        let center = self.skim_window_center_hz(want_rate, Some(self.skim_center_hz));
+        if let Some(ddc) = self.skim_ddc.as_mut() {
+            ddc.set_offset_hz(center - self.state.center_hz);
+        }
+        let moved = (center - self.skim_center_hz).abs() >= 1.0;
+        self.skim_center_hz = center;
+        // Sent even when the centre held: the DC spike is at a fixed frequency,
+        // so a front end that retuned under a stationary window moved it inside
+        // that window. The skimmers ignore a centre that has not changed, so
+        // nothing is thrown away by saying so.
+        if let Some(sk) = self.skimmer.as_ref() {
+            sk.set_window(center, self.state.center_hz - center);
+        }
+        if moved {
+            debug!(center, rate = want_rate, "skim window moved");
+        }
+        // After the placement, not before: a window that moved has just dropped
+        // its tracks, and the view has to be back in place before the new ones
+        // are spawned.
+        self.sync_skimmer_view();
+    }
+
     /// Hand the running skimmers the window the operator can actually see, so
     /// they only spend decoder time on signals that are on screen.
-    ///
-    /// Re-sent on a retune as well as on a pan: `set_center` clears the tracks,
-    /// and the view has to be back in place before the new ones are spawned.
     fn sync_skimmer_view(&self) {
         if let Some(sk) = self.skimmer.as_ref() {
             sk.set_view(self.skim_view);
@@ -9480,6 +9639,12 @@ impl Engine {
         // Keep a wideband-IQ rig's own VFO on our dial (TCI); no-op elsewhere. This
         // way returning from TX doesn't snap the rig back to the IQ centre.
         self.source.set_if_offset(main_offset);
+        // On a screen wider than the skim window the dial decides which part of
+        // it is skimmed ([`skim_center_for`]), and tuning inside the span moves
+        // the dial without moving the front end or the client's view — so this
+        // is the only place that would notice. A handful of comparisons, and the
+        // dead band means ordinary tuning changes nothing.
+        self.sync_skim_window();
     }
 
     /// Tell the source where we would transmit, for the band-switching hardware
@@ -10920,12 +11085,10 @@ impl Engine {
         match self.source.set_center_hz(center_hz) {
             Ok(()) => {
                 self.state.center_hz = center_hz;
-                // The skim window follows the hardware center; re-label spots
-                // and clear tracks so nothing straddles the old/new axis.
-                if let Some(sk) = self.skimmer.as_ref() {
-                    sk.set_center(center_hz);
-                }
-                self.sync_skimmer_view();
+                // Re-place the skim window inside the span that has just moved;
+                // one that really moves re-labels its spots and clears its
+                // tracks, so none straddles the old and new axis.
+                self.sync_skim_window();
                 self.sync_ism_window();
                 true
             }
@@ -11541,6 +11704,139 @@ fn pool_window_to_frame(
         bins,
         rows: Vec::new(),
         rows_clocked: false,
+    }
+}
+
+#[cfg(test)]
+mod skim_window_tests {
+    use super::{SKIM_TARGET_HZ, skim_center_for};
+
+    /// An RX-888 handed the whole half-spectrum: 32.4 MHz of it, centred on
+    /// 16.2 MHz because that is the only place a window that wide can sit.
+    const WIDE: f64 = 32_400_000.0;
+    const WIDE_CENTER: f64 = 16_200_000.0;
+    /// Rounded off the decimation ladder from that rate; the exact figure only
+    /// matters to the arithmetic, not to the rule.
+    const WIN: f64 = 202_500.0;
+
+    /// The bug as reported: the skimmers on a wide front end decoded nothing at
+    /// all, because their window sat in the middle of the sampled span while the
+    /// operator watched a band 2 MHz away.
+    #[test]
+    fn the_window_goes_where_the_operator_is_looking() {
+        let view = (14_000_000.0, 14_100_000.0);
+        let c = skim_center_for(Some(view), 14_030_000.0, WIDE_CENTER, WIDE, WIN, None);
+        assert!(
+            c - WIN / 2.0 <= view.0 && c + WIN / 2.0 >= view.1,
+            "window at {c} does not cover {view:?}"
+        );
+    }
+
+    /// Nobody watching — a headless server, or a client that has not said what
+    /// it is showing yet — and the window starts where it always did.
+    #[test]
+    fn no_view_starts_on_the_hardware_centre() {
+        assert_eq!(skim_center_for(None, 14_030_000.0, WIDE_CENTER, WIDE, WIN, None), WIDE_CENTER);
+    }
+
+    /// A view the window already covers does not move it. Every move costs each
+    /// track in the window and each callsign half-read, and a drag reports a new
+    /// view several times a second.
+    #[test]
+    fn a_pan_inside_the_window_holds_it_still() {
+        let cur = 14_050_000.0;
+        for lo in [14_020_000.0, 14_000_000.0, 14_080_000.0] {
+            let view = Some((lo, lo + 20_000.0));
+            let c = skim_center_for(view, lo + 10_000.0, WIDE_CENTER, WIDE, WIN, Some(cur));
+            assert_eq!(c, cur, "view {view:?} moved the window");
+        }
+    }
+
+    /// ...and a pan that leaves it does, onto the view it can no longer see.
+    #[test]
+    fn a_pan_out_of_the_window_moves_it() {
+        let cur = 14_050_000.0;
+        let view = (14_200_000.0, 14_240_000.0);
+        let c = skim_center_for(Some(view), 14_220_000.0, WIDE_CENTER, WIDE, WIN, Some(cur));
+        assert_eq!(c, (view.0 + view.1) / 2.0);
+    }
+
+    /// A screen wider than the window can only ever be part-covered, so the part
+    /// is the one around the dial — a band-wide view of 20 m has its CW at one
+    /// end and its phone at the other, and the operator is in one of them.
+    #[test]
+    fn a_wide_view_keeps_the_dial_in_the_window() {
+        let view = Some((14_000_000.0, 14_350_000.0));
+        let dial = 14_025_000.0;
+        let c = skim_center_for(view, dial, WIDE_CENTER, WIDE, WIN, None);
+        assert!((c - dial).abs() < WIN / 2.0, "dial {dial} outside the window at {c}");
+        // ...without the window hanging off the end of the screen, where half of
+        // it would be skimming spectrum nobody is looking at.
+        assert!(c - WIN / 2.0 >= 14_000_000.0 - 0.5, "window at {c} runs past the view");
+    }
+
+    /// Tuning across that view does not re-cut the window every few kilohertz.
+    /// It has to be the dial that moves it, and only once the dial is well out
+    /// towards the edge, or a scrolled VFO would keep throwing the decoders away.
+    #[test]
+    fn ordinary_tuning_does_not_re_cut_a_wide_view() {
+        let view = Some((14_000_000.0, 14_350_000.0));
+        let cur = 14_101_250.0;
+        for dial in [14_090_000.0, 14_101_250.0, 14_120_000.0, 14_150_000.0] {
+            assert_eq!(
+                skim_center_for(view, dial, WIDE_CENTER, WIDE, WIN, Some(cur)),
+                cur,
+                "dial {dial} moved the window"
+            );
+        }
+        let far = 14_300_000.0;
+        assert_ne!(skim_center_for(view, far, WIDE_CENTER, WIDE, WIN, Some(cur)), cur);
+    }
+
+    /// The window is an NCO offset inside the stream, so both its edges stay
+    /// inside what was sampled however close to the end of the span the operator
+    /// is looking — including the bottom of 160 m on a front end that starts at
+    /// zero.
+    #[test]
+    fn the_window_stays_inside_the_span() {
+        for view in [(1_800_000.0, 1_840_000.0), (32_000_000.0, 32_400_000.0)] {
+            let c = skim_center_for(Some(view), view.0, WIDE_CENTER, WIDE, WIN, None);
+            assert!(c - WIN / 2.0 >= -0.5, "window at {c} starts below the span");
+            assert!(c + WIN / 2.0 <= WIDE + 0.5, "window at {c} ends above the span");
+        }
+    }
+
+    /// A front end no wider than the window has nothing to place: it is all
+    /// window, wherever the operator looks. This is every narrow SDR and every
+    /// I/Q rig, and the behaviour there must not change at all.
+    #[test]
+    fn a_narrow_front_end_is_all_window() {
+        let center = 14_100_000.0;
+        for span in [48_000.0, 192_000.0, SKIM_TARGET_HZ] {
+            let view = Some((center - 5_000.0, center + 5_000.0));
+            assert_eq!(skim_center_for(view, center, center, span, SKIM_TARGET_HZ, None), center);
+        }
+    }
+
+    /// A front end that retuned out from under a stationary window takes the
+    /// window with it rather than leaving it hanging outside the new span.
+    #[test]
+    fn a_retune_drags_a_window_left_outside_the_span() {
+        // 2 Msps on 14.1 MHz, then the dial jumps a band with the view.
+        let (span, cur) = (2_000_000.0, 14_050_000.0);
+        let view = Some((21_020_000.0, 21_060_000.0));
+        let c = skim_center_for(view, 21_030_000.0, 21_040_000.0, span, WIN, Some(cur));
+        assert!((c - 21_040_000.0).abs() < span / 2.0, "window at {c} is outside the new span");
+    }
+
+    /// A degenerate view — a client mid-layout, or one whose window has drifted
+    /// off the end of the span entirely — leaves the window where it is rather
+    /// than parking it somewhere arbitrary.
+    #[test]
+    fn a_view_the_front_end_cannot_reach_is_ignored() {
+        let cur = 14_050_000.0;
+        let view = Some((88_000_000.0, 88_200_000.0));
+        assert_eq!(skim_center_for(view, 88_100_000.0, WIDE_CENTER, WIDE, WIN, Some(cur)), cur);
     }
 }
 

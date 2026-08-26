@@ -841,11 +841,13 @@ impl eframe::App for SdroxideApp {
             }
         }
 
-        // The skimmers decode only what is on screen, so they need the real
-        // visible span — not `SpectrumConfig::viewport`, which is padded so that
-        // panning doesn't clear the waterfall. Debounced on the same timer: a
-        // drag would otherwise re-cut the tracked set every frame, and every
-        // re-cut throws away decoders that were part-way through a callsign.
+        // The skimmers decode only what is on screen, and on a front end wider
+        // than their window it is also what decides which slice of the band they
+        // read at all — so they need the real visible span, not
+        // `SpectrumConfig::viewport`, which is padded so that panning doesn't
+        // clear the waterfall. Debounced on the same timer: a drag would
+        // otherwise re-cut the tracked set every frame, and every re-cut throws
+        // away decoders that were part-way through a callsign.
         if self.state.skimmer.any_enabled() && !self.view.is_unset() {
             let want = (self.view.view_lo_hz, self.view.view_hi_hz);
             let tol = (want.1 - want.0).abs() * 0.01;
