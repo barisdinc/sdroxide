@@ -544,6 +544,69 @@ pub struct PacketHeard {
     pub sent: bool,
 }
 
+/// Where one line of the terminal came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PacketTermKind {
+    /// The far end said it.
+    #[default]
+    Rx,
+    /// We sent it.
+    Tx,
+    /// sdroxide said it: the link came up, the call was refused, the far end
+    /// gave up. Not traffic, and coloured differently so it cannot be mistaken
+    /// for something a BBS printed.
+    Note,
+}
+
+/// One line of a connected-mode session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketTermLine {
+    /// Seconds since the Unix epoch.
+    pub at: i64,
+    pub kind: PacketTermKind,
+    pub text: String,
+}
+
+/// Who is driving the connected-mode link.
+///
+/// There is one link and one radio, so this is also the answer to "why was I
+/// refused" — a question an operator otherwise has to guess at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PacketLinkOwner {
+    /// Nobody. The link is free for either.
+    #[default]
+    Idle,
+    /// The operator, from the packet panel.
+    Terminal,
+    /// A Winlink forwarding session, from the MAIL window.
+    Session,
+}
+
+/// The connected-mode link, as the panel needs to see it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PacketLink {
+    /// The state machine's own name for where it is: `Disconnected`,
+    /// `AwaitingConnection`, `Connected`, `TimerRecovery`, `AwaitingRelease`.
+    /// Its word rather than a translation, so a transcript and a debug log
+    /// describe the same thing.
+    pub state: String,
+    /// Who is at the far end, once there is a far end.
+    pub peer: Option<String>,
+    /// The digipeater path in use, in order. Empty for a direct link.
+    pub via: Vec<String>,
+    /// Extended (mod-128) sequence numbers.
+    pub ext: bool,
+    /// I frames sent and not yet acknowledged.
+    pub unacked: u16,
+    /// Bytes handed to the link that have not been made into frames yet.
+    pub pending: u32,
+    /// Retries used against N2. A count climbing while `unacked` stays put is
+    /// what a fading path looks like from this side, and the only warning
+    /// before the link gives up.
+    pub retries: u8,
+    pub owner: PacketLinkOwner,
+}
+
 /// What a packet station is doing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PacketStatus {
@@ -559,12 +622,35 @@ pub struct PacketStatus {
     /// against a steady `heard` is what a marginal path looks like.
     pub bad_frames: u32,
     /// The connected-mode link, when there is one.
-    pub link: Option<String>,
+    pub link: Option<PacketLink>,
+    /// The terminal session, oldest first, capped.
+    #[serde(default)]
+    pub term: Vec<PacketTermLine>,
+    /// The tail of a line that has arrived without its terminator.
+    ///
+    /// Carried apart from `term` because it is the most important thing on the
+    /// screen: a BBS prompt has no CR after it, so a terminal that printed only
+    /// whole lines would sit there showing nothing while the far end waited for
+    /// an answer to a question the operator never saw.
+    #[serde(default)]
+    pub term_partial: String,
 }
 
 /// Most frames kept for the monitor pane. A busy VHF channel produces a few a
 /// second, and the pane is a rolling view rather than a log.
 pub const PACKET_HEARD_MAX: usize = 200;
+
+/// Most lines kept in the terminal.
+///
+/// The whole status is cloned into every `DigiStatus` five times a second and
+/// crosses the wire to remote clients, so the transcript is a rolling view like
+/// the monitor above it rather than a session log. Lines are cut to
+/// [`PACKET_TERM_LINE_MAX`] for the same reason.
+pub const PACKET_TERM_MAX: usize = 200;
+
+/// Longest terminal line kept. A BBS wraps at 80; a station sending more than
+/// this without a terminator is not sending text a person is reading.
+pub const PACKET_TERM_LINE_MAX: usize = 256;
 
 /// One station on the FSQ heard list.
 ///
@@ -1260,6 +1346,27 @@ pub struct DigiConfig {
     /// Text sent as a periodic UNPROTO beacon. Empty disables it.
     #[serde(default)]
     pub packet_beacon_text: String,
+    /// Sent to a station that connects to us, once the link is up.
+    ///
+    /// The TNC world calls this CTEXT. Empty sends nothing, which is right for
+    /// a station that only ever dials out — and a station that answers calls
+    /// but says nothing looks broken to whoever called it.
+    #[serde(default = "default_packet_connect_text")]
+    pub packet_connect_text: String,
+    /// The digipeater path a terminal connect uses when the operator leaves the
+    /// via box empty — `OE3XLR-1,OE3XMS-1`, the way `c CALL v A,B` writes it.
+    ///
+    /// Worth having as a setting because the path to a local node is the same
+    /// every time, and retyping it is how a hop gets left off.
+    #[serde(default)]
+    pub packet_connect_via: String,
+    /// Ask for extended (mod-128) sequence numbers when dialling out.
+    ///
+    /// Off. A window of 128 frames is only useful on a fast, clean path, and
+    /// many nodes answer a SABME with a DM — which an operator reads as "that
+    /// station refused me" with no way to tell it was the frame they sent.
+    #[serde(default)]
+    pub packet_ext_seq: bool,
     /// Minutes between beacons; zero disables.
     #[serde(default)]
     pub packet_beacon_minutes: u32,
@@ -1537,6 +1644,9 @@ impl Default for DigiConfig {
             packet_kiss_port: default_packet_kiss_port(),
             packet_accept_incoming: false,
             packet_beacon_text: String::new(),
+            packet_connect_text: default_packet_connect_text(),
+            packet_connect_via: String::new(),
+            packet_ext_seq: false,
             packet_beacon_minutes: 0,
             aprs_mycall: String::new(),
             aprs_path: default_aprs_path(),
@@ -2458,6 +2568,13 @@ fn default_packet_slottime_ms() -> u16 {
 }
 fn default_packet_kiss_port() -> u16 {
     8001
+}
+/// What a station that answers a call says first.
+///
+/// Generic on purpose: it goes out under whatever callsign the operator set,
+/// and a greeting naming a station that is not theirs is worse than none.
+fn default_packet_connect_text() -> String {
+    "Connected to sdroxide. No mailbox here — type away.".to_string()
 }
 /// One local fill-in hop and one wide one — the path that reaches almost
 /// anywhere without asking the whole network to repeat you three times.

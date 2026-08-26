@@ -690,7 +690,33 @@ use sdroxide_types::{
 /// used to follow and the rest as garbage. The handshake's equality test is what
 /// stops it trying. `digi.json` is migrated rather than versioned — the old key
 /// carries into both new ones on load, so nobody's signal changes level.
-pub const PROTO_VERSION: u16 = 93;
+///
+/// **94** — packet radio grew an operator's terminal, so the panel needs to know
+/// more about the link than the callsign at the far end.
+/// [`sdroxide_types::PacketStatus::link`] changes from `Option<String>` to
+/// `Option<PacketLink>`: the state machine's own name for where it is, the peer,
+/// the digipeater path, the sequence width, the frames outstanding, the retry
+/// count against N2, and which of the two things that can drive one link is
+/// driving it — the packet panel or the MAIL window. That last one is the answer
+/// to "why was I refused", which an operator otherwise has to guess at.
+///
+/// `term` and `term_partial` are new beside it: the session's lines, and the
+/// tail of one that has arrived without its terminator. The tail is carried
+/// separately because it is the most important thing on the screen — a BBS
+/// prompt has no carriage return after it, so a terminal that printed only whole
+/// lines would sit showing nothing while the far end waited for an answer to a
+/// question the operator never saw.
+///
+/// [`sdroxide_types::Command`] gains `PacketConnect`, `PacketSend`,
+/// `PacketDisconnect` and `PacketTermClear`, appended for the usual reason, and
+/// [`sdroxide_types::DigiConfig`] gains `packet_connect_text`,
+/// `packet_connect_via` and `packet_ext_seq` beside the packet settings they
+/// belong with rather than at the tail — postcard numbers fields by position and
+/// a v93 peer desynchronises on either placement, so they go where they read.
+/// The handshake's equality test is what stops it trying. `digi.json` needs no
+/// migration: all three carry `#[serde(default)]`, so a config written by v93
+/// loads unchanged.
+pub const PROTO_VERSION: u16 = 94;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

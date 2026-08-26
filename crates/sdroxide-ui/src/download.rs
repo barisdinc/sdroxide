@@ -119,9 +119,9 @@ pub fn decode_text(bytes: &[u8]) -> Loaded {
         return unicode(text.to_string());
     }
     let (name, table): (_, fn(u8) -> char) = if looks_cyrillic(bytes) {
-        ("Windows-1251", windows_1251)
+        ("Windows-1251", sdroxide_types::text::cp1251_char)
     } else {
-        ("Windows-1252", windows_1252)
+        ("Windows-1252", sdroxide_types::text::cp1252_char)
     };
     Loaded { text: bytes.iter().map(|&b| table(b)).collect(), assumed: Some(name) }
 }
@@ -153,45 +153,6 @@ fn looks_cyrillic(bytes: &[u8]) -> bool {
         longest = longest.max(run);
     }
     longest >= 3
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Windows-1252 (the Western European code page, and what "ANSI" means on a
-/// Western Windows). Its 0xA0-0xFF half is Latin-1 outright; only the 0x80-0x9F
-/// block is its own, and that block is typography rather than letters. The five
-/// positions Microsoft never assigned come back as the replacement character.
-#[rustfmt::skip]
-fn windows_1252(b: u8) -> char {
-    const HIGH: [char; 32] = [
-        '€', '\u{fffd}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{fffd}', 'Ž', '\u{fffd}',
-        '\u{fffd}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{fffd}', 'ž', 'Ÿ',
-    ];
-    match b {
-        0x80..=0x9f => HIGH[(b - 0x80) as usize],
-        _ => b as char,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Windows-1251 (the Cyrillic code page). Its top four rows are the Russian
-/// alphabet laid out in Unicode's own order, so those are arithmetic; the
-/// 0x80-0xBF half mixes the same typography as 1252 with the letters the other
-/// Cyrillic languages add, and that part is a table.
-#[rustfmt::skip]
-fn windows_1251(b: u8) -> char {
-    const HIGH: [char; 64] = [
-        'Ђ', 'Ѓ', '‚', 'ѓ', '„', '…', '†', '‡', '€', '‰', 'Љ', '‹', 'Њ', 'Ќ', 'Ћ', 'Џ',
-        'ђ', '‘', '’', '“', '”', '•', '–', '—', '\u{fffd}', '™', 'љ', '›', 'њ', 'ќ', 'ћ', 'џ',
-        '\u{a0}', 'Ў', 'ў', 'Ј', '¤', 'Ґ', '¦', '§', 'Ё', '©', 'Є', '«', '¬', '\u{ad}', '®', 'Ї',
-        '°', '±', 'І', 'і', 'ґ', 'µ', '¶', '·', 'ё', '№', 'є', '»', 'ј', 'Ѕ', 'ѕ', 'ї',
-    ];
-    match b {
-        0x80..=0xbf => HIGH[(b - 0x80) as usize],
-        // 0xC0 is А and the alphabet runs unbroken from there, upper case then
-        // lower, exactly as U+0410 onwards does.
-        0xc0..=0xff => char::from_u32(0x410 + (b - 0xc0) as u32).unwrap_or(char::REPLACEMENT_CHARACTER),
-        _ => b as char,
-    }
 }
 
 #[cfg(target_arch = "wasm32")]

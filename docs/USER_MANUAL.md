@@ -10010,6 +10010,18 @@ only reliable source is what the gateway's owner publishes. Get it wrong in the
 it wrong in the 9600 direction and you hear nothing at all, which is why the
 session transcript records the speed each call went out at.
 
+### Packet length and window
+
+**Packet length** is the most a single frame carries, and **window** is how many
+frames go out before waiting for an acknowledgement. Shorter frames survive a
+marginal path — only the frame that was hit has to be sent again — and cost more
+overhead per byte; a bigger window fills a good path and is more to resend on a
+bad one. 128 and 4 are reasonable everywhere; 64 on an HF path that is fading,
+256 where the path is solid.
+
+Both apply to Winlink over the radio as well as to the terminal: they are the
+link's settings, not the panel's.
+
 ### Speeds
 
 | | Where | Notes |
@@ -10034,9 +10046,83 @@ sequence.
 count is that page's own tally, and one left over from a cleared page describes
 traffic that is no longer on it. A connected station stays connected.
 
-**LINK** shows the connected session, when there is one. There is no text entry:
-packet here is not a keyboard mode. The traffic is somebody else's, a beacon on
-a timer, or a Winlink session driving the link from the MAIL window.
+Clicking the callsigns on a monitor line puts that station in the terminal's
+connect bar, path and all. That is how you find out who is reachable: by
+watching the channel, not by typing callsigns from memory.
+
+**TERMINAL** is the connected session — see below.
+
+### Connecting to a node or a BBS
+
+Type a callsign in the terminal's connect bar and press **CONNECT**. What comes
+back appears in the pane above the input line; what you type goes out a line at
+a time. A node or a BBS answers with its own command prompt, and from there you
+are talking to its software, not to sdroxide — `H` for help and `B` to leave are
+a good guess almost everywhere.
+
+**Via** is the digipeater path, nearest hop first, separated by commas:
+`OE3XLR-1,OE3XMS-1`. Leave it empty for a station you can hear directly. Most
+BBSes are a hop or two away through a node, so this is usually the difference
+between a call that works and one that never gets an answer — and a call through
+the wrong path fails exactly like a station that is not there. Setting a
+**Default via** in the packet settings fills the box in for you, because the
+path to your local node is the same every time and retyping it is how a hop gets
+left off.
+
+The status row is the session in five numbers. **CALLING** means the connect is
+out and unanswered; **CONNECTED** means the link is up. `n unacked` is frames
+sent that the far end has not confirmed, and `retry n` is how many times we have
+asked again — a retry count climbing while the unacknowledged count stays put is
+what a fading path looks like from this side, and it is the warning before the
+link gives up. When it does give up, the transcript says so in those words,
+which is deliberately different from what it says when the far end hangs up:
+"the link gave up" and "disconnected" send you looking in completely different
+places.
+
+**Up** and **Down** on the input line walk back through what you have already
+sent. At 300 baud, retyping is where the typos come from.
+
+Lines end with a carriage return, which is what every BBS and node command line
+expects. Text that is not Unicode is read as Windows-1252 and sent as it — most
+of this network predates UTF-8, and a two-byte sequence arrives at a BBS as two
+characters of nonsense where one byte would have been the right letter.
+
+**Extended (mod-128)** asks for a window bigger than seven frames. It is off,
+and worth leaving off unless you know the far end wants it: many nodes refuse
+the request with a DM, which looks exactly like a station that would not talk to
+you.
+
+### Answering calls
+
+Switch on **Answer calls** and a station that connects to you arrives in the
+same terminal pane; **Connect text** is what they are greeted with. You are then
+in a conversation with whoever called — there is no mailbox here, so say so in
+the connect text if nobody is watching the screen.
+
+A station whose link is already busy refuses calls with a DM rather than
+accepting them, which tells the caller to try later. That is the same rule as
+everything else in this section: there is one radio, one channel and one link.
+
+### One link at a time
+
+The MAIL window and this pane are two ways to use one radio. Whichever asks
+first gets it, and the other is told so — a Winlink session started while you
+are connected is refused with the reason, and a CONNECT pressed during a Winlink
+session gets a line in the transcript saying the MAIL window has the link.
+
+**Disconnect before changing mode.** A mode change ends the session
+immediately, and the DISC cannot get out: the modem needs seconds of audio that
+the mode change takes away. The far end is left waiting out its own timers.
+
+### When a call is not answered
+
+At 300 baud a full frame takes seconds to reach the other end, so the link's
+timers are worked out from the speed, the packet length and the number of hops
+rather than being fixed. If a call to a station you can plainly hear is never
+answered, the usual causes are, in order: the wrong digipeater path; the station
+not answering calls at all; a **Packet length** the far end will not accept —
+drop it to 128, or 64 on a marginal path; and **Extended** switched on against
+a node that refuses it.
 
 ### Serving the modem to other software
 
@@ -10044,6 +10130,10 @@ Switch on **KISS server** in the packet setup dialog and sdroxide offers its
 modem as a KISS TNC on a socket (8001 by default), the same way it already
 serves TCI and rigctld. Pat, an APRS client, or the Linux AX.25 stack can then
 use the radio without knowing sdroxide exists.
+
+The KISS server and the terminal are two hosts on one radio and neither knows
+about the other: a KISS client can put frames on the air under your callsign
+while you are in a session, and nothing will stop it. Use one at a time.
 
 A host's TXDELAY and persistence commands are logged and ignored — those are
 your settings, and a client overriding them invisibly would be a mystery to

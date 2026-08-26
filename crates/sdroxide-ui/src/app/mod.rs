@@ -445,6 +445,21 @@ pub struct SdroxideApp {
     fsq_rx_images: Vec<egui::TextureHandle>,
     /// Picked-image inbox for FSQ image transmit (raw file bytes).
     fsq_img_inbox: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// Packet: who the terminal's CONNECT button calls.
+    packet_target: String,
+    /// Packet: the digipeater path typed beside it.
+    packet_via: String,
+    /// Packet: what is typed on the terminal's input line but not yet sent.
+    packet_draft: String,
+    /// Packet: lines already sent, newest last, for the up-arrow.
+    ///
+    /// A node's command line is retyped constantly — the same `L`, the same
+    /// `C CALL`, the same `B` — and at 300 baud retyping is where the typos
+    /// come from.
+    packet_history: Vec<String>,
+    /// Packet: how far back through [`Self::packet_history`] the operator has
+    /// walked. `None` means they are typing something new.
+    packet_history_at: Option<usize>,
     /// APRS: the station icons, decoded once and kept as textures.
     aprs_icons: crate::aprs_icons::AprsIcons,
     /// APRS: the map's centre, zoom and selected station.
@@ -1084,6 +1099,11 @@ impl SdroxideApp {
             aprs_map: crate::aprs_map::AprsMapState::default(),
             aprs_target: String::new(),
             aprs_draft: String::new(),
+            packet_target: String::new(),
+            packet_via: String::new(),
+            packet_draft: String::new(),
+            packet_history: Vec::new(),
+            packet_history_at: None,
             aprs_show_traffic: false,
             aprs_filter: String::new(),
             aprs_lat_buf: String::new(),

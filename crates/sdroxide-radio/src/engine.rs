@@ -6408,6 +6408,54 @@ impl Engine {
                 }
                 return;
             }
+            // The connected-mode terminal. No transmit gate of its own on any
+            // of these: the frames leave through `DigiAction::KeyTx` and the
+            // engine's normal PTT path, so the station interlock and the band
+            // rails apply exactly as they do to a beacon. Its absence here
+            // looks like an oversight, so: it is not one.
+            //
+            // Every other refusal — no callsign, a bad path, the link busy —
+            // is written into the terminal's own transcript by the controller,
+            // where the operator is looking. Only "you are not in a packet
+            // mode" has to be a Notice, because in that case there is no
+            // controller and so no transcript to write into.
+            PacketConnect { call, via, ext } => {
+                match self.digi.as_mut() {
+                    Some(d) if self.state.rx[0].mode.is_packet() => {
+                        d.packet_connect(call, via, ext);
+                    }
+                    _ => {
+                        let _ = self.event_tx.send(RadioEvent::Notice(Some(
+                            "switch the radio to PACKET or PACKET-HF to connect".into(),
+                        )));
+                    }
+                }
+                return;
+            }
+            PacketSend { text } => {
+                if let Some(d) = self.digi.as_mut()
+                    && self.state.rx[0].mode.is_packet()
+                {
+                    d.packet_send_line(text);
+                }
+                return;
+            }
+            PacketDisconnect => {
+                if let Some(d) = self.digi.as_mut()
+                    && self.state.rx[0].mode.is_packet()
+                {
+                    d.packet_disconnect();
+                }
+                return;
+            }
+            PacketTermClear => {
+                if let Some(d) = self.digi.as_mut()
+                    && self.state.rx[0].mode.is_packet()
+                {
+                    d.packet_term_clear();
+                }
+                return;
+            }
             WinlinkConnect => {
                 // Taken by value so the radio can be set up for the call
                 // below: applying the gateway's channel needs the engine, and
@@ -7888,7 +7936,18 @@ impl Engine {
         // ever on a link that no longer exists.
         let port = self.packet_port.clone();
         if let Some(wl) = self.winlink.as_mut() {
-            if wl.packet_available() != port.is_some() {
+            // Compared by identity, not by "is there one".
+            //
+            // `start_digi` clears the handle and `make_digi` puts a new one
+            // back inside the same call, so a change from PACKET to PACKET-HF
+            // reads as `true != true` here and the manager keeps a handle whose
+            // other end was dropped with the old controller. A session started
+            // on it then blocks against a link that no longer exists.
+            let stale = match (port.as_ref(), wl.packet_port()) {
+                (Some(new), Some(held)) => !new.same_link(held),
+                (a, b) => a.is_some() != b.is_some(),
+            };
+            if stale {
                 wl.set_packet_port(port);
             }
         }
