@@ -1062,7 +1062,14 @@ impl eframe::App for MultiApp {
                 // by itself. A station asks each of its radios separately, so
                 // without this the tabs behind the one on screen would each
                 // wait at a challenge nobody is looking at.
-                tab.app.poll_auth();
+                //
+                // A tab waiting its turn — the station judges one sign-in at a
+                // time — needs the frames to take it: nothing arrives on its
+                // own socket while it waits, so without this it would sit at
+                // the challenge until something else happened to redraw.
+                if tab.app.poll_auth() {
+                    crate::repaint::after_ms(&ctx, 120);
+                }
             }
         }
         // Publish the roster before the frame (the settings dialog draws it),

@@ -1431,15 +1431,22 @@ impl SdroxideApp {
     /// sign-in screen never runs either: a station's second radio would sit at
     /// a challenge nobody can see, staying unconnected until it was clicked,
     /// even though the operator signed in to that very station a moment ago.
-    pub(crate) fn poll_auth(&mut self) {
+    ///
+    /// Returns whether this tab has an answer ready and is only waiting its
+    /// turn at the station — a station judges one sign-in at a time. The shell
+    /// keeps asking for frames while that is true, because a hidden tab has no
+    /// other reason to be redrawn and its turn comes on somebody else's socket.
+    pub(crate) fn poll_auth(&mut self) -> bool {
         let phase = self.ctrl.auth_phase();
         self.login.settle(&phase, &self.station_key());
         if !phase.is_pending() {
-            return;
+            return false;
         }
         if let Some(a) = self.login.answer_without_asking(&phase) {
             self.ctrl.send_auth(a.username, a.password);
+            return false;
         }
+        self.login.waiting_for_turn()
     }
 
     /// Detach from this radio: disconnect the engine, drop the audio streams,
