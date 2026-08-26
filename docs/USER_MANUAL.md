@@ -537,13 +537,17 @@ mode. What is in the box never changes; only where the two rows are cut does.
   out when a lorry goes past. A station sending no group 2A sends no radio text —
   the group list will tell you that, where the blank field cannot.
 
-  Two things are deliberately not shown. **Traffic message channel** data is
-  decoded by nobody here: the messages are numeric references into a licensed
+  Text is read through the standard's own character table, so accented letters —
+  `ä`, `ö`, `å`, `ß` and the rest of the European set — arrive as themselves.
+  That table is close to ASCII but not equal to it: a `¤` where you expected a
+  dollar is the station sending plain ASCII into a slot the standard gives to the
+  international currency sign. Codes with no printable character at all still
+  come out as `·`.
+
+  One thing is deliberately not shown: **traffic message channel** data is
+  decoded by nobody here. The messages are numeric references into a licensed
   location database, and without it "event 108 at location 12345" is all there is
-  to say. And accented characters come out as `·`. The standard has its own
-  character table above plain ASCII, which this build does not reproduce, and a
-  wrong letter in a station's name is indistinguishable from a bad decode in a
-  way that a dot is not.
+  to say.
 - **DRM** (DRM only) — how the **Digital Radio Mondiale** decoder is getting on.
   The button lights only when audio is actually being decoded, not merely when a
   carrier is present, so it answers "is this station coming through?" at a
