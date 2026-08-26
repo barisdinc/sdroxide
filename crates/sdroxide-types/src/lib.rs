@@ -33,6 +33,7 @@ mod pictures;
 mod probe;
 mod prop_store;
 mod propagation;
+mod qo100;
 mod radio;
 mod rds;
 pub mod region;
@@ -154,6 +155,7 @@ pub use propagation::{
     SPLAT_SIGMA_KM, cell_center, cell_of, fof2_floor_mhz, margin_db, muf3000_floor_mhz,
     obliquity_factor,
 };
+pub use qo100::{QO100_BEACON_HZ, Qo100Settings, Qo100Status};
 pub use radio::{
     AirspyConfig, AirspyDevice, AirspyGain, AirspyHfConfig, AirspyHfDevice, AirspyHfModel, Backend,
     CAT_IQ_DC_BLOCK_MAX_HZ, CAT_IQ_RATES, CAT_SCOPE_MIN_BAUD, CONVERTER_OFFSET_MAX_HZ,

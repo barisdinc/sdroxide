@@ -391,6 +391,13 @@ pub struct RadioState {
     /// panel learns that. Appended last: postcard numbers fields by position.
     #[serde(default)]
     pub adsb: crate::AdsbSettings,
+    /// The QO-100 beacon decoder: whether it runs, and how wide a search it
+    /// makes around [`crate::QO100_BEACON_HZ`]. Live status (lock, offset,
+    /// decoded text) is [`crate::Qo100Status`], sent separately like
+    /// [`crate::IsmStatus`] — this struct is settings, sent whole on every
+    /// change like [`Self::ism`].
+    #[serde(default)]
+    pub qo100: crate::Qo100Settings,
 }
 
 impl Default for RadioState {
@@ -430,6 +437,7 @@ impl Default for RadioState {
             // Open, until the radio says otherwise: the level is adopted from
             // the rig, and until one has answered there is nothing to claim.
             rig_squelch: 0.0,
+            qo100: crate::Qo100Settings::default(),
         }
     }
 }

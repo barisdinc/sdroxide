@@ -5300,6 +5300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdroxide-qo100"
+version = "1.5.3"
+dependencies = [
+ "crossbeam-channel",
+ "sdroxide-dsp",
+ "sdroxide-types",
+ "tracing",
+]
+
+[[package]]
 name = "sdroxide-r82xx"
 version = "1.5.4"
 dependencies = [
