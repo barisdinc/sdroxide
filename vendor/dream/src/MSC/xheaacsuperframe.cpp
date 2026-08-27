@@ -130,9 +130,20 @@ bool XHEAACSuperFrame::parse(CVectorEx<_BINARY>& asf)
             frameSize[0] = borders[0];
             break;
         default: // boundary in this superframe
+            /* No adjustment for the Header. The Frame border index counts from
+               the start of the *Payload* section, not from the start of the
+               super frame - which is why the two special values above exist at
+               all: index 0 is the first payload byte, so a border one or two
+               bytes earlier, in the previous super frame's payload, has no
+               ordinary index to be given. Upstream subtracted 2 here, on the
+               reading that the index includes the 2 byte Header; that reading
+               makes 0xffe and 0xfff mean exactly what indices 0 and 1 would
+               already have meant, and leaves every audio frame handed to the
+               decoder two bytes out of step. Removing the subtraction is the
+               fix several people confirmed on air (Dream forum thread
+               01c6e64c3b), and it is what the redundancy argument predicts. */
             borders[0] += start;
-            if(borders[0]<2) { reset(); return false; }
-            borders[0] -= 2; // header not in payload
+            if(borders[0]>payload.size()) { reset(); return false; }
             frameSize[0] = borders[0];
             //cerr << "border 0 is " << borders[0] << " bytes from start of payload" << endl;
             break;
@@ -146,11 +157,6 @@ bool XHEAACSuperFrame::parse(CVectorEx<_BINARY>& asf)
                 return false;
             }
             borders[i] += start;
-            if(borders[i]<2) {
-                reset();
-                return false;
-            }
-            borders[i] -= 2; // header not in payload
             if(borders[i]<borders[i-1] || borders[i]>payload.size()) {
                 reset();
                 return false;

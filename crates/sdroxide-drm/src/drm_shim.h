@@ -52,6 +52,11 @@ typedef struct {
     int32_t cur_service;
     double  bitrate_kbps;
     int32_t audio_codec;         /* CAudioParam::EAudCod */
+    /* 1 when this build can actually decode `audio_codec`. Dream substitutes a
+       null codec for anything it cannot, which gives a locked receiver, a
+       service label, a text message and silence - a state no other field here
+       distinguishes from an audio decode that is merely failing. */
+    int32_t audio_codec_supported;
     int32_t audio_mode;          /* mono / p-stereo / stereo */
     int32_t audio_sample_rate;
     int32_t is_stereo;
@@ -153,11 +158,19 @@ int32_t sdrx_drm_test_throw(int32_t kind);
  *
  * The parsers carry payload between super frames, so successive calls
  * accumulate until the next initialisation. One parser of each kind per thread.
+ *
+ * `frame_sizes`, when not NULL, receives the length of each of the first
+ * `max_sizes` audio frames. The count alone cannot tell a correct framing from
+ * a misaligned one - both yield one frame per declared border - so the sizes
+ * are what pins where the borders actually fell.
+ *
  * Exists only for the test that a corrupt super frame cannot take the process
- * down. */
+ * down, and for the test that the frame borders land where the standard puts
+ * them. */
 int32_t sdrx_drm_test_parse_superframe(int32_t kind, int32_t len_part_a,
                                        int32_t len_part_b, const uint8_t* bytes,
-                                       int32_t len);
+                                       int32_t len, int32_t* frame_sizes,
+                                       int32_t max_sizes);
 
 #ifdef __cplusplus
 }

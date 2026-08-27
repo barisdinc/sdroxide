@@ -215,8 +215,32 @@ fn parse_superframe(kind: i32, part_a: usize, part_b: usize, bytes: &[u8]) -> i3
             part_b as i32,
             bytes.as_ptr(),
             bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
         )
     }
+}
+
+/// The same, but reporting how long each audio frame came out.
+///
+/// The frame count is the declared border count whether or not the borders were
+/// read correctly, so it is the sizes that say where they fell.
+fn parse_superframe_sizes(kind: i32, part_a: usize, part_b: usize, bytes: &[u8]) -> Vec<i32> {
+    let mut sizes = [0i32; 16];
+    // SAFETY: as above, plus `sizes` is a live array of the length passed.
+    let n = unsafe {
+        crate::sys::sdrx_drm_test_parse_superframe(
+            kind,
+            part_a as i32,
+            part_b as i32,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            sizes.as_mut_ptr(),
+            sizes.len() as i32,
+        )
+    };
+    assert!(n >= 0, "parser rejected a super frame it should have accepted");
+    sizes[..n as usize].to_vec()
 }
 
 /// Point the parser named by `kind` at a stream of `part_a + part_b` byte frames.
@@ -228,6 +252,8 @@ fn init_superframe(kind: i32, part_a: usize, part_b: usize) {
             part_a as i32,
             part_b as i32,
             std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
             0,
         )
     };
@@ -342,9 +368,11 @@ fn a_well_formed_superframe_parses() {
 
     // xHE-AAC: two frame borders, 2 bytes of Header, 294 bytes of Payload and a
     // 4 byte Directory. The Directory is read last border first, and each entry
-    // is a 12 bit index into the super frame followed by the border count
-    // repeated. Borders at 102 and 202 cut the payload into two 100 byte frames
-    // and leave 94 bytes running on into the next super frame.
+    // is a 12 bit index into the Payload followed by the border count repeated.
+    // Borders at 102 and 202 cut the payload into frames of 102 and 100 bytes
+    // and leave 92 bytes running on into the next super frame. See
+    // `xhe_aac_frame_borders_are_counted_from_the_payload` for why those
+    // numbers and not 100/100/94.
     let mut good = vec![0x5au8; size];
     good[0] = 0x20; // frame border count 2, bit reservoir level 0
     good[size - 4] = 0x0c; // index 202 = 0x0ca ...
@@ -354,7 +382,7 @@ fn a_well_formed_superframe_parses() {
     init_superframe(XHE, 0, size);
     assert_eq!(parse_superframe(XHE, 0, size, &good), 2, "two frame borders");
 
-    // And the 94 bytes left over are carried: the next super frame declares one
+    // And the 92 bytes left over are carried: the next super frame declares one
     // border at 102, which with the carry lands 194 bytes into the payload.
     let mut next = vec![0x5au8; size];
     next[0] = 0x10; // frame border count 1
@@ -377,4 +405,176 @@ fn a_well_formed_superframe_parses() {
     // 6 + 5 + 50 = 61, leaving 239 bytes of Part B.
     init_superframe(AAC, 61, size - 61);
     assert_eq!(parse_superframe(AAC, 61, size - 61, &aac), 5, "five UEP AAC frames");
+}
+
+/// An xHE-AAC frame border is counted from the first byte of the Payload
+/// section, not from the first byte of the super frame.
+///
+/// Dream 2.2 subtracted two from every border "because the header is not in the
+/// payload". The parser contradicts itself about that: the two special border
+/// values are 0xFFE for "two bytes back into the previous super frame's
+/// payload" and 0xFFF for "one byte back", and with the subtraction an ordinary
+/// index of 0x000 means exactly what 0xFFE already means. A standard does not
+/// spell one border two ways. Without the subtraction the encoding runs
+/// straight through - 0xFFE, 0xFFF, 0x000, 0x001 - which is what it is for.
+///
+/// The cost of getting it wrong is not two bytes in one frame. Those two bytes
+/// are never consumed, so the payload stays two bytes ahead and every audio
+/// frame after the first is cut two bytes early, for as long as the receiver
+/// stays tuned - which is a locked receiver, a service label, and silence.
+///
+/// The frame *count* is the declared border count either way, which is why
+/// `a_well_formed_superframe_parses` cannot see this and this test exists.
+#[test]
+fn xhe_aac_frame_borders_are_counted_from_the_payload() {
+    const XHE: i32 = crate::sys::SDRX_DRM_SF_XHE_AAC as i32;
+    let size = 300usize;
+
+    // 2 byte Header, 294 byte Payload, 4 byte Directory; borders at 102 and 202.
+    let mut good = vec![0x5au8; size];
+    good[0] = 0x20; // frame border count 2, bit reservoir level 0
+    good[size - 4] = 0x0c; // index 202 = 0x0ca ...
+    good[size - 3] = 0xa2; // ... then the count, 2
+    good[size - 2] = 0x06; // index 102 = 0x066 ...
+    good[size - 1] = 0x62; // ... then the count, 2
+    init_superframe(XHE, 0, size);
+    assert_eq!(
+        parse_superframe_sizes(XHE, 0, size, &good),
+        vec![102, 100],
+        "the first frame runs from the start of the Payload to border 0, so it \
+         is 102 bytes - 100 is the two byte Header wrongly deducted"
+    );
+
+    // 294 - 202 = 92 bytes are carried, not 94. The next super frame has one
+    // border at 102, so its frame is 92 + 102 = 194 bytes; that figure is the
+    // same under either reading, because the carry absorbs the error - which is
+    // exactly how a two byte slip goes unnoticed on every frame after the first.
+    let mut next = vec![0x5au8; size];
+    next[0] = 0x10; // frame border count 1
+    next[size - 2] = 0x06; // index 102 ...
+    next[size - 1] = 0x61; // ... then the count, 1
+    assert_eq!(parse_superframe_sizes(XHE, 0, size, &next), vec![194]);
+
+    // A border at index 0 is now representable and must not be rejected: the
+    // guards that used to reject it existed only to stop the subtraction
+    // wrapping an unsigned through zero.
+    let mut zero = vec![0x5au8; size];
+    zero[0] = 0x10; // one border
+    zero[size - 2] = 0x00; // index 0 ...
+    zero[size - 1] = 0x01; // ... then the count, 1
+    init_superframe(XHE, 0, size);
+    assert_eq!(
+        parse_superframe_sizes(XHE, 0, size, &zero),
+        vec![0],
+        "a border at the very start of the payload is a zero length frame, not \
+         a rejection"
+    );
+}
+
+/// The AAC decoder is still faad2, and the xHE-AAC decoder is reported
+/// separately when the host has libfdk-aac.
+///
+/// `InitCodecList` puts `FdkAacCodec` ahead of `AacCodec`, and upstream's
+/// `CanDecode(AC_AAC)` answers yes on any fdk-aac 2.x — it tests SBR capability
+/// bits against the AAC decoder module's flag word — so without the guard in
+/// `fdk_aac_codec.cpp` installing libfdk-aac would silently move every ordinary
+/// DRM broadcast off the statically linked faad2 this receiver was verified on.
+#[test]
+fn aac_stays_with_faad2_whatever_else_is_installed() {
+    // The codec list is thread-local and built by the first decoder.
+    let ring = crate::Ring::new(4096, 4096);
+    let _d = crate::Decoder::new(&ring, true, false).expect("decoder");
+    let v = crate::codec_version();
+    assert!(v.contains("Nero AAC"), "AAC should still be faad2, got {v:?}");
+    // Whether the xHE-AAC half is there depends on the host, so this only
+    // reports it — but it must never be the *only* entry.
+    eprintln!("DRM audio decoders: {v}");
+}
+
+/// An xHE-AAC broadcast decodes to audio.
+///
+/// The regression gate for the whole xHE-AAC change, and the one test that
+/// exercises libfdk-aac at all. Two independent faults had to be fixed before
+/// this could pass, and each hid the other:
+///
+/// * `FdkAacCodec::Decode` told the library its output buffer was
+///   `frameSize * numChannels` samples long, read from the stream info *before*
+///   the frame was decoded — and a USAC stream reports zero channels until one
+///   has been. Every frame asked for a zero-sample buffer, so every frame came
+///   back `AAC_DEC_OUTPUT_BUFFER_TOO_SMALL` and nothing at all was decoded.
+/// * `XHEAACSuperFrame::parse` cut every audio frame two bytes short, so the
+///   frames that reached the decoder were misaligned. That one does not show in
+///   the sample count — the codec conceals its way through and returns samples
+///   either way — but it took the library's own error count on a clean 65
+///   second recording from 2 to 220, with audible dropouts to match.
+///
+/// So a count of decoded samples catches the first and a listen catches the
+/// second. Both are asserted here as far as they can be.
+///
+/// Set `SDROXIDE_DRM_XHE_SAMPLE` to a 48 kHz recording of an xHE-AAC broadcast.
+/// `FMGold_xHE_ModeB_9khz.flac` from
+/// <https://sourceforge.net/projects/drm/files/samples/DRM%20sample%20recordings/>
+/// is one; convert it with `ffmpeg -i x.flac -ar 48000 -ac 1 x.wav`.
+#[test]
+fn an_xhe_aac_recording_decodes() {
+    let Ok(path) = std::env::var("SDROXIDE_DRM_XHE_SAMPLE") else {
+        eprintln!("set SDROXIDE_DRM_XHE_SAMPLE to a 48 kHz xHE-AAC recording to run this");
+        return;
+    };
+
+    let mut reader = hound::WavReader::open(&path).expect("open the recording");
+    let spec = reader.spec();
+    assert_eq!(spec.sample_rate as f64, SIGNAL_RATE, "the recording must be 48 kHz");
+    let channels = spec.channels as usize;
+    let mono: Vec<i16> = reader
+        .samples::<i16>()
+        .map(|s| s.expect("read sample"))
+        .collect::<Vec<_>>()
+        .chunks(channels)
+        .map(|c| c[0])
+        .collect();
+
+    let worker = DrmWorker::new(false, false).expect("start the decoder");
+    let mut interleaved = Vec::with_capacity(mono.len() * 2);
+    for &s in &mono {
+        interleaved.push(s);
+        interleaved.push(s);
+    }
+
+    let mut sink = vec![0i16; 8192];
+    let mut audio_samples = 0usize;
+    for chunk in interleaved.chunks(4800) {
+        while worker.push(chunk) > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        loop {
+            let n = worker.pop(&mut sink);
+            if n == 0 {
+                break;
+            }
+            audio_samples += n / 2;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+
+    let status = worker.status();
+    assert!(status.locked, "the decoder did not lock onto {path}");
+    assert_eq!(
+        status.service.codec,
+        Some(sdroxide_types::DrmCodec::XheAac),
+        "{path} is not an xHE-AAC broadcast"
+    );
+    assert!(
+        status.service.codec_supported,
+        "no xHE-AAC decoder registered — this host needs libfdk-aac installed"
+    );
+    assert!(!status.service.label.is_empty(), "no service label was decoded");
+
+    // The assertion the buffer-size fix exists for: before it, this was zero.
+    let seconds = audio_samples as f64 / AUDIO_RATE;
+    let expected = mono.len() as f64 / SIGNAL_RATE;
+    assert!(
+        seconds > expected * 0.5,
+        "only {seconds:.1} s of audio came out of a {expected:.1} s recording"
+    );
 }

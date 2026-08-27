@@ -396,6 +396,11 @@ static void status_body(sdrx_drm* h, sdrx_drm_status* out)
             out->bitrate_kbps =
                 double(p.GetBitRateKbps(cur, service.eAudDataFlag != CService::SF_AUDIO));
             out->audio_codec = int32_t(service.AudioParam.eAudioCoding);
+            /* Reads the flags CAudioSourceDecoder's constructor set by asking
+               the codec list what it registered, so it answers for the build
+               and, for xHE-AAC, for whether libfdk-aac was found at run time. */
+            out->audio_codec_supported =
+                h->receiver.GetAudSorceDec()->CanDecode(service.AudioParam.eAudioCoding) ? 1 : 0;
             out->audio_mode = int32_t(service.AudioParam.eAudioMode);
             out->audio_sample_rate = int32_t(service.AudioParam.eAudioSamplRate);
             out->is_stereo = service.AudioParam.eAudioMode == CAudioParam::AM_STEREO ? 1 : 0;
@@ -439,7 +444,8 @@ static thread_local AACSuperFrame tls_aac_superframe;
 
 int32_t sdrx_drm_test_parse_superframe(int32_t kind, int32_t len_part_a,
                                        int32_t len_part_b, const uint8_t* bytes,
-                                       int32_t len)
+                                       int32_t len, int32_t* frame_sizes,
+                                       int32_t max_sizes)
 {
     int32_t frames = -1;
     const bool ok = sdrx_guard("test parse superframe", [&] {
@@ -514,6 +520,10 @@ int32_t sdrx_drm_test_parse_superframe(int32_t kind, int32_t len_part_a,
         for (unsigned i = 0; i < n; i++)
         {
             sf->getFrame(frame, crc, i);
+            if (frame_sizes != nullptr && int32_t(i) < max_sizes)
+            {
+                frame_sizes[i] = int32_t(frame.size());
+            }
         }
         frames = int32_t(n);
     });
@@ -528,10 +538,40 @@ const char* sdrx_drm_codec_version(void)
     if (version.empty())
     {
         /* GetDecoder indexes the codec list, which is empty until a receiver
-           has been built — hence the null check, and hence the guard. */
+           has been built — hence the null check, and hence the guard.
+           Both decoders, not just AAC: the whole point of the xHE-AAC line is
+           that it is absent unless libfdk-aac was found, and a log that only
+           ever names faad2 cannot say so. */
         sdrx_guard("codec version", [&] {
-            CAudioCodec* codec = CAudioCodec::GetDecoder(CAudioParam::AC_AAC, true);
-            version = codec != nullptr ? codec->DecGetVersion() : std::string();
+            const CAudioParam::EAudCod wanted[] = {CAudioParam::AC_AAC,
+                                                   CAudioParam::AC_xHE_AAC};
+            std::string all;
+            for (CAudioParam::EAudCod c : wanted)
+            {
+                CAudioCodec* codec = CAudioCodec::GetDecoder(c, true);
+                if (codec == nullptr)
+                {
+                    continue;
+                }
+                std::string one = codec->DecGetVersion();
+                /* DecGetVersion ends in a newline on the FDK codec. */
+                while (!one.empty() && (one.back() == '\n' || one.back() == '\r'))
+                {
+                    one.pop_back();
+                }
+                if (one.empty())
+                {
+                    continue;
+                }
+                if (!all.empty())
+                {
+                    all += "; ";
+                }
+                all += one;
+            }
+            /* Left empty when the codec list has not been built yet, so the
+               next call tries again rather than caching "nothing". */
+            version = all;
         });
     }
     return version.c_str();

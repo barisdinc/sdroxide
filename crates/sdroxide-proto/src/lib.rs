@@ -740,7 +740,23 @@ use sdroxide_types::{
 /// [`sdroxide_types::DeviceCaps`] gains `cw_audio_keyed`, appended: a client has
 /// to know whether CW leaves as audio or as text over the control port before it
 /// can decide whether that level reaches CW at all.
-pub const PROTO_VERSION: u16 = 95;
+///
+/// **96** — xHE-AAC decoding for DRM. Two changes to `DrmStatus`, which rides in
+/// [`ServerMsg::Drm`].
+///
+/// [`sdroxide_types::DrmCodec`] lost its `Celp` and `Hvxc` variants. Both were
+/// withdrawn from the DRM standard and neither can be signalled, and the two
+/// slots they occupied now mean Opus and "reserved" — so the old table read an
+/// Opus service as CELP. Postcard numbers a fieldless enum by declaration
+/// order, so every remaining variant moved: a v95 peer would read xHE-AAC as
+/// HVXC.
+///
+/// [`sdroxide_types::DrmService`] gained `codec_supported`, which is not
+/// appended but sits beside `codec` where it reads. A locked receiver whose
+/// codec has no decoder reports a healthy signal, a service label and silence,
+/// and this is the only field that distinguishes that from an audio decode
+/// that is merely failing.
+pub const PROTO_VERSION: u16 = 96;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

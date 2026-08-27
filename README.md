@@ -934,6 +934,15 @@ brew install pkg-config cmake autoconf automake libtool opus
   build: RADE's model weights are ~110 MB of generated C.
 - **libopus** is strictly optional, but installing it avoids a CMake 4 problem —
   see below.
+- **libfdk-aac** is optional and is a *runtime* dependency, not a build one:
+  nothing needs it to compile. It is what decodes **xHE-AAC**, the codec most
+  surviving DRM shortwave broadcasters now use, and the DRM window says so when
+  it is missing. It cannot be built in — its licence carries restrictions the
+  GPL does not permit, which is why Debian ships it in `non-free` — so sdroxide
+  looks for it at startup and uses it if it is there. `libfdk-aac2` on
+  Debian/Ubuntu, `libfdk-aac` on Arch, `brew install fdk-aac` on macOS, or
+  `libfdk-aac-2.dll` beside the executable on Windows. See
+  `vendor/fdk-aac/PROVENANCE.md`.
 
 For the **SoapySDR** backend you need its development libraries and the driver
 module(s) for your radio (e.g. `soapysdr`, `soapysdr-module-hackrf`,

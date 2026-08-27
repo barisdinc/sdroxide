@@ -2618,6 +2618,17 @@ impl SdroxideApp {
                         format!("DRM: {}. Click for the broadcast's details", d.service.label)
                     }
                     Some(_) if decoding => "DRM is decoding — click for the details".to_string(),
+                    // Locked and reading the multiplex, and silent: the one
+                    // dark-chip state that is not a signal problem.
+                    Some(d) if d.locked && !d.service.codec_supported => match d.service.codec {
+                        Some(c) => format!(
+                            "DRM: {} — locked, but its {} audio cannot be decoded here. \
+                             Click for what is missing",
+                            d.summary(),
+                            c.label()
+                        ),
+                        None => format!("DRM: {} — click for the decoder's state", d.summary()),
+                    },
                     Some(d) => format!("DRM: {} — click for the decoder's state", d.summary()),
                     None => "DRM — click for the decoder's state".to_string(),
                 };

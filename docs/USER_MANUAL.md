@@ -1796,8 +1796,10 @@ at all means no signal on this frequency. `TIME` and `FRAME` lit with `FAC` dark
 usually means the signal is there but too weak or too distorted to read — DRM
 needs a genuinely clean channel, and about 15 dB SNR for a reliable 10 kHz
 decode. Everything lit except `AUDIO` means the multiplex is being read but its
-audio is not decoding, which on a working install means the broadcaster is using
-**xHE-AAC**, a later codec than the AAC this build decodes.
+audio is not decoding, which usually means a signal too intermittent to carry
+audio through even though the control channels are getting through. If instead
+the DRM window says the codec is **not decodable**, that is a different problem
+with a fix — see **Codecs** below.
 
 Below the indicators, once the signal is locked:
 
@@ -1877,11 +1879,33 @@ signal, and the AGC is bypassed — what you hear is the level the broadcaster
 mixed, not a level the receiver invented. If a station is stereo, it is played
 in stereo.
 
+**Codecs.** **AAC** is built in and needs nothing. **xHE-AAC**, which most of
+the surviving DRM30 broadcasters have moved to, is decoded through
+**libfdk-aac** if that library is on the system — it cannot be built in,
+because its licence and this program's are incompatible, so it is looked up when
+the radio starts and used if it is there. Install it and restart:
+
+| | |
+| --- | --- |
+| Debian / Ubuntu | `sudo apt install libfdk-aac2` |
+| Arch | `sudo pacman -S libfdk-aac` |
+| macOS | `brew install fdk-aac` |
+| Windows | put `libfdk-aac-2.dll` beside `sdroxide.exe` |
+
+**Opus** is not part of the DRM standard — it is an extension a few
+experimental transmissions use — and decodes if **libopus** is installed, the
+same way.
+
+When a station's codec cannot be decoded, the DRM window says so in place of
+guesswork: the codec is named, followed by *not decodable*, and the panel tells
+you which library is missing. The **DRM** chip in the top bar stays dark in that
+state, because nothing is being heard.
+
 **What is not here.** Transmit: DRM is a broadcast system and there is no
-amateur DRM to send. **xHE-AAC** and the withdrawn CELP and HVXC speech codecs
-are not decoded — only AAC, which is what the surviving DRM30 shortwave
-broadcasts use. Journaline, MOT slideshows and the electronic programme guide
-are carried by the standard but not shown.
+amateur DRM to send. Journaline, MOT slideshows and the electronic programme
+guide are carried by the standard but not shown. The CELP and HVXC speech
+codecs of the original standard were withdrawn from it and nothing transmits
+them.
 
 ### 2.20 Recording the audio
 
