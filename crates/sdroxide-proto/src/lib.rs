@@ -776,7 +776,26 @@ use sdroxide_types::{
 ///
 /// `Meters` rides in an event only, never in a command, so this is a one-way
 /// change: nothing a client sends carries it.
-pub const PROTO_VERSION: u16 = 97;
+/// **98** — an IC-9700 on macOS, three ways (issue #192).
+///
+/// `Mode::SstvFm` — SSTV on an FM carrier, the way slow-scan is sent on VHF
+/// and UHF — is appended to [`sdroxide_types::Mode`]. Appended, so every mode
+/// already on the wire keeps its number; but the variant itself is new, and a
+/// v97 peer handed one decodes it as nothing at all.
+///
+/// [`sdroxide_types::RadioState`] gained `rig_squelch`, the radio's *own*
+/// squelch threshold as a `0..1` fraction of its scale, and
+/// [`sdroxide_types::Command`] gained `SetRigSquelch` to move it. A rig that
+/// hands sdroxide audio it has already gated has the only squelch that can
+/// open — `Command::SetSquelch` is a threshold on what got through — so the
+/// SQL control follows [`sdroxide_types::DeviceCaps::commands_squelch`], also
+/// new here, to whichever of the two the front end actually has.
+///
+/// Three appended fields and one appended variant: postcard numbers both by
+/// position, so a v97 peer desynchronises on the tail of every `RadioState`
+/// and every `DeviceCaps` regardless. The handshake's equality test is what
+/// stops it trying.
+pub const PROTO_VERSION: u16 = 98;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

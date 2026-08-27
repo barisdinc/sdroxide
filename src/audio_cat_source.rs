@@ -724,6 +724,11 @@ impl IqSource for AudioCatSource {
                 // commanding the rig back — the radio's own setting is the
                 // operator's, not a stale one to overwrite.
                 sdroxide_cat::CatUpdate::Power(frac) => out.push(ControlUpdate::TxDrive(frac)),
+                // And the squelch it came up on, read at the same moment and
+                // adopted the same way. On demod audio this is the gate the
+                // operator actually hears, so the rail has to start where the
+                // radio's knob already is.
+                sdroxide_cat::CatUpdate::Squelch(frac) => out.push(ControlUpdate::Squelch(frac)),
                 // The operator keyed the radio itself — mic button, foot
                 // switch, VOX, its own keyer. Passed up as the thing it is, not
                 // as a request to transmit: see `ControlUpdate::RigTx`.
@@ -783,6 +788,27 @@ impl IqSource for AudioCatSource {
     /// let through. The rig's own filter is the one that does the work.
     fn set_control_filter(&mut self, mode: Mode, lo_hz: f64, hi_hz: f64) {
         self.cat.set_filter(mode, lo_hz as f32, hi_hz as f32);
+    }
+
+    // ── Squelch ──────────────────────────────────────────────────────────────
+    /// The rig's own squelch, over CAT. On demod audio it is the only one there
+    /// is: what reaches the sound card has already been through it, so a
+    /// threshold applied on this side can close further on what got through but
+    /// can never open what was shut out (issue #192).
+    fn set_squelch(&mut self, frac: f32) {
+        self.cat.set_squelch(frac);
+    }
+
+    /// True on a family whose squelch sdroxide can address — but only while the
+    /// rig is the one doing the demodulating.
+    ///
+    /// On quadrature it is the wrong gate entirely: the stream is raw baseband,
+    /// sdroxide demodulates it, and the radio's squelch decides nothing but
+    /// what comes out of the radio's own speaker. There the engine's own
+    /// threshold is the honest one, and handing the SQL rail to a control that
+    /// does not reach the audio would be the same fault the other way round.
+    fn commands_squelch(&self) -> bool {
+        self.cat.commands_squelch() && matches!(self.format, SoundFormat::DemodAudio)
     }
 
     // ── Output power ─────────────────────────────────────────────────────────

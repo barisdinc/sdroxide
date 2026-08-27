@@ -2235,6 +2235,14 @@ impl SdroxideApp {
         self.rx_gains().first().cloned()
     }
 
+    /// Whether the SQL rail drives the *radio's* squelch rather than the
+    /// engine's own gate — true on a transceiver that hands us audio it has
+    /// already squelched, which is the only front end where the software gate
+    /// cannot reach what is muting the operator.
+    fn rig_squelch(&self) -> bool {
+        self.caps.as_ref().is_some_and(|c| c.commands_squelch)
+    }
+
     /// The device rate the front end is streaming, and the deepest decimation
     /// it has the bandwidth for. `None` on a radio with no IQ to decimate — a
     /// CAT rig on a sound card — and on one already streaming so narrow a span
@@ -2426,24 +2434,50 @@ impl SdroxideApp {
         // noise chips, then mute and record, the two that act on the finished
         // audio rather than on the level.
         crate::chrome::control_row(ui, narrow, |ui| {
-            let mut sql = self.state.rx[0].squelch_db;
             ui.label("SQL");
-            if crate::chrome::slider(
-                ui,
-                Slider::new(&mut sql, sdroxide_types::SQUELCH_OPEN_DB..=-30.0)
-                    .show_value(true)
-                    .custom_formatter(|v, _| {
-                        if v <= (sdroxide_types::SQUELCH_OPEN_DB + 1.0) as f64 {
-                            "off".into()
-                        } else {
-                            format!("{v:.0}")
-                        }
+            if self.rig_squelch() {
+                // The radio's own gate, on the radio's own scale. The dBFS rail
+                // below would be a control that does nothing here: what the
+                // sound card receives has already been through the rig's
+                // squelch, so a threshold on this side can close further on
+                // what got through and can never open what was shut out
+                // (issue #192).
+                let mut sql = self.state.rig_squelch;
+                if crate::chrome::slider(
+                    ui,
+                    Slider::new(&mut sql, 0.0..=1.0).show_value(true).custom_formatter(|v, _| {
+                        if v <= 0.001 { "open".into() } else { format!("{:.0}%", v * 100.0) }
                     }),
-            )
-            .changed()
-            {
-                self.state.rx[0].squelch_db = sql; // optimistic echo
-                cmds.push(Command::SetSquelch { rx: RxId::Main, db: sql });
+                )
+                .on_hover_text(
+                    "The radio's own squelch, sent over the control link. This is the \
+                     gate the audio actually passes through — the software one would only \
+                     close further on what the rig already let by.",
+                )
+                .changed()
+                {
+                    self.state.rig_squelch = sql; // optimistic echo
+                    cmds.push(Command::SetRigSquelch { frac: sql });
+                }
+            } else {
+                let mut sql = self.state.rx[0].squelch_db;
+                if crate::chrome::slider(
+                    ui,
+                    Slider::new(&mut sql, sdroxide_types::SQUELCH_OPEN_DB..=-30.0)
+                        .show_value(true)
+                        .custom_formatter(|v, _| {
+                            if v <= (sdroxide_types::SQUELCH_OPEN_DB + 1.0) as f64 {
+                                "off".into()
+                            } else {
+                                format!("{v:.0}")
+                            }
+                        }),
+                )
+                .changed()
+                {
+                    self.state.rx[0].squelch_db = sql; // optimistic echo
+                    cmds.push(Command::SetSquelch { rx: RxId::Main, db: sql });
+                }
             }
             for &c in &chips[lifted..] {
                 self.rx_chip(ui, cmds, c, narrow);
@@ -4523,9 +4557,18 @@ fn rx_rows(ui: &egui::Ui, gain: bool, decim: bool, agc_off: bool, mode: Mode) ->
     }
 
     // Filter / noise: the squelch rail and its readout — the deepest threshold
-    // is the longest it reads, "off" at the bottom of the range being shorter.
+    // is the longest the dBFS one reads, "off" at the bottom of the range being
+    // shorter. Priced against the *radio's* readout as well, and always: which
+    // of the two rails is drawn is the front end's answer, and a front end can
+    // be swapped under a running window (`Engine::adopt_source`), so a box
+    // sized for one of them would change width when the operator applied a new
+    // interface.
     let sql_readout = format!("{:.0}", sdroxide_types::SQUELCH_OPEN_DB);
-    let noise = label("SQL") + g + rail + g + value_field_w(ui, &sql_readout);
+    let noise = label("SQL")
+        + g
+        + rail
+        + g
+        + value_field_w(ui, &sql_readout).max(value_field_w(ui, "100%"));
 
     // Then the run itself. Each chip is priced at its widest label, so the box
     // does not breathe as a decode comes and goes (see [`RxChip::width_label`])

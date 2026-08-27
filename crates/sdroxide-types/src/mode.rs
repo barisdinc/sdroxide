@@ -122,6 +122,23 @@ pub enum Mode {
     /// wants is not the packet one. Appended for the same reason as
     /// [`Mode::Hell`].
     Aprs,
+    /// SSTV on an FM carrier — the way slow-scan is sent on VHF and UHF.
+    ///
+    /// The same seven transmission modes as [`Mode::Sstv`], the same decoder,
+    /// the same panel and the same gallery: what differs is the radio
+    /// underneath. Below 30 MHz an SSTV picture is a phone emission on a
+    /// sideband; on 2 m and 70 cm it modulates an FM carrier on a channel, so
+    /// the dial is the channel centre rather than the foot of a passband and
+    /// the transmitter has to be in FM to send it at all.
+    ///
+    /// A `Mode` of its own for exactly the reason [`Mode::Packet`] and
+    /// [`Mode::PacketHf`] are two: every per-mode table in the tree — the
+    /// filter, the demodulator, the CAT mode to command, the transmit level —
+    /// needs a different answer, and none of them has a dial frequency to work
+    /// it out from. Making [`Mode::Sstv`] answer by band would also take the
+    /// choice away from the operator, and 2 m SSTV on sideband is a thing
+    /// people do (issue #192). Appended for the same reason as [`Mode::Hell`].
+    SstvFm,
 }
 
 /// The bands on which analog SSTV rides the lower sideband, as (low, high) Hz.
@@ -136,7 +153,7 @@ const SSTV_LSB_BANDS: [(f64, f64); 3] =
 impl Mode {
     /// Every mode, in the order they cycle and appear in the picker — which is
     /// deliberately *not* the enum's declaration order (see [`Mode::Hell`]).
-    pub const ALL: [Mode; 31] = [
+    pub const ALL: [Mode; 32] = [
         Mode::Lsb,
         Mode::Usb,
         Mode::Cw,
@@ -160,6 +177,7 @@ impl Mode {
         Mode::PacketHf,
         Mode::Aprs,
         Mode::Sstv,
+        Mode::SstvFm,
         Mode::Rifp,
         Mode::Wefax,
         Mode::Olivia,
@@ -172,9 +190,9 @@ impl Mode {
 
     /// The digital modes handled by a dedicated decode/encode engine (the
     /// slotted FT8/FT4 modes, the continuous keyboard modes, Hell, SSTV, RIFP,
-    /// packet, RF Paint). All are USB underneath except RIFP and VHF packet,
-    /// which frequency-modulate the carrier.
-    pub const DIGITAL: [Mode; 19] = [
+    /// packet, RF Paint). All are USB underneath except RIFP, VHF packet and
+    /// VHF SSTV, which frequency-modulate the carrier.
+    pub const DIGITAL: [Mode; 20] = [
         Mode::Ft8,
         Mode::Ft4,
         Mode::Ft2,
@@ -187,6 +205,7 @@ impl Mode {
         Mode::Fsq,
         Mode::Hell,
         Mode::Sstv,
+        Mode::SstvFm,
         Mode::Rifp,
         Mode::Wefax,
         Mode::RfPaint,
@@ -208,6 +227,7 @@ impl Mode {
                 | Mode::Psk
                 | Mode::Rtty
                 | Mode::Sstv
+                | Mode::SstvFm
                 | Mode::Rifp
                 | Mode::Olivia
                 | Mode::Thor
@@ -245,7 +265,7 @@ impl Mode {
     /// audio on a sideband like any other keyboard mode. APRS is VHF packet
     /// under another name, so it is.
     pub fn is_carrier_centered(self) -> bool {
-        matches!(self, Mode::Rifp | Mode::Packet | Mode::Aprs)
+        matches!(self, Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm)
     }
 
     /// True for the modes that go out on a *frequency-modulated* carrier.
@@ -261,7 +281,10 @@ impl Mode {
     /// HF packet is deliberately not here: 300 baud is audio on a sideband like
     /// any other keyboard mode.
     pub fn is_fm_carrier(self) -> bool {
-        matches!(self, Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs)
+        matches!(
+            self,
+            Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm
+        )
     }
 
     /// True for the modes whose transmit audio is levelled by
@@ -380,7 +403,7 @@ impl Mode {
     /// True for the SSTV image mode. Forks the digi panel to the image UI and
     /// skips the FT8/text-modem overlays.
     pub fn is_sstv(self) -> bool {
-        matches!(self, Mode::Sstv)
+        matches!(self, Mode::Sstv | Mode::SstvFm)
     }
 
     /// True for the RIFP image mode. Shares SSTV's image panel (compose,
@@ -392,7 +415,7 @@ impl Mode {
     /// True for the modes that drive the image panel — a picture compositor on
     /// transmit, a live picture and a gallery on receive.
     pub fn is_image(self) -> bool {
-        matches!(self, Mode::Sstv | Mode::Rifp)
+        matches!(self, Mode::Sstv | Mode::SstvFm | Mode::Rifp)
     }
 
     /// True for HF weather fax. Its own panel rather than the image one: there
@@ -457,6 +480,7 @@ impl Mode {
             Mode::Psk => "PSK",
             Mode::Rtty => "RTTY",
             Mode::Sstv => "SSTV",
+            Mode::SstvFm => "SSTV-FM",
             Mode::Olivia => "OLIVIA",
             Mode::Thor => "THOR",
             Mode::Fsq => "FSQ",
@@ -538,8 +562,10 @@ impl Mode {
             // 9600 G3RUH about 16 kHz, and both fit inside a 25 kHz channel
             // with the usual margin for a rig a little off frequency.
             // APRS shares the channel and therefore the passband; it is
-            // 1200 Bell 202 on FM whatever the region.
-            Mode::Packet | Mode::Aprs => (-8_000.0, 8_000.0),
+            // 1200 Bell 202 on FM whatever the region. VHF SSTV is the same
+            // shape of thing — an FM channel, not a sideband — and its video
+            // subcarrier runs to 2300 Hz, well inside it.
+            Mode::Packet | Mode::Aprs | Mode::SstvFm => (-8_000.0, 8_000.0),
             // HF packet is 300 baud AFSK on a sideband, tones around
             // 1600/1800 Hz — an ordinary keyboard-mode passband.
             Mode::PacketHf => (150.0, 2850.0),
@@ -563,8 +589,10 @@ impl Mode {
     /// where a picture sent on USB comes out of everybody else's receiver
     /// inverted — and USB on every band above.
     pub fn is_lower_sideband_at(self, dial_hz: f64) -> bool {
+        // `Mode::Sstv` by name rather than [`Self::is_sstv`]: sideband is a
+        // question about a sideband emission, and [`Mode::SstvFm`] is not one.
         self.is_lower_sideband()
-            || (self.is_sstv()
+            || (matches!(self, Mode::Sstv)
                 && SSTV_LSB_BANDS.iter().any(|&(lo, hi)| dial_hz >= lo && dial_hz <= hi))
     }
 
@@ -666,6 +694,7 @@ impl Mode {
             | Mode::Psk
             | Mode::Rtty
             | Mode::Sstv
+            | Mode::SstvFm
             | Mode::Rifp
             | Mode::Wefax
             | Mode::Olivia
@@ -726,7 +755,10 @@ impl Mode {
             Mode::Am | Mode::Sam => {
                 &[("6k", -3000.0, 3000.0), ("10k", -5000.0, 5000.0), ("16k", -8000.0, 8000.0)]
             }
-            Mode::Nfm => &[("8k", -4000.0, 4000.0), ("16k", -8000.0, 8000.0)],
+            // VHF SSTV joins NFM rather than packet's wider pair: it is a voice
+            // channel with a picture on it, and the deviation is a voice
+            // channel's.
+            Mode::Nfm | Mode::SstvFm => &[("8k", -4000.0, 4000.0), ("16k", -8000.0, 8000.0)],
             Mode::Dsb => &[("5k", -2500.0, 2500.0), ("6k", -3000.0, 3000.0)],
             // The one digital mode with a real filter choice: 1200 Bell 202
             // occupies about 10 kHz and 9600 G3RUH about 16 kHz, so the
@@ -1215,6 +1247,7 @@ mod tests {
             (Mode::PacketHf, 28),
             (Mode::Drm, 29),
             (Mode::Aprs, 30),
+            (Mode::SstvFm, 31),
         ];
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
@@ -1259,7 +1292,7 @@ mod tests {
         // `Mode::ALL`'s length is checked by the array type; what needs
         // checking is that it is a permutation of the enum, with nothing
         // dropped and nothing listed twice.
-        let last = Mode::Aprs as u8;
+        let last = Mode::SstvFm as u8;
         for i in 0..=last {
             let present = Mode::ALL.iter().filter(|m| **m as u8 == i).count();
             assert_eq!(present, 1, "discriminant {i} appears {present} times in Mode::ALL");
@@ -1415,13 +1448,15 @@ mod tests {
     }
 
     /// The band-aware answer differs from the mode-only one for SSTV alone —
-    /// 40 m does not turn FT8 or PSK31 upside down.
+    /// 40 m does not turn FT8 or PSK31 upside down. [`Mode::SstvFm`] is not in
+    /// it either: an FM carrier has no sideband to be on the wrong side of.
     #[test]
     fn only_sstv_changes_sideband_with_the_band() {
         for mode in Mode::ALL {
             for dial in [1_890_000.0, 3_730_000.0, 7_171_000.0, 14_230_000.0, 145_500_000.0] {
                 let differs = mode.is_lower_sideband_at(dial) != mode.is_lower_sideband();
-                assert_eq!(differs, mode.is_sstv() && dial < 10_000_000.0, "{mode:?} at {dial}");
+                let want = mode == Mode::Sstv && dial < 10_000_000.0;
+                assert_eq!(differs, want, "{mode:?} at {dial}");
             }
         }
     }

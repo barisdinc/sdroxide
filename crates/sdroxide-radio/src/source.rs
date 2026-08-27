@@ -55,6 +55,12 @@ pub enum ControlUpdate {
     TxDrive(f32),
     /// TUNE drive the rig reports, as a 0..1 fraction.
     TuneDrive(f32),
+    /// The squelch threshold the rig reports, as a 0..1 fraction of its own
+    /// scale (see [`IqSource::commands_squelch`]).
+    ///
+    /// The radio's own setting arriving, not a request — read when the control
+    /// link opens and *adopted*, the same way the antenna below it is.
+    Squelch(f32),
     /// The hardware centre (LO) moved out from under this source: on a
     /// shared-LO device (an AD9361's two receive chains share one
     /// synthesiser), a sibling stream retuned it. The engine *adopts* the new
@@ -271,6 +277,23 @@ pub trait IqSource: Send {
     /// only drive control (a CAT rig's sound card) or drive is applied in our
     /// own modulator chain (IQ sources).
     fn commands_tx_power(&self) -> bool {
+        false
+    }
+    /// Set the *rig's own* squelch threshold, as a `0..1` fraction of its
+    /// scale — `0` open, `1` closed. No-op for sources with no such control.
+    fn set_squelch(&mut self, _frac: f32) {}
+    /// Whether [`Self::set_squelch`] actually reaches a squelch in the radio.
+    ///
+    /// True only on a transceiver that hands us audio it has already gated. On
+    /// one of those the rig's squelch is the *only* squelch there is: what the
+    /// sound card receives has been through it, so a threshold applied on this
+    /// side can close further on what got through but can never open what was
+    /// shut out — which is how an operator ended up with a squelch control that
+    /// could not reach the thing muting their radio (issue #192).
+    ///
+    /// False on every I/Q front end, where the engine has the whole passband
+    /// and its own gate is the honest one.
+    fn commands_squelch(&self) -> bool {
         false
     }
     /// Latest forward-power / SWR the rig reported, polled by the engine while
@@ -936,6 +959,12 @@ impl IqSource for ConvertedSource {
 
     fn commands_tx_power(&self) -> bool {
         self.inner.commands_tx_power()
+    }
+    fn set_squelch(&mut self, frac: f32) {
+        self.inner.set_squelch(frac);
+    }
+    fn commands_squelch(&self) -> bool {
+        self.inner.commands_squelch()
     }
 
     fn tx_telemetry(&mut self) -> Option<sdroxide_types::TxTelemetry> {

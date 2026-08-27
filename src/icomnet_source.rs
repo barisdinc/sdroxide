@@ -56,7 +56,7 @@ use sdroxide_dsp::Ddc;
 use sdroxide_icomnet::{IcomNetDevice, IcomNetOptions};
 use sdroxide_radio::rtrb;
 use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
-use sdroxide_types::{CwKeying, IcomNetConfig, IcomRxSource, Mode, TxTelemetry};
+use sdroxide_types::{Band, CwKeying, IcomNetConfig, IcomRxSource, Mode, TxTelemetry};
 
 use crate::dial::Dial;
 use crate::session_trace::TraceStore;
@@ -193,6 +193,15 @@ pub struct IcomNetSource {
     last_signal: Option<(Instant, f32)>,
     last_telem: Option<TxTelemetry>,
     transmitting: bool,
+    /// Whether the squelch level has been settled — by the radio answering the
+    /// opening read, or by this end setting one. What it suppresses is an
+    /// answer that crossed a command on the wire, which would otherwise put the
+    /// rail back where the radio was before the operator moved it.
+    squelch_set: bool,
+    /// The band this end has already put the radio's own repeater shift back
+    /// to simplex for — see [`civ::simplex_frame`], and [`Self::pump`] for why
+    /// it is a band rather than a one-off.
+    simplex_band: Option<Band>,
 }
 
 impl IcomNetSource {
@@ -308,6 +317,8 @@ impl IcomNetSource {
             last_signal: None,
             last_telem: None,
             transmitting: false,
+            squelch_set: false,
+            simplex_band: None,
         };
         notes.extend(src.configure(cfg));
         // Adopt the radio's current dial before returning, the way the CAT
@@ -341,6 +352,9 @@ impl IcomNetSource {
         // What the radio's power is set to, so the Drive slider starts where the
         // radio already is instead of imposing a remembered level on it.
         self.send(civ::read_power_frame(self.civ_addr));
+        // And where its squelch is, adopted the same way and for the same
+        // reason — on AF it is the gate the operator hears (issue #192).
+        self.send(civ::read_squelch_frame(self.civ_addr));
 
         match model.lan_afif_select {
             Some(item) => {
@@ -512,6 +526,21 @@ impl IcomNetSource {
             self.on_reply(reply);
         }
 
+        // The radio's own repeater shift, put back to simplex whenever the dial
+        // has moved to another band. A band stacking register restores whatever
+        // duplex that band was last left on the moment the dial crosses into it,
+        // so clearing it once with the other offsets in `configure` is not
+        // enough — see [`civ::simplex_frame`] (issue #192). Not while keyed: the
+        // transmit frequency went out with the key-down, and mid-over the link
+        // belongs to the meters.
+        if !self.transmitting && self.dial.vfo > 0.0 {
+            let band = Band::containing(self.dial.vfo);
+            if self.simplex_band != Some(band) {
+                self.simplex_band = Some(band);
+                self.send(civ::simplex_frame(self.civ_addr));
+            }
+        }
+
         if self.last_poll.elapsed() >= POLL_PERIOD {
             self.last_poll = Instant::now();
             self.send(civ::read_freq_frame(self.civ_addr));
@@ -564,6 +593,14 @@ impl IcomNetSource {
             0x14 => {
                 if let Some(frac) = civ::parse_power_reply(&reply.data) {
                     self.pending.push(ControlUpdate::TxDrive(frac));
+                } else if let Some(frac) = civ::parse_squelch_reply(&reply.data) {
+                    // Only the opening read ever answers here: once this end
+                    // has set a level, the suppression in `set_squelch` keeps
+                    // the radio's own answer from dragging the rail back.
+                    if !self.squelch_set {
+                        self.squelch_set = true;
+                        self.pending.push(ControlUpdate::Squelch(frac));
+                    }
                 }
             }
             0x15 => {
@@ -803,6 +840,19 @@ impl IqSource for IcomNetSource {
     fn set_tune_drive(&mut self, _frac: f64) {}
     fn commands_tx_power(&self) -> bool {
         true
+    }
+
+    /// The radio's own squelch, which on AF over the network is the only one
+    /// there is: what the LAN stream carries has already been through it.
+    fn set_squelch(&mut self, frac: f32) {
+        self.squelch_set = true;
+        self.send(civ::set_squelch_frame(self.civ_addr, frac));
+    }
+    /// AF only. On the 12 kHz IF the stream is real spectrum that sdroxide
+    /// demodulates itself, so the radio's gate decides nothing about the audio
+    /// heard here and the engine's own threshold is the one that does.
+    fn commands_squelch(&self) -> bool {
+        self.rx_source == IcomRxSource::Af
     }
 
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {

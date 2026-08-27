@@ -198,7 +198,7 @@ fn mode_digit(m: Mode) -> char {
         // for than a sideband — which at least leaves the sound card in the
         // transmit path. What actually goes out on one is then whatever the
         // engine modulated, through an SSB transmitter.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => '2',
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => '2',
         Mode::Usb | Mode::Spec | Mode::Sstv | Mode::Wefax | Mode::RfPaint => '2',
     }
 }

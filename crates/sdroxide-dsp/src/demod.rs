@@ -153,7 +153,15 @@ pub fn make_demod(mode: Mode, channel_rate: f64) -> Option<Box<dyn Demodulator>>
         Mode::Rifp => Some(Box::new(FskDemod::new(channel_rate, lo, hi))),
         Mode::Am => Some(Box::new(AmDemod::new(channel_rate, lo, hi))),
         Mode::Sam => Some(Box::new(SamDemod::new(channel_rate, lo, hi))),
-        Mode::Nfm => Some(Box::new(FmDemod::new(channel_rate, lo, hi))),
+        // VHF SSTV takes the NFM voice path rather than the flat packet one,
+        // and deliberately: on 2 m a picture is sent through an ordinary FM
+        // transceiver's microphone input and received by another one, so what
+        // reproduces the link is the voice chain — the sub-audible high-pass
+        // (a repeater channel may well carry a CTCSS tone under the picture)
+        // and the ±5 kHz scaling the transmitter below uses. Its video
+        // subcarrier runs 1200–2300 Hz, which is inside that chain with room
+        // to spare either side.
+        Mode::Nfm | Mode::SstvFm => Some(Box::new(FmDemod::new(channel_rate, lo, hi))),
         Mode::Wfm => Some(Box::new(WfmDemod::new(channel_rate))),
         // DRM's decoder is a vendored C++ receiver, which cannot be linked from
         // this crate — see `Demodulator::take_drm`. The engine builds

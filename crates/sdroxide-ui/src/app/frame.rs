@@ -1466,8 +1466,11 @@ impl SdroxideApp {
             show_spots,
             show_memories,
             show_voice,
+            caps,
             ..
         } = self;
+        // Read before the borrow below, which takes `self` apart.
+        let rig_squelch = caps.as_ref().is_some_and(|c| c.commands_squelch);
         let mut sink = crate::input::UiSink {
             view,
             help: &mut help.open,
@@ -1477,6 +1480,7 @@ impl SdroxideApp {
             memories: show_memories,
             voice: show_voice,
             speech: &mut speech_acts,
+            rig_squelch,
         };
         input.poll_pointer_and_keys(ctx, state, &mut sink, cmds);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1525,8 +1529,10 @@ impl SdroxideApp {
             show_spots,
             show_memories,
             show_voice,
+            caps,
             ..
         } = self;
+        let rig_squelch = caps.as_ref().is_some_and(|c| c.commands_squelch);
         let mut sink = crate::input::UiSink {
             view,
             help: &mut help.open,
@@ -1536,6 +1542,7 @@ impl SdroxideApp {
             memories: show_memories,
             voice: show_voice,
             speech: &mut Vec::new(),
+            rig_squelch,
         };
         input.release_all(state, &mut sink, cmds);
     }

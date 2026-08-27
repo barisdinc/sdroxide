@@ -765,4 +765,21 @@ pub enum Command {
         mode: Mode,
         level: f32,
     },
+
+    /// Set the *radio's own* squelch threshold, as a `0..1` fraction of its
+    /// scale — `0` open, `1` closed (issue #192).
+    ///
+    /// Not [`Command::SetSquelch`], and the difference is which receiver is
+    /// being quietened. That one is sdroxide's gate on a passband sdroxide
+    /// demodulated, in dBFS. This is a level in the rig, and on a transceiver
+    /// that hands us audio it has already gated it is the only one that can
+    /// open: what reaches the sound card is what the radio let through.
+    ///
+    /// Ignored by a front end with no such control
+    /// ([`crate::DeviceCaps::commands_squelch`]), which is every SDR.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetRigSquelch {
+        frac: f32,
+    },
 }

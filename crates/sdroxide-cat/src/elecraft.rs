@@ -205,7 +205,7 @@ fn mode_digit(m: Mode) -> char {
         // hang off SSB — so plain FM is as close as the rig gets, and which
         // input it transmits is then the rig's MIC/LINE menu rather than
         // anything CAT can say.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => '4',
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => '4',
         Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => '5',
         Mode::Digl => '9',
         Mode::Digu

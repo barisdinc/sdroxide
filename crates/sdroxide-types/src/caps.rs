@@ -205,6 +205,23 @@ pub struct DeviceCaps {
     /// Appended last, for the same reason as `shared_lo_rx`.
     #[serde(default)]
     pub cw_audio_keyed: bool,
+    /// The radio has a squelch of its own that sdroxide can set, so the SQL
+    /// control drives *that* rather than the engine's own gate
+    /// ([`crate::RadioState::rig_squelch`] rather than
+    /// [`crate::RxState::squelch_db`]).
+    ///
+    /// True on a transceiver that hands us audio it has already gated, where
+    /// the rig's squelch is the only one that can open — a threshold on this
+    /// side never hears what the radio muted (issue #192). False on every I/Q
+    /// front end, where the engine has the whole passband and its own gate is
+    /// the honest one.
+    ///
+    /// Reported by the source (`IqSource::commands_squelch`) rather than read
+    /// from the CAT configuration, for the same reason [`Self::cw_audio_keyed`]
+    /// is: a backend that is not a CAT rig has no such field and still has an
+    /// answer. Appended last, for the same reason as `shared_lo_rx`.
+    #[serde(default)]
+    pub commands_squelch: bool,
 }
 
 impl DeviceCaps {

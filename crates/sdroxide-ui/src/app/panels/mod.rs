@@ -56,7 +56,7 @@ pub(in crate::app) fn panel_panes(mode: Mode) -> &'static [&'static str] {
         // it whole instead of squeezing it under something else.
         Mode::Wspr => &["SPOTS", "MAP", "STATUS"],
         Mode::Fsq => &["HEARD", "TRAFFIC"],
-        Mode::Sstv | Mode::Rifp => &["RECEIVE", "SEND"],
+        Mode::Sstv | Mode::SstvFm | Mode::Rifp => &["RECEIVE", "SEND"],
         // MONITOR is every frame heard on the channel, TERMINAL is the
         // connected session — the two things a packet operator watches, and
         // they move independently, so they get a pane each rather than sharing
@@ -343,6 +343,10 @@ fn digi_dial_freqs(mode: Mode) -> &'static [(&'static str, f64)] {
             ("2m", 144_500_000.0),
             ("70cm", 432_500_000.0),
         ],
+        // The VHF/UHF image channels, where the picture rides an FM carrier —
+        // see `SSTV_FM_DIALS` for where each comes from and why the list is
+        // this short.
+        Mode::SstvFm => &[("6m", 50_510_000.0), ("2m", 144_500_000.0), ("70cm", 433_400_000.0)],
         // Olivia activity centres (USB dial).
         Mode::Olivia => &[
             ("80m", 3_581_000.0),

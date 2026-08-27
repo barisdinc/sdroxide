@@ -2361,6 +2361,7 @@ fn engine_thread(
     // it is the trait's own answer, passed on.
     caps.center_is_dial = source.center_is_dial();
     caps.cw_audio_keyed = source.cw_audio_keyed();
+    caps.commands_squelch = source.commands_squelch();
     let audio_mode = caps.audio_mode;
     let radio_fs = source.sample_rate();
     let audio_bw = source.display_bandwidth().unwrap_or(radio_fs / 2.0);
@@ -4095,6 +4096,17 @@ impl Engine {
                     let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
                 }
             }
+            // The squelch the radio is set to, read when its control link
+            // opened. Adopted rather than overridden, exactly as the drive
+            // above is — the operator set it at the rig, and a remembered level
+            // imposed on top would move a gate they can hear.
+            ControlUpdate::Squelch(frac) => {
+                let frac = frac.clamp(0.0, 1.0);
+                if self.state.rig_squelch != frac {
+                    self.state.rig_squelch = frac;
+                    let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+                }
+            }
             // Which socket the radio is receiving on, as the radio itself
             // reports it when its control link opens. Adopted for the same
             // reason the drive above is: the operator set it on the rig, the
@@ -4670,7 +4682,10 @@ impl Engine {
         } else if mode.is_rade() {
             Box::new(RadeController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_sstv() {
-            Box::new(SstvController::new(self.digi_config.clone(), tap_rate))
+            // Both SSTV modes, one controller: HF and VHF differ in the radio
+            // underneath, not in the picture — the same reason the two packet
+            // modes share theirs.
+            Box::new(SstvController::new(mode, self.digi_config.clone(), tap_rate))
         } else if mode.is_wefax() {
             Box::new(WefaxController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_rifp() {
@@ -5647,6 +5662,14 @@ impl Engine {
             SetVolume { rx, v } => self.state.rx[rx.index()].volume = v.clamp(0.0, 1.0),
             SetMute { rx, muted } => self.state.rx[rx.index()].muted = muted,
             SetSquelch { rx, db } => self.state.rx[rx.index()].squelch_db = db,
+            // The rig's own squelch, on a front end that has one. Held in the
+            // state either way so the rail keeps its position on a source that
+            // is not listening, and passed straight down — the radio is what
+            // the level means something to.
+            SetRigSquelch { frac } => {
+                self.state.rig_squelch = frac.clamp(0.0, 1.0);
+                self.source.set_squelch(self.state.rig_squelch);
+            }
             SetNoiseBlanker(on) => self.state.noise_blanker = on,
             SetNoiseReduction { rx, level } => {
                 // A remote client can ask for an engine this host cannot run.
@@ -9626,6 +9649,7 @@ impl Engine {
         self.caps = caps;
         self.caps.center_is_dial = self.source.center_is_dial();
         self.caps.cw_audio_keyed = self.source.cw_audio_keyed();
+        self.caps.commands_squelch = self.source.commands_squelch();
         self.audio_mode = self.caps.audio_mode;
         self.radio_fs = self.source.sample_rate();
         self.audio_bw = self.source.display_bandwidth().unwrap_or(self.radio_fs / 2.0);
@@ -9822,7 +9846,9 @@ impl Engine {
     /// leaves them alone.
     fn follow_sideband(&mut self) {
         let mode = self.state.rx[0].mode;
-        if !mode.is_sstv() {
+        // `Mode::Sstv` by name rather than [`Mode::is_sstv`]: its VHF twin
+        // rides an FM carrier, which has no sideband to swap.
+        if mode != Mode::Sstv {
             return;
         }
         let want = mode.default_filter_at(self.state.rx_freq_hz());
@@ -11470,9 +11496,9 @@ fn rig_mode_class(m: Mode) -> u8 {
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
         Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => 2,
         Mode::Cw => 3,
-        // RIFP, VHF packet and APRS are data on an FM carrier, so a rig
-        // reporting plain FM is still where we left it.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs => 5,
+        // RIFP, VHF packet, APRS and VHF SSTV are data on an FM carrier, so a
+        // rig reporting plain FM is still where we left it.
+        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => 5,
     }
 }
 

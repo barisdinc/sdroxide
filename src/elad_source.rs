@@ -662,11 +662,14 @@ impl IqSource for EladSource {
                 // `Protocol::tx_state_requests`), so this never arrives — but
                 // the day it does, it means the same thing here as anywhere.
                 sdroxide_cat::CatUpdate::Ptt(on) => out.push(ControlUpdate::RigTx(on)),
-                // The meters arrive on their own telemetry channels, not here.
+                // The meters arrive on their own telemetry channels, not here;
+                // and the ELAD dialect has no squelch command, so that read is
+                // never asked for either.
                 sdroxide_cat::CatUpdate::Swr(_)
                 | sdroxide_cat::CatUpdate::Alc(_)
                 | sdroxide_cat::CatUpdate::Po(_)
                 | sdroxide_cat::CatUpdate::FwdW(_)
+                | sdroxide_cat::CatUpdate::Squelch(_)
                 | sdroxide_cat::CatUpdate::Signal(_) => {}
             }
         }

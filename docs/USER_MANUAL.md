@@ -287,7 +287,7 @@ popup with three rows:
   has a standard calling frequency carry a cyan underline; see
   [§3.1](#31-general-considerations).
 - **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB SPEC`.
-- **DIGITAL:** `FT8 FT4 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP RFPAINT RADE` (see
+- **DIGITAL:** `FT8 FT4 PSK RTTY OLIVIA THOR FSQ HELL SSTV SSTV-FM RIFP RFPAINT RADE` (see
   [Digital modes](#3-digital-modes)).
 
 ![The band and mode selector popup](images/04-band-mode-popup.jpg)
@@ -434,6 +434,19 @@ mode. What is in the box never changes; only where the two rows are cut does.
   [2.20](#220-recording-the-audio).
 - **SQL** — squelch; below the open threshold it reads
   `off`.
+
+  On a radio that hands sdroxide audio it has **already squelched** — a CAT rig
+  on a sound card, an Icom sending AF over the network — this rail sets the
+  *radio's own* squelch over the control link instead, and reads as a
+  percentage of the radio's scale (`open` at the bottom). That is the gate the
+  audio actually passes through: a threshold applied on this side could only
+  close further on what the radio already let by, and could never open up a
+  weak station the radio had muted. The level is read from the rig when the
+  control link opens, so the rail starts where you left the knob rather than
+  imposing a remembered figure on it, and a keyboard or MIDI binding on the
+  squelch action follows the same rail. Every other front end — anything
+  sending sdroxide I/Q — keeps the dBFS threshold, which is the honest one
+  there: the whole passband arrives and sdroxide does the gating.
 - **NB** — impulse noise blanker on the raw signal (keyboard shortcut **N**).
 - **ANC** — automatic notch: an adaptive filter that cancels **constant tone
   elements** — heterodynes, carriers, and tuner-uppers — while leaving voice and
@@ -1732,6 +1745,19 @@ not, which on 70 cm (a 7.6 MHz shift in Region 1) it never is.
 > **Settings → General** ([6.1](#61-general-station-audio-and-remote-access)),
 > and set the shift by hand wherever your local plan differs.
 
+**On a CAT-controlled rig, sdroxide owns the shift.** These controls work by
+moving the radio's dial for the length of the over — the same way RIT, XIT and
+split do on a rig whose VFO is its whole frequency control — so the radio's own
+duplex setting has to be off, or the two would be added together and the over
+would go out a shift away from where you asked for it. sdroxide therefore puts
+an Icom back to simplex whenever the dial moves to another band.
+
+That matters on a radio that remembers a duplex setting per band, which an
+IC-9700 does: switching to 70 cm or 23 cm recalls whatever that band was last
+left on, normally DUP−, and before this the SIMPLEX button on screen could not
+take it off again. Set the shift here rather than on the radio; the radio's own
+DUP button will be overridden the next time you change band.
+
 #### The tone — TONE
 
 Press **TONE** for what goes out under the voice, the 1750 Hz burst, and the
@@ -2767,6 +2793,26 @@ of the dial as you tune across the boundary, and a CAT-controlled rig is
 commanded into the matching sideband. Nothing to set, and nothing to undo when
 you go back up — a picture sent on the wrong sideband arrives at everyone else
 inverted.
+
+**On VHF and UHF, use SSTV-FM instead.** Above 30 MHz a picture is normally sent
+on an FM carrier rather than a sideband, so the DIGITAL row has a second entry —
+**SSTV-FM** — beside SSTV. Everything about the picture is the same: the same
+seven transmission modes, the same decoder, the same gallery and the same
+compositor. What differs is the radio underneath. SSTV puts a CAT-controlled rig
+in USB (or LSB); SSTV-FM puts it in FM, and the dial is the centre of a channel
+rather than the foot of a passband.
+
+Its band buttons are the FM image channels: **50.510** on 6 m, **144.500** on
+2 m and **433.400** on 70 cm — the IARU Region 1 plan's own, the last of which
+it names as *SSTV (FM/AFSK)*. Region 2's plan appoints no image channel at all
+(the ARRL 2 m plan calls 145.50–145.80 "miscellaneous and experimental modes"),
+so a Region 2 station is offered 145.500 marked as common practice rather than
+as something a plan says. Region 3 names none, and none is offered.
+
+Pick by what the other station is doing, not by the band alone: 2 m SSTV on
+sideband is a thing people do, and both modes are available everywhere. If a
+picture is audible but decodes as noise, the usual cause is being in the wrong
+one of the two.
 
 **Receiving:**
 
@@ -9829,7 +9875,7 @@ The panes, by mode:
 | FT8, FT4, FT2 | **DECODES** · **QSO** · WFALL |
 | JS8 | **HEARD** · **CHAT** · WFALL |
 | FSQ | **HEARD** · **TRAFFIC** · WFALL |
-| SSTV, RIFP | **RECEIVE** · **SEND** · WFALL |
+| SSTV, SSTV-FM, RIFP | **RECEIVE** · **SEND** · WFALL |
 | Weather fax | **CHART** · **SAVED** · WFALL |
 | RF Paint | **TEXT** · **IMAGE** · WFALL |
 | PSK, RTTY, Olivia, THOR, Contestia, Hell, RADE | **PANEL** · WFALL |
@@ -11498,7 +11544,8 @@ using. Bind them under **Speech** on the Controls tab:
 | THOR | DominoEX-family IFK keyboard mode with FEC (THOR4…THOR32). |
 | FSQ | Fast Simple QSO — 33-tone IFK with directed (FSQCALL) messaging and images. |
 | HELL | Hellschreiber — facsimile "dot" mode read by eye, not decoded (Feld Hell, Slow, X5, X9, FSK Hell 245/105, Hell 80). |
-| SSTV | Slow-scan TV image mode (Scottie, Martin, Robot). |
+| SSTV | Slow-scan TV image mode (Scottie, Martin, Robot), on a sideband — LSB on 160/80/40 m, USB above. |
+| SSTV-FM | The same picture on an FM carrier, the way slow-scan is sent on VHF and UHF. |
 | RIFP | Radio Image Framing Protocol (draft-dulaunoy-rifp-00): packetised images over continuous-phase FSK. Centred on the dial, ~25 kHz wide — 70 cm, 2 m/6 m all-modes, or 10 m FM. |
 | RFPAINT | RF Paint — transmit-only spectrum painting of text and images onto the waterfall. |
 | PACKET / PACKET-HF | AX.25 packet radio: 1200 baud Bell 202 or 9600 baud G3RUH on VHF/UHF FM, 300 baud AFSK on HF sideband. Carries Winlink sessions and offers the modem as a KISS TNC. See [11](#11-winlink-radio-email). |
