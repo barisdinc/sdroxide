@@ -84,6 +84,16 @@ const LOADER_TIMEOUT: Duration = Duration::from_secs(60);
 const RECLAIM_WINDOW: Duration = Duration::from_secs(10);
 const RECLAIM_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Quiet either side of the loader: after letting the interface go, and after
+/// the loader has finished with it.
+///
+/// Both are SoapyELAD's, which is the only recipe here that has been run
+/// against a real FDM-S2. Neither is derived from anything — they are somebody
+/// else's measured-good numbers for a device that has just had its FPGA
+/// rewritten, and the second one costs a second once a session.
+const SETTLE_BEFORE: Duration = Duration::from_millis(200);
+const SETTLE_AFTER: Duration = Duration::from_secs(1);
+
 /// The speed code of the image loaded in this process, if one was.
 ///
 /// Process-wide rather than per-device because that is the shape of the thing
@@ -194,6 +204,10 @@ impl Run {
         tracing::info!("loading the ELAD's FPGA image: {what}");
         trace.note(format!("fpga: running {what}"));
 
+        // The interface was let go a moment ago and the loader is about to claim
+        // it. Give the release time to land before something else asks for it.
+        std::thread::sleep(SETTLE_BEFORE);
+
         let started = Instant::now();
         let mut child = match Command::new(&self.loader)
             .arg("+")
@@ -240,6 +254,8 @@ impl Run {
             Some(s) if s.success() => {
                 trace.note(format!("fpga: loaded in {:.1}s", started.elapsed().as_secs_f64()));
                 *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.code);
+                // Let the device finish coming back before claiming it.
+                std::thread::sleep(SETTLE_AFTER);
                 Ok(())
             }
             other => {
@@ -304,8 +320,10 @@ fn missing_loader(model: Model) -> String {
          answers every command and sends no samples at all. sdroxide can load it \
          for you but could not find ELAD's `{LOADER}` — download it from ELAD's \
          Linux area (eladit.com → Download → SDR/Linux), copy it to \
-         /usr/local/bin/{LOADER}, and make it executable. Set {LOADER_ENV} if you \
-         keep it somewhere else",
+         /usr/local/bin/{LOADER}, and make it executable. Take the \
+         \"intel\" build, not the newer \"ubuntu-32\" one: that is a 32-bit \
+         binary and on a 64-bit machine it opens the device, sends nothing and \
+         exits without a word. Set {LOADER_ENV} if you keep it somewhere else",
         model.name(),
     )
 }
@@ -316,13 +334,34 @@ fn missing_loader(model: Model) -> String {
 /// gets a sentence of its own rather than being left to the silence watchdog —
 /// which reopens the device every three seconds, for ever, without a word.
 pub fn silence_hint(model: Model) -> String {
+    // Whether an image went in this session changes the advice completely, and
+    // getting that wrong is worse than saying nothing: telling somebody to
+    // install a loader they have just watched run for six seconds sends them to
+    // the one place the fault is not.
+    hint_for(model, LOADED.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+}
+
+/// The sentence itself, with the loaded state passed in so it can be tested
+/// either way without racing another test for the global.
+fn hint_for(model: Model, loaded: bool) -> String {
     if model.needs_fpga_load() {
+        if loaded {
+            return format!(
+                "the {} has not delivered a single sample, although its FPGA was \
+                 programmed at this open. The device is answering every command \
+                 and producing nothing, which is past anything sdroxide can tell \
+                 apart from here — please send Settings → Radio → Copy diagnostic \
+                 report to the issue tracker",
+                model.name(),
+            );
+        }
         format!(
             "the {} has not delivered a single sample. That is what an unloaded \
              FPGA looks like: it enumerates, reports its serial, and acknowledges \
              the start of the stream, with no down-converter in it to produce one. \
              Install ELAD's `{LOADER}` loader (eladit.com → Download → SDR/Linux) \
-             as /usr/local/bin/{LOADER} and sdroxide will run it at every open",
+             as /usr/local/bin/{LOADER} — the \"intel\" build, which is the \
+             64-bit one — and sdroxide will run it at every open",
             model.name(),
         )
     } else {
@@ -409,11 +448,22 @@ mod tests {
         let w = missing_loader(Model::S2);
         assert!(w.contains("FDM-S2"), "{w}");
         assert!(w.contains(LOADER), "{w}");
-        let s = silence_hint(Model::S2);
+        let s = hint_for(Model::S2, false);
         assert!(s.contains(LOADER), "{s}");
         // The transceiver's version must not send anybody after a loader it
         // does not need.
-        let duo = silence_hint(Model::Duo);
+        let duo = hint_for(Model::Duo, false);
         assert!(!duo.contains(LOADER), "{duo}");
+    }
+
+    /// A silent receiver whose FPGA *was* just programmed must not be answered
+    /// with "install the loader" — the operator has watched it run, and being
+    /// sent back to it is how a real fault gets read as a botched install.
+    #[test]
+    fn a_programmed_device_that_is_still_silent_is_not_blamed_on_the_loader() {
+        let s = hint_for(Model::S2, true);
+        assert!(!s.contains(LOADER), "{s}");
+        assert!(s.contains("programmed"), "{s}");
+        assert!(s.contains("diagnostic report"), "{s}");
     }
 }

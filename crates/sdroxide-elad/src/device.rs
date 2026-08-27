@@ -8,6 +8,11 @@
 //! in that order and nothing says what happens if it is not; a driver written
 //! against a device nobody has is not the place to find out. [`Device::open`]
 //! is therefore one function rather than a set of setters the caller sequences.
+//!
+//! The samplers differ in one place and it is the last step: their FIFO is
+//! started by [`Device::start_pending`] from the stream thread, once the bulk
+//! transfers are already queued. That is the order of the only driver anybody
+//! has streamed an FDM-S2 with, and the reverse of `gr-elad`'s. See issue #178.
 
 use sdroxide_types::EladConfig;
 
@@ -41,6 +46,8 @@ pub struct Device {
     /// Warnings gathered at open that the operator should see rather than have
     /// to find in a log — a slow USB port, a calibration that would not read.
     pub warnings: Vec<String>,
+    /// Whether the FIFO has been started yet. See [`Device::start_pending`].
+    started: bool,
     trace: Trace,
 }
 
@@ -88,6 +95,7 @@ impl Device {
             hw_version: None,
             firmware: None,
             warnings: Vec::new(),
+            started: false,
             trace: trace.clone(),
         };
 
@@ -114,7 +122,13 @@ impl Device {
         }
         dev.retune()?;
         dev.apply_front_end()?;
-        dev.start()?;
+        // On the FDM-DUO the start belongs here, at the end of the sequence
+        // `gr-elad` performs. On a sampler it is deliberately left until the
+        // host is already reading — see `start_pending`.
+        if model == Model::Duo {
+            dev.start()?;
+            dev.started = true;
+        }
 
         tracing::info!(
             "opened {} (usb {:04x}:{:04x}, serial {}, {}) at {} Hz",
@@ -277,6 +291,29 @@ impl Device {
             1,
         )?;
         expect_ack("front-end setting", Request::SamplerFrontEnd.code(), &reply)
+    }
+
+    /// Start the FIFO if the open did not, and say nothing if it did.
+    ///
+    /// The samplers are started here, from the stream thread, *after* the bulk
+    /// transfers are already queued — which is the order the one driver
+    /// verified against a real FDM-S2 uses, and the opposite of the order
+    /// `gr-elad` uses. Starting first leaves the device pushing into a FIFO
+    /// nobody is emptying for as long as it takes to submit sixteen transfers;
+    /// at 6144 kHz that is longer than the bridge's own buffering, and there is
+    /// no evidence about what ELAD's FPGA does when it overruns on its very
+    /// first block.
+    ///
+    /// The transceiver is not changed: it initialises its FIFO explicitly, its
+    /// sequence is the one `gr-elad` documents, and it is the only model anybody
+    /// has streamed from here.
+    pub fn start_pending(&mut self) -> Result<()> {
+        if self.started {
+            return Ok(());
+        }
+        self.start()?;
+        self.started = true;
+        Ok(())
     }
 
     /// Start the sample FIFO. The device echoes `0xE9`.

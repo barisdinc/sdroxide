@@ -7224,6 +7224,13 @@ SDR/Linux), copy it to `/usr/local/bin/elad-firmware` and make it executable:
 sudo install -m 755 elad-firmware-2.0-intel /usr/local/bin/elad-firmware
 ```
 
+> ⚠️ **Take the "intel" build, not the newer "ubuntu-32" one.** The 2019
+> `ubuntu-32` file is a 32-bit binary; on a 64-bit machine it opens the receiver,
+> sends it nothing and exits without an error, so it looks exactly like a
+> successful load. The older 2016 "intel" file is the 64-bit build. A working run
+> prints `XYLINX programming correct` and takes about six seconds — check that
+> once by hand before blaming anything else.
+
 sdroxide then runs it for you every time it opens the receiver, loading the
 image for the sample rate you picked. It takes about six seconds, once per
 session. If you keep the loader somewhere else, point `SDROXIDE_ELAD_FIRMWARE`

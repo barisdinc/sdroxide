@@ -604,7 +604,9 @@ starting sdroxide before the rig is fine:
   Install ELAD's own `elad-firmware` loader (their Linux download area) as
   `/usr/local/bin/elad-firmware` and sdroxide runs it for you at every open,
   choosing the image for the Sample rate you picked; the six rates *are* six
-  images, which is why nothing in the vendor protocol selects between them.
+  images, which is why nothing in the vendor protocol selects between them. Take
+  the "intel" build — the newer "ubuntu-32" one is 32-bit and on a 64-bit machine
+  exits silently having done nothing.
   Without the loader sdroxide says so on screen rather than sitting on "waiting
   for spectrum" for ever.
 

@@ -192,6 +192,11 @@ fn pump(
         ep.submit(ep.allocate(TRANSFER_BYTES));
     }
 
+    // Only now is the device told to produce anything. On a sampler the FIFO
+    // start was held back from the open for exactly this: the queue above is
+    // what the first block has to land in. See `Device::start_pending`.
+    dev.start_pending()?;
+
     loop {
         // 1. Collapse the whole control channel, then apply each field once.
         let mut pending = Pending::default();
