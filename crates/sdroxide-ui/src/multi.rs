@@ -1072,6 +1072,21 @@ impl eframe::App for MultiApp {
                 }
             }
         }
+        // A link that has dropped is redialled here rather than on the error
+        // screen, for the same reason: the screen belongs to one tab, and a
+        // station's other radios have nobody looking at them to press anything.
+        // Every tab is asked, the one on screen included — its own frame draws
+        // the countdown but does not drive it.
+        //
+        // The clock is what releases these, so a window with nothing else
+        // happening in it has to be woken to let them go.
+        let mut waiting = false;
+        for tab in &mut self.tabs {
+            waiting |= tab.app.poll_reconnect();
+        }
+        if waiting {
+            crate::repaint::after_ms(&ctx, 250);
+        }
         // Publish the roster before the frame (the settings dialog draws it),
         // act on what the strips and the dialogs asked for after it. Which
         // radios have been lent out is settled first: both the strip and the

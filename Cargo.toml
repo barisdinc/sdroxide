@@ -2,10 +2,20 @@
 resolver = "3"
 members = ["crates/*"]
 default-members = [".", "crates/sdroxide-types", "crates/sdroxide-proto", "crates/sdroxide-dsp", "crates/sdroxide-radio", "crates/sdroxide-config"]
-# The vendored `soapysdr` is reached through `[patch.crates-io]`, not as a
-# member: it is upstream's crate under upstream's licence, not ours to lint or
+# The vendored crates are reached through `[patch.crates-io]`, not as members:
+# they are upstream's code under upstream's licences, not ours to lint or
 # version with the rest.
-exclude = ["vendor/soapysdr"]
+exclude = ["vendor/soapysdr", "vendor/ewebsock"]
+
+[patch.crates-io]
+
+# `ewebsock` 0.8.0 with one error classifier widened. On Windows a blocking
+# read whose timeout expires may be answered with `ERROR_IO_PENDING` (997)
+# rather than with a timeout, and upstream treats anything that is not
+# `WouldBlock`/`TimedOut` as a dead connection — so a remote client lost its
+# session every twenty minutes or so and had to be reconnected by hand.
+# See vendor/ewebsock/PROVENANCE.md; this stays until upstream carries it.
+ewebsock = { path = "vendor/ewebsock" }
 
 # `soapysdr` 0.5.1 with one method added: `Device::setting_info`, the call that
 # says which settings a driver has. Upstream wraps `readSetting`/`writeSetting`
@@ -13,7 +23,6 @@ exclude = ["vendor/soapysdr"]
 # crate — so a host can set a driver setting it already knows the name of, but
 # cannot discover one. That is what the SoapySDR settings panel is built on.
 # See vendor/soapysdr/PROVENANCE.md; this stays until the method is upstream.
-[patch.crates-io]
 soapysdr = { path = "vendor/soapysdr" }
 
 [workspace.package]

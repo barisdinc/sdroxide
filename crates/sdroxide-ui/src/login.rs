@@ -17,14 +17,23 @@
 //! and the rest of the tabs let themselves in. Ticking "remember" is the
 //! separate, longer-lived decision to keep it on this device between runs.
 //!
-//! Those automatic sign-ins go in one at a time ([`SIGNING_IN`]), because that
-//! is the only rate a station will judge them at: it compares one answer at a
-//! time and tells everybody else to come back. A station of four radios whose
-//! four tabs all answered on the same frame would have three of them turned
-//! away — and a tab that is not the one on screen never draws a card, so there
-//! is nobody there to try again. The gate, and treating that "come back" as
-//! the non-verdict it is ([`sdroxide_types::is_auth_busy`]), are what keep the
-//! rest of the station's tabs from arriving at a challenge they cannot answer.
+//! Sign-ins go in one at a time ([`SIGNING_IN`]), because that is the only rate
+//! a station will judge them at: it compares one answer at a time and tells
+//! everybody else to come back. A station of four radios whose four tabs all
+//! answered on the same frame would have three of them turned away — and a tab
+//! that is not the one on screen never draws a card, so there is nobody there
+//! to try again. The gate, and treating that "come back" as the non-verdict it
+//! is ([`sdroxide_types::is_auth_busy`]), are what keep the rest of the
+//! station's tabs from arriving at a challenge they cannot answer.
+//!
+//! *Every* answer takes the turn, the operator's own included
+//! ([`LoginForm::manual`]). It used to be only the automatic ones, and the one
+//! answer left outside the gate was the one somebody was watching: type a
+//! password on the tab on screen while another tab of the same station lets
+//! itself in, and the station compares one of the two and tells the other to
+//! come back — which the card then drew in the refusal colour, under a password
+//! that was perfectly good. That is issue #188's "it says the password is wrong
+//! and then connects anyway".
 
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, Mutex};
@@ -140,6 +149,17 @@ pub struct LoginForm {
     /// typed — quite possibly the password the station had just refused — as
     /// this station's known-good sign-in, and write it to disk.
     was_checking: bool,
+    /// What the operator typed and pressed SIGN IN on, waiting for this
+    /// station's turn like every other answer.
+    ///
+    /// Held here rather than handed straight to the socket because a station
+    /// judges one sign-in at a time: an answer that went out beside another
+    /// tab's would be compared against nothing and come back
+    /// [`sdroxide_types::AUTH_BUSY`], in front of the one person who would read
+    /// that as a verdict. Kept across a "come back" — nothing was compared, so
+    /// it is as good as it was — and dropped on a real verdict, which is the
+    /// operator's to deal with.
+    manual: Option<RemoteAccess>,
     /// Whether this sign-in is the operator's own answer to the card, rather
     /// than one the tab gave for itself.
     ///
@@ -179,12 +199,17 @@ impl LoginForm {
         // it is as good as it was, and this connection has to be free to offer
         // it again. Nothing else here would — a tab that is not on screen never
         // draws a card, so "ask the operator" is not an answer for it.
-        if let AuthPhase::Prompt(Some(why)) = phase
-            && is_auth_busy(why)
-        {
-            self.offered_stored = false;
-            self.offered_session = false;
-            self.submitted_stored = false;
+        if let AuthPhase::Prompt(Some(why)) = phase {
+            if is_auth_busy(why) {
+                self.offered_stored = false;
+                self.offered_session = false;
+                self.submitted_stored = false;
+            } else {
+                // ...and a station that *did* compare it has answered the
+                // operator, so their answer is spent. Posting it back would
+                // loop the very password the station has just turned down.
+                self.manual = None;
+            }
         }
         if phase.is_pending() {
             // A challenge where a moment ago there was none: a new session on
@@ -219,6 +244,7 @@ impl LoginForm {
             // somebody who was shown the box. See [`Self::answered_by_hand`].
             forget();
         }
+        self.manual = None;
         self.password.clear();
         self.focused = false;
     }
@@ -226,8 +252,11 @@ impl LoginForm {
     /// Put the once-per-connection state back, because there is a new
     /// connection: the controller reconnects in place and keeps this form.
     ///
-    /// What is deliberately *not* reset is the station key and the "remember"
-    /// tick, which belong to the operator rather than to the socket.
+    /// What is deliberately *not* reset is the station key, the "remember" tick
+    /// and the answer the operator typed ([`Self::manual`]) — all three belong
+    /// to the operator rather than to the socket, and a password that was in
+    /// flight when the link dropped is still the right answer to the challenge
+    /// the new one arrives at.
     fn new_session(&mut self) {
         self.offered_stored = false;
         self.offered_session = false;
@@ -309,17 +338,27 @@ impl LoginForm {
         crate::repaint::animate(ui.ctx());
     }
 
-    /// An answer this connection can give without asking anybody: the sign-in
-    /// another tab of this station has already had accepted, or the one kept
-    /// on this device. `None` means either that the operator has to be asked,
-    /// or that another tab of this station is mid-attempt and it is not this
-    /// one's turn yet — [`LoginForm::waiting_for_turn`] tells the two apart.
+    /// The answer this connection has ready, if the station's turn is going:
+    /// the one the operator typed ([`Self::manual`]), the sign-in another tab
+    /// of this station has already had accepted, or the one kept on this
+    /// device. `None` means either that the operator has to be asked, or that
+    /// another tab of this station is mid-attempt and it is not this one's turn
+    /// yet — [`LoginForm::waiting_for_turn`] tells the two apart.
+    ///
+    /// The operator's own answer comes first and is not held to
+    /// [`answerable`]: they are answering a card that is showing them a
+    /// refusal, which is exactly the phase an automatic answer must *not* keep
+    /// posting into.
     ///
     /// Public because a tab that is not on screen never draws the sign-in and
     /// still has to be able to let itself in — see `SdroxideApp::poll_auth`.
     pub fn answer_without_asking(&mut self, phase: &AuthPhase) -> Option<RemoteAccess> {
         self.waiting = false;
-        if !answerable(phase) || self.auto_attempts >= MAX_AUTO_ATTEMPTS {
+        // Nothing goes out while the server is judging one, or where there is
+        // no challenge to answer.
+        let asked = matches!(phase, AuthPhase::Prompt(_));
+        let by_hand = asked && self.manual.is_some();
+        if self.auto_attempts >= MAX_AUTO_ATTEMPTS || (!by_hand && !answerable(phase)) {
             return None;
         }
         if !self.claim_gate(crate::time::now_unix_f64()) {
@@ -329,7 +368,17 @@ impl LoginForm {
             self.waiting = true;
             return None;
         }
-        let answer = self.session_answer(phase).or_else(|| self.stored_answer(phase));
+        let answer = match self.manual.clone() {
+            // Kept rather than taken: a station too busy to compare it has to
+            // be offered it again, and `settle` is what drops it on a verdict.
+            // The tick on the card speaks for the operator from here on, which
+            // is what this is — see [`Self::answered_by_hand`].
+            Some(a) if asked => {
+                self.answered_by_hand = true;
+                Some(a)
+            }
+            _ => self.session_answer(phase).or_else(|| self.stored_answer(phase)),
+        };
         match answer {
             // Spent, and the turn is used: `settle` gives the gate back when
             // the server answers.
@@ -432,13 +481,20 @@ pub fn screen(
         // again before the operator was ever asked.
         forget();
     }
-    // Waiting for another tab of this station to finish its attempt is a wait,
-    // not a question: this connection has an answer and is going to give it as
-    // soon as the turn comes round, so the card says so rather than putting an
-    // empty box and a red line in front of an operator with nothing to do.
+    // Waiting for a turn at the station is a wait, not a question: this
+    // connection has an answer and is going to give it as soon as the turn
+    // comes round, so the card says so rather than putting an empty box and a
+    // red line in front of an operator with nothing to do.
+    //
+    // The "come back" is filtered out whether or not *this* form is the one
+    // waiting: a station judges one sign-in at a time across every client on
+    // it, so an answer can come back unjudged with nothing here to blame for
+    // it — and a sentence about somebody else's sign-in, in the colour a
+    // refusal is drawn in, reads as "wrong password" to the one person looking
+    // at it.
     let waiting = form.waiting_for_turn();
-    let refused = refused.filter(|why| !(waiting && is_auth_busy(why)));
-    let checking = matches!(phase, AuthPhase::Checking) || waiting;
+    let refused = refused.filter(|why| !is_auth_busy(why));
+    let checking = matches!(phase, AuthPhase::Checking) || waiting || form.manual.is_some();
     let tier = crate::layout::tier(ui.ctx());
     let touch = tier.touch();
 
@@ -484,8 +540,15 @@ pub fn screen(
         return None;
     }
     form.submitted_stored = false;
-    form.answered_by_hand = true;
-    Some(RemoteAccess { username: form.username.clone(), password: form.password.clone() })
+    // A fresh intent, so the automatic budget starts again: what it bounds is
+    // answers a station never compared, and the operator pressing the button is
+    // not one of those.
+    form.auto_attempts = 0;
+    form.manual =
+        Some(RemoteAccess { username: form.username.clone(), password: form.password.clone() });
+    // Out now if this station's turn is free, and on a later frame if it is
+    // not. Either way it leaves through the one gate every other answer does.
+    form.answer_without_asking(phase)
 }
 
 /// Roughly how tall the card comes out, for placing it before it is laid out.
@@ -899,6 +962,69 @@ mod tests {
             "nobody was shown the card, so nothing here speaks for the operator"
         );
         assert!(!form.remember);
+    }
+
+    /// A form holding what somebody typed and pressed SIGN IN on, without
+    /// going through `screen` — which needs an `egui::Ui`.
+    fn typed(station: &str, password: &str) -> LoginForm {
+        LoginForm {
+            manual: Some(RemoteAccess { username: "oe3jjs".into(), password: password.into() }),
+            ..tab(station)
+        }
+    }
+
+    /// Issue #188: the operator's own answer takes the station's turn like
+    /// every other one. It used to go straight out, so a tab letting itself in
+    /// beside it had both compared at once — and a station compares one, which
+    /// left the person watching looking at "another sign-in is being checked"
+    /// where they expected their radio.
+    #[test]
+    fn a_typed_answer_takes_the_stations_turn() {
+        let station = "ws://typed-turn.test:4950";
+        known(station, "hunter2");
+        let (mut other, mut mine) = (tab(station), typed(station, "correct-horse"));
+        other.settle(&AuthPhase::Prompt(None), station);
+        mine.settle(&AuthPhase::Prompt(None), station);
+
+        // The other tab has the turn, so the typed answer waits for it rather
+        // than being compared alongside.
+        assert!(other.answer_without_asking(&AuthPhase::Prompt(None)).is_some());
+        assert!(
+            mine.answer_without_asking(&AuthPhase::Prompt(None)).is_none(),
+            "both went at once"
+        );
+        assert!(mine.waiting_for_turn());
+
+        other.settle(&AuthPhase::Checking, station);
+        other.settle(&AuthPhase::Open, station);
+        let answer = mine.answer_without_asking(&AuthPhase::Prompt(None)).expect("the turn passed");
+        assert_eq!(answer.password, "correct-horse", "the station's answer won over the typed one");
+        assert!(mine.answered_by_hand, "the operator was the one who answered");
+    }
+
+    /// A typed answer is offered against a *refusal* — that is the card the
+    /// operator is looking at — where an automatic one never is, and it
+    /// survives a "come back" for the same reason a stored one does.
+    #[test]
+    fn a_typed_answer_answers_a_refusal_and_outlives_a_busy_station() {
+        let station = "ws://typed-again.test:4950";
+        let no = AuthPhase::Prompt(Some(sdroxide_types::AUTH_REFUSED.into()));
+        let busy = AuthPhase::Prompt(Some(sdroxide_types::AUTH_BUSY.into()));
+        let mut form = typed(station, "hunter2");
+
+        // The refusal on screen is what was typed over, so it must not stop
+        // the answer going out.
+        assert!(form.answer_without_asking(&no).is_some());
+        form.settle(&AuthPhase::Checking, station);
+
+        // Unjudged: the same answer is still the right one.
+        form.settle(&busy, station);
+        assert_eq!(form.answer_without_asking(&busy).map(|a| a.password), Some("hunter2".into()));
+        form.settle(&AuthPhase::Checking, station);
+
+        // Judged, and turned down: the operator's, not ours, to answer again.
+        form.settle(&no, station);
+        assert!(form.answer_without_asking(&no).is_none(), "a refused password was posted back");
     }
 
     /// A claim on the gate cannot outlive the connection that made it: a tab

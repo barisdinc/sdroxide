@@ -71,6 +71,16 @@ use self::settings::{SatEditState, SettingsTab, TestOutcome};
 /// not of the panel, so it is worded once here rather than per mode.
 const RX_ONLY_HINT: &str = "This radio can only receive — it has no transmitter to key.";
 
+/// How long after a connection drops the first redial goes out, in seconds.
+/// Short enough that a station restarting is a blink; long enough that the
+/// socket the far end has just closed is properly gone.
+pub(in crate::app) const RETRY_MIN_S: f64 = 1.0;
+
+/// The longest the wait between redials grows to. A station that is off for the
+/// evening is checked twice a minute, which costs nothing and still has the
+/// radio back within half a minute of it coming up.
+pub(in crate::app) const RETRY_MAX_S: f64 = 30.0;
+
 /// Attach [`RX_ONLY_HINT`] to a control greyed *because* this radio cannot
 /// transmit.
 ///
@@ -121,6 +131,24 @@ pub struct SdroxideApp {
     /// UI-side smoothing for the spectrum *line* (waterfall stays un-averaged).
     spec_smooth: spectrum_view::SpectrumSmooth,
     error: Option<String>,
+    /// When to redial the connection that produced [`Self::error`], and how
+    /// long the wait before the one after that.
+    ///
+    /// A link that drops comes back by itself. It used to sit on a button, and
+    /// the button is the wrong shape for what actually goes wrong out there: a
+    /// station restarting, a laptop's Wi-Fi handing over, a Windows socket
+    /// answering a timed-out read with an errno that ends the thread (issue
+    /// #188) — all of them are over in seconds, and none of them is a decision
+    /// anybody needs to be asked for. Nor is there anybody to ask on the tabs
+    /// behind the one on screen, which is most of a station's radios.
+    ///
+    /// The wait doubles up to [`RETRY_MAX_S`] while the far end stays down, so
+    /// a server that is off for the evening is not dialled sixty times a
+    /// minute, and goes back to [`RETRY_MIN_S`] the moment a session is
+    /// accepted. `None` means nothing is armed — either there is no error, or
+    /// this controller has no connection to redial.
+    retry_at: Option<f64>,
+    retry_backoff: f64,
     /// Persistent, non-fatal operator notice (e.g. radio audio input
     /// unavailable / mono card selected for IQ). Shown as a warning banner.
     radio_notice: Option<String>,
@@ -973,6 +1001,8 @@ impl SdroxideApp {
             peaks: spectrum_view::PeakHold::default(),
             spec_smooth: spectrum_view::SpectrumSmooth::default(),
             error: None,
+            retry_at: None,
+            retry_backoff: RETRY_MIN_S,
             radio_notice: None,
             sent_cfg: None,
             desired_cfg: None,
@@ -1467,6 +1497,66 @@ impl SdroxideApp {
             return false;
         }
         self.login.waiting_for_turn()
+    }
+
+    /// Line up the next redial after a connection has dropped.
+    ///
+    /// The wait carries a stagger of up to a second, spread by radio: a station
+    /// of four radios loses all four sockets in the same instant, and four
+    /// clients dialling back on the same millisecond arrive at a sign-in that
+    /// judges one answer at a time and tells the other three to come back.
+    fn arm_retry(&mut self, now: f64) {
+        // Already lined up. A dropped link is often reported twice — the socket
+        // errors and then closes — and neither the wait nor the backoff may be
+        // charged for that twice.
+        if self.retry_at.is_some() || !self.ctrl.can_reconnect() {
+            return;
+        }
+        let stagger = 0.25 * f64::from(self.radio_id % 4);
+        self.retry_at = Some(now + self.retry_backoff + stagger);
+        // Charged here rather than when the attempt goes out, so the *next*
+        // wait is the longer one and pressing the button really does start
+        // again from the bottom.
+        self.retry_backoff = (self.retry_backoff * 2.0).min(RETRY_MAX_S);
+    }
+
+    /// Dial again now, whatever the clock says. The screen clears optimistically
+    /// — the handshake finishes asynchronously, and a socket that fails again
+    /// reports itself through the same event that put us here.
+    fn reconnect_now(&mut self) {
+        let now = crate::time::now_unix_f64();
+        self.error = None;
+        self.retry_at = None;
+        self.frame = None;
+        self.wide_frame = None;
+        // The new session starts on the engine's own spectrum config, not the
+        // one the old session was told. Forgetting what was sent is what makes
+        // this frame's debounce push it again.
+        self.sent_cfg = None;
+        self.desired_cfg = None;
+        if let Err(e) = self.ctrl.reconnect() {
+            // Threw before the socket was even opened, so nothing is going to
+            // report this one asynchronously — line the next attempt up here.
+            self.error = Some(e);
+            self.arm_retry(now);
+        }
+    }
+
+    /// Redial if the wait is up. Returns whether one is still pending, so the
+    /// shell knows to keep asking for frames.
+    ///
+    /// Called for every tab, on screen or not: three of a station's four radios
+    /// are behind the one being looked at, and a radio nobody is looking at has
+    /// to come back on its own — there is no button there to press.
+    pub(crate) fn poll_reconnect(&mut self) -> bool {
+        let Some(at) = self.retry_at else { return false };
+        let now = crate::time::now_unix_f64();
+        // `>=` and the step-backwards guard together: this is a wall clock, and
+        // an NTP correction must not park the next attempt hours in the future.
+        if now >= at || now < at - RETRY_MAX_S {
+            self.reconnect_now();
+        }
+        self.retry_at.is_some()
     }
 
     /// Detach from this radio: disconnect the engine, drop the audio streams,

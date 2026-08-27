@@ -3186,20 +3186,31 @@ impl SdroxideApp {
                 // The first radio is the station: it runs the shared network
                 // services and the legacy configuration, and it stays.
                 //
-                // On a connection this hangs up and nothing more — the radio at
-                // the other end is closed with **Close on station** below, and
-                // the two say which they are.
-                let closing = if chip.station.is_empty() {
-                    "Close this radio (its configuration is kept)"
-                } else {
-                    "Close this tab — the connection is dropped and the radio stays on its station"
-                };
-                if chip.id != station_id
-                    && crate::chrome::chip(ui, false, RichText::new("×").size(11.0))
-                        .on_hover_text(closing)
-                        .clicked()
-                {
-                    requests.push(crate::app::RadioTabRequest::Close(chip.id));
+                // On one of this machine's own radios "×" closes it, as it
+                // always has. On a *connection* it opens a menu instead,
+                // because there are two things it could mean and they are not
+                // the same thing at all: hanging up leaves the radio where it
+                // is, and closing it on the station takes it out of somebody's
+                // roster. Both live here, where the operator reaches for the
+                // close box — a second button somewhere else is a button that
+                // does not get found (issue #188) — and the second asks again
+                // before it acts, so taking a radio out of a station is still
+                // never one stray click.
+                if chip.id != station_id {
+                    let closing = if chip.station.is_empty() {
+                        "Close this radio (its configuration is kept)"
+                    } else {
+                        "Close this tab, or close the radio on its station"
+                    };
+                    let close = crate::chrome::chip(ui, false, RichText::new("×").size(11.0))
+                        .on_hover_text(closing);
+                    if chip.station.is_empty() {
+                        if close.clicked() {
+                            requests.push(crate::app::RadioTabRequest::Close(chip.id));
+                        }
+                    } else {
+                        Self::close_station_radio_menu(ui, &close, chip, requests);
+                    }
                 }
                 ui.add_space(6.0);
             }
@@ -3215,7 +3226,10 @@ impl SdroxideApp {
             // dongle in here and plugging one in at the remote site.
             match targets.as_slice() {
                 [] => {}
-                [only] => {
+                // One destination, and it is this computer: press and it is
+                // made. Nobody has to be told which machine their own radio
+                // goes on.
+                [only] if only.key.is_empty() => {
                     if crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
                         .on_hover_text(only.hint())
                         .clicked()
@@ -3224,13 +3238,24 @@ impl SdroxideApp {
                             .push(crate::app::RadioTabRequest::Add { station: only.key.clone() });
                     }
                 }
+                // One destination, and it is somebody else's station — which is
+                // every browser client, since a browser has no hardware of its
+                // own and so no second roster to disambiguate against. It still
+                // names the station and asks: creating a radio on a machine at
+                // the other end of a network is not what "+" looks like it
+                // does, and a station that grew radios 2, 3 and 4 nobody meant
+                // to ask for is what that cost (issue #188).
                 many => {
                     // Plain "+", like the single-destination case: the arrow
                     // that would mark it as a menu is not in the text font and
                     // comes out as an empty box. What it opens is a menu, and
                     // the hover text says which rosters are in it.
+                    let tip = match many {
+                        [only] => only.hint(),
+                        _ => "Add a radio — here, or on a station you are connected to".to_string(),
+                    };
                     let btn = crate::chrome::chip(ui, false, RichText::new("+").size(13.0))
-                        .on_hover_text("Add a radio — here, or on a station you are connected to");
+                        .on_hover_text(tip);
                     crate::chrome::menu_popup(ui, &btn, |ui| {
                         for t in many {
                             if ui.button(t.label()).on_hover_text(t.hint()).clicked() {
@@ -3270,44 +3295,60 @@ impl SdroxideApp {
                         requests.push(crate::app::RadioTabRequest::Rename { id: chip.id, name });
                     }
                 }
-                // Closing a radio that lives on another machine. Deliberately
-                // not the "×" on the chip: there, on a connection, "×" means
-                // hang up — and hanging up must never be one stray click away
-                // from taking somebody's radio out of their station. So it sits
-                // here, on the radio actually being looked at, says which
-                // station it will reach, and asks first.
-                //
-                // The station's own first radio is not offered: it holds the
-                // shared network services and the address every client that
-                // knows nothing of a roster arrives at, and the station refuses
-                // to close it.
-                if !chip.station.is_empty() && chip.roster_editable && !chip.first_of_station {
-                    let btn = crate::chrome::chip(
-                        ui,
-                        false,
-                        RichText::new("Close on station").size(11.5),
-                    )
-                    .on_hover_text(format!(
-                        "Take this radio out of {}'s roster — its settings are kept there",
-                        station_label(&chip.station)
-                    ));
-                    crate::chrome::menu_popup(ui, &btn, |ui| {
-                        ui.label(format!(
-                            "Close {} on {}? Its configuration stays on that machine; the tab \
-                             here closes with it.",
-                            chip.display_name(),
-                            station_label(&chip.station)
-                        ));
-                        if ui.button(RichText::new("Close it").strong()).clicked() {
-                            requests.push(crate::app::RadioTabRequest::RemoveFromStation(chip.id));
-                            ui.close();
-                        }
-                    });
-                }
             });
         }
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(6.0);
+    }
+
+    /// What the "×" on a *connection's* chip opens: hang up, or close the radio
+    /// on the station it lives at.
+    ///
+    /// Two answers rather than one, because "close" means two different things
+    /// to a radio on somebody else's machine and neither is obviously the one
+    /// meant. Hanging up is the first entry and acts at once — it is what "×"
+    /// has always done, and it changes nothing anywhere else. Taking the radio
+    /// out of the station's roster is the second, and asks again: it reaches
+    /// across the network, every other client on that station sees it, and its
+    /// device is released.
+    ///
+    /// The station's own first radio is never offered the second: it holds the
+    /// shared network services and the address every client that knows nothing
+    /// of a roster arrives at, and the station refuses to close it.
+    fn close_station_radio_menu(
+        ui: &mut egui::Ui,
+        button: &egui::Response,
+        chip: &crate::app::RadioChip,
+        requests: &mut Vec<crate::app::RadioTabRequest>,
+    ) {
+        let where_ = station_label(&chip.station).to_string();
+        let removable = chip.roster_editable && !chip.first_of_station;
+        crate::chrome::menu_popup(ui, button, |ui| {
+            if ui
+                .button("Close this tab")
+                .on_hover_text(format!("Hang up. The radio stays on {where_}."))
+                .clicked()
+            {
+                requests.push(crate::app::RadioTabRequest::Close(chip.id));
+                ui.close();
+            }
+            if !removable {
+                return;
+            }
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "Close {} on {where_}? Its configuration stays on that machine; the tab here \
+                     closes with it, and so does everyone else's.",
+                    chip.display_name(),
+                ))
+                .size(11.5),
+            );
+            if ui.button(RichText::new(format!("Close it on {where_}")).strong()).clicked() {
+                requests.push(crate::app::RadioTabRequest::RemoveFromStation(chip.id));
+                ui.close();
+            }
+        });
     }
 }

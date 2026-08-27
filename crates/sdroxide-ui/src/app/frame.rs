@@ -326,6 +326,9 @@ impl eframe::App for SdroxideApp {
         // Remaining space: the panadapter (+ FT8/FT4 operating panel).
         if let Some(err) = self.error.clone() {
             let offer_retry = self.ctrl.can_reconnect();
+            // Seconds until the redial that is already coming, so the screen
+            // can say what is going to happen rather than only what went wrong.
+            let due_in = self.retry_at.map(|at| (at - crate::time::now_unix_f64()).max(0.0));
             let mut retry = false;
             ui.vertical_centered(|ui| {
                 // Roughly where `centered_and_justified` used to put the text,
@@ -333,25 +336,26 @@ impl eframe::App for SdroxideApp {
                 ui.add_space(ui.available_height() * 0.4);
                 ui.label(RichText::new(err).size(18.0).color(crate::theme::ALERT()));
                 if offer_retry {
-                    ui.add_space(14.0);
-                    retry = ui.button(RichText::new("Reconnect").size(16.0)).clicked();
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(match due_in {
+                            Some(s) if s >= 1.0 => format!("Reconnecting in {}s…", s.ceil() as u64),
+                            Some(_) => "Reconnecting…".to_string(),
+                            None => "Not connected.".to_string(),
+                        })
+                        .size(13.0)
+                        .color(crate::theme::gray(150)),
+                    );
+                    ui.add_space(10.0);
+                    retry = ui.button(RichText::new("Reconnect now").size(16.0)).clicked();
                 }
             });
             if retry {
-                // Optimistic: the handshake finishes asynchronously, so the
-                // screen clears now and a socket that fails again reports
-                // itself through the same event that put us here.
-                self.error = None;
-                self.frame = None;
-                self.wide_frame = None;
-                // The new session starts on the engine's own spectrum config,
-                // not the one the old session was told. Forgetting what was
-                // sent is what makes this frame's debounce push it again.
-                self.sent_cfg = None;
-                self.desired_cfg = None;
-                if let Err(e) = self.ctrl.reconnect() {
-                    self.error = Some(e);
-                }
+                // Asking by hand puts the wait back to the bottom: the operator
+                // has some reason to believe the far end is up, and making them
+                // watch out a backoff they did not choose is not an answer.
+                self.retry_backoff = super::RETRY_MIN_S;
+                self.reconnect_now();
             }
         } else if self.state.rx[0].mode.is_digital() {
             // Remember the voice-mode view once, so leaving FT8 can restore it
@@ -986,6 +990,11 @@ impl SdroxideApp {
                         )));
                     }
                     self.caps = Some(c);
+                    // A session the far end accepted: whatever the link was
+                    // doing, it is doing it again, so the next drop starts its
+                    // backoff from the bottom rather than from wherever the
+                    // last outage left it.
+                    self.retry_backoff = super::RETRY_MIN_S;
                     // A new source may have no full-band lane at all. Without
                     // this the strip from the previous backend stays on screen
                     // for good, showing a band nothing is receiving any more.
@@ -1075,6 +1084,7 @@ impl SdroxideApp {
                         self.speech.announcer.on_error(&e, now);
                     }
                     self.error = Some(e);
+                    self.arm_retry(now);
                 }
                 RadioEvent::LoginTest(r) => {
                     self.login_tests_pending.remove(&r.target);

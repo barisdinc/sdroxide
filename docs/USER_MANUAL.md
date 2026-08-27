@@ -1460,6 +1460,14 @@ exactly as a local one does. The **+** on the main window's tab strip always
 means this computer; the choice lives in Settings → Radio, which is where the
 two rosters are side by side.
 
+The **+** only acts on the press when the radio is going on the computer you
+are sitting at. Where it would go on a station instead — which is always the
+case in the browser client ([8](#8-remote-operation)), since a browser has
+no hardware of its own — it names the station and asks first. Creating a radio
+is not something to do to somebody else's machine by accident: it opens a
+configuration there and starts an engine, and everyone else connected to that
+station gets a tab for it.
+
 **Adding somebody else's station.** A radio in a tab does not have to be
 attached to this machine. **Settings → Remote** takes the address of an sdroxide
 server and gives it a tab of its own, exactly like a local radio
@@ -1469,17 +1477,28 @@ Such a tab is closed from the roster like any other, which hangs up and changes
 nothing on the server.
 
 **Closing a radio that lives on a station.** Hanging up and closing a radio are
-different things, so they are different buttons. The **×** on a connection's
-button closes the tab — it hangs up, and the radio stays where it is. To take a
-radio out of the station's roster, select it and press **Close on station**,
-next to the **Name** box; it asks once before doing it. What happens then is
-what happens when a local radio is closed here: the roster entry goes, its
-configuration stays on that machine, its engine stops and its device is
-released, and every client on that station — not just this one — sees the radio
-leave. A station's *first* radio is never offered: it runs the station-wide
-services and answers at the plain `/ws` that every client arrives at. A station
-that does not allow this at all — one whose sdroxide was not started as a
-server, or an older one — simply shows neither control.
+different things, so the **×** on a connection's button asks which you meant:
+
+- **Close this tab** — hang up. The radio stays exactly where it is, and comes
+  back the next time you connect to that station. This is what **×** on one of
+  *this* computer's radios does straight away, without a menu.
+- **Close it on** *station* — take the radio out of that station's roster. The
+  same menu says what that means and you have to press again, because it
+  reaches across the network.
+
+Closing a radio on a station does what closing a local radio does here: the
+roster entry goes, its configuration stays on that machine, its engine stops and
+its device is released, and every client on that station — not just this one —
+sees the radio leave. A station's *first* radio is never offered: it runs the
+station-wide services and answers at the plain `/ws` that every client arrives
+at. A station that does not allow this at all — one whose sdroxide was not
+started as a server, or an older one — offers only "Close this tab".
+
+> Radios you did not mean to create live on the **station**, not on the screen
+> that made them, so closing their tabs is not enough — they are announced again
+> on the next connection. **Close it on** *station* is what removes them. If you
+> want to know when they appeared, the server logs each one:
+> `journalctl -u sdroxide | grep "radio added to the roster"`.
 
 **The tab strip.** Each radio gets a tab of its own, and the open one is joined
 to the page below it. Click anywhere on a tab — not just its name — to switch
@@ -9496,6 +9515,12 @@ itself. Ticking **Remember me** is the separate decision to keep the sign-in on
 this device between runs (in `config.toml`, or the browser's local storage —
 in plain text either way).
 
+A station compares one answer at a time, so its radios' tabs take turns signing
+in and the card says **CHECKING…** while a tab waits for its own. That wait is
+not a verdict on the password and is never shown as one: only "username or
+password not accepted", in red, means the station actually looked at what you
+typed and said no.
+
 > **Sign-in is not encryption.** It stops the wrong people operating the radio;
 > it does not hide what you are doing from anyone watching the network, and the
 > password itself crosses in the clear over plain `ws://`. On anything but a
@@ -9530,13 +9555,17 @@ in plain text either way).
   end answers one at a time, so a bus scan cannot interrupt the radio.
 - **One client at a time.** A second connection is refused with a "server busy"
   message.
-- **If the link drops**, the client shows what went wrong in place of the
-  panadapter, with a **Reconnect** button under it. Pressing it dials the same
-  server again and picks the session back up — the radio keeps running
-  meanwhile, so nothing is lost by a client that was away. This applies to the
-  browser client as well; reloading the page does the same thing.
-- **A "server busy" message right after pressing Reconnect** means the server has
-  not finished letting go of the old session yet. Press it again.
+- **If the link drops**, the client dials again by itself. It shows what went
+  wrong in place of the panadapter and says how long until the next attempt —
+  a second at first, doubling to at most half a minute while the far end stays
+  down, and back to a second as soon as a session is accepted. **Reconnect now**
+  under it skips the wait. The radio keeps running meanwhile, so nothing is lost
+  by a client that was away, and a station's other radios come back on their own
+  even though nobody is looking at their tabs. This applies to the browser
+  client as well; reloading the page does the same thing.
+- **A "server busy" message right after a reconnect** means the server has not
+  finished letting go of the old session yet. The next automatic attempt gets
+  in.
 - **A sign-in is asked for again after a reconnect.** Each socket is challenged
   on its own; *remember* is what makes that invisible.
 - **No encryption.** The server speaks plain `ws://` and binds to all interfaces
@@ -9602,10 +9631,11 @@ a dongle's AGC off from a phone. Which interface the server opens is reachable
 from here too: the Rescan and Discover buttons enumerate the *server's* buses
 and network, so you can pick another radio out of that list and press **Apply /
 reconnect**. So is *how many* radios it has: the roster across the top of
-Settings → Radio has the same **+** as the desktop client, which here can only
-mean the station, and **Close on station** takes one out again. A radio added
-this way opens as another browser tab of the same page within a second, exactly
-as the station's other radios do.
+Settings → Radio has the same **+** as the desktop client — which here can only
+mean the station, so it names it and asks before making one — and the **×** on a
+radio's button offers **Close it on** *station* to take one out again. A radio
+added this way opens as another browser tab of the same page within a second,
+exactly as the station's other radios do.
 The [solar system 3D view](#7-solar-system-3d-view) works too: **☀ 3D**
 opens it in a new tab, which connects to a separate read-only endpoint and so
 does not consume the single control connection — though it is challenged for the

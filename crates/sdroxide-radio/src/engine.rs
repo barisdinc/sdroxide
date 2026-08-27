@@ -2291,6 +2291,56 @@ fn decimation_for(want: u32, device_rate_hz: f64, audio_mode: bool) -> u32 {
     (1u32 << want.ilog2()).min(sdroxide_types::max_decimation(device_rate_hz))
 }
 
+/// Drop the commands at the end of a drained batch that a later one in the same
+/// batch has already overwritten.
+///
+/// The case this exists for is a panadapter drag. Once the view is the whole
+/// captured span there is nothing left to slide, so the gesture moves the
+/// *window* instead and the dial with it (issue #133) — which means one
+/// [`Command::SetCenter`] and one [`Command::SetVfo`] per frame of the UI
+/// drawing it, for as long as the operator's hand is down. Every one of those
+/// is a hardware retune, a skimmer restart and a waterfall remap here; an SDR
+/// on a Pi carrying a station cannot do sixty of them a second and does not
+/// need to, because fifty-nine of them are answers nobody ever sees. Only the
+/// last of each is a state anything observes.
+///
+/// Both are absolute setters, so the last one wins — but only where nothing
+/// between them could have *read* what an earlier one set. `SwapVfos` and
+/// `CopyAtoB` do exactly that, and `TuneInSpan` reads the centre, so this is
+/// deliberately narrow: it collapses the run of setters at the *end* of the
+/// batch and stops at the first command that is anything else. Interleaving the
+/// two with each other is fine — between them they set only the two things they
+/// each overwrite.
+fn collapse_superseded(batch: &mut Vec<Command>) {
+    let settles = |c: &Command| matches!(c, Command::SetCenter(_) | Command::SetVfo { .. });
+    // Everything from here to the end is setters, so nothing in it can observe
+    // what an earlier one of them did.
+    let start = batch.iter().rposition(|c| !settles(c)).map_or(0, |i| i + 1);
+    if batch.len() - start < 2 {
+        return;
+    }
+    let slot = |vfo: &Vfo| usize::from(matches!(vfo, Vfo::B));
+    let (mut last_center, mut last_vfo) = (None, [None, None]);
+    for (i, cmd) in batch.iter().enumerate().skip(start) {
+        match cmd {
+            Command::SetCenter(_) => last_center = Some(i),
+            Command::SetVfo { vfo, .. } => last_vfo[slot(vfo)] = Some(i),
+            _ => {}
+        }
+    }
+    let mut i = 0;
+    batch.retain(|cmd| {
+        let keep = i < start
+            || match cmd {
+                Command::SetCenter(_) => last_center == Some(i),
+                Command::SetVfo { vfo, .. } => last_vfo[slot(vfo)] == Some(i),
+                _ => true,
+            };
+        i += 1;
+        keep
+    });
+}
+
 fn engine_thread(
     source: Box<dyn IqSource>,
     mut caps: DeviceCaps,
@@ -2836,10 +2886,14 @@ fn engine_thread(
     let mut next_drm = Instant::now();
     let mut next_session = Instant::now() + SESSION_SAVE_INTERVAL;
 
+    // The commands waiting at the top of a tick, kept between iterations so the
+    // batch costs no allocation. See [`collapse_superseded`].
+    let mut batch: Vec<Command> = Vec::new();
     loop {
+        batch.clear();
         loop {
             match cmd_rx.try_recv() {
-                Ok(cmd) => engine.apply(cmd),
+                Ok(cmd) => batch.push(cmd),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if engine.tx_active {
@@ -2852,6 +2906,10 @@ fn engine_thread(
                     return;
                 }
             }
+        }
+        collapse_superseded(&mut batch);
+        for cmd in batch.drain(..) {
+            engine.apply(cmd);
         }
 
         // Frontend device swaps: audio (rebuilt cpal ring endpoints) and radio
@@ -12519,5 +12577,92 @@ mod hop_div_tests {
         assert_eq!(hop_div_for(0.0, 4096, 28.0), 2);
         assert_eq!(hop_div_for(f64::NAN, 4096, 28.0), 2);
         assert_eq!(hop_div_for(8_100_000.0, 4096, 0.0), 2);
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::collapse_superseded;
+    use sdroxide_types::{Command, Vfo};
+
+    fn kinds(batch: &[Command]) -> Vec<String> {
+        batch
+            .iter()
+            .map(|c| match c {
+                Command::SetCenter(hz) => format!("C{hz}"),
+                Command::SetVfo { vfo, hz } => format!("V{vfo:?}{hz}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn collapse(mut batch: Vec<Command>) -> Vec<String> {
+        collapse_superseded(&mut batch);
+        kinds(&batch)
+    }
+
+    /// What a drag delivers: one centre and one dial per frame of the UI, of
+    /// which only the last pair is a state anything ever sees. Sixty retunes a
+    /// second is what issue #188's remote client was asking a Pi for.
+    #[test]
+    fn a_drags_worth_of_frames_costs_one_retune() {
+        let drag: Vec<Command> = (0..4)
+            .flat_map(|i| {
+                let hz = 14_100_000.0 + f64::from(i) * 1000.0;
+                [Command::SetCenter(hz), Command::SetVfo { vfo: Vfo::A, hz }]
+            })
+            .collect();
+        assert_eq!(collapse(drag), ["C14103000", "VA14103000"]);
+    }
+
+    /// The two VFOs are separate settings, and each keeps its own last word.
+    #[test]
+    fn each_vfo_keeps_its_own_last_value() {
+        assert_eq!(
+            collapse(vec![
+                Command::SetVfo { vfo: Vfo::A, hz: 1.0 },
+                Command::SetVfo { vfo: Vfo::B, hz: 2.0 },
+                Command::SetVfo { vfo: Vfo::A, hz: 3.0 },
+            ]),
+            ["VB2", "VA3"]
+        );
+    }
+
+    /// The rule that keeps this honest: a command that could *read* the centre
+    /// or the dial is a wall, and nothing before it is dropped across it.
+    /// `CopyAtoB` is the one that proves it — collapsing the two `SetVfo`s
+    /// around it would copy a VFO that never held the value being copied.
+    #[test]
+    fn a_command_that_reads_the_dial_is_a_wall() {
+        assert_eq!(
+            collapse(vec![
+                Command::SetVfo { vfo: Vfo::A, hz: 100.0 },
+                Command::CopyAtoB,
+                Command::SetVfo { vfo: Vfo::A, hz: 200.0 },
+            ]),
+            ["VA100", "CopyAtoB", "VA200"]
+        );
+        // ...and the setters *after* the wall still collapse among themselves.
+        assert_eq!(
+            collapse(vec![
+                Command::SetCenter(1.0),
+                Command::SwapVfos,
+                Command::SetCenter(2.0),
+                Command::SetCenter(3.0),
+            ]),
+            ["C1", "SwapVfos", "C3"]
+        );
+    }
+
+    /// Nothing to collapse must change nothing — including the ordinary case of
+    /// a single command arriving on its own.
+    #[test]
+    fn a_batch_with_no_repeats_is_left_alone() {
+        assert_eq!(collapse(vec![]), Vec::<String>::new());
+        assert_eq!(collapse(vec![Command::SetCenter(1.0)]), ["C1"]);
+        assert_eq!(
+            collapse(vec![Command::SetPtt(true), Command::SetCenter(1.0)]),
+            ["SetPtt(true)", "C1"]
+        );
     }
 }
