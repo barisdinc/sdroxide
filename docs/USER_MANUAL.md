@@ -2127,7 +2127,10 @@ Click **SETUP** in the QSO area to open the **FT8 / FT4 / FT2 Setup** window:
 
 - **My callsign** — your call (entered in upper case).
 - **My grid** — your Maidenhead grid locator (for example `FN42`).
-- **TX period** — whether you call in the **Even** or **Odd** time slots.
+- **TX period** — whether you call CQ in the **Even** or **Odd** time slots.
+  It sets the period you *call* in. Answering somebody instead takes the slot
+  opposite the one they were last heard transmitting in, whichever that is; the
+  readout beside your transmit offset says which period is actually in use.
 - **Auto-sequence** — advance the QSO automatically (recommended on).
 - **TX watchdog / Give up after** — how long unattended transmitting may
   continue with no progress, and how many unanswered calls to one station are
@@ -2256,12 +2259,17 @@ double-click to hand the view back to the auto-fit.
 #### 3.2.3 Working stations
 
 - **Answer a call:** click **REPLY** on a decode. sdroxide adopts that station,
-  picks the opposite time slot, and runs the exchange automatically. If they
-  have been calling *you*, the reply opens where their exchange actually stands
-  rather than at the top: somebody repeating `<you> <them> -19` gets your
-  R+report back, not your grid, and the report they sent is already in the log
-  entry. So a station who calls again after you pressed **STOP QSO** — or who
-  called while you were busy with someone else — is answered with one press.
+  takes the time slot opposite theirs, and runs the exchange automatically. The
+  slot is chosen from when that station was actually last heard transmitting —
+  not from the period the clock happens to be in when you press the button — so
+  answering a row from several turns ago still lands clear of them, and a
+  station that keeps an unusual sequence is answered in their gap rather than on
+  top of them. If they have been calling *you*, the reply opens where their
+  exchange actually stands rather than at the top: somebody repeating
+  `<you> <them> -19` gets your R+report back, not your grid, and the report they
+  sent is already in the log entry. So a station who calls again after you
+  pressed **STOP QSO** — or who called while you were busy with someone else —
+  is answered with one press.
 - **Losing a pile-up:** if the station you called comes back to someone else
   instead, sdroxide stops calling and holds at `Wait CQ` rather than doubling
   into their QSO. The transcript shows a pink line — *"W9XYZ is working K1ABC"* —
