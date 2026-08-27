@@ -53,7 +53,8 @@ pub enum Backend {
     /// for the same reason as `SmartSdr` above.
     AirspyHf,
     /// An Icom over its LAN or WiFi port, speaking the IP-remote protocol
-    /// RS-BA1 uses: IC-7300MK2, IC-705, IC-9700, IC-7610, IC-905, IC-R8600.
+    /// RS-BA1 uses: IC-7300MK2, IC-705, IC-7610, IC-7760, IC-7851, IC-9700,
+    /// IC-905, IC-R8600.
     /// Control, audio and the radio's own spectrum scope all arrive over the
     /// network; there is no I/Q, because no Icom offers any. Appended last,
     /// for the same reason as `SmartSdr` above.
@@ -504,13 +505,14 @@ impl IcomModel {
 
     /// Top of this model's `27 00` scope amplitude scale.
     ///
-    /// `160` across the IC-7300 generation; the IC-7760 sweeps a taller
-    /// `0 ~ 200`. Icom documents no dB per step for either, so this only says
-    /// what "full scale" means — reading the wrong one puts the whole trace
-    /// 20 dB out, which the panadapter's auto-levelling then hides.
+    /// `160` across the IC-7300 generation; the IC-7610 and the IC-7760 sweep
+    /// a taller `0 ~ 200`, in 689 points rather than 475. Icom documents no dB
+    /// per step for any of them, so this only says what "full scale" means —
+    /// reading the wrong one puts the whole trace 20 dB out, which the
+    /// panadapter's auto-levelling then hides.
     pub fn scope_full_scale(self) -> u8 {
         match self {
-            IcomModel::Ic7760 => 200,
+            IcomModel::Ic7610 | IcomModel::Ic7760 => 200,
             _ => 160,
         }
     }

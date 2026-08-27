@@ -671,7 +671,10 @@ pub struct ScopeSweep {
     pub divisions: u8,
     /// Present on the first division only.
     pub info: Option<ScopeInfo>,
-    /// Amplitudes, 0..=160. Empty on the first division of a split sweep.
+    /// Amplitudes, on a scale the *model* sets — `0..=160` across the IC-7300
+    /// generation, `0..=200` on an IC-7610 or IC-7760. Nothing on the wire says
+    /// which, so the top of the scale comes from `IcomModel::scope_full_scale`
+    /// rather than from here. Empty on the first division of a split sweep.
     pub bins: Vec<u8>,
 }
 

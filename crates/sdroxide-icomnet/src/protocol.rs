@@ -891,7 +891,14 @@ pub const UNKNOWN_MODEL: Model = Model {
 };
 
 /// Models whose `1A 05` numbering has been read out of the manufacturer's CI-V
-/// reference. Extending this is a documentation exercise, not a protocol one.
+/// reference — or, on the sets old enough to predate those being published
+/// separately, out of the command table at the back of the instruction manual.
+/// Extending this is a documentation exercise, not a protocol one.
+///
+/// Every Icom that speaks this protocol belongs here, because the alternative
+/// is not a smaller table but an operator being sent to the radio's own menus
+/// for something sdroxide could have written for them. What keeps a model out
+/// is only ever a number nobody has read.
 pub const MODELS: &[Model] = &[
     Model {
         civ_address: 0xB6,
@@ -941,6 +948,109 @@ pub const MODELS: &[Model] = &[
         // 01 03 is the [USB B] port's copy and 01 10 the LINE-OUT one; both
         // are the same setting on a socket this session is not using.
         lan_afif_select: Some(0x0123),
+        data_mode_sub: Some(0x06),
+    },
+    Model {
+        civ_address: 0x98,
+        name: "IC-7610",
+        // The IC-7610 sweeps the IC-7760's shape, not the IC-7300's, two
+        // generations before it: its CI-V reference gives the LAN sweep as one
+        // 704-byte division carrying 689 points on a 0 ~ C8 scale, and splits
+        // the USB form of the same sweep into 15.
+        scope_bins: 689,
+        scope_full_scale: 200,
+        // IC-7610 CI-V reference guide, Connectors > MOD Input: 1A 05 00 91 =
+        // DATA OFF MOD, 00 92 / 00 93 / 00 94 = DATA1 / DATA2 / DATA3 MOD.
+        // Four slots, like the IC-7760, but the list is the IC-7300MK2's —
+        // `00=MIC, 01=ACC, 02=MIC,ACC, 03=USB, 04=MIC,USB, 05=LAN` — so LAN is
+        // `05` here and `09` on the radio whose slot count it shares.
+        lan_mod_input: Some((&[0x0091, 0x0092, 0x0093, 0x0094], 0x05)),
+        // 1A 05 00 86 = Connectors > LAN AF/IF Output > Output Select,
+        // `00=AF, 01=IF`. 00 80 is the [USB] port's copy of the same setting,
+        // six items earlier — near enough to reach by a typo, and the wrong
+        // one to write for a network session.
+        lan_afif_select: Some(0x0086),
+        data_mode_sub: Some(0x06),
+    },
+    Model {
+        civ_address: 0xA2,
+        name: "IC-9700",
+        scope_bins: 475,
+        scope_full_scale: 160,
+        // IC-9700 CI-V reference guide, SET > Connectors > MOD Input:
+        // 1A 05 01 15 = DATA OFF MOD, 01 16 = DATA MOD. One DATA slot, as on
+        // an IC-7300MK2, and the same `00=MIC … 05=LAN` list.
+        lan_mod_input: Some((&[0x0115, 0x0116], 0x05)),
+        // 1A 05 01 10 = SET > Connectors > LAN AF/IF Output > Output Select,
+        // `00=AF, 01=IF`. 01 05 is the [USB] port's copy.
+        lan_afif_select: Some(0x0110),
+        data_mode_sub: Some(0x06),
+    },
+    Model {
+        civ_address: 0xAC,
+        name: "IC-905",
+        scope_bins: 475,
+        scope_full_scale: 160,
+        // IC-905 CI-V reference guide, SET > Connectors > MOD Input:
+        // 1A 05 01 26 = DATA OFF MOD, 01 27 = DATA MOD, both
+        // `00=MIC, 01=USB, 02=MIC,USB, 03=LAN` — the IC-705's short list, so
+        // LAN is `03` and not the `05` of the models either side of it here.
+        //
+        // Not 01 29: that is ATV MOD, which has a *longer* list of its own
+        // (`00=MIC, 01=AV-IN, … 05=LAN`) because the ATV picture carries the
+        // AV-IN socket. Writing `03` there selects USB.
+        lan_mod_input: Some((&[0x0126, 0x0127], 0x03)),
+        // 1A 05 01 22 = LAN AF/IF Output > Output Select, `00=AF, 01=IF`.
+        // 01 17 is the USB/AV-OUT copy.
+        lan_afif_select: Some(0x0122),
+        data_mode_sub: Some(0x06),
+    },
+    Model {
+        civ_address: 0x96,
+        name: "IC-R8600",
+        scope_bins: 475,
+        scope_full_scale: 160,
+        // A receiver: no modulation input to select, which is the one field in
+        // this table that does not exist rather than merely being unknown.
+        // `RadioCap::can_transmit` already suppresses the note that would
+        // otherwise ask the operator to go and set a menu item that is not on
+        // their radio; this is the other half of that.
+        lan_mod_input: None,
+        // IC-R8600 CI-V reference guide: 1A 05 00 89 = the signal output from
+        // [LAN], `00=AF, 01=IF`. Icom words it per socket rather than as a
+        // "LAN AF/IF Output" heading on this set, and there are two more of
+        // them — 00 68 for the [AF/IF] jack and 00 73 for the front [USB].
+        lan_afif_select: Some(0x0089),
+        // The `1A` command on this set has sub-commands `00` and `05` and
+        // nothing else. There is no DATA switch because there is no transmit,
+        // so the family default would be a frame the receiver can only answer
+        // NG to, once per mode change.
+        data_mode_sub: None,
+    },
+    Model {
+        civ_address: 0x8E,
+        name: "IC-7851",
+        // The scope fields are the family fallback, not figures read out of a
+        // manual. This set has no separate CI-V reference guide — its command
+        // table is a chapter of the instruction manual — and that table
+        // documents no `27 00` at all, though the firmware release notes for
+        // the sweep say otherwise. So the shape is simply unread. It is what
+        // an unrecognised radio would have been given anyway, which is why the
+        // gap is not a reason to leave the model out and lose the menu numbers
+        // below with it.
+        scope_bins: 475,
+        scope_full_scale: 160,
+        // IC-7850/IC-7851 instruction manual, command table: 1A 05 00 63 =
+        // MOD input connector during DATA OFF, 00 64 / 00 65 / 00 66 = DATA1 /
+        // DATA2 / DATA3. The flagship has the longest list of the lot —
+        // `00=MIC, 01=ACC-A, 02=ACC-B, 03=MIC/ACC-A, 04=MIC/ACC-B,
+        // 05=ACC-A/ACC-B, 06=MIC/ACC-A/ACC-B, 07=S/P DIF, 08=USB, 09=LAN` —
+        // so LAN is `09`, as on the IC-7760, for an entirely different reason.
+        lan_mod_input: Some((&[0x0063, 0x0064, 0x0065, 0x0066], 0x09)),
+        // 1A 05 00 56 = AF/IF signal output to LAN, `00=AF, 01=IF`. This set
+        // has five of these, one per output socket — 00 32 ACC-A, 00 38 ACC-B,
+        // 00 44 S/P DIF, 00 50 USB B — and only the last of the five is ours.
+        lan_afif_select: Some(0x0056),
         data_mode_sub: Some(0x06),
     },
 ];
@@ -1340,9 +1450,10 @@ mod tests {
         assert_eq!(ic705.lan_afif_select, Some(0x0114));
 
         // An unknown rig still works — it just does not get menu writes, which
-        // is the whole point of the table.
-        let other = model_for(0xA2);
-        assert_eq!(other.civ_address, 0xA2);
+        // is the whole point of the table. `88h` is the IC-7100, which has no
+        // network port and so can never be in here.
+        let other = model_for(0x88);
+        assert_eq!(other.civ_address, 0x88);
         assert!(other.lan_mod_input.is_none());
         assert!(other.lan_afif_select.is_none());
     }
@@ -1363,6 +1474,56 @@ mod tests {
     }
 
     #[test]
+    fn the_ic7610_sweeps_the_ic7760s_shape_on_numbering_of_its_own() {
+        // Issue #190: the model an operator was told sdroxide did not know.
+        let r = model_for(0x98);
+        assert_eq!(r.name, "IC-7610");
+        // 689 points on 0 ~ 200, like the IC-7760 and unlike everything else
+        // of its generation.
+        assert_eq!(r.scope_bins, 689);
+        assert_eq!(r.scope_full_scale, 200);
+        // Four DATA slots like the IC-7760's, but LAN is `05` and not `09`:
+        // the two facts travel separately, so neither model's numbering can be
+        // guessed from the other's.
+        assert_eq!(r.lan_mod_input, Some((&[0x0091u16, 0x0092, 0x0093, 0x0094][..], 0x05)));
+        assert_eq!(r.lan_afif_select, Some(0x0086));
+    }
+
+    #[test]
+    fn every_lan_transceiver_writes_its_data_off_slot_first() {
+        // The DATA-OFF entry leads each list because it is the one a rig sits
+        // on outside a digital mode; a list that began anywhere else would
+        // leave the plain-SSB modulation source pointing at the microphone.
+        for m in MODELS {
+            let Some((items, lan)) = m.lan_mod_input else {
+                assert!(is_receiver(m.name), "{} has no MOD input and is not a receiver", m.name);
+                continue;
+            };
+            assert!(!items.is_empty(), "{} has an empty MOD input list", m.name);
+            // One DATA-OFF plus one, two or three DATA slots.
+            assert!((2..=4).contains(&items.len()), "{} has {} slots", m.name, items.len());
+            // Consecutive, and in the order Icom numbers them.
+            assert!(items.windows(2).all(|w| w[1] > w[0]), "{} is out of order", m.name);
+            // The value is an index into a per-model list, never a bit field:
+            // the longest of them stops at `09`.
+            assert!(lan <= 0x09, "{} takes {lan:#04x} for LAN", m.name);
+        }
+    }
+
+    #[test]
+    fn a_receiver_gets_an_output_select_and_nothing_that_implies_transmit() {
+        let r = model_for(0x96);
+        assert_eq!(r.name, "IC-R8600");
+        assert!(is_receiver(r.name));
+        // The 12 kHz IF is the whole reason a receive-only set is in the table.
+        assert_eq!(r.lan_afif_select, Some(0x0089));
+        assert!(r.lan_mod_input.is_none());
+        // …and no DATA switch, which on this set is a sub-command that does
+        // not exist rather than one that does nothing.
+        assert!(r.data_mode_sub.is_none());
+    }
+
+    #[test]
     fn a_radio_moved_off_its_factory_address_is_still_recognised_by_name() {
         // CI-V > CI-V Address is a menu item, and a radio on a shared bus is
         // routinely moved off its factory value. The name still names it.
@@ -1378,8 +1539,8 @@ mod tests {
 
         // A name nobody knows falls back to the address, which is how the
         // table behaved before names were consulted at all.
-        assert_eq!(model_for_radio("IC-9700", 0xB6).name, "IC-7300MK2");
-        assert_eq!(model_for_radio("IC-9700", 0xA2).name, UNKNOWN_MODEL.name);
+        assert_eq!(model_for_radio("IC-7100", 0xB6).name, "IC-7300MK2");
+        assert_eq!(model_for_radio("IC-7100", 0x88).name, UNKNOWN_MODEL.name);
 
         // And a name that names one model while the address names another is a
         // nickname somebody typed into the network settings. The address wins:

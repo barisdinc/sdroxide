@@ -735,9 +735,10 @@ starting sdroxide before the rig is fine:
   audio transmit.
 
 - **Icom LAN** — an Icom on its own Ethernet/WiFi port (IC-7300MK2, IC-705,
-  IC-9700, IC-7610, IC-905, IC-R8600), speaking the same IP-remote protocol as
-  RS-BA1 — no RS-BA1 licence and no PC at the radio. Control, audio and the
-  radio's own 475-point spectrum scope over one connection. There is no I/Q on
+  IC-7610, IC-7760, IC-7851, IC-9700, IC-905, IC-R8600), speaking the same
+  IP-remote protocol as RS-BA1 — no RS-BA1 licence and no PC at the radio.
+  Control, audio and the radio's own spectrum scope — 475 points, or 689 on an
+  IC-7610 or IC-7760 — over one connection. There is no I/Q on
   any Icom; the audio stream carries either demodulated AF or the 12 kHz DRM IF,
   and sdroxide can demodulate the latter itself over about ±12 kHz. Not yet
   hardware-verified.

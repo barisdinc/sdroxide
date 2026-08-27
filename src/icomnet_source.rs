@@ -1349,6 +1349,108 @@ mod tests {
         assert!((-10.0..0.0).contains(&peak), "peak came back at {peak} dB");
     }
 
+    /// Field report, issue #190: an IC-7610 over its LAN port was told
+    /// sdroxide did not know its menu numbering, and so had to be sent to
+    /// SET > Connectors > MOD Input by hand before anything it transmitted was
+    /// modulated at all.
+    #[test]
+    fn an_ic7610_gets_its_own_menu_numbers_and_every_one_of_its_data_slots() {
+        let sim = Sim::start(SimOptions {
+            civ_address: 0x98,
+            radio_name: "IC-7610".into(),
+            scope: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut c = cfg(&sim);
+        c.rx_source = IcomRxSource::If12k;
+        let src = IcomNetSource::open(&c).expect("open");
+        assert_eq!(src.open_status(), None, "nothing left for the operator to do by hand");
+
+        let menu = |hi: u8, lo: u8, value: u8| {
+            sim.civ_frames().iter().any(|f| {
+                f.len() >= 10
+                    && f[4] == 0x1A
+                    && f[5] == 0x05
+                    && f[6] == hi
+                    && f[7] == lo
+                    && f[8] == value
+            })
+        };
+        wait_for("the IC-7610 menu writes", || {
+            // LAN AF/IF Output > Output Select = IF, and DATA OFF plus all
+            // three DATA slots to LAN — `05` on this radio.
+            menu(0x00, 0x86, 0x01)
+                && menu(0x00, 0x91, 0x05)
+                && menu(0x00, 0x92, 0x05)
+                && menu(0x00, 0x93, 0x05)
+                && menu(0x00, 0x94, 0x05)
+        });
+        // Never the [USB] port's copy of the output select, six items earlier,
+        // and never the IC-7760's value for "LAN" even though the two radios
+        // have the same four slots: `09` is off the end of this rig's list.
+        assert!(!menu(0x00, 0x80, 0x01), "the USB output select is not ours to write");
+        assert!(!menu(0x00, 0x91, 0x09), "another model's LAN value");
+    }
+
+    /// The IC-7610 sweeps the IC-7760's shape — 689 bins on 0..=200 — from a
+    /// generation that otherwise sends 475 on 0..=160.
+    #[test]
+    fn an_ic7610_sweep_arrives_as_689_bins_on_its_own_taller_scale() {
+        let sim = Sim::start(SimOptions {
+            civ_address: 0x98,
+            radio_name: "IC-7610".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+
+        let mut buf = vec![Complex32::default(); 1024];
+        let mut bins = Vec::new();
+        wait_for("a scope sweep", || {
+            let _ = src.read(&mut buf);
+            src.wide_spectrum_db(&mut bins).is_some()
+        });
+        assert_eq!(bins.len(), 689, "the whole sweep, in the one frame a LAN Icom sends");
+        let peak = bins.iter().copied().fold(f32::MIN, f32::max);
+        assert!((-10.0..0.0).contains(&peak), "peak came back at {peak} dB");
+    }
+
+    /// An IC-R8600 is in the model table for the output select alone. The
+    /// modulation-input writes must stay away from it: `00 89` is one item
+    /// past the Speech-output block on that set, and it has no MOD input at
+    /// all to point at LAN.
+    #[test]
+    fn a_receiver_gets_its_output_select_and_no_modulation_write() {
+        let sim = Sim::start(SimOptions {
+            civ_address: 0x96,
+            radio_name: "IC-R8600".into(),
+            can_transmit: false,
+            scope: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut c = cfg(&sim);
+        c.rx_source = IcomRxSource::If12k;
+        let src = IcomNetSource::open(&c).expect("open");
+        // It says the set cannot transmit, which is a fact about the radio —
+        // and nothing about a menu, which would be an errand on a rig with no
+        // modulation input to run it on.
+        let status = src.open_status().unwrap_or_default();
+        assert!(!status.contains("menu numbering"), "{status}");
+
+        wait_for("the output select", || {
+            sim.civ_frames().iter().any(|f| {
+                f.len() >= 10 && f[4] == 0x1A && f[5] == 0x05 && f[6..9] == [0x00, 0x89, 0x01]
+            })
+        });
+        let mod_write = sim
+            .civ_frames()
+            .iter()
+            .any(|f| f.len() >= 10 && f[4] == 0x1A && f[5] == 0x05 && f[6] == 0x00 && f[7] > 0x89);
+        assert!(!mod_write, "nothing past the output select is ours on a receiver");
+    }
+
     #[test]
     fn the_scope_span_is_commanded_rather_than_left_wherever_the_radio_had_it() {
         let sim = Sim::start(SimOptions { civ_address: 0xA4, ..Default::default() }).unwrap();
@@ -1395,9 +1497,11 @@ mod tests {
 
     #[test]
     fn an_unknown_model_says_what_the_operator_has_to_set_by_hand() {
+        // An IC-7100: no network port, so it can never be in the model table.
+        // The IC-9700 that used to stand in here is in it now.
         let sim = Sim::start(SimOptions {
-            civ_address: 0xA2,
-            radio_name: "IC-9700".into(),
+            civ_address: 0x88,
+            radio_name: "IC-7100".into(),
             scope: false,
             ..Default::default()
         })

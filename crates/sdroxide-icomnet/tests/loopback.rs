@@ -65,15 +65,17 @@ fn a_wrong_password_is_reported_as_such_rather_than_timing_out() {
 
 #[test]
 fn an_unknown_model_still_connects_but_gets_no_menu_writes() {
-    // An IC-9700's CI-V address, which is not in the table.
+    // An IC-7100's CI-V address. It has no network port at all, so it will
+    // never be in the table — unlike the IC-9700 that used to stand in here,
+    // which is now in it.
     let sim = Sim::start(SimOptions {
-        civ_address: 0xA2,
-        radio_name: "IC-9700".into(),
+        civ_address: 0x88,
+        radio_name: "IC-7100".into(),
         ..Default::default()
     })
     .unwrap();
     let dev = connect(&sim, |_| {}).expect("connect");
-    assert_eq!(dev.info().civ_address, 0xA2);
+    assert_eq!(dev.info().civ_address, 0x88);
     assert_eq!(dev.info().model.name, "Icom (LAN)");
     assert!(dev.info().model.lan_mod_input.is_none());
     assert!(dev.info().model.lan_afif_select.is_none());
@@ -390,11 +392,12 @@ fn test_connection_reports_the_radio_in_one_line() {
 
 #[test]
 fn an_unknown_model_says_the_operator_must_set_the_menu_item() {
-    // A radio whose `1A 05` numbering is not in the table — the IC-705's is,
-    // so it would no longer produce the note this test is about.
+    // A radio whose `1A 05` numbering is not in the table. It has to be one
+    // with no network port — every Icom that can actually reach this backend
+    // is now in the table, which is the point of the table.
     let sim = Sim::start(SimOptions {
-        civ_address: 0xA2,
-        radio_name: "IC-9700".into(),
+        civ_address: 0x88,
+        radio_name: "IC-7100".into(),
         ..Default::default()
     })
     .unwrap();
