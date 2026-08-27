@@ -39,7 +39,10 @@
 //! has connected over its RF deck's LAN port and streamed audio, its dial, its
 //! meter and its scope (issue #183) — but that session ran *before* the model
 //! was in the table, so what the trace proves is the transport, not the menu
-//! writes or the 689-bin sweep now built from its CI-V reference guide.
+//! writes or the 689-bin sweep now built from its CI-V reference guide. The one
+//! thing that model has since been reported to do differently is its 12 kHz IF,
+//! which arrives mirrored: see `sdroxide_icomnet::protocol::Model::if_inverted`
+//! for what that costs and how little of it Icom documents.
 //! Everything else — transmit, the other models' menu numbering, the meters —
 //! is still only exercised against `sdroxide_icomnet::sim`, and the session
 //! trace is copyable from the settings tab so a user with a radio can report
@@ -229,7 +232,19 @@ impl IcomNetSource {
         let tx = dev.take_audio_tx();
         let civ_addr = info.civ_address;
 
+        // The model's own answer unless the operator has overruled it. Read
+        // here rather than in `configure`, because the mixer below is built
+        // once and the radio cannot change under a session.
+        let invert_if = cfg.invert_if.unwrap_or(info.model.if_inverted);
+
         let mut notes = Vec::new();
+        if rx_source == IcomRxSource::If12k && invert_if {
+            tracing::info!(
+                radio = %info.radio_name,
+                overridden = cfg.invert_if.is_some(),
+                "Icom LAN: mirroring the 12 kHz IF about its centre"
+            );
+        }
         if cfg.rx_source == IcomRxSource::If12k && rx_source == IcomRxSource::Af {
             notes.push(format!(
                 "The 12 kHz IF needs a 48 kHz audio stream; this connection asked for {} Hz, \
@@ -269,7 +284,13 @@ impl IcomNetSource {
             pending: Vec::new(),
             ddc: (rx_source == IcomRxSource::If12k).then(|| {
                 let mut d = Ddc::new(f64::from(cfg.sample_rate_hz), IF_OUT_RATE);
-                d.set_offset_hz(IF_CENTER_HZ);
+                // Which of the real IF's two halves lands on DC, and so which
+                // way up the baseband comes out. Mixing down from +12 kHz keeps
+                // it; mixing *up* from -12 kHz lands on the mirror instead and
+                // conjugates the lot, which is the whole of the fix for a radio
+                // whose IF arrives the other way round. See
+                // `Model::if_inverted`.
+                d.set_offset_hz(if invert_if { -IF_CENTER_HZ } else { IF_CENTER_HZ });
                 d
             }),
             if_in: Vec::new(),
@@ -1005,6 +1026,56 @@ mod tests {
         );
         assert!(wanted > 20.0 * at(6_000.0), "energy is at +3 kHz, not elsewhere");
         assert!(wanted > 20.0 * at(0.0), "and not left at DC");
+    }
+
+    /// A mirrored IF is the IC-7760's reported behaviour, and it is what makes
+    /// SSB come out on the opposite sideband: the same tone the test above puts
+    /// at +3 kHz has to land at -3 kHz instead. Checked three ways, because the
+    /// model default and the operator's override are the two halves of the fix
+    /// and either one alone would leave somebody stuck.
+    #[test]
+    fn a_mirrored_if_puts_the_tone_below_the_dial_instead_of_above_it() {
+        // A tone 3 kHz above the IF centre, read back as the offset it lands at.
+        let offset_of = |radio_name: &str, civ_address: u8, invert_if: Option<bool>| {
+            let sim = Sim::start(SimOptions {
+                tone_hz: Some(IF_CENTER_HZ + 3_000.0),
+                civ_address,
+                radio_name: radio_name.into(),
+                scope: false,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut c = cfg(&sim);
+            c.rx_source = IcomRxSource::If12k;
+            c.invert_if = invert_if;
+            let mut src = IcomNetSource::open(&c).expect("open");
+
+            let mut buf = vec![Complex32::default(); 4096];
+            let mut got = Vec::new();
+            wait_for("IF samples", || {
+                let n = src.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                got.len() > 12_000
+            });
+            let got = &got[2_000..];
+            let (up, down) =
+                (goertzel(got, 3_000.0, IF_OUT_RATE), goertzel(got, -3_000.0, IF_OUT_RATE));
+            assert!(
+                up > 20.0 * down || down > 20.0 * up,
+                "one side or the other, not both: {up} vs {down}"
+            );
+            if up > down { 3_000.0 } else { -3_000.0 }
+        };
+
+        // The IC-7760's own default, with nothing set by hand.
+        assert_eq!(offset_of("IC-7760", 0xB2, None), -3_000.0, "an IC-7760 mirrors its IF");
+        // Every other model keeps the convention Icom built the output for.
+        assert_eq!(offset_of("IC-705", 0xA4, None), 3_000.0, "and an IC-705 does not");
+        // Either way the operator has the last word — the model table is a
+        // report, not a measurement, so it has to be possible to overrule it in
+        // both directions.
+        assert_eq!(offset_of("IC-7760", 0xB2, Some(false)), 3_000.0, "override off");
+        assert_eq!(offset_of("IC-705", 0xA4, Some(true)), -3_000.0, "override on");
     }
 
     /// Complex energy at one frequency, positive or negative — the sign is the

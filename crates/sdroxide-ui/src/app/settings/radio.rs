@@ -1994,6 +1994,34 @@ pub(in crate::app) fn settings_icomnet_tab(
             ui.end_row();
         }
 
+        // Only on the IF path: the AF path is audio the radio has already
+        // demodulated, and there is nothing left in it to mirror.
+        if net.rx_source == IcomRxSource::If12k && net.if_mode_usable() {
+            ui.label("IF spectrum").on_hover_text(
+                "Which way round the radio's 12 kHz IF runs. \"Automatic\" uses what \
+                 the model is known to do — mirrored on an IC-7760, normal on every \
+                 other Icom. Set it by hand if SSB comes out on the wrong sideband: \
+                 the giveaway is having to select USB where the band runs LSB while \
+                 the radio's own mode display agrees with sdroxide throughout.",
+            );
+            ComboBox::from_id_salt("icomnet_invert_if")
+                .selected_text(match net.invert_if {
+                    None => "Automatic",
+                    Some(false) => "Normal",
+                    Some(true) => "Mirrored",
+                })
+                .show_styled(ui, |ui| {
+                    for (v, label) in
+                        [(None, "Automatic"), (Some(false), "Normal"), (Some(true), "Mirrored")]
+                    {
+                        if ui.selectable_label(net.invert_if == v, label).clicked() {
+                            net.invert_if = v;
+                        }
+                    }
+                });
+            ui.end_row();
+        }
+
         if net.rx_source == IcomRxSource::Af {
             ui.label("Displayed bandwidth");
             ui.add(

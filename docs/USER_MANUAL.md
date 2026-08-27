@@ -6479,14 +6479,39 @@ Select`), which decides who does the demodulating:
 
 Transmit is unaffected by the choice: it is always audio the radio modulates.
 
+##### IF spectrum: which way round the IF runs
+
+Only on the 12 kHz IF, and only worth touching if something is wrong.
+
+A 12 kHz IF is a *real* signal, so it carries the band you want and a mirror of
+it, and sdroxide has to pick one. Pick the wrong one and everything still sounds
+like a radio — it is just mirrored, which on SSB means the audio comes out on the
+opposite sideband to the one it was sent on. The giveaway is having to select
+**USB** on 40 m and **LSB** on 20 m to make anybody intelligible, with the
+radio's own mode display agreeing with sdroxide the whole time.
+
+- **Automatic** (the default) uses what the model is known to do: mirrored on an
+  **IC-7760**, normal on every other Icom.
+- **Normal** and **Mirrored** set it by hand.
+
+Icom documents this nowhere — not in the CI-V reference guides, not in the
+IC-7760's I/Q supplement — so the automatic answer is built from what radios have
+actually been reported to do, and the IC-7760's comes from a single operator's
+session. If your radio needs the opposite of what it is given, set it by hand and
+please say so, so the default can be corrected. The **IC-7610** is the one to
+watch: it shares the IC-7760's scope shape and may well share this too, but
+nobody has reported it, so it is left alone.
+
 ##### The dial and the mode belong to the radio
 
 Both travel in both directions, on either receive path. Turn the radio's dial or
 change its mode and sdroxide follows within a fifth of a second; change VFO or
 mode in sdroxide and the radio follows. On the 12 kHz IF the mode still matters
-even though sdroxide is the one demodulating — the IF you are given comes through
-the filter the radio's mode selects, and the radio's own display should not
-disagree with yours.
+even though sdroxide is the one demodulating — it is the mode the radio will
+transmit in, and the radio's own display should not disagree with yours. What it
+will *not* fix is a mirrored IF: the sideband you hear on that path is sdroxide's
+to choose, not the radio's, which is why a swap there is the **IF spectrum**
+setting above and not this one.
 
 What sdroxide will *not* do is impose the session's dial or mode when the
 connection opens: it adopts whatever the transceiver is already sitting on.

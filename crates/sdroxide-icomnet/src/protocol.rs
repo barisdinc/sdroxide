@@ -871,6 +871,30 @@ pub struct Model {
     /// and — on FM — its pre-emphasis, which tilts a Bell 202 tone pair about
     /// 6 dB and makes packet unreadable while still sounding like packet.
     pub data_mode_sub: Option<u8>,
+    /// Whether this model's 12 kHz IF output comes out mirrored about its
+    /// centre, so the mix down to baseband has to run the other way.
+    ///
+    /// The IF is a *real* signal at 12 kHz, which means it carries the wanted
+    /// spectrum at +12 kHz and its own mirror at -12 kHz. Which of the two the
+    /// mixer lands on DC decides which way up the result is, and getting it
+    /// wrong is not a subtle defect: SSB comes out on the opposite sideband to
+    /// the one it was sent on, so the operator has to select USB where the band
+    /// runs LSB to make anybody intelligible.
+    ///
+    /// Icom built this output for DRM and Dream reads it with its
+    /// `--flipspectrum` off, so `false` is the convention to expect and what
+    /// every model here is given until a radio says otherwise. The IC-7760 is
+    /// the one that has: a field report of exactly the sideband swap above,
+    /// against a session on the 12 kHz IF over the RF deck's LAN port. Icom
+    /// documents no such difference — neither the CI-V reference guide nor the
+    /// I/Q output supplement says which way either stream runs — so this is the
+    /// radio's behaviour as reported, not a fact off a page, and
+    /// `IcomNetConfig::invert_if` is there to overrule it in either direction.
+    ///
+    /// Deliberately not extended to the IC-7610, which shares the IC-7760's
+    /// 689-bin scope and might well share this too: nobody has reported it, and
+    /// guessing here would break a radio that works today.
+    pub if_inverted: bool,
 }
 
 /// Everything a model we do not recognise still gets: the common command set,
@@ -888,6 +912,7 @@ pub const UNKNOWN_MODEL: Model = Model {
     // failure than a digital mode that quietly transmits through the
     // microphone path.
     data_mode_sub: Some(0x06),
+    if_inverted: false,
 };
 
 /// Models whose `1A 05` numbering has been read out of the manufacturer's CI-V
@@ -911,6 +936,7 @@ pub const MODELS: &[Model] = &[
         // 1A 05 00 79 = LAN AF/IF Output → Output Select, `00=AF, 01=IF`.
         lan_afif_select: Some(0x0079),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
     Model {
         civ_address: 0xA4,
@@ -928,6 +954,7 @@ pub const MODELS: &[Model] = &[
         // wrong one to write for a network session.
         lan_afif_select: Some(0x0114),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
     Model {
         civ_address: 0xB2,
@@ -949,6 +976,10 @@ pub const MODELS: &[Model] = &[
         // are the same setting on a socket this session is not using.
         lan_afif_select: Some(0x0123),
         data_mode_sub: Some(0x06),
+        // Field report: on the 12 kHz IF this radio's stream is mirrored, and
+        // SSB lands on the wrong sideband until the mix runs the other way.
+        // See `Model::if_inverted` for what is and is not known about that.
+        if_inverted: true,
     },
     Model {
         civ_address: 0x98,
@@ -971,6 +1002,7 @@ pub const MODELS: &[Model] = &[
         // one to write for a network session.
         lan_afif_select: Some(0x0086),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
     Model {
         civ_address: 0xA2,
@@ -985,6 +1017,7 @@ pub const MODELS: &[Model] = &[
         // `00=AF, 01=IF`. 01 05 is the [USB] port's copy.
         lan_afif_select: Some(0x0110),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
     Model {
         civ_address: 0xAC,
@@ -1004,6 +1037,7 @@ pub const MODELS: &[Model] = &[
         // 01 17 is the USB/AV-OUT copy.
         lan_afif_select: Some(0x0122),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
     Model {
         civ_address: 0x96,
@@ -1026,6 +1060,7 @@ pub const MODELS: &[Model] = &[
         // so the family default would be a frame the receiver can only answer
         // NG to, once per mode change.
         data_mode_sub: None,
+        if_inverted: false,
     },
     Model {
         civ_address: 0x8E,
@@ -1052,6 +1087,7 @@ pub const MODELS: &[Model] = &[
         // 00 44 S/P DIF, 00 50 USB B — and only the last of the five is ours.
         lan_afif_select: Some(0x0056),
         data_mode_sub: Some(0x06),
+        if_inverted: false,
     },
 ];
 

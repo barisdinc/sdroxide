@@ -1591,6 +1591,21 @@ pub struct IcomNetConfig {
     /// How wide to sweep that scope. The radio's own setting is usually far
     /// narrower than the band view this lane exists to give.
     pub scope_span: IcomScopeSpan,
+    /// Whether to mirror the 12 kHz IF about its centre on the way in, or
+    /// `None` to follow whatever the model is known to do
+    /// (`sdroxide_icomnet::protocol::Model::if_inverted`).
+    ///
+    /// Only reaches the IF path — the AF path is audio the radio has already
+    /// demodulated, and there is nothing there to mirror. It exists because the
+    /// consequence is unmistakable and the cause is not: a mirrored IF puts SSB
+    /// on the opposite sideband, so the operator ends up selecting USB on 40 m
+    /// and LSB on 20 m to make anyone intelligible, with the radio's own mode
+    /// display agreeing with sdroxide the whole time.
+    ///
+    /// Left as an override rather than a plain switch because the model table
+    /// already knows the answer for the radios anybody has reported, and a
+    /// setting that has to be found before the audio works is not a fix.
+    pub invert_if: Option<bool>,
 }
 
 impl Default for IcomNetConfig {
@@ -1609,6 +1624,7 @@ impl Default for IcomNetConfig {
             set_mod_input_on_open: true,
             scope: true,
             scope_span: IcomScopeSpan::default(),
+            invert_if: None,
         }
     }
 }
