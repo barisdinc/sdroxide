@@ -575,6 +575,8 @@ struct Reading {
     right: String,
     /// Whether `right` is a co-equal reading (TX) or a quiet sub-label (RX).
     right_strong: bool,
+    /// The right-hand reading is a warning, and prints in the red-line red.
+    right_alert: bool,
 }
 
 fn reading(meters: Option<&Meters>) -> Reading {
@@ -591,6 +593,7 @@ fn reading(meters: Option<&Meters>) -> Reading {
                 accent: RED(),
                 right: power,
                 right_strong: true,
+                right_alert: false,
             },
             // No SWR bridge: the needle falls back to the engine's own drive
             // level, which is the only TX quantity every backend reports.
@@ -601,6 +604,7 @@ fn reading(meters: Option<&Meters>) -> Reading {
                 accent: RED(),
                 right: power,
                 right_strong: true,
+                right_alert: false,
             },
         };
     }
@@ -611,13 +615,19 @@ fn reading(meters: Option<&Meters>) -> Reading {
         Some(_) if dbm > S9_DBM => (format!("S9+{:.0}", dbm - S9_DBM), format!("{dbm:.0} dBm")),
         Some(m) => (format!("S{}", m.s_units().0), format!("{dbm:.0} dBm")),
     };
+    // The converter is into its rails. This takes the dBm's place rather than
+    // sitting beside it, because the dBm is no longer a measurement: a clipped
+    // carrier reads *lower* than it is, so leaving the number up would have the
+    // instrument quietly disagreeing with the warning printed next to it.
+    let overload = meters.is_some_and(Meters::adc_overloaded);
     Reading {
         scale: s_scale(),
         frac: frac_of(dbm),
         chip: primary,
-        accent: crate::theme::CYAN(),
-        right: secondary,
-        right_strong: false,
+        accent: if overload { RED() } else { crate::theme::CYAN() },
+        right: if overload { "OVL".to_string() } else { secondary },
+        right_strong: overload,
+        right_alert: overload,
     }
 }
 
@@ -713,7 +723,11 @@ fn header(p: &Painter, rect: Rect, r: &Reading, k: f32) -> Rect {
     let (chip_pt, strong_pt) = header_pt(k);
     let chip_rect = chip(p, pos2(rect.left() + 6.0 * k, head_y), &r.chip, r.accent, chip_pt);
     if !r.right.is_empty() {
-        let (pt, ink) = if r.right_strong { (strong_pt, READOUT()) } else { (chip_pt, SUBDUED()) };
+        let (pt, ink) = match (r.right_strong, r.right_alert) {
+            (_, true) => (strong_pt, RED()),
+            (true, false) => (strong_pt, READOUT()),
+            (false, false) => (chip_pt, SUBDUED()),
+        };
         // The secondary reading goes only where there is room for it beside the
         // headline one. In a box narrow enough for the two to meet, the chip is
         // the one worth keeping — it carries the signal report, and the pair

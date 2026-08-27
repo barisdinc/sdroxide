@@ -20,7 +20,7 @@ use sdroxide_digi::{
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
-    Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
+    AdcMeter, Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
     MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
     SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target, make_demod,
     make_modulator,
@@ -1806,6 +1806,11 @@ struct Engine {
     /// band plan is only consulted when the dial has actually moved.
     auto_shift_dial: Option<f64>,
     nb: NoiseBlanker,
+    /// Converter headroom, read straight off the samples the device handed
+    /// over. Fed before the blanker and before decimation — see
+    /// [`sdroxide_dsp::AdcMeter`], which records why either of those would
+    /// erase the evidence.
+    adc: AdcMeter,
     /// Auto-notch + spectral NR for the CAT/demod-audio path (the IQ path uses
     /// per-`RxChain` instances instead).
     audio_notch: AutoNotch,
@@ -2632,6 +2637,7 @@ fn engine_thread(
         burst_unkeys: false,
         auto_shift_dial: None,
         nb: NoiseBlanker::new(),
+        adc: AdcMeter::new(),
         audio_notch: AutoNotch::new(),
         audio_notch_on: false,
         audio_nr: SpectralNr::new(),
@@ -2999,6 +3005,7 @@ fn engine_thread(
             // over on the air as chirps. See `IqSource::read_available`.
             if engine.caps.full_duplex && !engine.audio_mode {
                 if let Ok(n @ 1..) = engine.source.read_available(&mut buf) {
+                    engine.adc.observe(&buf[..n]);
                     let iq = decimate(engine.decim.as_mut(), &buf[..n], &mut dbuf);
                     engine.run_audio(iq);
                 }
@@ -3008,10 +3015,14 @@ fn engine_thread(
                 Ok(0) => continue, // timeout
                 Ok(n) if engine.audio_mode => {
                     lane_samples += n as u64;
+                    engine.adc.observe(&buf[..n]);
                     engine.run_audio_mode(&buf[..n]);
                 }
                 Ok(n) => {
                     lane_samples += n as u64;
+                    // Ahead of the blanker and of `decimate`, both of which
+                    // destroy what this is looking for. See `AdcMeter`.
+                    engine.adc.observe(&buf[..n]);
                     // Blanking comes first, at the device rate: an impulse is
                     // only an impulse before the anti-alias filter smears it
                     // over a filter length, and after decimation there would be
@@ -3239,9 +3250,11 @@ fn engine_thread(
                         None => {}
                     }
                 }
+                let (adc_peak_dbfs, adc_clip) = engine.adc.read();
                 Some(Meters {
                     s_dbm: -127.0,
-                    adc_peak_dbfs: 0.0,
+                    adc_peak_dbfs,
+                    adc_clip,
                     tx: Some(TxMeters { fwd_w: tele.fwd_w, swr: tele.swr, alc, po: tele.po }),
                     stereo: false,
                     tone: None,
@@ -3258,9 +3271,14 @@ fn engine_thread(
                 engine.swr_tuning = false;
                 let stereo = engine.main.as_ref().is_some_and(|c| c.stereo_locked());
                 let tone = engine.main.as_ref().and_then(|c| c.sub_tone());
+                // Read unconditionally, so the window is consumed whether or not
+                // a reading is published — otherwise a front end with no signal
+                // report would accumulate one reading over the whole session.
+                let (adc_peak_dbfs, adc_clip) = engine.adc.read();
                 engine.rx_signal_dbm().map(|s_dbm| Meters {
                     s_dbm,
-                    adc_peak_dbfs: 0.0,
+                    adc_peak_dbfs,
+                    adc_clip,
                     tx: None,
                     stereo,
                     tone,

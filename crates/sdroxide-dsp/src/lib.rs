@@ -1,3 +1,4 @@
+mod adc;
 pub mod afsk;
 mod agc;
 mod ctcss;
@@ -44,6 +45,7 @@ mod wbspectrum;
 pub mod wefax;
 mod window;
 
+pub use adc::AdcMeter;
 pub use afsk::{AFSK_TX_PEAK, AfskProfile, AfskRx, AfskTx};
 pub use agc::Agc;
 pub use ctcss::{SubToneDetect, golay23_decode, golay23_encode};

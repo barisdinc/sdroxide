@@ -756,7 +756,27 @@ use sdroxide_types::{
 /// codec has no decoder reports a healthy signal, a service label and silence,
 /// and this is the only field that distinguishes that from an audio decode
 /// that is merely failing.
-pub const PROTO_VERSION: u16 = 96;
+/// **97** — converter overload is a reading of its own (issue #173).
+/// [`sdroxide_types::Meters`] gained `adc_clip`, the fraction of converter
+/// samples sitting at full scale, beside the `adc_peak_dbfs` it completes
+/// rather than at the tail — postcard numbers fields by position and a v96 peer
+/// desynchronises on either placement, so it goes where it reads.
+///
+/// `adc_peak_dbfs` was on the wire from the start and had never been measured:
+/// the engine filled it with a literal `0.0`. It now carries the real peak, so
+/// a v96 client shown a v97 reading would not merely mis-parse the tail — it
+/// would read a field that used to be a constant. The handshake's equality test
+/// is what stops it trying.
+///
+/// Two figures rather than one because neither answers alone. The peak cannot
+/// tell a signal that fills the converter from one twice too large for it, and
+/// the fraction saturates as soon as a constant-envelope signal passes √2 of
+/// full scale — every sample of an FM carrier clips from there on. Together
+/// they say whether the front end is into its rails and roughly how far.
+///
+/// `Meters` rides in an event only, never in a command, so this is a one-way
+/// change: nothing a client sends carries it.
+pub const PROTO_VERSION: u16 = 97;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

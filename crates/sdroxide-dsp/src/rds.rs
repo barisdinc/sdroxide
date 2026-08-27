@@ -575,6 +575,10 @@ struct Assembler {
     /// Programme identification awaiting a second sighting.
     pi_candidate: Option<u16>,
 
+    /// Extended country code awaiting a second sighting, for the same reason
+    /// the programme identification does — see [`Assembler::group1a`].
+    ecc_candidate: Option<u8>,
+
     /// The five-bit group code group 3A assigned to RadioText+, if any.
     rt_plus_group: Option<u8>,
 }
@@ -594,6 +598,7 @@ impl Assembler {
             ptyn_buf: [b' '; 8],
             ptyn_seen: 0,
             pi_candidate: None,
+            ecc_candidate: None,
             rt_plus_group: None,
         }
     }
@@ -704,14 +709,38 @@ impl Assembler {
         }
     }
 
-    /// Group 1A: the extended country code, which settles RDS versus RBDS.
+    /// Group 1A: the extended country code, accepted only on a second sighting.
+    ///
+    /// The same rule as [`Assembler::programme_id`], and for a sharper reason.
+    /// This byte decides which of two entirely different 32-entry programme-type
+    /// tables the station is read against — 5 is "Education" under one and
+    /// "Rock" under the other — and whether its identity code is spelled out as
+    /// a call sign. It has no redundancy beyond its own block check, it does not
+    /// change while a station is tuned, and a block the corrector repaired is
+    /// trusted like any other.
+    ///
+    /// Accepting it on one sighting is measurable, not theoretical: over a
+    /// minute of a marginal station transmitting nothing but `E0`, the decoder
+    /// published `E0`, `E1` and `92`. Land one of those on a high nibble of
+    /// `0xA` — one chance in sixteen — and the whole window re-labels itself
+    /// RBDS until the next real 1A arrives, which is how a station that never
+    /// moved appears to flip between the two standards.
     fn group1a(&mut self, blocks: [u16; 4], valid: u8) {
         if valid & 0b0100 == 0 {
             return;
         }
         let c = blocks[2];
-        if (c >> 12) & 0x7 == 0 {
-            Self::set(&mut self.data.ecc, Some((c & 0xff) as u8), &mut self.changed);
+        if (c >> 12) & 0x7 != 0 {
+            return;
+        }
+        let ecc = (c & 0xff) as u8;
+        if self.data.ecc == Some(ecc) {
+            return;
+        }
+        if self.ecc_candidate == Some(ecc) {
+            Self::set(&mut self.data.ecc, Some(ecc), &mut self.changed);
+        } else {
+            self.ecc_candidate = Some(ecc);
         }
     }
 
@@ -1301,5 +1330,53 @@ mod tests {
         assert_eq!(finish_text(&[0x24, 0xAB]), "¤$");
         // Below 0x20 there is no glyph to read, and a dot says so.
         assert_eq!(finish_text(&[0x00, b'X']), "·X");
+    }
+
+    /// One group 1A, correct in every bit as far as the block layer can tell,
+    /// carrying an extended country code the station never sent.
+    fn group_1a(ecc: u8) -> ([u16; 4], u8) {
+        // Block B: group 1, version A. Block C: variant 0, then the code.
+        ([0xD3C2, 0x1000, ecc as u16, 0], 0b1111)
+    }
+
+    #[test]
+    fn a_single_country_code_does_not_relabel_the_station() {
+        // Issue #173. The extended country code chooses between two entirely
+        // different programme-type tables and decides whether the identity is
+        // spelled out as a call sign, so it is held to the same rule as the
+        // programme identification: seen twice, or not believed. Over a minute
+        // of a marginal station sending nothing but E0, the decoder used to
+        // publish E0, E1 and 92.
+        let mut a = Assembler::new();
+        let (g, valid) = group_1a(0xE0);
+        a.group(g, valid);
+        assert_eq!(a.data.ecc, None, "one sighting is not evidence");
+        a.group(g, valid);
+        assert_eq!(a.data.ecc, Some(0xE0), "the second settles it");
+
+        // And a corrupted one arriving afterwards does not take it away.
+        let (bad, valid) = group_1a(0xA5);
+        a.group(bad, valid);
+        assert_eq!(a.data.ecc, Some(0xE0), "a lone stray does not move a settled code");
+        // Only a code that arrives twice replaces it — a station really can be
+        // retuned onto another that shares the dial.
+        a.group(bad, valid);
+        assert_eq!(a.data.ecc, Some(0xA5));
+    }
+
+    #[test]
+    fn a_country_code_needs_block_c_and_the_right_variant() {
+        let mut a = Assembler::new();
+        // Block C lost: nothing to read, and nothing left half-accepted either.
+        let (g, _) = group_1a(0xE0);
+        a.group(g, 0b1011);
+        a.group(g, 0b1011);
+        assert_eq!(a.data.ecc, None);
+        // Variant 1 puts something else in those bits, not a country code.
+        let mut other = g;
+        other[2] = 0x1000 | 0xE0;
+        a.group(other, 0b1111);
+        a.group(other, 0b1111);
+        assert_eq!(a.data.ecc, None);
     }
 }

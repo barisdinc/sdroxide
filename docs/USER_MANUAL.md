@@ -522,9 +522,15 @@ mode. What is in the box never changes; only where the two rows are cut does.
   difference is which table of programme types to read it against, and whether to
   spell the identity code out as call letters. **Auto** decides from the country
   code the station sends, which most stations outside North America do. Where one
-  does not, auto falls back to guessing from the identity code, and that guess
-  can be wrong — the call-letter range overlaps identity codes that are perfectly
-  ordinary elsewhere. Set it by hand when the programme type reads like nonsense.
+  does not, auto still guesses the *table* from the identity code — that guess
+  can be wrong, so set the selector by hand when the programme type reads like
+  nonsense — but it will not **name** the station from it. The call-letter range
+  overlaps identity codes that are perfectly ordinary elsewhere: a Finnish or
+  Danish station's identity decodes to a plausible American call sign, and four
+  invented letters sitting where the station's name goes look like fact in a way
+  a wrong category does not. Select **RBDS** by hand to name a North American
+  station that sends no country code.
+
   Nothing is re-decoded when you change it: the raw codes are already here, so
   everything on screen re-labels itself at once.
 
@@ -537,12 +543,13 @@ mode. What is in the box never changes; only where the two rows are cut does.
   out when a lorry goes past. A station sending no group 2A sends no radio text —
   the group list will tell you that, where the blank field cannot.
 
-  Text is read through the standard's own character table, so accented letters —
-  `ä`, `ö`, `å`, `ß` and the rest of the European set — arrive as themselves.
-  That table is close to ASCII but not equal to it: a `¤` where you expected a
-  dollar is the station sending plain ASCII into a slot the standard gives to the
-  international currency sign. Codes with no printable character at all still
-  come out as `·`.
+  **FRONT END OVERLOADING** — the station is too *strong*, the converter is clipping, and the
+  distortion lands right across the multiplex including on the 57 kHz subcarrier
+  the data rides. Nothing you can hear will tell you, and that is the point of
+  the warning: the whole distance between clean RDS and none is about a decibel,
+  and across all of it the audio stays clean and the stereo light stays on. Turn
+  the RF gain down or switch in an attenuator. The S-meter shows `OVL` for the
+  same reason ([2.9](#29-the-s-meter)).
 
   One thing is deliberately not shown: **traffic message channel** data is
   decoded by nobody here. The messages are numeric references into a licensed
@@ -794,6 +801,20 @@ link.
 
 The **S-meter** reads S0 (−127 dBm) through S9 (−73 dBm) and beyond, turning red
 past S9. It shows the S-unit (for example `S9+20`) and the level in dBm.
+
+Where the dBm normally sits you may instead see **`OVL`** in red. That is the
+converter clipping: the signal reaching it is bigger than it can represent, and
+everything downstream is reading a distorted version of it. The dBm is taken
+away rather than shown beside the warning because it is no longer a
+measurement — a clipped carrier reads *lower* than it really is, so the number
+would be arguing with the warning next to it. Turn the RF gain down, or switch
+in an attenuator, until it goes.
+
+It is worth taking seriously even when nothing sounds wrong, because on FM
+almost nothing will: the audio stays clean well past the point where the data
+riding above it has already gone. See the RDS diagnostics tab
+([2.7](#27-receiver-controls)) for the same warning where its effects show
+first.
 
 Clicking the meter cycles three faces:
 
