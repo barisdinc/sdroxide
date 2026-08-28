@@ -240,6 +240,7 @@ impl Worker {
         AdsbStatus {
             aircraft: self.tracker.snapshot(),
             unavailable: None,
+            degraded: None,
             suggest_center_hz: None,
             window_center_hz: self.center_hz,
             window_rate_hz: self.rate_hz,

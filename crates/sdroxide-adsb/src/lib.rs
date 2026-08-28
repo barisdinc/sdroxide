@@ -37,13 +37,25 @@
 //!
 //! # The receiver this needs
 //!
-//! Mode S is one megabit a second, so the stream has to be at least
-//! [`sdroxide_types::ADSB_MIN_RATE_HZ`] and centred near
-//! [`sdroxide_types::ADSB_FREQ_HZ`]. Neither can be manufactured downstream: the
-//! engine's downconverter decimates and does not interpolate. Where the receiver
-//! cannot do it, the answer is [`sdroxide_types::AdsbStatus::unavailable`] — a
-//! sentence the operator can act on — rather than a decoder that runs and finds
-//! nothing.
+//! Mode S is one megabit a second and every bit is two half-microsecond chips,
+//! so what matters is how many samples land inside a chip. The stream has to be
+//! at least [`sdroxide_types::ADSB_MIN_RATE_HZ`] and centred near
+//! [`sdroxide_types::ADSB_FREQ_HZ`]; neither can be manufactured downstream,
+//! because the engine's downconverter decimates and does not interpolate.
+//!
+//! Between that floor and [`sdroxide_types::ADSB_GOOD_RATE_HZ`] the decoder
+//! runs but is *degraded*, and not through any shortcoming of the
+//! implementation: at 2 Msps a chip and a sample are the same width, so a burst
+//! arriving out of step with the sample clock has its chips split equally
+//! between two samples that then read identically. Strong aircraft decode and
+//! the rest are lost. Above the good rate every arrival phase decodes — see
+//! [`demod`], which measures both.
+//!
+//! Where a receiver cannot do it at all, the answer is
+//! [`sdroxide_types::AdsbStatus::unavailable`] — a sentence the operator can act
+//! on — rather than a decoder that runs and finds nothing. Where it can run but
+//! only just, it is
+//! [`sdroxide_types::AdsbStatus::degraded`], for the same reason.
 
 mod controller;
 pub mod cpr;
@@ -54,7 +66,7 @@ pub mod message;
 pub mod track;
 
 pub use controller::{AdsbAction, AdsbController};
-pub use demod::{Candidate, Demod, modulate};
+pub use demod::{Candidate, Demod, modulate, modulate_at};
 pub use frame::{Accepted, Rejected, accept};
 pub use message::{Body, Es, Message};
 pub use track::Tracker;

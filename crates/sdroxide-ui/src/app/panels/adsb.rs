@@ -187,6 +187,13 @@ impl SdroxideApp {
                 }
             });
         }
+        // Running, but on a stream too narrow to carry the waveform properly.
+        // Said out loud because the symptom — a short list — is exactly what a
+        // quiet sky looks like, and the fix is one setting away on most
+        // receivers.
+        if let Some(why) = &st.degraded {
+            ui.label(RichText::new(why).size(10.5).color(theme::YELLOW()));
+        }
     }
 
     /// The target list, with the detail card pinned to the bottom of the column.

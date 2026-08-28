@@ -17,15 +17,27 @@
 //! So a short reply is 8 + 56 = 64 µs and a long one 120 µs, and everything
 //! this module does is measured in microseconds rather than in samples.
 //!
-//! # Why it is written in microseconds
+//! # Why it is written in microseconds, and why the positions are fractional
 //!
 //! There is no resampler in front of this. The engine hands over whatever its
-//! downconverter settled on — 2.4 Msps from an RTL-SDR, 2.5 from an Airspy,
-//! 2.0 from an SDRplay — and the decoder indexes by time:
-//! [`Scan::at`] turns a microsecond offset into a sample index at whatever rate
-//! it was built for. Nothing here assumes two samples per bit, which is what
-//! lets one implementation cover every front end in the tree without a
-//! fractional resampler in the hot path.
+//! downconverter settled on — 2.4 Msps from an RTL-SDR, 2.025 from an RX-888's
+//! wideband path, 2.5 from an Airspy — and the decoder works in *time*, not in
+//! samples: [`Demod::chip`] integrates the envelope over the half-microsecond
+//! window a chip actually occupies, wherever that falls between samples.
+//!
+//! That last part is not a refinement, it is the whole thing working or not.
+//! A transponder's burst arrives at an arbitrary moment, so the chip boundaries
+//! fall wherever they like relative to the sample grid. Round them to the
+//! nearest sample and the error is up to half a sample — which at two samples
+//! per bit is **half a chip**, and half the bits in the message get decided on
+//! the wrong side. Measured, on clean full-scale bursts swept across one sample
+//! period: 5 % recovered at 2.025 Msps, 53 % at 2.4, against 100 % above 4.
+//! Everything below 4 Msps was effectively broken, and the front end most
+//! people point at 1090 MHz runs at 2.4.
+//!
+//! So the correlator searches at half-sample steps, refines the burst's start
+//! time to a sixteenth of a sample against the preamble, and slices with
+//! fractional windows from there.
 //!
 //! # Power, not magnitude
 //!
@@ -75,13 +87,39 @@ const TAIL_US: f64 = MSG_US + 4.0;
 /// second is often.
 const PULSE_OVER_NOISE: f32 = 3.0;
 
-/// How much stronger the weakest pulse must be than the strongest dark chip.
+/// How well the preamble has to match, as a normalised contrast between the
+/// four lit chips and the six dark ones — see [`Demod::contrast`].
 ///
-/// A factor of two in power, i.e. 3 dB. Requiring more rejects real aircraft at
-/// the edge of range, where the pulse tops are within a few dB of the ringing
-/// between them; requiring less lets a strong signal's own tail masquerade as a
-/// second preamble one microsecond later.
-const PULSE_OVER_SPACE: f32 = 2.0;
+/// # Why this is not a pulse-to-space ratio
+///
+/// It used to be one: the weakest pulse had to be twice the loudest space.
+/// That number is unreachable. A 0.5 µs pulse sampled every 0.5 µs is exactly
+/// at the limit, and at the worst arrival phase each pulse straddles two
+/// samples that are half lit — so the 0.5 µs gap between the preamble's first
+/// two pulses is *filled in* by two half-lit samples and reads exactly as
+/// strongly as the pulses either side of it. The ratio is 1.0 no matter what
+/// the signal-to-noise is, so no threshold on it can pass a perfect signal,
+/// and the min/max score it was refined against is flat — there is not even a
+/// gradient to find the alignment with.
+///
+/// A contrast between the *sums* has neither problem: it stays positive
+/// through the worst phase (about 0.26 for a noiseless burst at 2 Msps), it
+/// varies smoothly with alignment, and it is what the refinement climbs.
+const CONTRAST_MIN: f32 = 0.24;
+
+/// The same for the coarse pass, which is up to a quarter of a sample out and
+/// therefore reads a duller preamble than the refined pass will.
+const COARSE_CONTRAST: f32 = 0.14;
+
+/// Sub-sample offsets tried when the coarse pass fires, as a fraction of a
+/// sample either side.
+///
+/// The coarse search is at half-sample steps, so the truth is within a quarter
+/// of a sample; a third either way covers it with margin. Sixteenths, because
+/// what this has to deliver is a chip window aligned to a fraction of its own
+/// width — at 2 Msps a sixteenth of a sample is 0.03 µs against a 0.5 µs chip.
+const REFINE_SPAN: f64 = 0.34;
+const REFINE_STEP: f64 = 1.0 / 16.0;
 
 /// A message the slicer produced, before anything has checked it.
 #[derive(Debug, Clone)]
@@ -104,12 +142,40 @@ pub struct Demod {
     sps_us: f64,
     /// Envelope power, with [`TAIL_US`] of the previous block still in front.
     power: Vec<f32>,
+    /// Running sum of `power`, one longer: `psum[j]` is the total before sample
+    /// `j`.
+    ///
+    /// The power is constant across a sample, so this is piecewise linear and
+    /// interpolating it gives the integral over a *fractional* range exactly —
+    /// which turns every chip from a loop over the samples it touches into two
+    /// interpolations. That is what makes the fractional windows affordable:
+    /// the loop version cost half a core at 2 Msps and could not keep up at 4.
+    ///
+    /// `f64` because it accumulates across a whole block, and the differences
+    /// taken from it are individual samples.
+    psum: Vec<f64>,
     /// How many samples of `power` are carried over from last time.
     carried: usize,
     /// Slowly-tracked noise floor in power units.
     noise: f32,
+    /// The floor has seen at least one block.
+    ///
+    /// Without this the tracker eases down from its initial guess over several
+    /// blocks, and a decoder that has just started — or has just had its window
+    /// rebuilt by a retune — is deaf to weak aircraft for the whole of that.
+    primed: bool,
     /// Preambles accepted, and messages sliced out of them.
     pub preambles: u64,
+    /// Samples seen since the decoder started, so a position can be compared
+    /// across blocks after the buffer has been trimmed.
+    seen: u64,
+    /// The last message emitted and where, to suppress the duplicate a strong
+    /// burst produces from two neighbouring alignments.
+    last_out: Option<(Vec<u8>, u64)>,
+    /// Absolute position to resume scanning at, after a message that checked
+    /// out. Carried across blocks, because a message read at the end of one
+    /// runs into the next.
+    skip_to: u64,
 }
 
 impl Demod {
@@ -123,16 +189,27 @@ impl Demod {
             rate_hz,
             sps_us: rate_hz / 1e6,
             power: Vec::new(),
+            psum: vec![0.0],
             carried: 0,
             // Starts pessimistic and tracks down: a floor that begins at zero
-            // would accept everything for the first few blocks.
+            // would accept everything until the first block replaces it.
             noise: 1e-3,
+            primed: false,
             preambles: 0,
+            seen: 0,
+            last_out: None,
+            skip_to: 0,
         }
     }
 
     pub fn rate_hz(&self) -> f64 {
         self.rate_hz
+    }
+
+    /// The noise floor the gate is measuring against, in power units. For the
+    /// tests and the replay tool.
+    pub fn noise_floor(&self) -> f32 {
+        self.noise
     }
 
     /// Feed one block and collect every message found in it.
@@ -155,6 +232,15 @@ impl Demod {
         for z in iq {
             self.power.push(z.re * z.re + z.im * z.im);
         }
+        self.seen += iq.len() as u64;
+        self.psum.clear();
+        self.psum.reserve(self.power.len() + 1);
+        let mut acc = 0.0f64;
+        self.psum.push(0.0);
+        for &p in &self.power {
+            acc += f64::from(p);
+            self.psum.push(acc);
+        }
         self.track_noise();
 
         let span = (MSG_US * self.sps_us).ceil() as usize;
@@ -162,68 +248,189 @@ impl Demod {
             return;
         }
         let last = self.power.len() - span;
-        let mut i = 0usize;
-        while i < last {
-            match self.try_at(i) {
-                Some(c) => {
-                    self.preambles += 1;
-                    // Step past the whole message: its own pulses would
-                    // otherwise re-trigger the correlator on the way through.
-                    i += span;
-                    out.push(c);
-                }
-                None => i += 1,
+        // Absolute position of `power[0]` in the stream, so the de-duplicator's
+        // memory survives the buffer being trimmed between blocks.
+        let origin = self.seen.saturating_sub(self.power.len() as u64);
+        let mut skip_to = self.skip_to;
+        for i in 0..last {
+            if origin + (i as u64) < skip_to {
+                continue;
+            }
+            let Some(c) = self.try_at(i) else { continue };
+            self.preambles += 1;
+            // One sample at a time, never skipping a message length on a hit.
+            //
+            // Skipping was the obvious economy and it was wrong: a burst is not
+            // the only thing that trips the correlator, and a false trip on
+            // noise a few microseconds ahead of a real aeroplane would step
+            // straight over it. With a gate loose enough to catch every arrival
+            // phase, that was happening often enough to hide most of the sky.
+            //
+            // What skipping was really for is the duplicate a strong burst
+            // produces when two neighbouring alignments both resolve it, and
+            // that is better answered by recognising the duplicate.
+            let at = origin + i as u64;
+            let dup = self
+                .last_out
+                .as_ref()
+                .is_some_and(|(b, p)| *b == c.bytes && at.saturating_sub(*p) < span as u64);
+            if dup {
+                continue;
+            }
+            // A message whose own check sequence comes out is one we have
+            // finished with, and its 112 bits of data will otherwise trip the
+            // correlator dozens more times on the way past — which is most of
+            // what this loop costs on a busy band. Skipping only on *that*
+            // gets the economy without the blindness: nothing is stepped over
+            // except a message already read.
+            //
+            // Only the formats that carry a plain check sequence can say so. A
+            // surveillance reply's parity has an address mixed into it and
+            // means nothing here, so those are read the slow way.
+            let df = c.bytes[0] >> 3;
+            let done = matches!(df, 11 | 17 | 18) && crate::crc::syndrome(&c.bytes) == 0;
+            self.last_out = Some((c.bytes.clone(), at));
+            out.push(c);
+            if done {
+                skip_to = at + span as u64;
             }
         }
+        self.skip_to = skip_to;
         // Anything from `last` on stays for the next block to look at.
         self.carried = 0;
     }
 
-    /// Sample index of a time offset from a preamble start.
+    /// Total energy up to a fractional sample position, by interpolating the
+    /// running sum.
     #[inline]
-    fn at(&self, base: usize, us: f64) -> usize {
-        base + (us * self.sps_us).round() as usize
-    }
-
-    /// Envelope power over the half-microsecond chip beginning at `us`.
-    ///
-    /// The mean over the chip rather than one sample from the middle of it: at
-    /// 2 Msps a chip is one sample and the two are the same thing, but at 8 or
-    /// 20 Msps a single sample throws away most of what was received and costs
-    /// several dB of sensitivity for nothing.
-    #[inline]
-    fn chip(&self, base: usize, us: f64) -> f32 {
-        let a = self.at(base, us);
-        let b = self.at(base, us + 0.5).max(a + 1);
-        let b = b.min(self.power.len());
-        if a >= b {
+    fn upto(&self, x: f64) -> f64 {
+        let n = self.power.len();
+        if x <= 0.0 {
             return 0.0;
         }
-        let mut sum = 0.0f32;
-        for &p in &self.power[a..b] {
-            sum += p;
+        if x >= n as f64 {
+            return self.psum[n];
         }
-        sum / (b - a) as f32
+        let i = x as usize;
+        self.psum[i] + (x - i as f64) * f64::from(self.power[i])
     }
 
-    /// Try to read a message whose preamble starts at sample `i`.
-    fn try_at(&self, i: usize) -> Option<Candidate> {
-        // The four pulses, and the six chips that have to be dark.
+    /// Mean envelope power over a *fractional* range of sample indices.
+    ///
+    /// The partial samples at each end contribute in proportion to how much of
+    /// them the range covers, which is the reverse of what the ADC did to the
+    /// pulse on the way in. This is the whole reason the decoder works below
+    /// 4 Msps, and doing it in two interpolations rather than a loop is what
+    /// makes it affordable.
+    #[inline]
+    fn energy(&self, x0: f64, x1: f64) -> f32 {
+        let w = x1 - x0;
+        if w <= 0.0 {
+            return 0.0;
+        }
+        ((self.upto(x1) - self.upto(x0)) / w) as f32
+    }
+
+    /// Envelope power over the half-microsecond chip beginning `us` after the
+    /// burst starts at fractional sample position `base`.
+    #[inline]
+    fn chip(&self, base: f64, us: f64) -> f32 {
+        self.energy(base + us * self.sps_us, base + (us + 0.5) * self.sps_us)
+    }
+
+    /// How well a preamble sits at `base`: its contrast, the weakest of its
+    /// four lit chips, and the peak.
+    ///
+    /// The contrast is `(lit - dark) / (lit + dark)` over the mean of each
+    /// group — 1.0 for a noiseless burst perfectly aligned, 0 for anything with
+    /// no preamble in it, and negative where the pattern is inverted. It is a
+    /// difference of sums rather than a ratio of extremes for the reason
+    /// [`CONTRAST_MIN`] gives: the extremes are equal at the worst arrival
+    /// phase however strong the signal, and the sums are not.
+    #[inline]
+    fn contrast(&self, base: f64) -> (f32, f32, f32) {
+        let mut lit = 0.0f32;
         let mut weakest = f32::MAX;
         let mut peak = 0.0f32;
         for us in PULSES_US {
-            let p = self.chip(i, us);
+            let p = self.chip(base, us);
+            lit += p;
             weakest = weakest.min(p);
             peak = peak.max(p);
         }
-        if weakest < self.noise * PULSE_OVER_NOISE {
+        let mut dark = 0.0f32;
+        for us in SPACES_US {
+            dark += self.chip(base, us);
+        }
+        let lit = lit / PULSES_US.len() as f32;
+        let dark = dark / SPACES_US.len() as f32;
+        let total = lit + dark;
+        let q = if total > 0.0 { (lit - dark) / total } else { 0.0 };
+        (q, weakest, peak)
+    }
+
+    /// Try to read a message whose preamble starts near sample `i`.
+    ///
+    /// Three passes over the same four pulses and six spaces: a coarse one at
+    /// half-sample steps to find candidates cheaply, a refinement to a
+    /// sixteenth of a sample to place the burst, and the real test at that
+    /// place. Only then is anything sliced.
+    fn try_at(&self, i: usize) -> Option<Candidate> {
+        // ── coarse ──
+        //
+        // Half-sample steps: at whole ones the worst case is a quarter of a
+        // chip out at 2 Msps, which is enough to dull the contrast past the
+        // point where a threshold loose enough to catch it would fire on
+        // anything.
+        let floor = self.noise * PULSE_OVER_NOISE;
+        let mut base = f64::NAN;
+        let mut best_coarse = f32::NEG_INFINITY;
+        for half in [0.0f64, 0.5] {
+            let b = i as f64 + half;
+            // The cheapest possible rejection, and the one that decides what
+            // this costs: a preamble begins with a pulse, so if the very first
+            // lit chip is in the noise there is nothing here. Two
+            // interpolations, and it turns away all but a fraction of a percent
+            // of the samples in a quiet band before any of the other nine chips
+            // are touched.
+            if self.chip(b, PULSES_US[0]) < floor {
+                continue;
+            }
+            let (q, weakest, _) = self.contrast(b);
+            if weakest < floor || q < COARSE_CONTRAST {
+                continue;
+            }
+            // The better of the two, not the first that passes: taking the
+            // first put the refinement's window on the wrong side of the truth
+            // whenever both were good enough to fire.
+            if q > best_coarse {
+                best_coarse = q;
+                base = b;
+            }
+        }
+        if base.is_nan() {
             return None;
         }
-        let mut loudest_space = 0.0f32;
-        for us in SPACES_US {
-            loudest_space = loudest_space.max(self.chip(i, us));
+
+        // ── refine ──
+        //
+        // Climb the contrast. It is smooth in the alignment and peaks where the
+        // lit windows hold whole pulses and the dark ones hold none.
+        let mut best = (f32::NEG_INFINITY, base);
+        let mut d = -REFINE_SPAN;
+        while d <= REFINE_SPAN + 1e-9 {
+            let b = base + d;
+            let (q, _, _) = self.contrast(b);
+            if q > best.0 {
+                best = (q, b);
+            }
+            d += REFINE_STEP;
         }
-        if weakest < loudest_space * PULSE_OVER_SPACE {
+        let base = best.1;
+
+        // ── the real test, at the place the burst actually starts ──
+        let (q, weakest, peak) = self.contrast(base);
+        if weakest < floor || q < CONTRAST_MIN {
             return None;
         }
 
@@ -234,8 +441,8 @@ impl Demod {
         let mut k = 0usize;
         while k < nbits {
             let t = PREAMBLE_US + k as f64 * BIT_US;
-            let a = self.chip(i, t);
-            let b = self.chip(i, t + 0.5);
+            let a = self.chip(base, t);
+            let b = self.chip(base, t + 0.5);
             if a > b {
                 bytes[k / 8] |= 0x80 >> (k % 8);
             }
@@ -285,6 +492,11 @@ impl Demod {
         let mut sample: Vec<f32> = fresh.iter().step_by(37).copied().collect();
         sample.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let q = sample[sample.len() / 4];
+        if !self.primed {
+            self.primed = true;
+            self.noise = q.max(1e-12);
+            return;
+        }
         if q < self.noise {
             self.noise = 0.7 * self.noise + 0.3 * q;
         } else {
@@ -297,51 +509,80 @@ impl Demod {
 /// Modulate a Mode S reply the way a transponder does: the preamble, then one
 /// on-off keyed chip per half-microsecond, into `nf` of complex noise.
 ///
-/// Public because two callers outside this module need a transmitter and it has
-/// to be *the same* transmitter — the unit tests here, and the `adsb_iq`
-/// example that synthesises a sky to a file. A generator that placed its pulses
-/// differently from the decoder's expectations would prove nothing and hide
-/// exactly the errors a test is for.
+/// Starts the burst 10 µs in. See [`modulate_at`] for why that is a parameter
+/// worth having.
+pub fn modulate(msg: &[u8], rate_hz: f64, amp: f32, nf: f32, seed: u64) -> Vec<Complex32> {
+    modulate_at(msg, rate_hz, 10.0, amp, nf, seed)
+}
+
+/// The same, starting at an arbitrary — and deliberately fractional — time.
 ///
+/// # Why the pulses are integrated rather than stamped onto samples
+///
+/// A transponder does not know where this receiver's sample instants are. Its
+/// pulses begin whenever they begin, and each sample the ADC delivers is the
+/// energy over that sample's own window — so a pulse edge falling in the middle
+/// of a sample gives a *half-height* sample, and every burst on the air lands
+/// at a different sub-sample phase.
+///
+/// A generator that instead rounded each pulse to the nearest sample would
+/// produce signals no aircraft transmits, and — because the decoder used to
+/// round the same way — would have agreed with it perfectly while both were
+/// wrong. That is exactly what happened: this crate's tests passed at every
+/// rate while the decoder recovered 5 % of real bursts at 2.025 Msps. The
+/// integration below is what makes the round trip mean something.
+///
+/// Public because the tests here, the engine's integration test and the
+/// `adsb_iq` example all need a transmitter, and it has to be *the same* one.
 /// `seed` makes the noise deterministic; there is no `rand` in this tree, and a
 /// decoder test that fails one run in fifty is worse than no test at all.
-pub fn modulate(msg: &[u8], rate_hz: f64, amp: f32, nf: f32, seed: u64) -> Vec<Complex32> {
+pub fn modulate_at(
+    msg: &[u8],
+    rate_hz: f64,
+    t0_us: f64,
+    amp: f32,
+    nf: f32,
+    seed: u64,
+) -> Vec<Complex32> {
     let sps_us = rate_hz / 1e6;
     let bits = msg.len() * 8;
-    // 10 µs of quiet in front so the noise tracker has something to measure,
-    // and a whole long-message span behind: the scan deliberately stops one
-    // message short of the end of what it has, so a burst any closer to the end
-    // than that waits for a block that a caller may never send.
-    let lead = 10.0;
-    let total_us = lead + PREAMBLE_US + bits as f64 + MSG_US + 8.0;
+    // A whole long-message span of quiet behind: the scan deliberately stops
+    // one message short of the end of what it has, so a burst any closer to the
+    // end than that waits for a block a caller may never send.
+    let total_us = t0_us + PREAMBLE_US + bits as f64 + MSG_US + 8.0;
     let n = (total_us * sps_us).ceil() as usize;
-    let mut on = vec![false; n];
-    let mut mark = |us: f64| {
-        let a = (us * sps_us).round() as usize;
-        let b = ((us + 0.5) * sps_us).round() as usize;
-        for s in on.iter_mut().take(b.min(n)).skip(a.min(n)) {
-            *s = true;
-        }
-    };
-    for us in PULSES_US {
-        mark(lead + us);
-    }
+
+    // Every pulse's start time, in microseconds. Each is 0.5 µs long.
+    let mut pulses: Vec<f64> = PULSES_US.iter().map(|u| t0_us + u).collect();
     for k in 0..bits {
         let bit = msg[k / 8] & (0x80 >> (k % 8)) != 0;
-        let t = lead + PREAMBLE_US + k as f64;
-        mark(if bit { t } else { t + 0.5 });
+        let t = t0_us + PREAMBLE_US + k as f64 * BIT_US;
+        pulses.push(if bit { t } else { t + 0.5 });
     }
+
     let mut st = seed | 1;
-    let mut rnd = || {
+    let mut rnd = move || {
         st ^= st << 13;
         st ^= st >> 7;
         st ^= st << 17;
         ((st >> 40) as f32 / 8_388_608.0) - 1.0
     };
-    on.iter()
-        .map(|&o| {
-            let a = if o { amp } else { 0.0 };
-            Complex32::new(a + nf * rnd(), nf * rnd())
+    (0..n)
+        .map(|i| {
+            let a = i as f64 / sps_us;
+            let b = (i + 1) as f64 / sps_us;
+            // How much of this sample's window the pulses cover. The pulses
+            // never overlap, so this is a plain sum.
+            let mut cover = 0.0;
+            for &p in &pulses {
+                let lo = p.max(a);
+                let hi = (p + 0.5).min(b);
+                if hi > lo {
+                    cover += hi - lo;
+                }
+            }
+            let level = amp * (cover / (b - a)).clamp(0.0, 1.0) as f32;
+            Complex32::new(level + nf * rnd(), nf * rnd())
         })
         .collect()
 }
@@ -370,7 +611,7 @@ mod tests {
     /// come back at every rate a front end in this tree might deliver.
     #[test]
     fn one_burst_decodes_at_every_rate_a_front_end_delivers() {
-        for rate in [2_000_000.0, 2_400_000.0, 2_500_000.0, 3_200_000.0, 8_000_000.0] {
+        for rate in [2_400_000.0, 2_500_000.0, 3_200_000.0, 4_050_000.0, 8_000_000.0] {
             let out = decode_at(rate);
             assert!(!out.is_empty(), "nothing found at {rate}");
             assert!(
@@ -378,6 +619,116 @@ mod tests {
                 "the message came back wrong at {rate}: {:02X?}",
                 out[0].bytes
             );
+        }
+    }
+
+    /// Sweep a burst across one whole sample period, at every rate.
+    ///
+    /// **The test this decoder was shipped without, and should not have been.**
+    /// A transponder has no idea where the receiver's sample instants are, so a
+    /// burst arrives at a uniformly random sub-sample phase: this is not an
+    /// edge case, it is the ordinary situation forty times over.
+    ///
+    /// The first cut rounded every chip position to the nearest sample and
+    /// recovered 2 of 40 at 2.025 Msps and 21 of 40 at 2.4, on clean
+    /// full-scale bursts. Every other test passed, because the generator
+    /// rounded the same way — see [`modulate_at`].
+    ///
+    /// At and above [`sdroxide_types::ADSB_GOOD_RATE_HZ`] the answer has to be
+    /// all of them. Below it the waveform is critically sampled and no
+    /// implementation recovers every phase (see [`recall_at_a_marginal_rate_is_
+    /// limited_by_the_sample_rate`]), which is why that is where the good rate
+    /// is drawn.
+    #[test]
+    fn a_burst_decodes_wherever_it_falls_between_two_samples() {
+        for rate in [2_400_000.0f64, 3_200_000.0, 4_050_000.0, 8_000_000.0] {
+            const N: usize = 40;
+            let mut hits = 0;
+            for k in 0..N {
+                let t0 = 10.0 + (k as f64 / N as f64) * (1e6 / rate);
+                let iq = modulate_at(&DF17, rate, t0, 1.0, 0.02, 0x9E37_79B9 + k as u64);
+                let mut d = Demod::new(rate);
+                let mut out = Vec::new();
+                d.push(&vec![Complex32::new(0.0, 0.0); 8192], &mut out);
+                out.clear();
+                d.push(&iq, &mut out);
+                if out.iter().any(|c| c.bytes == DF17) {
+                    hits += 1;
+                }
+            }
+            assert_eq!(hits, N, "only {hits}/{N} phases decoded at {rate:.0} sps");
+        }
+    }
+
+    /// The same sweep at a *marginal* rate, recording what physics allows.
+    ///
+    /// A Mode S chip is 0.5 µs, so at 2 Msps the chip and the sample are the
+    /// same width and the channel is critically sampled. At the worst arrival
+    /// phase each chip is split equally across two samples and reads exactly as
+    /// strongly as its neighbour: the bit is a coin toss, and no amount of
+    /// arithmetic downstream puts the information back. At 2.025 Msps it is
+    /// worse again, because the two clocks beat — the alignment walks through
+    /// the degenerate phase every 40 bits, so *every* message has a few bands
+    /// of bits decided on the wrong side of a boundary.
+    ///
+    /// This is why [`sdroxide_types::ADSB_GOOD_RATE_HZ`] is 2.4 Msps and why
+    /// the panel says so when a receiver delivers less. The numbers are pinned
+    /// low so a regression is still caught; they are not a target to improve.
+    #[test]
+    fn recall_at_a_marginal_rate_is_limited_by_the_sample_rate() {
+        for (rate, floor) in [(2_000_000.0f64, 30usize), (2_025_000.0, 12)] {
+            const N: usize = 40;
+            let mut hits = 0;
+            for k in 0..N {
+                let t0 = 10.0 + (k as f64 / N as f64) * (1e6 / rate);
+                let iq = modulate_at(&DF17, rate, t0, 1.0, 0.02, 0x9E37_79B9 + k as u64);
+                let mut d = Demod::new(rate);
+                let mut out = Vec::new();
+                d.push(&vec![Complex32::new(0.0, 0.0); 8192], &mut out);
+                out.clear();
+                d.push(&iq, &mut out);
+                if out.iter().any(|c| c.bytes == DF17) {
+                    hits += 1;
+                }
+            }
+            assert!(hits >= floor, "only {hits}/{N} phases decoded at {rate:.0} sps");
+        }
+    }
+
+    /// At a rate that can carry the waveform, recall has to hold up as the
+    /// signal comes down — and it must not depend on the arrival phase, or the
+    /// decoder works on half the sky and looks like propagation.
+    #[test]
+    fn a_weak_burst_still_decodes_at_every_phase() {
+        const N: usize = 40;
+        for rate in [2_400_000.0f64, 4_050_000.0] {
+            for (amp, floor) in [(0.15f32, N), (0.08, N - 1)] {
+                let mut hits = 0;
+                for k in 0..N {
+                    let t0 = 10.0 + (k as f64 / N as f64) * (1e6 / rate);
+                    let iq = modulate_at(&DF17, rate, t0, amp, 0.01, 0x1234_5678 + k as u64);
+                    let mut d = Demod::new(rate);
+                    let mut out = Vec::new();
+                    // Primed on noise, not on silence: a floor eased down from
+                    // digital zero would make this test measure the tracker.
+                    let mut st = 99u64;
+                    let mut rnd = || {
+                        st ^= st << 13;
+                        st ^= st >> 7;
+                        st ^= st << 17;
+                        ((st >> 40) as f32 / 8_388_608.0) - 1.0
+                    };
+                    let warm: Vec<Complex32> =
+                        (0..16384).map(|_| Complex32::new(0.01 * rnd(), 0.01 * rnd())).collect();
+                    d.push(&warm, &mut out);
+                    out.clear();
+                    d.push(&iq, &mut out);
+                    if out.iter().any(|c| c.bytes == DF17) {
+                        hits += 1;
+                    }
+                }
+                assert!(hits >= floor, "only {hits}/{N} at amplitude {amp} and {rate:.0} sps");
+            }
         }
     }
 
@@ -424,8 +775,15 @@ mod tests {
         for chunk in iq.chunks(16_384) {
             d.push(chunk, &mut out);
         }
+        // A few thousand a second is the design point, not a failure. The
+        // check sequence is what decides whether a candidate is a message, and
+        // a random 112 bits passes it with probability 2⁻²⁴ — then still has to
+        // land on one of the three formats that carry a plain one. At this rate
+        // that is a phantom aircraft about once a day, and the arithmetic costs
+        // a few percent of a core. Tightening the gate to suppress them would
+        // cost real aircraft at the edge of range, which is the wrong trade.
         assert!(
-            out.len() < 2_000,
+            out.len() < 20_000,
             "the correlator fired {} times on a second of pure noise",
             out.len()
         );

@@ -7314,12 +7314,39 @@ impl Engine {
 
     /// The rate the ADS-B window asks its down-converter for.
     ///
-    /// Capped at what the front end delivers, because a window is a decimation
-    /// of that stream and not a second tuner. A receiver below
-    /// [`sdroxide_types::ADSB_MIN_RATE_HZ`] therefore lands on its own rate,
-    /// `sync_adsb` refuses to start, and the panel says why.
+    /// Everything the front end delivers, up to a CPU cap — *not* a preferred
+    /// figure the stream is decimated down to. Mode S is a half-microsecond
+    /// chip, so samples per chip is the whole game: a receiver handing over
+    /// 4 Msps decodes every arrival phase where one handing over 2.4 is merely
+    /// good, and decimating to hit a target would give away the only thing that
+    /// matters here.
+    ///
+    /// A receiver below [`sdroxide_types::ADSB_MIN_RATE_HZ`] lands on its own
+    /// rate, `sync_adsb` refuses to start, and the panel says why.
     fn adsb_target_rate_hz(&self) -> f64 {
-        sdroxide_types::ADSB_TARGET_RATE_HZ.min(self.state.sample_rate)
+        self.state.sample_rate.min(sdroxide_types::ADSB_MAX_RATE_HZ)
+    }
+
+    /// Why the decoder will do badly here even though it can run. `None` when
+    /// there is nothing to say.
+    ///
+    /// A different kind of statement from [`Self::adsb_unavailable`]: the lane
+    /// is decoding and aircraft will appear, and the operator would otherwise
+    /// have no way of knowing that the ones at the edge of range are being lost
+    /// to arithmetic rather than to propagation.
+    fn adsb_degraded(&self) -> Option<String> {
+        let rate = Ddc::rate_for(self.state.sample_rate, self.adsb_target_rate_hz());
+        if rate >= sdroxide_types::ADSB_GOOD_RATE_HZ || self.adsb_unavailable().is_some() {
+            return None;
+        }
+        Some(format!(
+            "this stream is {:.3} Msps and a Mode S chip is half a microsecond, so the \
+             signal is barely sampled: the strong aircraft decode and the weak ones are \
+             lost. {:.1} Msps or more is what it takes — widen the receiver's window if \
+             it has the setting.",
+            rate / 1e6,
+            sdroxide_types::ADSB_GOOD_RATE_HZ / 1e6
+        ))
     }
 
     /// Where the window sits: on 1090 MHz where the span reaches it, and on the
@@ -7512,9 +7539,11 @@ impl Engine {
         // Running again: whatever was last said about it being down is stale,
         // so a later stop says it afresh.
         self.adsb_idle_sent = None;
+        let degraded = self.adsb_degraded();
         for action in d.poll() {
             let AdsbAction::Status(mut st) = action;
             st.unavailable = unavailable.clone();
+            st.degraded = degraded.clone();
             st.suggest_center_hz = unavailable.is_some().then_some(sdroxide_types::ADSB_FREQ_HZ);
             let _ = self.event_tx.send(RadioEvent::AdsbStatus(st));
         }

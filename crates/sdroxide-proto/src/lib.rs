@@ -814,7 +814,20 @@ use sdroxide_types::{
 /// per-aircraft position history is `f32` (about two metres at any latitude)
 /// because it is the bulk of that message and a history dot on a map has no use
 /// for more.
-pub const PROTO_VERSION: u16 = 99;
+///
+/// **100** — one appended field, `AdsbStatus::degraded` (issue #160).
+///
+/// A receiver can be able to run the ADS-B decoder and still be too narrow to
+/// carry the waveform properly — below about 2.4 Msps a Mode S chip and a
+/// sample are the same width, and the aircraft at the edge of range are lost to
+/// arithmetic rather than to propagation. That is not the same statement as
+/// `unavailable`, which means nothing is running at all, so it is a field of
+/// its own rather than a reuse.
+///
+/// Appended at the end of the struct; postcard numbers fields by position, so a
+/// v99 peer desynchronises on the tail of every `AdsbStatus` and the
+/// handshake's equality test is what stops it trying.
+pub const PROTO_VERSION: u16 = 100;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

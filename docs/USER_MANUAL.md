@@ -3626,24 +3626,39 @@ back if you wander off.
 
 #### What you need
 
-A receiver that reaches 1090 MHz and streams at least **2 Msps**. Both are hard
-requirements and neither can be worked around downstream:
+**An antenna for 1090 MHz, on the right socket.** This matters more than
+anything else on this page. A quarter wave at 1090 MHz is 69 mm long, and an HF
+wire or a discone is tens of decibels deaf up there. On a receiver with separate
+inputs — the RX-888's HF and VHF sockets, for instance — 1090 MHz arrives only
+through the VHF one, and an antenna on the other socket produces exactly the
+symptom you would expect from a broken decoder: an empty list, or one or two
+aircraft that come and go. Sixty-nine millimetres of wire in an SMA plug,
+against a window, is usually good for a hundred kilometres.
 
-- Mode S is a megabit a second, and every bit is split into two half-microsecond
-  halves. Deciding which half holds the energy takes at least one sample in each.
-  Below two megasamples a second there is nothing to slice.
-- The channel has to be inside the receiver's window. A downconverter can only
-  decimate a stream, never widen it.
+Turn any input attenuation **off**, and switch the bias tee on if your antenna
+or preamplifier wants it. Attenuation that is right on a crowded HF band is
+simply loss here.
 
-An RTL-SDR at its default 2.4 Msps is the classic receiver for this and is
-exactly right: the window is the whole stream and the decoder reads all of it.
-So are an Airspy, a HackRF, an SDRplay, a Pluto and a LimeSDR. What will not
-work is a transceiver handing over demodulated audio, or a front end you have
-decimated below 2 Msps — and in each case the panel says so in a sentence,
-rather than showing an empty list you would have to guess at.
+**A stream of at least 2.4 Msps at 1090 MHz.** Mode S is a megabit a second and
+every bit is two half-microsecond chips, so this is about how many samples land
+inside a chip:
 
-A quarter-wave antenna for 1090 MHz is 69 mm long. That, and a window, is
-usually enough for a hundred kilometres.
+| Stream | What happens |
+| --- | --- |
+| below 2 Msps | Refused. There is not one sample per chip; there is nothing to slice. |
+| 2.0 – 2.4 Msps | Runs, and says it is degraded. A chip and a sample are the same width, so a burst arriving out of step with the sample clock has chips split equally across two samples that then read the same. Strong aircraft decode; the rest are lost. |
+| 2.4 Msps and up | Full performance. Every arrival phase decodes. |
+
+An RTL-SDR at its default 2.4 Msps is the classic receiver for this and sits
+exactly on the line. So do an Airspy, a HackRF, an SDRplay, a Pluto and a
+LimeSDR. On a receiver whose window width you choose — the RX-888's **panadapter
+width** setting, for example — pick 4 MHz or more; SDRoxide keeps whatever it is
+given, up to 9 MHz, because more samples per chip is strictly better here and
+nothing is gained by throwing them away.
+
+What will never work is a transceiver handing over demodulated audio, or a front
+end decimated below 2 Msps. In each case the panel says so in a sentence rather
+than showing an empty list you would have to guess at.
 
 #### The aircraft list
 
@@ -3759,6 +3774,22 @@ works; it does not prove the decoder works on air, because the transmitter and
 the receiver were written by the same hand. For that, put a real recording
 through `adsb_replay` and compare the aircraft it lists against another decoder
 on the same file.
+
+#### If nothing is decoding
+
+Record a few seconds and look at what the receiver actually heard:
+
+```
+sdroxide --server --freq 1090000000 --mode ADS-B --record-iq /tmp/air.iq
+cargo run --release -p sdroxide-adsb --example adsb_replay -- /tmp/air.iq <rate>
+```
+
+The summary line at the end distinguishes the two failures. **Preambles but no
+frames** means the correlator is triggering on noise and nothing is checking
+out — there is no signal, and the antenna is the place to look. **No preambles
+either** means the receiver is not even seeing bursts. A working setup shows
+strong aircraft 30 dB or more above the noise floor; if the loudest thing in the
+capture is 10 dB above it, no decoder will find anything in it.
 
 ---
 

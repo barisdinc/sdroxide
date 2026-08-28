@@ -39,13 +39,29 @@ pub const ADSB_FREQ_HZ: f64 = 1_090_000_000.0;
 /// rather than to run and decode nothing.
 pub const ADSB_MIN_RATE_HZ: f64 = 2_000_000.0;
 
-/// What the lane asks its downconverter for.
+/// The rate below which recall suffers no matter how good the signal is.
 ///
-/// 2.4 Msps is the RTL-SDR's own default and the rate most 1090 MHz receivers
-/// are run at; asking for it means the commonest front end decimates by one and
-/// the window costs a mixer. A receiver streaming more gets decimated down to
-/// near this; one streaming less is refused by [`ADSB_MIN_RATE_HZ`].
-pub const ADSB_TARGET_RATE_HZ: f64 = 2_400_000.0;
+/// A Mode S chip is 0.5 µs, so at 2 Msps a chip and a sample are the same width
+/// and the channel is critically sampled: at the worst arrival phase a chip is
+/// split equally between two samples and reads exactly as strongly as its
+/// neighbour, and the bit is a coin toss. Nothing downstream can put that back.
+/// At 2.4 Msps a chip is 1.2 samples and the worst case leaves a clear 3:2, and
+/// measured recall goes from a fraction of the sky to all of it.
+///
+/// It is not a refusal — a receiver between this and [`ADSB_MIN_RATE_HZ`] still
+/// decodes the strong aircraft — but it is worth telling the operator, because
+/// on most receivers the window width is theirs to change.
+pub const ADSB_GOOD_RATE_HZ: f64 = 2_400_000.0;
+
+/// The most the lane will take, however wide the receiver is.
+///
+/// More samples per chip is strictly better for this waveform, so the window is
+/// *not* decimated down to some preferred figure — it keeps whatever the front
+/// end delivers, up to here. The cap is a CPU budget: the correlator touches
+/// every sample, and at this rate a very busy sky costs about a quarter of a
+/// core. An RX-888 handing over its full 32.4 MHz would otherwise cost four
+/// times that for no gain worth having.
+pub const ADSB_MAX_RATE_HZ: f64 = 9_000_000.0;
 
 /// Longest track kept per aircraft, whatever the settings say.
 pub const ADSB_TRACK_MAX: usize = 240;
@@ -275,6 +291,15 @@ pub struct AdsbStatus {
     /// Surveillance replies whose recovered address belonged to no known
     /// aircraft, so they were dropped rather than believed.
     pub unmatched: u64,
+    /// Why the decoder will do badly here even though it is running.
+    ///
+    /// A receiver below [`ADSB_GOOD_RATE_HZ`] decodes the strong aircraft and
+    /// quietly loses the rest. Without this the operator sees a short list and
+    /// concludes there is nothing overhead, when what is overhead is being
+    /// thrown away by a window one setting from wide enough.
+    ///
+    /// Appended, for the usual reason: postcard numbers fields by position.
+    pub degraded: Option<String>,
 }
 
 /// How the ADS-B decoder behaves. Owned by the engine (it lives in
