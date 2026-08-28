@@ -2305,6 +2305,19 @@ fn skim_center_for(
     if holds { cur } else { want }
 }
 
+/// The QO-100 beacon decoder's down-converter output rate for a search
+/// half-width of `half_width_hz`: about 2.5× the search so the requested span
+/// fits under Nyquist with margin — see `sdroxide_qo100::bpsk` for why the
+/// decoder wants that oversampling — and floored at 16 kHz so the default
+/// (±5 kHz) and any narrower width still land on a sane, cheap rate. Widening
+/// the search really does widen the capture the decoder is handed; the
+/// demodulator inside it always runs at a fixed rate regardless
+/// (`sdroxide_qo100`'s `DEMOD_RATE_HZ`), which is what keeps the search cost
+/// from growing with the square of the width.
+fn qo100_capture_rate_for(half_width_hz: f64) -> f64 {
+    (half_width_hz * 2.5).max(16_000.0)
+}
+
 /// How soon after noticing a disconnected front-end the first reconnect attempt
 /// runs, and the ceiling the spacing doubles up to while attempts keep failing.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -7365,7 +7378,7 @@ impl Engine {
     /// the skimmer ask for, so it costs the engine almost nothing at the
     /// default width.
     fn qo100_target_rate_hz(&self) -> f64 {
-        (self.state.qo100.search_half_width_hz * 2.5).max(16_000.0)
+        qo100_capture_rate_for(self.state.qo100.search_half_width_hz)
     }
 
     /// Construct or tear down the QO-100 beacon decoder, mirroring
@@ -12807,6 +12820,41 @@ mod skim_window_tests {
         let cur = 14_050_000.0;
         let view = Some((88_000_000.0, 88_200_000.0));
         assert_eq!(skim_center_for(view, 88_100_000.0, WIDE_CENTER, WIDE, WIN, Some(cur)), cur);
+    }
+}
+
+#[cfg(test)]
+mod qo100_rate_tests {
+    use super::qo100_capture_rate_for;
+
+    /// The engine default (±5 kHz) and anything narrower sit on the 16 kHz
+    /// floor — ×2.5 does not reach it until ±6.4 kHz.
+    #[test]
+    fn the_default_and_narrow_widths_sit_on_the_16_khz_floor() {
+        assert_eq!(qo100_capture_rate_for(5_000.0), 16_000.0);
+        assert_eq!(qo100_capture_rate_for(0.0), 16_000.0);
+        assert_eq!(qo100_capture_rate_for(6_400.0), 16_000.0);
+    }
+
+    /// Past the knee the capture tracks the search width, so widening the
+    /// window in the UI really does hand the decoder a wider span.
+    #[test]
+    fn a_wider_search_asks_for_a_proportionally_wider_capture() {
+        assert_eq!(qo100_capture_rate_for(10_000.0), 25_000.0);
+        assert_eq!(qo100_capture_rate_for(25_000.0), 62_500.0);
+        // ±50 kHz is the UI's MAX_HALF_WIDTH_HZ.
+        assert_eq!(qo100_capture_rate_for(50_000.0), 125_000.0);
+    }
+
+    #[test]
+    fn the_capture_rate_is_monotonic_and_never_below_the_floor() {
+        let mut prev = 0.0;
+        for hw in [0.0, 2_500.0, 5_000.0, 10_000.0, 20_000.0, 50_000.0] {
+            let r = qo100_capture_rate_for(hw);
+            assert!(r >= prev, "rate dropped at half-width {hw}");
+            assert!(r >= 16_000.0, "below the floor at half-width {hw}");
+            prev = r;
+        }
     }
 }
 

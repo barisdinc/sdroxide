@@ -1298,16 +1298,11 @@ impl SdroxideApp {
     /// itself each earn the column on their own — the offset so the column is
     /// there *before* the operator tunes up rather than appearing mid-digit.
     fn readout_digits(&self) -> u32 {
-        let range_reaches =
+        let range_reaches_10ghz =
             self.caps.as_ref().is_some_and(|c| c.freq_ranges_rx.iter().any(|&(_, hi)| hi >= 1e10));
-        let converter_reaches =
-            self.radio_cfg.as_ref().is_some_and(|c| c.converter_offset_hz.abs() >= 1e10);
-        let dial_reaches = self.state.active_freq_hz() >= 1e10;
-        if range_reaches || converter_reaches || dial_reaches {
-            freq_display::DIGITS_EXT
-        } else {
-            freq_display::DIGITS
-        }
+        let converter_offset_hz =
+            self.radio_cfg.as_ref().map(|c| c.converter_offset_hz).unwrap_or(0.0);
+        readout_digit_count(range_reaches_10ghz, converter_offset_hz, self.state.active_freq_hz())
     }
 
     /// The VFO frequency controls (A/B select + big readout + the inactive
@@ -5022,6 +5017,35 @@ fn sub_mode_picker(ui: &mut egui::Ui, cur: Mode, narrow: bool) -> Option<Mode> {
     picked
 }
 
+/// How many digit columns the frequency readout needs: [`freq_display::DIGITS`]
+/// normally, [`freq_display::DIGITS_EXT`] once anything puts a real digit in the
+/// ten-GHz column. Three independent tells, any one of them enough:
+///
+/// * `range_reaches_10ghz` — the receiver's published receive range (already
+///   shifted by the configured converter/LNB offset) reaches 10 GHz or past it.
+/// * `converter_offset_hz` — a 3-cm / 10 GHz converter is configured (LNB LO
+///   9750–10600 MHz, i.e. `|offset|` of about 9.75 GHz and up — a QO-100
+///   station's is 9.75 GHz exactly, well short of 10 GHz), so the column is
+///   there *before* the operator tunes up rather than appearing mid-digit. A
+///   driver that publishes no ranges at all (SoapySDR makes that optional)
+///   leaves the first tell blind, and this is what still earns that station
+///   its column. The `9e9` cut clears every 3-cm converter and stays above
+///   the next transverter down (13 cm, ~2.3 GHz).
+/// * `active_freq_hz` — the dial is already up there, converter or not (a
+///   wideband direct sampler, a paired panadapter).
+///
+/// Without the extra column the dial reading 10489.750 MHz has nowhere to put
+/// its leading "1" and is silently shown as "0489.750.000".
+fn readout_digit_count(
+    range_reaches_10ghz: bool,
+    converter_offset_hz: f64,
+    active_freq_hz: f64,
+) -> u32 {
+    let earns_extra =
+        range_reaches_10ghz || converter_offset_hz.abs() >= 9e9 || active_freq_hz >= 1e10;
+    if earns_extra { freq_display::DIGITS_EXT } else { freq_display::DIGITS }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6372,5 +6396,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_readout_stays_at_ten_columns_for_an_ordinary_station() {
+        // No range past 10 GHz, no converter, dial on HF / VHF / 23 cm.
+        assert_eq!(readout_digit_count(false, 0.0, 14_074_000.0), freq_display::DIGITS);
+        assert_eq!(readout_digit_count(false, 0.0, 1_296_000_000.0), freq_display::DIGITS);
+        // A 13 cm transverter (~2.256 GHz offset) is the nearest converter
+        // below a 3 cm one and must not trip the extra column.
+        assert_eq!(readout_digit_count(false, -2_256_000_000.0, 144_000_000.0), freq_display::DIGITS);
+    }
+
+    #[test]
+    fn a_qo100_converter_offset_earns_the_eleventh_column_before_the_dial_moves() {
+        // A QO-100 LNB down-converts by 9.75 GHz — short of 10 GHz, which is
+        // why the cut is 9e9 — while the dial is still parked on HF and the
+        // driver may publish no ranges at all. The column has to be there
+        // already, or it appears mid-digit the moment the operator tunes up.
+        assert_eq!(
+            readout_digit_count(false, -9_750_000_000.0, 14_074_000.0),
+            freq_display::DIGITS_EXT
+        );
+        // A 10 GHz-LO LNB (some 3 cm setups) too.
+        assert_eq!(
+            readout_digit_count(false, -10_000_000_000.0, 14_074_000.0),
+            freq_display::DIGITS_EXT
+        );
+    }
+
+    #[test]
+    fn a_dial_at_the_beacon_earns_the_column_on_its_own() {
+        // A wideband front end tuned straight to 10489.750 MHz, no converter —
+        // the exact reading the extra column exists to keep from truncating.
+        assert_eq!(readout_digit_count(false, 0.0, 10_489_750_000.0), freq_display::DIGITS_EXT);
+    }
+
+    #[test]
+    fn a_published_range_reaching_10_ghz_is_enough_by_itself() {
+        assert_eq!(readout_digit_count(true, 0.0, 14_074_000.0), freq_display::DIGITS_EXT);
     }
 }

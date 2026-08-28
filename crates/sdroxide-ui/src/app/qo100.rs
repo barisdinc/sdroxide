@@ -515,15 +515,7 @@ impl SdroxideApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            // A 32-bit sync word matched within 3 errors, times a 16-bit CRC,
-            // turns up by chance about once every couple of hours of
-            // searching — and APPLY writes the measured offset straight into
-            // the converter setting, so a single lock is not enough to act
-            // on. Two CRC-valid frames (`blocks_locked >= 2`) and a
-            // non-empty ASCII payload make a false positive vanishingly
-            // unlikely; the operator can still eyeball the TELEMETRY panel.
-            let confirmed =
-                status.as_ref().is_some_and(|s| s.blocks_locked >= 2 && !s.text.is_empty());
+            let confirmed = apply_is_confirmed(status.as_ref());
             let can_apply = measured_hz.is_some() && radio_cfg.is_some() && confirmed;
             let apply = ui.add_enabled(
                 can_apply,
@@ -572,6 +564,19 @@ impl SdroxideApp {
 /// period is) or if the decoder has never locked at all.
 fn locked_freq(status: Option<&Qo100Status>) -> Option<f64> {
     status.filter(|s| s.locked).map(|s| QO100_BEACON_HZ + s.offset_hz)
+}
+
+/// Whether a measured offset is safe to offer for `APPLY CORRECTION`, which
+/// writes it straight into the converter/LNB setting.
+///
+/// A 32-bit sync word matched within three bit errors, times a 16-bit CRC,
+/// turns up by chance roughly once every couple of hours of searching, so a
+/// single lock is not enough to act on. The button stays disabled until a
+/// second CRC-valid frame lands (`blocks_locked >= 2`) carrying a non-empty
+/// decoded payload — a false positive that clears both is vanishingly
+/// unlikely, and the operator can still eyeball the TELEMETRY panel.
+fn apply_is_confirmed(status: Option<&Qo100Status>) -> bool {
+    status.is_some_and(|s| s.blocks_locked >= 2 && !s.text.is_empty())
 }
 
 /// The one-line summary under the strip: off, searching (with how many
@@ -705,5 +710,33 @@ mod tests {
         let line = status_line(true, None, true);
         assert!(line.contains("receiving station"), "{line:?}");
         assert_ne!(line, "starting…");
+    }
+
+    #[test]
+    fn status_line_before_the_first_window_says_how_long_it_takes() {
+        // A search that is running but has not filled a window yet — distinct
+        // from one that never started (`None` → "starting…").
+        let mut s = status(false, 0.0);
+        s.blocks_tried = 0;
+        let line = status_line(true, Some(&s), false);
+        assert!(line.starts_with("searching"), "{line:?}");
+        assert!(line.contains("24 s"), "{line:?}");
+    }
+
+    #[test]
+    fn apply_stays_disabled_until_a_second_crc_valid_frame_with_text() {
+        assert!(!apply_is_confirmed(None), "nothing decoded yet");
+
+        let mut s = status(true, 1_000.0);
+        s.blocks_locked = 1;
+        s.text = "QO-100 XX".into();
+        assert!(!apply_is_confirmed(Some(&s)), "one lock could be a chance match");
+
+        s.blocks_locked = 2;
+        s.text = String::new();
+        assert!(!apply_is_confirmed(Some(&s)), "a blank payload is not a confirmation");
+
+        s.text = "QO-100 XX".into();
+        assert!(apply_is_confirmed(Some(&s)), "two locks and real text: safe to offer");
     }
 }
