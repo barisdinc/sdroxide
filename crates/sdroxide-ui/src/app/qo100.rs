@@ -511,15 +511,27 @@ impl SdroxideApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let can_apply = measured_hz.is_some() && radio_cfg.is_some();
+            // A 32-bit sync word matched within 3 errors, times a 16-bit CRC,
+            // turns up by chance about once every couple of hours of
+            // searching — and APPLY writes the measured offset straight into
+            // the converter setting, so a single lock is not enough to act
+            // on. Two CRC-valid frames (`blocks_locked >= 2`) and a
+            // non-empty ASCII payload make a false positive vanishingly
+            // unlikely; the operator can still eyeball the TELEMETRY panel.
+            let confirmed =
+                status.as_ref().is_some_and(|s| s.blocks_locked >= 2 && !s.text.is_empty());
+            let can_apply = measured_hz.is_some() && radio_cfg.is_some() && confirmed;
             let apply = ui.add_enabled(
                 can_apply,
                 egui::Button::new(RichText::new(" APPLY CORRECTION ").strong()),
             );
-            let apply = apply.on_hover_text(
+            let apply = apply.on_hover_text(if measured_hz.is_some() && !confirmed {
+                "Waiting for a second CRC-valid frame at this frequency before offering to write \
+                 it — one lock alone could be a chance match"
+            } else {
                 "Write the corrected converter/LNB offset and reopen the receiver — a brief \
-                 interruption, the same one Settings ▸ Radio ▸ Apply makes",
-            );
+                 interruption, the same one Settings ▸ Radio ▸ Apply makes"
+            });
             if apply.clicked()
                 && let (Some(mut c), Some(measured)) = (radio_cfg.clone(), measured_hz)
             {
