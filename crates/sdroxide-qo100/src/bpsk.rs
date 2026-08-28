@@ -398,8 +398,10 @@ pub fn acquire(
     None
 }
 
+// `pub(crate)` so `controller`'s own test module can build a real on-air frame
+// through `synth_signal` without a second copy of the synthesis living there.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// xorshift64* — cheap, deterministic, good enough for test noise and
@@ -463,7 +465,7 @@ mod tests {
     /// in a continuously-transmitting real signal sliced at an arbitrary
     /// time), a constant frequency offset, a random starting phase and chip
     /// timing offset, and light noise.
-    fn synth_signal(
+    pub(crate) fn synth_signal(
         text: &str,
         rate_hz: f64,
         offset_hz: f64,

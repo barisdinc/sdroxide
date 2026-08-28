@@ -241,3 +241,107 @@ impl Drop for Qo100Controller {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sdroxide_types::Qo100Settings;
+
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_lock_is_fresh_for_about_three_frame_times_then_stale() {
+        assert!(!lock_is_fresh(0), "0 means the decoder has never locked");
+        assert!(lock_is_fresh(now_unix()), "a lock from just now is fresh");
+        // The beacon alternates an uncoded frame (this decoder) with a coded
+        // one it skips, so a real gap runs a bit over two frame times; three
+        // is the grace. Just inside it, then well outside:
+        assert!(lock_is_fresh(now_unix() - (FRAME_SECONDS * 2.5) as i64));
+        assert!(!lock_is_fresh(now_unix() - (FRAME_SECONDS * 4.0) as i64));
+    }
+
+    #[test]
+    fn the_rolling_window_holds_a_whole_frame_and_overlaps_by_more_than_one() {
+        // A frame beginning anywhere in the buffer has to be captured whole at
+        // least once regardless of where the cut lands, so the window must
+        // exceed two frame times ...
+        assert!(window_seconds() > 2.0 * FRAME_SECONDS);
+        // ... and consecutive windows must overlap by more than a frame, or a
+        // frame could fall exactly on a cut and be lost from both.
+        assert!(keep_seconds() > FRAME_SECONDS);
+        assert!(keep_seconds() < window_seconds());
+    }
+
+    /// Poll `c` until `pred` holds on a status, or ~10 s pass. Returns the last
+    /// status seen either way.
+    fn wait_for(
+        c: &Qo100Controller,
+        pred: impl Fn(&sdroxide_types::Qo100Status) -> bool,
+    ) -> Option<sdroxide_types::Qo100Status> {
+        let mut latest = None;
+        for _ in 0..500 {
+            if let Some(s) = c.poll() {
+                let hit = pred(&s);
+                latest = Some(s);
+                if hit {
+                    return latest;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        latest
+    }
+
+    /// The plumbing end to end on a signal that cannot lock: blocks accumulate
+    /// to a full window, a search runs, a complete status snapshot comes back
+    /// through `poll`, and — pure noise — nothing locks. The test finishing is
+    /// also the assertion that dropping the controller with a search behind it
+    /// returns promptly.
+    #[test]
+    fn the_worker_accumulates_a_window_searches_and_reports_through_poll() {
+        let rate = 16_000.0;
+        let c = Qo100Controller::new(
+            rate,
+            Qo100Settings { enabled: true, search_half_width_hz: 300.0 },
+        );
+        let n = (rate * FRAME_SECONDS * 2.4) as usize; // a hair over one window
+        let noise: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let (a, b) = ((i as f32 * 0.7).sin(), (i as f32 * 1.9 + 1.0).sin());
+                Complex32::new(a, b)
+            })
+            .collect();
+        c.on_rx_iq(&noise);
+        let s = wait_for(&c, |s| s.blocks_tried >= 1).expect("a search should be attempted");
+        assert!(s.running);
+        assert!(!s.locked);
+        assert_eq!(s.blocks_locked, 0, "pure noise must never lock");
+    }
+
+    /// A synthesized frame fed through the controller comes back out of `poll`
+    /// as a lock, with the decoded text and the offset the search assumed —
+    /// the same contract `bpsk::acquire`'s tests check, but exercised through
+    /// the worker thread, the rolling buffer and the status channel.
+    #[test]
+    fn a_synthesized_frame_locks_through_the_worker() {
+        let rate = 16_000.0;
+        let c = Qo100Controller::new(
+            rate,
+            Qo100Settings { enabled: true, search_half_width_hz: 300.0 },
+        );
+        // One synth frame is ~10 s of signal and a window is ~24 s, so stack
+        // three; the frame in the first copy lands wholly inside the buffer.
+        let one = crate::bpsk::tests::synth_signal("CONTROLLER E2E", rate, 150.0, 0.02, 3);
+        let block: Vec<Complex32> = one.iter().chain(&one).chain(&one).copied().collect();
+        c.on_rx_iq(&block);
+        let s = wait_for(&c, |s| s.blocks_locked >= 1).expect("the frame should lock");
+        assert!(s.locked);
+        assert!((s.offset_hz - 150.0).abs() <= 3.0, "offset {}", s.offset_hz);
+        assert!(s.text.starts_with("CONTROLLER E2E"), "{:?}", s.text);
+    }
+}
