@@ -316,6 +316,31 @@ fn refine_offset_hz(iq: &[Complex32], rate_hz: f64, cm: &CoarseMatch) -> f64 {
     sum.arg() as f64 * rate_hz / std::f64::consts::TAU
 }
 
+/// Mix `iq` down by `shift_hz` and integer-decimate by `deci` in one pass,
+/// each output sample the mean of its `deci` inputs. That boxcar is a crude
+/// anti-alias filter, but its nulls sit exactly at multiples of the output
+/// rate — where any energy would fold — and the beacon is 400 baud, far
+/// inside the output passband, so nothing that carries the frame is touched.
+/// Output rate is `rate_hz / deci`.
+fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> Vec<Complex32> {
+    let deci = deci.max(1);
+    let w = -std::f64::consts::TAU * shift_hz / rate_hz;
+    let mut out = Vec::with_capacity(iq.len() / deci + 1);
+    let mut acc = Complex32::new(0.0, 0.0);
+    let mut k = 0usize;
+    for (n, &z) in iq.iter().enumerate() {
+        let ph = w * n as f64;
+        acc += z * Complex32::new(ph.cos() as f32, ph.sin() as f32);
+        k += 1;
+        if k == deci {
+            out.push(acc / deci as f32);
+            acc = Complex32::new(0.0, 0.0);
+            k = 0;
+        }
+    }
+    out
+}
+
 /// Search `iq` (complex baseband, `rate_hz` samples/s, the beacon assumed to
 /// sit somewhere within `±search_half_width_hz` of DC) for one CRC-valid
 /// AO-40 uncoded frame, stepping the candidate frequency by `freq_step_hz`.
@@ -323,6 +348,19 @@ fn refine_offset_hz(iq: &[Complex32], rate_hz: f64, cm: &CoarseMatch) -> f64 {
 /// see [`refine_offset_hz`] — so `freq_step_hz` only needs to be fine enough
 /// to land *somewhere* inside a real signal's capture range, not to measure
 /// it.
+///
+/// Each candidate is mixed down to `demod_rate_hz` (a fixed ~16 kHz — all the
+/// 400 baud beacon ever needs) *before* the chip search runs, no matter how
+/// wide `rate_hz` made the capture. Without that step the per-candidate work
+/// scaled with the capture rate while the candidate count scaled with the
+/// search width, so the total grew with the *square* of the width and the
+/// widest settings ran many times slower than real time.
+///
+/// Candidates are tried from the centre outward, so a beacon near the assumed
+/// frequency — the common case for a roughly-calibrated station — is found
+/// without walking the whole grid first. `cancel` is polled between
+/// candidates so the engine can drop the controller (turning the decoder off,
+/// or changing the search width) without waiting out a search in progress.
 ///
 /// `iq` needs to span at least one whole frame (`FRAME_BITS` bits plus the
 /// sync word, [`BAUD`] bits/s) for a frame to have any chance of falling
@@ -334,21 +372,26 @@ pub fn acquire(
     rate_hz: f64,
     search_half_width_hz: f64,
     freq_step_hz: f64,
+    demod_rate_hz: f64,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Option<Qo100Lock> {
-    if freq_step_hz <= 0.0 || rate_hz <= 0.0 {
+    use std::sync::atomic::Ordering;
+    if freq_step_hz <= 0.0 || rate_hz <= 0.0 || demod_rate_hz <= 0.0 {
         return None;
     }
+    let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
+    let dr = rate_hz / deci as f64;
     let steps = (search_half_width_hz / freq_step_hz).round() as i64;
-    let mut mixed = Vec::with_capacity(iq.len());
-    for step in -steps..=steps {
+    // 0, +1, -1, +2, -2, … — centre outward.
+    let order = (0..=2 * steps).map(|i| if i % 2 == 0 { i / 2 } else { -(i / 2 + 1) });
+    for step in order {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let coarse_hz = step as f64 * freq_step_hz;
-        mixed.clear();
-        mixed.extend(iq.iter().enumerate().map(|(n, &z)| {
-            let phase = -2.0 * std::f64::consts::PI * coarse_hz * n as f64 / rate_hz;
-            z * Complex32::new(phase.cos() as f32, phase.sin() as f32)
-        }));
-        if let Some(cm) = try_frequency(&mixed, rate_hz) {
-            let offset_hz = coarse_hz + refine_offset_hz(&mixed, rate_hz, &cm);
+        let mixed = mix_decimate(iq, rate_hz, coarse_hz, deci);
+        if let Some(cm) = try_frequency(&mixed, dr) {
+            let offset_hz = coarse_hz + refine_offset_hz(&mixed, dr, &cm);
             return Some(Qo100Lock { offset_hz, text: cm.m.text });
         }
     }
@@ -475,12 +518,26 @@ mod tests {
     }
 
     const TEST_RATE: f64 = 16_000.0;
+    const TEST_STEP: f64 = 150.0;
+
+    /// `acquire` with the production demod rate and no cancellation, so the
+    /// tests exercise exactly the mix-down-then-search path the worker uses.
+    fn acq(iq: &[Complex32], rate_hz: f64, half_width_hz: f64) -> Option<Qo100Lock> {
+        acquire(
+            iq,
+            rate_hz,
+            half_width_hz,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
 
     #[test]
     fn a_clean_frame_at_zero_offset_decodes_and_reports_no_drift() {
         let iq = synth_signal("QO-100 TEST TELEMETRY LINE ONE", TEST_RATE, 0.0, 0.0, 1);
-        let lock = acquire(&iq, TEST_RATE, 50.0, 10.0).expect("should lock");
-        // Refined well past the 10 Hz search grid — see `refine_offset_hz`.
+        let lock = acq(&iq, TEST_RATE, 50.0).expect("should lock");
+        // Refined well past the coarse search grid — see `refine_offset_hz`.
         assert!(lock.offset_hz.abs() < 1.0, "found {}", lock.offset_hz);
         assert!(lock.text.starts_with("QO-100 TEST TELEMETRY LINE ONE"), "{:?}", lock.text);
     }
@@ -488,12 +545,12 @@ mod tests {
     /// The whole point of the feature: a beacon that is not exactly where the
     /// dial assumes it is still gets found, and the frequency the search
     /// lands on *is* the calibration answer — refined well past the coarse
-    /// search grid's own 10 Hz step, not just "the nearest step".
+    /// search grid's own step, not just "the nearest step".
     #[test]
     fn a_drifted_frame_is_found_and_the_drift_is_reported() {
         for &true_offset in &[37.0f64, -68.0, 91.0] {
             let iq = synth_signal("DRIFT CASE", TEST_RATE, true_offset, 0.02, 2);
-            let lock = acquire(&iq, TEST_RATE, 150.0, 10.0)
+            let lock = acq(&iq, TEST_RATE, 150.0)
                 .unwrap_or_else(|| panic!("should lock at offset {true_offset}"));
             assert!(
                 (lock.offset_hz - true_offset).abs() <= 1.0,
@@ -511,7 +568,42 @@ mod tests {
         let iq: Vec<Complex32> = (0..n)
             .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
             .collect();
-        assert!(acquire(&iq, TEST_RATE, 100.0, 10.0).is_none());
+        assert!(acq(&iq, TEST_RATE, 100.0).is_none());
+    }
+
+    /// The cost regression guard: a search at a *realistic* capture rate and
+    /// width — the engine's default ±5 kHz, captured at 16 kHz — still finds
+    /// the beacon, and the mix-down-per-candidate path keeps the sweep short
+    /// enough to matter (the earlier code searched every candidate at the
+    /// full capture rate and this width was already seconds of work). Every
+    /// other test runs a ±50–150 Hz search, which is why the blow-up went
+    /// unnoticed.
+    #[test]
+    fn a_default_width_search_at_a_realistic_rate_still_locks() {
+        // ±5 kHz search wants a capture a little over 2.5× wide — the same
+        // rule `Engine::qo100_target_rate_hz` follows.
+        let rate = 12_500.0f64.max(16_000.0);
+        let iq = synth_signal("REALISTIC WIDTH", rate, 3_200.0, 0.02, 7);
+        let started = std::time::Instant::now();
+        let lock = acq(&iq, rate, 5_000.0).expect("should still lock at the default width");
+        assert!((lock.offset_hz - 3_200.0).abs() <= 2.0, "found {}", lock.offset_hz);
+        assert!(lock.text.starts_with("REALISTIC WIDTH"));
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "default-width search took {:?} — the per-candidate cost has regressed",
+            started.elapsed()
+        );
+    }
+
+    /// A cancelled search returns without walking the grid.
+    #[test]
+    fn a_cancelled_search_bails_out() {
+        let iq = synth_signal("CANCELLED", TEST_RATE, 40.0, 0.0, 1);
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            acquire(&iq, TEST_RATE, 20_000.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .is_none()
+        );
     }
 
     #[test]

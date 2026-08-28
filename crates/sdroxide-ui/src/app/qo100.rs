@@ -572,7 +572,9 @@ fn status_line(enabled: bool, status: Option<&Qo100Status>) -> String {
                 s.blocks_locked
             )
         }
-        Some(s) if s.blocks_tried == 0 => "searching — first block takes about 10 s".to_string(),
+        Some(s) if s.blocks_tried == 0 => {
+            "searching — the first window fills after about 24 s, then repeats".to_string()
+        }
         Some(s) => format!(
             "searching — {} block{} tried, none locked yet",
             s.blocks_tried,
