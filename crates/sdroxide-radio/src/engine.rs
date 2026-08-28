@@ -1974,8 +1974,12 @@ struct Engine {
     /// The stream rate `qo100_ddc` was built to decimate — the same reason
     /// `ism_in_rate` exists.
     qo100_in_rate: f64,
-    /// The operator's persisted QO-100 preference, kept apart from
-    /// `state.qo100` for the same reason as `skim_cfg`.
+    /// The last QO-100 setting the operator chose, held in step with
+    /// `state.qo100` for symmetry with `ism_cfg` and `skim_cfg`. Nothing
+    /// reads it back yet: like the ISM decoder, a source swap into audio mode
+    /// turns the decoder off and a swap back leaves it off until the operator
+    /// turns it on again. Not persisted to disk — there is nothing here worth
+    /// surviving a restart.
     qo100_cfg: sdroxide_types::Qo100Settings,
     /// Open capture file for `--record-iq`, and the interleaving scratch it is
     /// written from.
@@ -6547,12 +6551,9 @@ impl Engine {
 
             SetQo100Config(cfg) => {
                 self.state.qo100 = cfg;
-                // Remembered before `sync_qo100` may force the live state off
-                // on an audio-mode source, so a swap back restores what was
-                // chosen — the same reason `ism_cfg` exists. Not saved to
-                // disk: unlike the ISM decoder, there is nothing here worth
-                // surviving a restart — the search width defaults to
-                // something sane, and the decoder itself defaults off.
+                // Held in step with the live setting for symmetry with the
+                // ISM and skimmer configs; see `qo100_cfg`'s own doc for why
+                // nothing reads it back and why it is not saved to disk.
                 self.qo100_cfg = cfg;
                 self.sync_qo100();
                 if let Some(c) = self.qo100.as_ref() {
