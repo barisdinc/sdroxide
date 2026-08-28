@@ -608,7 +608,16 @@ mod tests {
     }
 
     fn frame_with(center_hz: f64, span_hz: f64, bins: Vec<u8>) -> SpectrumFrame {
-        SpectrumFrame { seq: 1, center_hz, span_hz, db_floor: -120.0, db_ceil: -20.0, bins }
+        SpectrumFrame {
+            seq: 1,
+            center_hz,
+            span_hz,
+            db_floor: -120.0,
+            db_ceil: -20.0,
+            bins,
+            rows: Vec::new(),
+            rows_clocked: false,
+        }
     }
 
     #[test]
