@@ -5992,11 +5992,22 @@ restore and still be distinct from every other sdroxide.
 
 **No spectrum.** The control link is TCP and the spectrum is UDP, so a radio can
 answer everything you ask it and still send you nothing. If the panadapter stays
-empty while the frequency readout tracks the radio, suspect the UDP path: a host
-firewall, a VPN, or an MTU smaller than the **Network MTU** setting. sdroxide
-says so on connect when no VITA-49 data arrives at all, and the diagnostic
-report's `--- streams ---` section is where to confirm it — an empty one means
-not a single packet reached this machine.
+empty while the frequency readout tracks the radio, suspect the UDP path. On a
+computer that has never run SmartSDR, **its own firewall is the usual answer**:
+SmartSDR's installer adds a rule for itself and sdroxide arrives without one. A
+VPN comes next, then an MTU smaller than the **Network MTU** setting.
+
+sdroxide says so on connect when nothing arrives, and the diagnostic report's
+`--- streams ---` section is where to confirm it. It opens with a count of the
+datagrams that reached the machine at all, which separates the two silences: zero
+means the radio's UDP never got here and the fault is outside sdroxide, while a
+non-zero count with no streams listed means it did arrive and sdroxide could not
+read it — a bug worth reporting.
+
+One case sdroxide repairs by itself: some firmware ignores the UDP port a client
+asks for and streams to 4991, FlexLib's own. When the radio refuses that request
+sdroxide listens on 4991 too and says so in the report. It takes that port *only*
+in that case, so SmartSDR can still be started alongside on the same machine.
 
 Receive covers 30 kHz to 54 MHz, and to 165 MHz on the models with a VHF
 receiver (the 6600, the 6700 and the 8000 family). On those, transmit is offered
