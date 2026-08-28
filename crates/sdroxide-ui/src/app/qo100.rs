@@ -429,9 +429,13 @@ impl SdroxideApp {
 
         ui.add_space(6.0);
         ui.label(
-            RichText::new(status_line(cfg.enabled, status.as_ref()))
-                .size(9.5)
-                .color(theme::CYAN_DIM()),
+            RichText::new(status_line(
+                cfg.enabled,
+                status.as_ref(),
+                self.ctrl.engine_is_remote(),
+            ))
+            .size(9.5)
+            .color(theme::CYAN_DIM()),
         );
 
         let radio_cfg = self.ctrl.radio_config();
@@ -575,9 +579,18 @@ fn locked_freq(status: Option<&Qo100Status>) -> Option<f64> {
 /// distinction `IsmStatus`'s bursts/decodes line exists for, so a search
 /// that is running but has not found the beacon yet reads differently from
 /// one that never started.
-fn status_line(enabled: bool, status: Option<&Qo100Status>) -> String {
+///
+/// `remote` is the client-does-not-own-the-engine case: the decoder runs on
+/// the station and its status has no path to a remote client yet (see
+/// `RadioEvent::Qo100Status`), so rather than sit on "starting…" forever the
+/// line says plainly that this readout is local to the receiving station.
+fn status_line(enabled: bool, status: Option<&Qo100Status>, remote: bool) -> String {
     if !enabled {
         return String::new();
+    }
+    if remote {
+        return "decoder runs on the receiving station — its readout is not sent to remote clients"
+            .to_string();
     }
     match status {
         None => "starting…".to_string(),
@@ -673,14 +686,24 @@ mod tests {
 
     #[test]
     fn status_line_is_blank_while_switched_off() {
-        assert_eq!(status_line(false, Some(&status(true, 0.0))), "");
+        assert_eq!(status_line(false, Some(&status(true, 0.0)), false), "");
+        assert_eq!(status_line(false, None, true), "");
     }
 
     #[test]
     fn status_line_distinguishes_locked_from_still_searching() {
-        assert!(status_line(true, Some(&status(true, 0.0))).starts_with("locked"));
+        assert!(status_line(true, Some(&status(true, 0.0)), false).starts_with("locked"));
         let mut searching = status(false, 0.0);
         searching.blocks_tried = 3;
-        assert!(status_line(true, Some(&searching)).starts_with("searching"));
+        assert!(status_line(true, Some(&searching), false).starts_with("searching"));
+    }
+
+    #[test]
+    fn status_line_tells_a_remote_client_the_readout_is_local() {
+        // No status will ever arrive on a remote client (the server drops
+        // the event), so the line must not sit on "starting…".
+        let line = status_line(true, None, true);
+        assert!(line.contains("receiving station"), "{line:?}");
+        assert_ne!(line, "starting…");
     }
 }
