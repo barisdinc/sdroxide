@@ -112,6 +112,9 @@ or connects to a remote sdroxide server.
 - **ISM band decoder** — reads the unattended 868 MHz traffic around you and
   lists each device with its readings in real units. See
   [ISM band decoder](#5-ism-band-decoder).
+- **QO-100 beacon calibration** — decodes the 10489.750 MHz narrowband beacon,
+  measures how far your LNB has drifted, and writes the converter offset for
+  you. See [§2.21](#221-qo-100-beacon-calibration).
 - **Many radio backends:** SoapySDR devices, OpenHPSDR (Hermes/Metis) Ethernet
   SDRs, a TCI server (ExpertSDR3/Thetis), a SmartSDR radio (FlexRadio
   FLEX-6000/8000), RTL-SDR, RX-888, Airspy HF+ and SDRplay RSP receivers over
@@ -2039,6 +2042,76 @@ This is not `--record-iq` ([12](#12-command-line-reference)), which writes the
 raw IQ of the whole span — tens of megabytes a second — so that a band can be
 replayed offline. This records what came out of the receiver, at a size you can
 send to someone.
+
+### 2.21 QO-100 beacon calibration
+
+The QO-100 (Es'hail-2) narrowband transponder carries a beacon on its lower
+edge, at **10489.750 MHz**, that transmits AO-40 telemetry as 400 baud
+Manchester BPSK. Every ground station receives that beacon through an LNB, whose
+local oscillator is only roughly on frequency and drifts with temperature — so
+the dial and the signal disagree by a few kHz, and by different amounts on a
+cold morning and a warm afternoon. The **QO100** button in the System module
+opens a window that decodes the beacon, measures exactly how far it is from
+10489.750 MHz, and offers to write that figure into the converter/LNB offset in
+one click.
+
+> **Note:** like the skimmers and the ISM decoder, this is a wideband feature.
+> It needs a true IQ source and is unavailable when a CAT radio is feeding
+> demodulated audio.
+
+#### What the window shows
+
+- **ON / OFF** starts the decoder. It reads the raw IQ straight from the
+  hardware, so it works regardless of where the main dial is pointed, as long as
+  the beacon is inside the span the receiver is delivering — turning it on also
+  tunes VFO A to 10489.750 MHz as a convenience, nothing more. Like SCAN and
+  SAT, the button stays lit whenever the decoder is running, window open or not.
+  It is greyed out only if the receiver's own configuration says 10489.750 MHz
+  is unreachable — the usual cause is that no converter/LNB offset has been set
+  up yet (**Settings ▸ Radio ▸ Converter**).
+- **width ± / −** sets how far either side of 10489.750 MHz the search looks, in
+  5 kHz steps from ±5 to ±50 kHz. Start at the default ±5 kHz; widen it only if
+  the beacon is not found, which means the LNB is further off than usual. A
+  wider search asks the receiver for a wider capture and takes longer to sweep,
+  so it is not free — but the demodulator itself always runs at a fixed rate, so
+  even the widest setting stays comfortably ahead of real time.
+- The **mini waterfall** draws the slice of spectrum being searched, with the
+  measured beacon frequency marked once the decoder locks. It is only a picture:
+  if the receiver is parked on another band the strip is blank and the window
+  says so, but the decoder keeps working.
+- **RECEIVER / TARGET / MEASURED / DRIFT** are the dial frequency now, the
+  10489.750 MHz target, the frequency the beacon was actually found on, and the
+  difference. DRIFT is green within ±200 Hz, amber to ±3 kHz.
+- **TELEMETRY** shows the beacon's own decoded status text. It is there for its
+  own sake and as an independent check: a lock with a valid CRC but garbled text
+  is a warning that no number above would catch.
+- The status line under the strip is the honest measure, the same
+  "attempted vs. succeeded" idea as the ISM decoder's bursts/decoded line: the
+  first search window fills after about 24 seconds, then repeats, and a search
+  that is running but has not found the beacon reads differently from one that
+  never started.
+
+#### Applying the correction
+
+**APPLY CORRECTION** writes the corrected converter offset and reopens the
+receiver — the same brief interruption **Settings ▸ Radio ▸ Apply** makes, so a
+bad reading can never disturb a running receiver for more than that. The button
+stays disabled until the decoder has locked **twice** at the same frequency: a
+32-bit sync word matched within three bit errors and then a 16-bit CRC will pass
+by pure chance roughly once every couple of hours of searching, and one lock is
+not enough to change a setting on. After it is applied, the window shows what
+changed and when.
+
+Because the coded frames the beacon alternates with are not decoded, a lock
+lands roughly every 20 seconds rather than every 10 — which is normal and not a
+sign the beacon has gone away.
+
+#### Remote and browser clients
+
+The decoder runs on the machine the radio is on. Its readout is not sent to
+remote or browser clients yet, so on those the window opens, the strip draws
+from the shared spectrum, and the status line says the readout is local to the
+receiving station rather than sitting on "starting…".
 
 ---
 
