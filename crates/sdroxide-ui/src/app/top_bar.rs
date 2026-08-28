@@ -1290,10 +1290,24 @@ impl SdroxideApp {
     /// receiver that reaches 10 GHz on its own hardware (a wideband direct
     /// sampler, a paired panadapter) gets the same extra column without
     /// needing a converter to ask for it.
+    ///
+    /// The published range is not the only tell, though: a SoapySDR driver
+    /// that never implemented `getFrequencyRange` publishes an empty list, so
+    /// a 3-cm LNB station driven through one would still truncate its
+    /// 10489.750 MHz dial. So the configured converter offset and the dial
+    /// itself each earn the column on their own — the offset so the column is
+    /// there *before* the operator tunes up rather than appearing mid-digit.
     fn readout_digits(&self) -> u32 {
-        let reaches_10ghz =
+        let range_reaches =
             self.caps.as_ref().is_some_and(|c| c.freq_ranges_rx.iter().any(|&(_, hi)| hi >= 1e10));
-        if reaches_10ghz { freq_display::DIGITS_EXT } else { freq_display::DIGITS }
+        let converter_reaches =
+            self.radio_cfg.as_ref().is_some_and(|c| c.converter_offset_hz.abs() >= 1e10);
+        let dial_reaches = self.state.active_freq_hz() >= 1e10;
+        if range_reaches || converter_reaches || dial_reaches {
+            freq_display::DIGITS_EXT
+        } else {
+            freq_display::DIGITS
+        }
     }
 
     /// The VFO frequency controls (A/B select + big readout + the inactive

@@ -276,7 +276,12 @@ impl SdroxideApp {
     }
 
     fn qo100_body(&mut self, ui: &mut egui::Ui, win: &mut Qo100WinState, cmds: &mut Vec<Command>) {
-        let reachable = self.caps.as_ref().is_none_or(|c| c.can_rx_hz(QO100_BEACON_HZ));
+        // `may_rx_hz`, not `can_rx_hz`: a driver that publishes no tuning
+        // ranges (SoapySDR makes `getFrequencyRange` optional, and plenty of
+        // backends skip it) has not said it *cannot* reach the beacon. Gating
+        // on `can_rx_hz` there greys ON out on a correctly-set-up LNB station
+        // and tells it to configure a converter offset it already has.
+        let reachable = self.caps.as_ref().is_none_or(|c| c.may_rx_hz(QO100_BEACON_HZ));
         let frame = self.frame.clone();
         // Edited in place and sent whole on any change, the same convention
         // the ISM window follows for `IsmSettings` — the engine persists this
