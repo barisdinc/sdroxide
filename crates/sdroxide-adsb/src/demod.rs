@@ -121,6 +121,15 @@ const COARSE_CONTRAST: f32 = 0.14;
 const REFINE_SPAN: f64 = 0.34;
 const REFINE_STEP: f64 = 1.0 / 16.0;
 
+/// Extra slicing alignments to try, in samples either side of the one the
+/// preamble chose, when the first read does not check out.
+///
+/// Ordered outward, so the likeliest correction is tried first. They are only
+/// reached on a format whose check sequence can settle the question, which is
+/// also what keeps them off the hot path: a candidate raised by noise slices to
+/// an unverifiable format nine times in ten and returns immediately.
+const SLICE_PHASES: [f64; 6] = [-0.1, 0.1, -0.2, 0.2, -0.35, 0.35];
+
 /// A message the slicer produced, before anything has checked it.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -434,7 +443,38 @@ impl Demod {
             return None;
         }
 
-        // Slice the first five bits to learn the length, then the rest.
+        // ── slice, letting the check sequence choose the alignment ──
+        //
+        // The preamble says where the burst starts, but only to the accuracy
+        // eight microseconds of it can support, and the message runs for a
+        // hundred and twelve more. A start that best fits the preamble is not
+        // always the one that reads the data correctly, and at 2.4 Msps a
+        // twentieth of a sample is the difference.
+        //
+        // So try the neighbourhood and let the check sequence say which was
+        // right — it is a 24-bit test, and a wrong alignment does not pass it.
+        // This is what a comparison against dump1090_rs on its own off-air
+        // recordings turned up: the preamble-only alignment found 11 of its 14
+        // messages, and the three it missed were not weak, they were sliced
+        // from a start a fraction of a sample out.
+        let first = self.slice(base, peak)?;
+        let df = first.bytes[0] >> 3;
+        // Nothing to choose with, on a format whose parity carries an address.
+        if !matches!(df, 11 | 17 | 18) || crate::crc::syndrome(&first.bytes) == 0 {
+            return Some(first);
+        }
+        for d in SLICE_PHASES {
+            let Some(c) = self.slice(base + d, peak) else { continue };
+            let df = c.bytes[0] >> 3;
+            if matches!(df, 11 | 17 | 18) && crate::crc::syndrome(&c.bytes) == 0 {
+                return Some(c);
+            }
+        }
+        Some(first)
+    }
+
+    /// Read the message out from a given start, as bits.
+    fn slice(&self, base: f64, peak: f32) -> Option<Candidate> {
         let mut bytes = [0u8; 14];
         let mut conf_sum = 0.0f32;
         let mut nbits = LONG_BITS;

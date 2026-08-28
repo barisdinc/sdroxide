@@ -3771,9 +3771,20 @@ sdroxide --file /tmp/sky.iq --rate 2400000 --freq 1090000000 --mode ADS-B
 
 Six aircraft at descending signal levels, flying. It proves the whole chain
 works; it does not prove the decoder works on air, because the transmitter and
-the receiver were written by the same hand. For that, put a real recording
-through `adsb_replay` and compare the aircraft it lists against another decoder
-on the same file.
+the receiver were written by the same hand.
+
+For that there is a second test, against real off-air recordings made by
+somebody else with somebody else's hardware, checked against what *their*
+decoder finds in them. Point it at a checkout of
+[rsadsb/dump1090_rs](https://github.com/rsadsb/dump1090_rs):
+
+```
+SDROXIDE_ADSB_IQ=/path/to/dump1090_rs/test_iq \
+  cargo test -p sdroxide-adsb --test reference_corpus -- --nocapture
+```
+
+SDRoxide finds all fourteen messages in those three captures, and nothing the
+reference does not also find.
 
 #### If nothing is decoding
 
