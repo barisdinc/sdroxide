@@ -4,6 +4,7 @@
 //! current [`Mode`] and hands it the height it may use. One submodule per
 //! panel:
 //!
+//! - [`adsb`] — the aircraft list and the 1090 MHz radar picture
 //! - [`aprs`] — the APRS station list, map and messages
 //! - [`cw`] — the Morse decode/keyboard panel, the one non-digital mode here
 //! - [`decodes`] — the FT8/FT4/JS8 decode list and the QSO sequencer beside it
@@ -15,6 +16,7 @@
 //! - [`setup`] — the digimode setup window the panels share
 //! - [`widgets`] — the row and station-card widgets several panels draw
 
+pub(in crate::app) mod adsb;
 pub(in crate::app) mod aprs;
 pub(in crate::app) mod cw;
 pub(in crate::app) mod decodes;
@@ -65,6 +67,9 @@ pub(in crate::app) fn panel_panes(mode: Mode) -> &'static [&'static str] {
         // Three, because an APRS operator watches three things that move
         // independently: who is out there, where they are, and what they said.
         Mode::Aprs => &["STATIONS", "MESSAGES", "MAP"],
+        // Two, because there is nothing to say back: this is a surveillance
+        // downlink, and the aircraft are not listening.
+        Mode::Adsb => &["AIRCRAFT", "MAP"],
         Mode::Wefax => &["CHART", "SAVED"],
         Mode::RfPaint => &["TEXT", "IMAGE"],
         // The keyboard modes and RADE are one column already: receive above,

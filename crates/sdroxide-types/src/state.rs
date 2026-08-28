@@ -381,6 +381,16 @@ pub struct RadioState {
     /// on it. Appended last: postcard numbers fields by position.
     #[serde(default)]
     pub rig_squelch: f32,
+    /// How the ADS-B decoder behaves, and whether it can run at all.
+    ///
+    /// Here rather than only in `adsb.json` for the reason every other
+    /// decoder's settings are: a remote client edits it, and the engine's reply
+    /// is this field coming back changed. It is also where the engine says no —
+    /// a front end that hands over demodulated audio cannot feed a 2 Msps
+    /// demodulator, and [`crate::AdsbSettings::OFF`] arriving back is how the
+    /// panel learns that. Appended last: postcard numbers fields by position.
+    #[serde(default)]
+    pub adsb: crate::AdsbSettings,
 }
 
 impl Default for RadioState {
@@ -408,6 +418,7 @@ impl Default for RadioState {
             noise_blanker: false,
             skimmer: crate::SkimmerSettings::default(),
             ism: crate::IsmSettings::default(),
+            adsb: crate::AdsbSettings::default(),
             gains: Vec::new(),
             tx_gains: Vec::new(),
             antenna_rx: String::new(),

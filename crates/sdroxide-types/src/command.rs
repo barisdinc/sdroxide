@@ -782,4 +782,13 @@ pub enum Command {
     SetRigSquelch {
         frac: f32,
     },
+
+    /// Set how the ADS-B decoder behaves (issue #160).
+    ///
+    /// The engine persists it to `adsb.json` and echoes it back in
+    /// [`crate::RadioState::adsb`], so there is no apply step and no way for
+    /// the panel's copy and the engine's to drift apart.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetAdsbConfig(crate::AdsbSettings),
 }

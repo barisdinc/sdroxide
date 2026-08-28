@@ -168,6 +168,11 @@ pub fn make_demod(mode: Mode, channel_rate: f64) -> Option<Box<dyn Demodulator>>
         // `sdroxide_drm::DrmDemod` itself; reaching here means it forgot to,
         // and the mode is silent rather than wrong.
         Mode::Drm => None,
+        // ADS-B produces no audio at all: it is 1 Mbit/s pulse-position
+        // modulation two megahertz wide, decoded off the raw I/Q by an engine
+        // lane of its own. There is nothing for this chain to demodulate, and a
+        // silent receiver is the correct behaviour rather than a missing case.
+        Mode::Adsb => None,
         Mode::Spec => None,
     }
 }

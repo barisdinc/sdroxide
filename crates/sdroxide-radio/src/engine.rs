@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use tracing::{debug, info, warn};
 
+use sdroxide_adsb::{AdsbAction, AdsbController};
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
     AprsController, CwController, DigiAction, DigiController, DigiEngine, FsqController,
@@ -1932,6 +1933,35 @@ struct Engine {
     /// The operator's persisted ISM preference, kept apart from `state.ism` for
     /// the same reason as `skim_cfg`.
     ism_cfg: sdroxide_types::IsmSettings,
+
+    /// The ADS-B lane (issue #160): a third window, on 1090 MHz.
+    ///
+    /// Its own rather than a share of anything else's for the plainest reason
+    /// in the tree — it is two and a half megahertz wide and a gigahertz away
+    /// from every other lane. It only runs in `Mode::Adsb`, because a receiver
+    /// parked on 1090 MHz at 2.4 Msps is not listening to anything else.
+    adsb_ddc: Option<Ddc>,
+    adsb: Option<AdsbController>,
+    adsb_buf: Vec<Complex32>,
+    /// Absolute frequency the window is centred on.
+    adsb_center_hz: f64,
+    /// The stream rate `adsb_ddc` was built to decimate, so a retune can tell a
+    /// window that merely moved from one that has to be rebuilt.
+    adsb_in_rate: f64,
+    /// The operator's persisted preference, kept apart from `state.adsb` for the
+    /// same reason `ism_cfg` is.
+    adsb_cfg: sdroxide_types::AdsbSettings,
+    /// The station's own position, so a surface squitter has something to be
+    /// decoded against. Sent to the worker when it changes.
+    adsb_home: Option<(f64, f64)>,
+    /// The last "cannot run" sentence sent to the panel, so it is sent once
+    /// rather than on every block.
+    ///
+    /// The outer `None` means nothing has been said yet, which is different
+    /// from having said "there is nothing wrong". Without the distinction a
+    /// panel that connected while the lane was down would sit on "starting the
+    /// decoder" forever.
+    adsb_idle_sent: Option<Option<String>>,
     /// Open capture file for `--record-iq`, and the interleaving scratch it is
     /// written from.
     iq_rec: Option<std::io::BufWriter<std::fs::File>>,
@@ -2175,6 +2205,18 @@ struct Engine {
 /// looking at more than that, [`skim_center_for`] decides which part of it gets
 /// skimmed.
 const SKIM_TARGET_HZ: f64 = 192_000.0;
+
+/// How much of a front end's stream the ADS-B window may claim.
+///
+/// The outer edges of any receiver's span are where its own anti-alias filter
+/// is already rolling off, and a decoder that slices half-microsecond chips has
+/// no margin to spend on a signal that arrives tilted. Three quarters is the
+/// same figure the ISM plan uses, for the same reason.
+///
+/// On the commonest receiver for this the fraction never binds: an RTL-SDR at
+/// 2.4 Msps hands over a stream the window is exactly as wide as, the
+/// downconverter decimates by one, and nothing is trimmed.
+const ADSB_USABLE_FRACTION: f64 = 0.75;
 
 /// Where the skim window belongs, in absolute Hz.
 ///
@@ -2425,6 +2467,20 @@ fn engine_thread(
             }
             state.band = Band::containing(hz);
         }
+        // The same for ADS-B, which is a channel in the strongest sense there
+        // is: one frequency, worldwide, and a receiver anywhere else hears
+        // nothing at all. Unconditional here, unlike the in-session rule — the
+        // capabilities are not known yet at this point, and a dial that turns
+        // out to be unreachable is reported by `sync_adsb` a moment later.
+        if mode.is_adsb() {
+            let hz = sdroxide_types::ADSB_FREQ_HZ;
+            info!(from = state.active_freq_hz(), to = hz, "ADS-B is on 1090 MHz; tuning there");
+            match state.active_vfo {
+                Vfo::A => state.vfo_a_hz = hz,
+                Vfo::B => state.vfo_b_hz = hz,
+            }
+            state.band = Band::containing(hz);
+        }
     }
     let skim_cfg = sdroxide_config::load_skimmer_config();
     state.skimmer = if audio_mode {
@@ -2452,6 +2508,12 @@ fn engine_thread(
         sdroxide_types::IsmSettings::OFF // wideband-only, like the skimmers
     } else {
         ism_cfg
+    };
+    let adsb_cfg = sdroxide_config::load_adsb_config();
+    state.adsb = if audio_mode {
+        sdroxide_types::AdsbSettings::OFF // wideband-only, and by far the widest
+    } else {
+        adsb_cfg
     };
 
     // Read before the DSP below rather than with the rest of the session
@@ -2680,6 +2742,14 @@ fn engine_thread(
         ism_center_hz: 0.0,
         ism_in_rate: 0.0,
         ism_cfg,
+        adsb_ddc: None,
+        adsb: None,
+        adsb_buf: Vec::new(),
+        adsb_center_hz: 0.0,
+        adsb_in_rate: 0.0,
+        adsb_cfg,
+        adsb_home: None,
+        adsb_idle_sent: None,
         iq_rec,
         iq_rec_buf: Vec::new(),
         scan_cfg,
@@ -2784,6 +2854,8 @@ fn engine_thread(
     if !audio_mode {
         engine.sync_skimmer(); // starts if any kind is enabled in the saved config
         engine.sync_ism(); // likewise, from ism.json
+        engine.sync_adsb_home();
+        engine.sync_adsb(); // and the aircraft lane, if the mode is already ADS-B
     }
     // Start any enabled network spot feeds from the persisted config. The
     // operator identity comes from the digi config — one identity for the whole
@@ -2961,6 +3033,7 @@ fn engine_thread(
         engine.poll_voice();
         engine.poll_skimmer();
         engine.poll_ism();
+        engine.poll_adsb();
         engine.poll_scanner();
         engine.poll_tci_server();
         engine.poll_rigctld();
@@ -3660,6 +3733,17 @@ impl Engine {
                 d.on_rx_iq(&self.ism_buf);
             }
         }
+        // ...and the ADS-B decoder, from the widest window of the lot. On the
+        // commonest receiver for this — an RTL-SDR at its default 2.4 Msps —
+        // that decimation is by one and the chain is a mixer, because a
+        // megabit-a-second waveform has no slack to give away.
+        if let Some(ddc) = self.adsb_ddc.as_mut() {
+            self.adsb_buf.clear();
+            ddc.process(iq, &mut self.adsb_buf);
+            if let Some(d) = self.adsb.as_ref() {
+                d.on_rx_iq(&self.adsb_buf);
+            }
+        }
         // Feed TCI clients: the same clean tap the digital decoders use (so
         // muting or turning down sdroxide can't silence somebody's decoder),
         // resampled to the 48 kHz TCI mandates.
@@ -4076,6 +4160,7 @@ impl Engine {
                 // window was stale, not wrong.
                 self.sync_skim_window();
                 self.sync_ism_window();
+                self.sync_adsb_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
             }
@@ -4278,6 +4363,10 @@ impl Engine {
         // at fixed frequencies, so it stays on them for as long as the new span
         // still reaches, and only slides when it has to.
         self.sync_ism_window();
+        // The ADS-B window *does* follow the hardware centre, being one fixed
+        // target rather than a plan of them: 1090 MHz is where it has to be, and
+        // the only question is whether the new span still reaches it.
+        self.sync_adsb_window();
         // Re-seat the DDCs on the new centre. Without this the main receiver
         // keeps the offset it had against the old one, which is exactly how a
         // rig-initiated retune ends up demodulating somewhere the readout does
@@ -6154,6 +6243,9 @@ impl Engine {
                 // The network features report the same operator identity, so a
                 // callsign or grid edit reaches them from here.
                 self.spots.set_operator(&self.digi_config.my_call, &self.digi_config.my_grid);
+                // ...and so does the ADS-B lane, which needs the operator's own
+                // position to place an aircraft on the ground.
+                self.sync_adsb_home();
                 self.emit_digi_status();
             }
             SetDigiAudioFreq(hz) => {
@@ -6395,6 +6487,22 @@ impl Engine {
                 let _ = prev_rtl433;
                 self.sync_ism();
                 if let Some(d) = self.ism.as_ref() {
+                    d.set_config(cfg);
+                }
+            }
+
+            // ADS-B decoder (issue #160).
+            SetAdsbConfig(cfg) => {
+                let cfg = cfg.sane();
+                self.state.adsb = cfg;
+                // Remembered before `sync_adsb` may force the live state off,
+                // so a source swap back restores what was chosen.
+                self.adsb_cfg = cfg;
+                if let Err(e) = sdroxide_config::save_adsb_config(&cfg) {
+                    warn!("saving ADS-B config: {e}");
+                }
+                self.sync_adsb();
+                if let Some(d) = self.adsb.as_ref() {
                     d.set_config(cfg);
                 }
             }
@@ -7201,6 +7309,214 @@ impl Engine {
                 IsmAction::Status(s) => RadioEvent::IsmStatus(s),
             };
             let _ = self.event_tx.send(ev);
+        }
+    }
+
+    /// The rate the ADS-B window asks its down-converter for.
+    ///
+    /// Capped at what the front end delivers, because a window is a decimation
+    /// of that stream and not a second tuner. A receiver below
+    /// [`sdroxide_types::ADSB_MIN_RATE_HZ`] therefore lands on its own rate,
+    /// `sync_adsb` refuses to start, and the panel says why.
+    fn adsb_target_rate_hz(&self) -> f64 {
+        sdroxide_types::ADSB_TARGET_RATE_HZ.min(self.state.sample_rate)
+    }
+
+    /// Where the window sits: on 1090 MHz where the span reaches it, and on the
+    /// hardware centre where it does not — in which case nothing decodes and
+    /// [`Self::adsb_unavailable`] is what the operator is told.
+    fn adsb_window_center_hz(&self, rate: f64) -> f64 {
+        let want = sdroxide_types::ADSB_FREQ_HZ;
+        // The window has to fit inside the stream, and the stream's outer edges
+        // are where a front end's own anti-alias filter is rolling off, so the
+        // usable span is not the whole of it.
+        let slack = (self.state.sample_rate * ADSB_USABLE_FRACTION - rate) / 2.0;
+        if slack <= 0.0 {
+            return self.state.center_hz;
+        }
+        want.clamp(self.state.center_hz - slack, self.state.center_hz + slack)
+    }
+
+    /// Why the decoder cannot run here, if it cannot. `None` means it can.
+    ///
+    /// Every sentence names the number it is talking about. "No aircraft" and
+    /// "this receiver was never going to hear any" produce the same empty list,
+    /// and only this tells them apart.
+    fn adsb_unavailable(&self) -> Option<String> {
+        if self.audio_mode {
+            return Some(
+                "this front end hands over demodulated audio; ADS-B needs the raw I/Q stream"
+                    .to_string(),
+            );
+        }
+        if self.state.sample_rate < sdroxide_types::ADSB_MIN_RATE_HZ {
+            return Some(format!(
+                "ADS-B needs at least {:.1} Msps and this stream is {:.3} Msps — \
+                 lower the front-end decimation, or raise the device sample rate",
+                sdroxide_types::ADSB_MIN_RATE_HZ / 1e6,
+                self.state.sample_rate / 1e6
+            ));
+        }
+        if !self.caps.can_rx_hz(sdroxide_types::ADSB_FREQ_HZ) {
+            return Some("this receiver does not tune to 1090 MHz".to_string());
+        }
+        let rate = Ddc::rate_for(self.state.sample_rate, self.adsb_target_rate_hz());
+        let center = self.adsb_window_center_hz(rate);
+        if !sdroxide_adsb::window_covers(center, rate) {
+            return Some(format!(
+                "1090.000 MHz is outside the receiver's window, which is {:.3} MHz wide \
+                 about {:.3} MHz",
+                rate / 1e6,
+                center / 1e6
+            ));
+        }
+        None
+    }
+
+    /// A down-converter for the 1090 MHz window, already mixed onto it, and the
+    /// absolute frequency it is centred on.
+    ///
+    /// The one place the chain is built, so the rate it was built from is always
+    /// recorded with it.
+    fn build_adsb_window(&mut self) -> (Ddc, f64) {
+        let target = self.adsb_target_rate_hz();
+        let mut ddc = Ddc::new(self.state.sample_rate, target);
+        let center = self.adsb_window_center_hz(ddc.out_rate());
+        ddc.set_offset_hz(center - self.state.center_hz);
+        self.adsb_in_rate = self.state.sample_rate;
+        (ddc, center)
+    }
+
+    /// Start or stop the ADS-B lane to match the mode and the front end.
+    ///
+    /// Unlike the ISM decoder, which the operator switches on and leaves running
+    /// under whatever else they are doing, this one follows the *mode*: it needs
+    /// the receiver parked on 1090 MHz at two and a half megasamples a second,
+    /// and nothing else can be listened to through that.
+    fn sync_adsb(&mut self) {
+        let want = self.state.rx[0].mode.is_adsb() && self.adsb_unavailable().is_none();
+        // The operator's own preference survives being overruled: `state.adsb`
+        // is what the panel reads, `adsb_cfg` is what they chose.
+        if self.audio_mode {
+            self.state.adsb = sdroxide_types::AdsbSettings::OFF;
+        } else {
+            self.state.adsb = self.adsb_cfg;
+        }
+        match (want, self.adsb.is_some()) {
+            (true, false) => {
+                let (ddc, center) = self.build_adsb_window();
+                let out_rate = ddc.out_rate();
+                let c = AdsbController::new(center, out_rate, self.state.adsb);
+                c.set_home(self.adsb_home);
+                self.adsb = Some(c);
+                self.adsb_ddc = Some(ddc);
+                self.adsb_center_hz = center;
+                info!(rate = out_rate, center, "ADS-B decoder started");
+            }
+            (false, true) => {
+                self.adsb = None;
+                self.adsb_ddc = None;
+                self.adsb_buf.clear();
+                info!("ADS-B decoder stopped");
+            }
+            (true, true) => self.sync_adsb_window(),
+            _ => {}
+        }
+    }
+
+    /// Re-place the window after a retune or a rate change.
+    ///
+    /// The aircraft table survives: a receiver nudged a hundred kilohertz is
+    /// still looking at the same sky, and a target list rebuilt from nothing
+    /// every time the dial moves would be worse than a second of missed frames.
+    /// The chain that feeds it is another matter — a `Ddc` bakes in both its
+    /// input rate and its decimation, so a change in either is a rebuild rather
+    /// than a retune (the lesson of issue #142, next door).
+    fn sync_adsb_window(&mut self) {
+        let Some(ddc) = self.adsb_ddc.as_ref() else { return };
+        let want_rate = Ddc::rate_for(self.state.sample_rate, self.adsb_target_rate_hz());
+        if (want_rate - ddc.out_rate()).abs() >= 1.0
+            || (self.state.sample_rate - self.adsb_in_rate).abs() >= 1.0
+        {
+            let (ddc, center) = self.build_adsb_window();
+            let rate = ddc.out_rate();
+            self.adsb_ddc = Some(ddc);
+            self.adsb_center_hz = center;
+            if let Some(d) = self.adsb.as_ref() {
+                d.set_window(center, rate);
+            }
+            info!(rate, center, "ADS-B window rebuilt");
+            return;
+        }
+
+        let center = self.adsb_window_center_hz(want_rate);
+        let Some(ddc) = self.adsb_ddc.as_mut() else { return };
+        // Re-seated even when the window has not moved in absolute terms: the
+        // offset is measured from the *hardware* centre, and a retune is exactly
+        // what moves that. Phase-continuous and filter-free, so there is nothing
+        // to save by skipping it.
+        ddc.set_offset_hz(center - self.state.center_hz);
+        if (center - self.adsb_center_hz).abs() < 1.0 {
+            return;
+        }
+        self.adsb_center_hz = center;
+        if let Some(d) = self.adsb.as_ref() {
+            d.set_window(center, want_rate);
+        }
+    }
+
+    /// Tell the ADS-B lane where the station is, when that changes.
+    ///
+    /// A surface position squitter has no globally-unambiguous decode, so an
+    /// aircraft on a taxiway can only be placed against a reference — and until
+    /// it has been heard airborne, ours is the only one there is.
+    fn sync_adsb_home(&mut self) {
+        let grid = self.digi_config.my_grid.trim();
+        let home = (!grid.is_empty()).then(|| sdroxide_types::grid_to_latlon(grid)).flatten();
+        if home == self.adsb_home {
+            return;
+        }
+        self.adsb_home = home;
+        if let Some(d) = self.adsb.as_ref() {
+            d.set_home(home);
+        }
+    }
+
+    /// Drain the ADS-B decoder's aircraft table and forward it.
+    ///
+    /// The worker knows what it is decoding but not what the receiver could have
+    /// been decoding, so the "why is this empty" fields are filled in here,
+    /// where the front end's capabilities are.
+    fn poll_adsb(&mut self) {
+        let unavailable = self.adsb_unavailable();
+        let Some(d) = self.adsb.as_ref() else {
+            // Nothing running. On the ADS-B mode that is a fact worth sending —
+            // it is the only way the panel can say what is wrong — but off it
+            // there is nobody listening.
+            //
+            // Once, not per block: this runs at the front end's block rate,
+            // which on a fast source is hundreds of times a second, and every
+            // one of them would go to the UI and to every remote client.
+            if self.state.rx[0].mode.is_adsb() && self.adsb_idle_sent.as_ref() != Some(&unavailable)
+            {
+                self.adsb_idle_sent = Some(unavailable.clone());
+                let st = sdroxide_types::AdsbStatus {
+                    unavailable,
+                    suggest_center_hz: Some(sdroxide_types::ADSB_FREQ_HZ),
+                    ..Default::default()
+                };
+                let _ = self.event_tx.send(RadioEvent::AdsbStatus(Box::new(st)));
+            }
+            return;
+        };
+        // Running again: whatever was last said about it being down is stale,
+        // so a later stop says it afresh.
+        self.adsb_idle_sent = None;
+        for action in d.poll() {
+            let AdsbAction::Status(mut st) = action;
+            st.unavailable = unavailable.clone();
+            st.suggest_center_hz = unavailable.is_some().then_some(sdroxide_types::ADSB_FREQ_HZ);
+            let _ = self.event_tx.send(RadioEvent::AdsbStatus(st));
         }
     }
 
@@ -8330,6 +8646,28 @@ impl Engine {
             self.state.band = Band::containing(hz);
             self.follow_dial();
         }
+        // ADS-B is a channel too, and a far more absolute one: there is exactly
+        // one worldwide, the receiver has to be on it, and nothing else can be
+        // heard through a 2.4 Msps window parked there. Same three guards as
+        // APRS above — main receiver, a real mode change, and only when 1090 is
+        // not already inside the window — plus one more: a receiver that cannot
+        // reach 1090 MHz at all is left where it is, because retuning it would
+        // take away the band the operator was on and give nothing back. The
+        // panel says why instead.
+        if rx == RxId::Main
+            && mode.is_adsb()
+            && !self.state.rx[0].mode.is_adsb()
+            && self.caps.can_rx_hz(sdroxide_types::ADSB_FREQ_HZ)
+            && !sdroxide_adsb::window_covers(self.state.center_hz, self.state.sample_rate)
+        {
+            let hz = sdroxide_types::ADSB_FREQ_HZ;
+            match self.state.active_vfo {
+                Vfo::A => self.state.vfo_a_hz = hz,
+                Vfo::B => self.state.vfo_b_hz = hz,
+            }
+            self.state.band = Band::containing(hz);
+            self.follow_dial();
+        }
         // Changing modes under a running keyer message would leave it playing
         // into a transmit chain that has just been rebuilt (or into a digital
         // mode that has no use for it).
@@ -8379,6 +8717,9 @@ impl Engine {
         // or leaving Ft8/Ft4 starts/stops it (and aborts any in-flight QSO).
         if rx == RxId::Main {
             self.sync_digi_mode();
+            // ...and the ADS-B lane, which unlike the other wideband decoders
+            // runs only while its mode is selected.
+            self.sync_adsb();
             self.emit_digi_status();
             // A wider channel needs a wider berth from the LO: switching a
             // narrow mode that was happily sitting 30 kHz off the LO into WFM
@@ -9449,6 +9790,14 @@ impl Engine {
         self.ism_ddc = None;
         self.ism = None;
         self.ism_buf.clear();
+        // The ADS-B lane goes the same way and for the same reason, except that
+        // decimating the front end is the one thing most likely to take it below
+        // the two megasamples a second it cannot work without — which `sync_adsb`
+        // will then say out loud rather than restarting a decoder that can only
+        // find nothing.
+        self.adsb_ddc = None;
+        self.adsb = None;
+        self.adsb_buf.clear();
         // Dropped outright rather than left to `sync_tci_iq`'s own comparison:
         // two device rates can snap to the same client rate, and it would then
         // keep a decimation chain built for the rate we have just left.
@@ -9458,6 +9807,7 @@ impl Engine {
         self.sync_digi_mode();
         self.sync_skimmer();
         self.sync_ism();
+        self.sync_adsb();
         self.sync_audio_tap();
         self.sync_tci_iq();
         info!(factor, rate = self.state.sample_rate, "front-end decimation");
@@ -9819,6 +10169,7 @@ impl Engine {
         if !self.audio_mode {
             self.sync_skimmer();
             self.sync_ism();
+            self.sync_adsb();
         }
         // Re-derive the TCI streams at the new device rate and push a fresh
         // state burst, so connected clients follow the swap.
@@ -11405,6 +11756,7 @@ impl Engine {
                 // tracks, so none straddles the old and new axis.
                 self.sync_skim_window();
                 self.sync_ism_window();
+                self.sync_adsb_window();
                 true
             }
             Err(e) => {
@@ -11498,7 +11850,16 @@ fn rig_mode_class(m: Mode) -> u8 {
         Mode::Cw => 3,
         // RIFP, VHF packet, APRS and VHF SSTV are data on an FM carrier, so a
         // rig reporting plain FM is still where we left it.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => 5,
+        Mode::Nfm
+        | Mode::Wfm
+        | Mode::Rifp
+        | Mode::Packet
+        | Mode::Aprs
+        | Mode::SstvFm
+        // ADS-B is not a mode any rig has, and no rig will ever be in it: the
+        // dial is at 1090 MHz. Grouped with FM so an echo is never read as the
+        // operator having left the mode.
+        | Mode::Adsb => 5,
     }
 }
 

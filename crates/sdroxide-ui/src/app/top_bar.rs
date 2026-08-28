@@ -4867,8 +4867,11 @@ fn band_mode_menu(
             // DRM belongs with the analog modes rather than under "Digital"
             // below: that heading is the modes the digi engine decodes and
             // transmits, and DRM is a broadcast to listen to — a demodulator,
-            // like WFM beside it.
+            // like WFM beside it. ADS-B is here for the same reason: a
+            // receive-only signal to point the radio at, with no transmitter
+            // and nothing the digi engine touches.
             Mode::Drm,
+            Mode::Adsb,
             Mode::Digu,
             Mode::Digl,
             Mode::Dsb,

@@ -118,7 +118,9 @@ pub fn to_hamlib_mode(m: Mode) -> &'static str {
         // RIFP, VHF packet and VHF SSTV are data on an FM carrier, not on a
         // sideband.
         Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => "PKTFM",
-        Mode::Wfm => "WFM",
+        // No rig has an ADS-B mode; a remote hamlib client asking is told the
+        // widest FM there is, which is at least the right kind of receiver.
+        Mode::Wfm | Mode::Adsb => "WFM",
         Mode::Digu => "PKTUSB",
         Mode::Digl => "PKTLSB",
         Mode::Dsb => "DSB",

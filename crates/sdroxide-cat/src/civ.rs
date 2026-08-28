@@ -71,7 +71,16 @@ pub fn mode_to_civ(m: Mode) -> u8 {
         // RIFP is FSK on the carrier, and VHF packet frequency-modulates it,
         // so a CAT rig has to be in FM for the dial to mean what they mean by
         // it.
-        Mode::Nfm | Mode::Wfm | Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => 0x05,
+        // No rig has an ADS-B mode and none ever will: the dial is at
+        // 1090 MHz. Grouped with FM so nothing downstream has to special-case
+        // a mode a radio can neither be put into nor report back.
+        Mode::Nfm
+        | Mode::Wfm
+        | Mode::Rifp
+        | Mode::Packet
+        | Mode::Aprs
+        | Mode::SstvFm
+        | Mode::Adsb => 0x05,
         Mode::Spec => 0x01,
     }
 }

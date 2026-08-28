@@ -4,6 +4,7 @@
 //! it compiles for `wasm32-unknown-unknown`.
 
 mod access;
+mod adsb;
 mod aprs;
 mod awards;
 mod band;
@@ -60,6 +61,11 @@ mod wsjtx;
 mod wspr;
 
 pub use access::{AUTH_BUSY, AUTH_REFUSED, AuthPhase, RemoteAccess, RemoteServer, is_auth_busy};
+pub use adsb::{
+    ADSB_DROP_LIST_S, ADSB_DROP_MAP_S, ADSB_FREQ_HZ, ADSB_HISTORY_POINTS, ADSB_MAX_AIRCRAFT,
+    ADSB_MIN_RATE_HZ, ADSB_TARGET_RATE_HZ, ADSB_TRACK_MAX, ADSB_VECTOR_MINUTES, AdsbAircraft,
+    AdsbSettings, AdsbSource, AdsbStatus,
+};
 pub use aprs::{
     APRS_MESSAGE_MAX, APRS_MSG_RETRIES, APRS_STATION_MAX, APRS_TRACK_MAX, APRS_TRAFFIC_MAX,
     AprsEntryKind, AprsMessage, AprsMsgState, AprsPosition, AprsStation, AprsStatus, AprsSymbol,

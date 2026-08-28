@@ -139,6 +139,22 @@ pub enum Mode {
     /// choice away from the operator, and 2 m SSTV on sideband is a thing
     /// people do (issue #192). Appended for the same reason as [`Mode::Hell`].
     SstvFm,
+    /// ADS-B / Mode S on 1090 MHz — the surveillance downlink every civil
+    /// aircraft transmits, carrying an ICAO address, a callsign, an altitude, a
+    /// velocity and a position.
+    ///
+    /// Receive only, and the widest mode here by three orders of magnitude:
+    /// this is 1 Mbit/s pulse-position modulation and needs at least two
+    /// megasamples a second of I/Q, so it is decoded off the raw stream by its
+    /// own engine lane rather than by anything downstream of the receive
+    /// chain's downconverter. There is no audio at all — like [`Mode::Spec`],
+    /// its demodulator is `None`.
+    ///
+    /// A `Mode` rather than a window because it is a thing to point the radio
+    /// *at*: it owns the dial, it owns the sample rate, and nothing else can be
+    /// listened to while it runs. Appended for the same reason as
+    /// [`Mode::Hell`].
+    Adsb,
 }
 
 /// The bands on which analog SSTV rides the lower sideband, as (low, high) Hz.
@@ -153,7 +169,7 @@ const SSTV_LSB_BANDS: [(f64, f64); 3] =
 impl Mode {
     /// Every mode, in the order they cycle and appear in the picker — which is
     /// deliberately *not* the enum's declaration order (see [`Mode::Hell`]).
-    pub const ALL: [Mode; 32] = [
+    pub const ALL: [Mode; 33] = [
         Mode::Lsb,
         Mode::Usb,
         Mode::Cw,
@@ -162,6 +178,7 @@ impl Mode {
         Mode::Nfm,
         Mode::Wfm,
         Mode::Drm,
+        Mode::Adsb,
         Mode::Digu,
         Mode::Digl,
         Mode::Dsb,
@@ -256,6 +273,27 @@ impl Mode {
     /// True for APRS.
     pub fn is_aprs(self) -> bool {
         matches!(self, Mode::Aprs)
+    }
+
+    /// True for ADS-B / Mode S on 1090 MHz.
+    ///
+    /// Deliberately not [`Mode::is_digital`], even though it has a decoder and
+    /// a panel: every caller of that one means "the digi engine drives this",
+    /// and the digi engine works in 48 kHz audio. ADS-B is decoded from the raw
+    /// I/Q by an engine lane of its own, transmits nothing, and shares none of
+    /// the digital modes' configuration.
+    pub fn is_adsb(self) -> bool {
+        matches!(self, Mode::Adsb)
+    }
+
+    /// True for the modes that own the bottom panel.
+    ///
+    /// [`Mode::is_digital`] used to answer this on its own, which was true
+    /// until a mode arrived with a panel and no digi engine behind it. The two
+    /// questions are separate: this one decides whether the panadapter shares
+    /// the window, and that one decides who is being handed audio.
+    pub fn has_bottom_panel(self) -> bool {
+        self.is_digital() || self.is_adsb()
     }
 
     /// True for the modes whose transmit waveform is not single-sideband audio
@@ -429,7 +467,7 @@ impl Mode {
     /// True for the receive-only modes, so the UI can leave the transmit
     /// controls out rather than showing ones that refuse.
     pub fn is_rx_only(self) -> bool {
-        matches!(self, Mode::Wefax)
+        matches!(self, Mode::Wefax | Mode::Adsb)
     }
 
     /// True for Hellschreiber. Forks the digi panel to the scrolling raster UI:
@@ -495,6 +533,7 @@ impl Mode {
             Mode::Js8 => "JS8",
             Mode::Wspr => "WSPR",
             Mode::Drm => "DRM",
+            Mode::Adsb => "ADS-B",
         }
     }
 
@@ -515,6 +554,11 @@ impl Mode {
             Mode::Drm => (-5000.0, 5000.0),
             Mode::Nfm => (-8000.0, 8000.0),
             Mode::Wfm => (-96_000.0, 96_000.0),
+            // Not a receive filter — nothing narrows this stream, and the
+            // decoder reads all of it. The +/-1 MHz is the demodulator's own
+            // bandwidth, drawn on the panadapter so an operator can see that
+            // the whole channel is being read rather than some slice of it.
+            Mode::Adsb => (-1_000_000.0, 1_000_000.0),
             Mode::Digu => (200.0, 3200.0),
             Mode::Digl => (-3200.0, -200.0),
             Mode::Dsb => (-2850.0, 2850.0),
@@ -680,7 +724,10 @@ impl Mode {
             Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => C::Am,
             // WFM is FM's carrier position too; a rig with an I.F. output has
             // no such mode, so nothing here is lost by grouping them.
-            Mode::Nfm | Mode::Wfm => C::Fm,
+            // ADS-B joins them for the same reason WFM does: no radio with an
+            // I.F. output has this mode, so there is no separate offset for it
+            // to have, and FM's is the one a wideband receiver already uses.
+            Mode::Nfm | Mode::Wfm | Mode::Adsb => C::Fm,
             // Everything a rig would be put into DATA (or DIGI) for, on either
             // sideband — including RIFP and VHF packet, which the rig carries
             // as FM data rather than SSB but still through its data input.
@@ -719,7 +766,10 @@ impl Mode {
         // out is not a demodulated signal whose level follows the carrier's,
         // but the audio codec's own output, already at the level the
         // broadcaster mixed it to. Levelling it again would ride the programme.
-        !matches!(self, Mode::Nfm | Mode::Wfm | Mode::Drm)
+        // ADS-B is here because it produces no audio at all — its receive
+        // chain has no demodulator, so there is nothing for an AGC to be in
+        // front of.
+        !matches!(self, Mode::Nfm | Mode::Wfm | Mode::Drm | Mode::Adsb)
     }
 
     /// Furthest a filter edge may be dragged from the carrier — bounded by
@@ -727,6 +777,12 @@ impl Mode {
     pub fn max_filter_hz(self) -> f32 {
         match self {
             Mode::Wfm => 120_000.0,
+            // Not a filter in the sense the others are — there is no channel
+            // being carved out of anything, because the decoder reads the whole
+            // stream. What the number does is let the panadapter shade the
+            // 2 MHz the demodulator actually looks at, which on a receiver
+            // whose span is wider than that is worth seeing.
+            Mode::Adsb => 1_200_000.0,
             _ => 24_000.0,
         }
     }
@@ -760,6 +816,12 @@ impl Mode {
             // channel's.
             Mode::Nfm | Mode::SstvFm => &[("8k", -4000.0, 4000.0), ("16k", -8000.0, 8000.0)],
             Mode::Dsb => &[("5k", -2500.0, 2500.0), ("6k", -3000.0, 3000.0)],
+            // Both wider than any filter would be: a Mode S reply reaches its
+            // first nulls about 6 MHz out and is read by a slicer rather than
+            // by a passband. These are here so the panadapter's shading can be
+            // made to match the window the receiver is actually delivering,
+            // which is the only thing that limits the decode.
+            Mode::Adsb => &[("2M", -1_000_000.0, 1_000_000.0), ("2.4M", -1_200_000.0, 1_200_000.0)],
             // The one digital mode with a real filter choice: 1200 Bell 202
             // occupies about 10 kHz and 9600 G3RUH about 16 kHz, so the
             // operator wants the narrower one when running 1200 on a busy
@@ -1248,6 +1310,7 @@ mod tests {
             (Mode::Drm, 29),
             (Mode::Aprs, 30),
             (Mode::SstvFm, 31),
+            (Mode::Adsb, 32),
         ];
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
@@ -1292,7 +1355,7 @@ mod tests {
         // `Mode::ALL`'s length is checked by the array type; what needs
         // checking is that it is a permutation of the enum, with nothing
         // dropped and nothing listed twice.
-        let last = Mode::SstvFm as u8;
+        let last = Mode::Adsb as u8;
         for i in 0..=last {
             let present = Mode::ALL.iter().filter(|m| **m as u8 == i).count();
             assert_eq!(present, 1, "discriminant {i} appears {present} times in Mode::ALL");

@@ -1221,6 +1221,20 @@ pub fn save_ism_config(cfg: &sdroxide_types::IsmSettings) -> Result<(), ConfigEr
     save_json("ism.json", cfg)
 }
 
+/// ADS-B decoder preferences (issue #160).
+///
+/// Kept apart from the live `RadioState.adsb` for the same reason the ISM
+/// decoder's are: a front end that hands over demodulated audio, or one that
+/// cannot deliver two megasamples a second, forces the decoder off, and that
+/// must not overwrite what the operator chose for a receiver that can.
+pub fn load_adsb_config() -> sdroxide_types::AdsbSettings {
+    load_json::<sdroxide_types::AdsbSettings>("adsb.json").sane()
+}
+
+pub fn save_adsb_config(cfg: &sdroxide_types::AdsbSettings) -> Result<(), ConfigError> {
+    save_json("adsb.json", cfg)
+}
+
 /// Scanner settings: what to scan, how hard a signal has to be to stop it, and
 /// which memories to pass over. Restored at startup so a scan set up once is
 /// one keypress away afterwards.

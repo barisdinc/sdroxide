@@ -4971,6 +4971,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdroxide-adsb"
+version = "1.5.3"
+dependencies = [
+ "crossbeam-channel",
+ "num-complex",
+ "sdroxide-dsp",
+ "sdroxide-types",
+ "tracing",
+]
+
+[[package]]
 name = "sdroxide-airspy"
 version = "1.5.3"
 dependencies = [
@@ -5323,6 +5334,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "rtrb",
+ "sdroxide-adsb",
  "sdroxide-aprs",
  "sdroxide-ax25",
  "sdroxide-config",

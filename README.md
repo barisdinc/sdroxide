@@ -67,8 +67,10 @@ One binary, three ways to run it:
   raster), image **SSTV** (Scottie, Martin, Robot), image **RIFP**
   (draft-dulaunoy-rifp-00 — packetised, checksummed pictures over a 4800-baud
   CPFSK modem), receive-only **weather fax** (WEFAX/radiofax charts with a
-  station picker, phasing and slant correction), and transmit-only **RF Paint**
-  (spectrum painting of text and images onto the waterfall).
+  station picker, phasing and slant correction), transmit-only **RF Paint**
+  (spectrum painting of text and images onto the waterfall), and receive-only
+  **ADS-B** — the aircraft overhead on 1090 MHz, on a radar display with history
+  dots, speed vectors and data blocks.
 - **Receiver** — hang AGC, draggable passband filter edges (on the spectrum and
   the waterfall), noise blanker, auto-notch, **four noise-reduction engines**
   (RNNoise, DeepFilterNet3, a libspecbleach port and the built-in spectral NR,
@@ -1333,7 +1335,7 @@ way.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left; `14200000` on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC / moderate). |
-| `--mode <MODE>` | Initial mode: `USB LSB CW AM SAM NFM WFM DIGU DIGL DSB SPEC FT8 FT4 FT2 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP WEFAX RFPAINT RADE`. Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode: `USB LSB CW AM SAM NFM WFM DIGU DIGL DSB SPEC FT8 FT4 FT2 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP WEFAX RFPAINT RADE ADS-B`. Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (`LNAH`, `TX/RX`; see `--probe`). Default: the port the last session was left on. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (`BAND1`, `BAND2`). |
 | `--server` | Run as a server: HTTP web client + WebSocket streaming backend. |

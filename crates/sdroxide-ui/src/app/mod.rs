@@ -492,6 +492,18 @@ pub struct SdroxideApp {
     aprs_icons: crate::aprs_icons::AprsIcons,
     /// APRS: the map's centre, zoom and selected station.
     aprs_map: crate::aprs_map::AprsMapState,
+    /// ADS-B: the aircraft table and everything the decoder is seeing, as the
+    /// engine last sent it. Boxed because it carries every target's position
+    /// history and is far larger than anything else held here.
+    adsb_status: Option<Box<sdroxide_types::AdsbStatus>>,
+    /// ADS-B: the radar picture's pan/zoom and which target is selected.
+    adsb_map: crate::adsb_map::AdsbMapState,
+    /// ADS-B: filter for the aircraft list; matches a callsign or an address.
+    adsb_filter: String,
+    /// ADS-B: the decoder's own settings window is open.
+    show_adsb_setup: bool,
+    adsb_sort: panels::adsb::AdsbSort,
+    adsb_sort_desc: bool,
     /// APRS: who the message box is addressed to.
     aprs_target: String,
     /// APRS: what is typed in the message box but not yet sent.
@@ -1127,6 +1139,12 @@ impl SdroxideApp {
             fsq_img_inbox: std::sync::Arc::new(std::sync::Mutex::new(None)),
             aprs_icons: crate::aprs_icons::AprsIcons::default(),
             aprs_map: crate::aprs_map::AprsMapState::default(),
+            adsb_status: None,
+            adsb_map: crate::adsb_map::AdsbMapState::default(),
+            adsb_filter: String::new(),
+            show_adsb_setup: false,
+            adsb_sort: panels::adsb::AdsbSort::default(),
+            adsb_sort_desc: true,
             aprs_target: String::new(),
             aprs_draft: String::new(),
             packet_target: String::new(),

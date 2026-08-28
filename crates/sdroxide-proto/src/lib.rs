@@ -795,7 +795,26 @@ use sdroxide_types::{
 /// position, so a v97 peer desynchronises on the tail of every `RadioState`
 /// and every `DeviceCaps` regardless. The handshake's equality test is what
 /// stops it trying.
-pub const PROTO_VERSION: u16 = 98;
+///
+/// **99** — ADS-B (issue #160).
+///
+/// `Mode::Adsb` is appended to [`sdroxide_types::Mode`], which is on its own
+/// enough to force this bump: every mode already on the wire keeps its number,
+/// but a v98 peer handed the new one has no variant to decode it into and
+/// desynchronises on the rest of the message. That is the same reasoning as
+/// v98's `Mode::SstvFm` and v89's `Mode::Aprs`.
+///
+/// With it: `ServerMsg::AdsbStatus` carrying the aircraft table,
+/// `Command::SetAdsbConfig` to change how the decoder behaves, and
+/// [`sdroxide_types::RadioState::adsb`] holding what it was set to — all
+/// appended, all at the end of their respective enums and structs.
+///
+/// The table is re-sent whole a couple of times a second rather than
+/// incrementally, like the ISM device table and for the same reasons; the
+/// per-aircraft position history is `f32` (about two metres at any latitude)
+/// because it is the bulk of that message and a history dot on a map has no use
+/// for more.
+pub const PROTO_VERSION: u16 = 99;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1187,6 +1206,10 @@ pub enum ServerMsg {
     /// What the DRM decoder has made of the broadcast on the main receiver.
     /// A snapshot — see [`sdroxide_types::DrmStatus`].
     Drm(sdroxide_types::DrmStatus),
+    /// Every aircraft the ADS-B decoder is tracking, plus what the demodulator
+    /// is seeing and why it is not running when it is not. A whole snapshot,
+    /// twice a second — see [`sdroxide_types::AdsbStatus`].
+    AdsbStatus(Box<sdroxide_types::AdsbStatus>),
 }
 
 /// One radio in a station's roster, as a client sees it.

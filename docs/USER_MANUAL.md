@@ -15,7 +15,7 @@ or connects to a remote sdroxide server.
 
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
-3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS)](#3-digital-modes)
+3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
@@ -49,7 +49,8 @@ or connects to a remote sdroxide server.
   protocol on its own FSK modem), the transmit-only **RF Paint**
   (spectrum-painting) mode, AX.25 **packet** on HF and VHF, and **APRS** — with
   a live map of every station heard, drawn with its own symbol, and messages you
-  can send and answer.
+  can send and answer. **ADS-B** decodes the aircraft overhead on 1090 MHz onto
+  a radar display — see [§3.13](#313-ads-b-aircraft-on-1090-mhz).
 - **Receive controls:** AGC (Off/Slow/Med/Fast), volume, mute, squelch, an
   impulse noise blanker, an adaptive auto-notch (constant-tone canceller),
   noise reduction (four engines, three strengths each), front-end decimation
@@ -3606,6 +3607,158 @@ reports, Maidenhead grid reports, telemetry, queries, weather both attached to a
 position and standing alone, and messages, acknowledgements, rejections and
 bulletins. Weather is converted from the miles per hour, degrees Fahrenheit and
 hundredths of an inch the protocol carries.
+
+---
+
+### 3.13 ADS-B (aircraft on 1090 MHz)
+
+Choose **ADS-B** from the mode row — beside DRM, with the demodulators rather
+than under DIGITAL, because it is something to point the radio at rather than
+something to work. Every civil aircraft in the sky transmits its identity,
+altitude, velocity and position on 1090 MHz, twice a second, in clear and with a
+checksum. The panel is a target list on the left and a radar picture on the
+right.
+
+**The frequency is chosen for you.** There is exactly one ADS-B channel,
+worldwide. Selecting the mode tunes to 1090.000 MHz unless the receiver is
+already looking at it, and the **1090.000** button in the panel header puts it
+back if you wander off.
+
+#### What you need
+
+A receiver that reaches 1090 MHz and streams at least **2 Msps**. Both are hard
+requirements and neither can be worked around downstream:
+
+- Mode S is a megabit a second, and every bit is split into two half-microsecond
+  halves. Deciding which half holds the energy takes at least one sample in each.
+  Below two megasamples a second there is nothing to slice.
+- The channel has to be inside the receiver's window. A downconverter can only
+  decimate a stream, never widen it.
+
+An RTL-SDR at its default 2.4 Msps is the classic receiver for this and is
+exactly right: the window is the whole stream and the decoder reads all of it.
+So are an Airspy, a HackRF, an SDRplay, a Pluto and a LimeSDR. What will not
+work is a transceiver handing over demodulated audio, or a front end you have
+decimated below 2 Msps — and in each case the panel says so in a sentence,
+rather than showing an empty list you would have to guess at.
+
+A quarter-wave antenna for 1090 MHz is 69 mm long. That, and a window, is
+usually enough for a hundred kilometres.
+
+#### The aircraft list
+
+One row per aircraft, keyed on its ICAO address — the 24-bit number assigned
+when it was registered, unique worldwide and unchanging.
+
+| Column | What it is |
+| --- | --- |
+| CALL | The flight identification it is broadcasting. Empty for the first few seconds: an aircraft sends its position twice a second and its callsign every five, so the address arrives first. The row shows the address until the callsign does. |
+| ICAO | The address, in hex, once there is a callsign to distinguish it from. |
+| ALT | Altitude. Flight level above 18 000 feet (`F350`), hundreds of feet below it (`045`), and `GND` on the ground. |
+| GS | Ground speed in knots. |
+| TRK | Track over ground, degrees true. |
+| V/S | Rate of climb or descent, feet per minute. |
+| SQK | The squawk — the four-digit code the crew set for air traffic control. Only some frames carry it; see below. |
+| KM | Range from your station. Shown once **My grid** is filled in ([§3.1](#31-general-considerations)). |
+| AGE | How long since anything at all was heard from it. |
+
+The chips above the list sort it; clicking the one already selected reverses the
+order. Clicking a row opens the full card below it — everything the table has no
+room for, including geometric altitude, turn rate, signal level and the last
+frame as hex — and selects the aircraft on the map. **CENTER** in the card puts
+it in the middle of the picture.
+
+A **greyed row** is an aircraft that is still being heard but has not reported a
+position for ten seconds. It stays on the list and comes off the map; see below.
+
+#### The radar picture
+
+![The ADS-B panel: the aircraft list and the radar picture](images/adsb-panel.jpg)
+
+Standard surveillance-display symbology, and each part of it is telling you
+something:
+
+- **A white square** is an aircraft. Everything up there is an aeroplane, so a
+  symbol that said which kind would be saying nothing; the square stays the same
+  size at every zoom, so a glance across a busy sector reads as one class of
+  thing. A dot inside it means the aircraft is on the ground.
+- **History dots** behind it are where it has been. Their spacing is its speed
+  and their curve is its turn, which is how a controller reads both before
+  reading any number on the screen.
+- **A leader line** ahead of it is where it will be in a minute. The *length* is
+  the speed: two aircraft with equal leaders are going equally fast, at any zoom.
+  It bends when the aircraft is turning.
+- **The data block** beside it is the callsign, the altitude and the speed — the
+  order every radar display in the world puts them in. On a crowded picture only
+  the selected and hovered targets keep theirs.
+
+Drag to pan, scroll to zoom, double-click to reframe. Your own position is
+marked once **My grid** is set.
+
+**A target with a stale position is not drawn at all.** Past the timeout it
+comes off the map — square, dots and block together — while staying on the list,
+greyed. It is deliberately not faded instead: a dim square at a half-minute-old
+position is still a claim about where an aeroplane is, made in the same ink as
+the true ones, and the map is the one place with no room for a hedge.
+
+#### Setup
+
+**SETUP** in the panel header opens the decoder's own settings.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Drop from map after | 10 s | Without a position report, the target leaves the map and its row greys. |
+| Drop from list after | 60 s | With nothing heard at all, the aircraft is forgotten. |
+| Trail length | 40 points | How many past positions are kept and drawn. |
+| Speed vector | 1 min | How far ahead the leader line reaches. Zero switches leaders off. |
+| Track at most | 300 aircraft | A ceiling, so a busy sector cannot grow without bound. The longest-silent go first. |
+
+#### What is decoded, and what is believed
+
+Two kinds of transmission arrive on this channel, and SDRoxide treats them very
+differently.
+
+**Extended squitters** (downlink formats 17 and 18) are what an aircraft
+broadcasts on its own: identity, category, barometric and geometric altitude,
+position, velocity, and its emergency state. They carry a plain 24-bit check
+sequence, so a frame either checks out or it does not. These prove themselves.
+
+**Surveillance replies** (formats 0, 4, 5, 16, 20 and 21) are answers to a
+ground radar's interrogation, and they carry an altitude or the squawk. Their
+check sequence has the aircraft's address *mixed into* it, because the
+interrogator already knew who it had asked — which means that to a receiver
+listening passively there is nothing in the frame to check it against. Taken
+alone, any 56 bits of noise "decode" to some address.
+
+So SDRoxide accepts one only when the address it yields already belongs to an
+aircraft heard from a verified squitter, recently. That is what buys you the
+squawk column and the faster altitude updates without inventing aeroplanes. It
+is also why a squawk appears for some aircraft and not others: it depends on
+whether a radar is interrogating them where you can hear the answer.
+
+**No error correction.** Other decoders will flip a bit, or two, looking for a
+frame that checks out; it recovers some weak transmissions and it also invents
+aircraft, and an invented aircraft on a map looks exactly like a real one.
+
+Two encodings are deliberately not decoded, and an aircraft using either shows no
+altitude rather than a wrong one: the 100-foot Gillham encoding, used above
+50 175 feet and by a few older transponders, and the metric encoding, which the
+standard provides for and nothing transmits.
+
+#### Trying it without an aerial
+
+There is a signal generator in the source tree that synthesises a sky:
+
+```
+cargo run --release -p sdroxide-adsb --example adsb_iq -- /tmp/sky.iq
+sdroxide --file /tmp/sky.iq --rate 2400000 --freq 1090000000 --mode ADS-B
+```
+
+Six aircraft at descending signal levels, flying. It proves the whole chain
+works; it does not prove the decoder works on air, because the transmitter and
+the receiver were written by the same hand. For that, put a real recording
+through `adsb_replay` and compare the aircraft it lists against another decoder
+on the same file.
 
 ---
 
@@ -10452,7 +10605,7 @@ sends them.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left, or 14,200,000 on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC or a moderate value). |
-| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM). Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B). Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (LNAH, TX/RX — `--probe` lists them). Default: the port the last session was left on, and failing that whatever the driver selects. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (BAND1, BAND2). |
 | `--server` | Run as a server (web client + WebSocket streaming backend). |
@@ -10538,6 +10691,7 @@ sdroxide stores its settings under the per-user config directory:
 | `wsjtx.json` | JSON | WSJT-X UDP broadcast: enabled, destination host and port, and the name clients see. |
 | `scanner.json` | JSON | The scanner: memories or a range, the range and channel step, the level that counts as busy, the dwell, how it resumes, and which memories to skip. |
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
+| `adsb.json` | JSON | ADS-B decoder ([§3.13](#313-ads-b-aircraft-on-1090-mhz)): the two timeouts, how many history dots to keep, how far ahead the speed vectors reach, and the ceiling on the aircraft table. Restored at startup, and — like `ism.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
 | `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on, which band they watch and how wide a window they get. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
 | `rtl433_flex.conf` | text | Your own ISM decoders, in rtl_433's "flex" syntax ([§5.5](#55-adding-your-own-decoders-flex-specs)). Written with a commented example the first time the ISM decoder runs, and never rewritten afterwards — like `bandplan.json`, it is yours to edit. A specification that does not pass its check is listed in the ISM window and skipped; the rest still load. **RELOAD DECODERS** in the ISM window applies an edit without a restart. |
 | `input.json` | JSON | Control inputs: keyboard bindings, panadapter mouse behaviour, mouse-button bindings, and the MIDI controller mapping. Belongs to the machine running the user interface, not the engine. |
@@ -11550,6 +11704,7 @@ using. Bind them under **Speech** on the Controls tab:
 | RFPAINT | RF Paint — transmit-only spectrum painting of text and images onto the waterfall. |
 | PACKET / PACKET-HF | AX.25 packet radio: 1200 baud Bell 202 or 9600 baud G3RUH on VHF/UHF FM, 300 baud AFSK on HF sideband. Carries Winlink sessions and offers the modem as a KISS TNC. See [11](#11-winlink-radio-email). |
 | APRS | Automatic Packet Reporting System — 1200 baud AX.25 on the region's shared channel, with a live map of every station heard, its own symbol per station, and messages you can send and answer. See [3.12](#312-aprs). |
+| ADS-B | Aircraft surveillance on 1090 MHz: a target list and a radar picture with history dots, speed vectors and data blocks. Receive only, and needs a receiver streaming at least 2 Msps. See [3.13](#313-ads-b-aircraft-on-1090-mhz). |
 
 ### Bands
 

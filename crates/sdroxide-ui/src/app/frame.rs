@@ -357,7 +357,7 @@ impl eframe::App for SdroxideApp {
                 self.retry_backoff = super::RETRY_MIN_S;
                 self.reconnect_now();
             }
-        } else if self.state.rx[0].mode.is_digital() {
+        } else if self.state.rx[0].mode.has_bottom_panel() {
             // Remember the voice-mode view once, so leaving FT8 can restore it
             // instead of leaving the panadapter zoomed to the sub-band.
             if self.view.pre_digi_view.is_none() {
@@ -370,7 +370,15 @@ impl eframe::App for SdroxideApp {
             // are large enough to read on the waterfall. RIFP straddles the
             // dial rather than sitting above it, so its window is symmetric
             // and as wide as the profile's channel.
-            let (sub_lo, sub_hi) = if mode.is_aprs() {
+            let (sub_lo, sub_hi) = if mode.is_adsb() {
+                // ADS-B is not worked inside a sub-band at all: a Mode S reply
+                // is megahertz wide and the decoder reads the whole receiver
+                // window. Framing it like a digital mode would zoom the
+                // panadapter to a few kilohertz of one pulse's spectrum, which
+                // is a view of nothing. The whole channel instead, which is
+                // also all there is on this band.
+                (dial - 1_500_000.0, dial + 1_500_000.0)
+            } else if mode.is_aprs() {
                 // APRS is deliberately *not* framed on its own channel.
                 //
                 // Every other digital mode is worked inside a sub-band, so
@@ -609,6 +617,8 @@ impl eframe::App for SdroxideApp {
                                     self.image_panel(ui, &mut cmds, mode);
                                 } else if mode.is_rf_paint() {
                                     self.rf_paint_panel(ui, &mut cmds, panel_h);
+                                } else if mode.is_adsb() {
+                                    self.adsb_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_aprs() {
                                     self.aprs_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_packet() {
@@ -771,6 +781,7 @@ impl eframe::App for SdroxideApp {
         self.memories_window(&ctx, &mut cmds);
         self.scanner_window(&ctx, &mut cmds);
         self.ism_window(&ctx, &mut cmds);
+        self.adsb_setup_window(&ctx, &mut cmds);
         self.rds_window(&ctx);
         self.drm_window(&ctx, &mut cmds);
         self.voice_window(&ctx, &mut cmds);
@@ -1193,6 +1204,7 @@ impl SdroxideApp {
                 // reconstructing badly.
                 RadioEvent::IsmReports(r) => self.ism_reports = r,
                 RadioEvent::IsmStatus(st) => self.ism_status = Some(st),
+                RadioEvent::AdsbStatus(st) => self.adsb_status = Some(st),
                 RadioEvent::SstvStatus(s) => {
                     // Adopt a *newly* detected RX mode for the next transmit, but
                     // don't re-apply a steady detection every frame — that would
