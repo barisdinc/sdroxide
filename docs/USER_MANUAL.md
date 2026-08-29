@@ -8333,10 +8333,22 @@ The **UI** tab holds display preferences, stored in `config.toml` under `[ui]`, 
 spoken announcements below them under `[speech]`:
 
 - **Layout** — which control strip the window wears. **Auto** picks one from the
-  window size and is what you want; **Desktop**, **Tablet** and **Phone** force
-  it, to see how the compact strips look without a phone to hand, or to keep the
-  menus in a small desktop window rather than a strip wrapped over three rows.
-  See [9.4](#94-phones-and-tablets) for what each one shows.
+  window size and is what you want; **Desktop**, **Tablet**, **Small screen**
+  and **Phone** force it, to see how the compact strips look without a phone to
+  hand, or to keep the menus in a small desktop window rather than a strip
+  wrapped over three rows. See [9.4](#94-phones-and-tablets) for what each one
+  shows.
+
+  **Small screen** is Tablet with everything pulled in — the single-row strip
+  and its compact readout, and the operating panels' chips and row spacing
+  tightened. It is for a screen like **1366×768**, which is wide enough for the
+  roomy layout and short enough that a decode list and a waterfall are fighting
+  over about six hundred points
+  ([issue #211](https://github.com/dividebysandwich/sdroxide/issues/211)).
+  **Auto** already tightens the panels on any window under about 820 points
+  tall, so a small laptop gets most of this without being told; the setting is
+  for the rest of it, and for anyone who wants the tighter panels in a window
+  on a large screen.
 - **Theme** — the colour scheme for the whole UI: **Default** (the navy, cyan
   and hot pink every screenshot in this manual shows), **Light** (white panels
   and near-black text, for a bright shack or a screen read in daylight),
