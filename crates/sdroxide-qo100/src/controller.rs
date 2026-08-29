@@ -13,6 +13,16 @@
 //!   window follows. So a dropped block instead *restarts* the rolling
 //!   buffer: fewer search windows under sustained backpressure, but every one
 //!   of them is a contiguous span of air.
+//!
+//!   Which block to restart from is the whole difficulty, and it is why every
+//!   block carries a sequence number rather than the realtime side merely
+//!   raising a flag. A block can only be dropped when the queue is *full*, so
+//!   at that instant the queue still holds a full depth of blocks that do
+//!   join up with the buffer. A flag would therefore be consumed by one of
+//!   *those* — clearing the buffer before the gap, throwing away good air,
+//!   and then splicing the real gap in with the flag already spent.
+//!   [`Iq::seq`] moves the decision onto the block itself, so the restart
+//!   lands exactly where the hole is.
 //! * `Drop` cannot simply join the worker — a sweep in progress would hold
 //!   the engine thread for as long as the sweep takes. A shared cancel flag,
 //!   polled between candidates inside `acquire`, brings that back to at most
@@ -22,7 +32,7 @@
 //! dropped even while the IQ queue is backed up.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
@@ -32,7 +42,14 @@ use sdroxide_types::Qo100Settings;
 use crate::bpsk::{self, FRAME_SECONDS};
 
 /// Realtime data, dropped on backpressure.
-struct Iq(Vec<Complex32>);
+struct Iq {
+    /// Where this block sits in the realtime side's own stream, counting the
+    /// blocks it had to drop as well as the ones that fit. The worker reads
+    /// the gaps off these numbers — see the module doc for why a bare "a drop
+    /// happened" flag could not do it.
+    seq: u64,
+    samples: Vec<Complex32>,
+}
 
 /// Control traffic, never dropped.
 enum Ctl {
@@ -73,6 +90,18 @@ const FREQ_STEP_HZ: f64 = 150.0;
 /// of the search width — see [`bpsk::acquire`].
 pub(crate) const DEMOD_RATE_HZ: f64 = 16_000.0;
 
+/// Whether a block numbered `seq` carries straight on from the run the worker
+/// has already buffered, `want_seq` being the number the next contiguous block
+/// would have. Anything else is a gap the realtime side dropped, and the
+/// buffer has to restart from `seq` rather than splice across it.
+///
+/// A free function so the rule is pinned by name: the decision has to be made
+/// per *block*, and making it off a shared "a drop happened" flag instead is
+/// the subtle way to get it wrong — see the module doc.
+fn continues_run(want_seq: Option<u64>, seq: u64) -> bool {
+    want_seq == Some(seq)
+}
+
 /// Bounded IQ queue depth. Roughly a second and a half of channel-rate audio
 /// at a typical device read, enough that an ordinary scheduling hiccup does
 /// not cost a window; sustained backpressure past this restarts the buffer
@@ -83,9 +112,9 @@ pub struct Qo100Controller {
     iq_tx: Sender<Iq>,
     ctl_tx: Sender<Ctl>,
     res_rx: Receiver<sdroxide_types::Qo100Status>,
-    /// Set true when the realtime side had to drop a block: the worker sees
-    /// it, throws away the spliced buffer and starts a fresh contiguous one.
-    spliced: Arc<AtomicBool>,
+    /// Numbers the blocks handed to [`Self::on_rx_iq`], dropped ones
+    /// included, so the worker can tell a gap from an ordinary hand-off.
+    next_seq: AtomicU64,
     /// Set true by `Drop` so a sweep in progress returns at the next
     /// candidate instead of running to completion under the engine thread's
     /// `join`.
@@ -98,20 +127,21 @@ impl Qo100Controller {
         let (iq_tx, iq_rx) = bounded::<Iq>(IQ_QUEUE_DEPTH);
         let (ctl_tx, ctl_rx) = unbounded::<Ctl>();
         let (res_tx, res_rx) = unbounded::<sdroxide_types::Qo100Status>();
-        let spliced = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let window_len = (rate_hz * window_seconds()).round() as usize;
         let keep_len = (rate_hz * keep_seconds()).round() as usize;
         let worker = std::thread::Builder::new()
             .name("sdroxide-qo100".into())
             .spawn({
-                let spliced = Arc::clone(&spliced);
                 let cancel = Arc::clone(&cancel);
                 move || {
                     let mut cfg = cfg;
                     let mut buf: Vec<Complex32> = Vec::with_capacity(window_len);
                     let (mut tried, mut locked) = (0u64, 0u64);
                     let mut last: Option<(f64, String, i64)> = None; // offset, text, unix
+                    // The `seq` the next contiguous block would carry; `None`
+                    // before the first one has arrived.
+                    let mut want_seq: Option<u64> = None;
                     loop {
                         select! {
                             recv(ctl_rx) -> msg => match msg {
@@ -119,16 +149,12 @@ impl Qo100Controller {
                                 Ok(Ctl::Stop) | Err(_) => break,
                             },
                             recv(iq_rx) -> msg => match msg {
-                                Ok(Iq(block)) => {
-                                    // A dropped block since the last read means
-                                    // `buf` now spans a discontinuity. Nothing
-                                    // coherent can come out of that, so start
-                                    // over from this block, which *is*
-                                    // contiguous with what follows it.
-                                    if spliced.swap(false, Ordering::Relaxed) {
+                                Ok(Iq { seq, samples }) => {
+                                    if !continues_run(want_seq, seq) {
                                         buf.clear();
                                     }
-                                    buf.extend_from_slice(&block);
+                                    want_seq = Some(seq.wrapping_add(1));
+                                    buf.extend_from_slice(&samples);
                                     if buf.len() < window_len {
                                         continue;
                                     }
@@ -180,20 +206,19 @@ impl Qo100Controller {
             iq_tx,
             ctl_tx,
             res_rx,
-            spliced,
+            next_seq: AtomicU64::new(0),
             cancel,
             worker: Some(worker),
         }
     }
 
     /// Realtime path: hand a block of channel-rate IQ to the worker.
-    /// Non-blocking; a block that will not fit is dropped and the worker is
-    /// told the buffer is now spliced so it restarts rather than searching a
-    /// buffer with a hole in it.
+    /// Non-blocking; a block that will not fit is dropped, and the sequence
+    /// number it consumed is what later tells the worker to restart its
+    /// buffer rather than search one with a hole in it.
     pub fn on_rx_iq(&self, iq: &[Complex32]) {
-        if self.iq_tx.try_send(Iq(iq.to_vec())).is_err() {
-            self.spliced.store(true, Ordering::Relaxed);
-        }
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let _ = self.iq_tx.try_send(Iq { seq, samples: iq.to_vec() });
     }
 
     /// Apply new settings (currently just the search width) to the running
@@ -263,6 +288,21 @@ mod tests {
         // is the grace. Just inside it, then well outside:
         assert!(lock_is_fresh(now_unix() - (FRAME_SECONDS * 2.5) as i64));
         assert!(!lock_is_fresh(now_unix() - (FRAME_SECONDS * 4.0) as i64));
+    }
+
+    /// The rule that keeps a search window whole. The case that matters is the
+    /// last one: a block arriving after a drop must restart the buffer *at
+    /// itself*, which is what carrying the number on the block buys over a
+    /// shared flag — a flag is consumed by whichever block is dequeued next,
+    /// and since a drop can only happen with the queue full, that is one of
+    /// the blocks still ahead of the gap.
+    #[test]
+    fn only_the_next_block_in_sequence_continues_the_buffered_run() {
+        assert!(!continues_run(None, 0), "nothing buffered yet is a fresh start");
+        assert!(continues_run(Some(7), 7), "the expected block carries straight on");
+        assert!(!continues_run(Some(7), 8), "one dropped block is still a gap");
+        assert!(!continues_run(Some(7), 260), "a queue's worth of drops likewise");
+        assert!(!continues_run(Some(7), 6), "and so is anything out of order");
     }
 
     #[test]

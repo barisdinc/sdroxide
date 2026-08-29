@@ -2083,8 +2083,13 @@ in SDR Console.
   5 kHz steps from ±5 to ±50 kHz. Start at the default ±5 kHz; widen it only if
   the beacon is not found, which means the LNB is further off than usual. A
   wider search asks the receiver for a wider capture and takes longer to sweep,
-  so it is not free — but the demodulator itself always runs at a fixed rate, so
-  even the widest setting stays comfortably ahead of real time.
+  so it is not free. The demodulator itself always runs at a fixed rate whatever
+  the capture, which keeps that in hand up to a point: the default ±5 kHz sweeps
+  in a fraction of a second and ±25 kHz in a few seconds, both comfortably
+  inside the window they are searching. ±50 kHz takes longer than the window
+  does to fill, so at the widest setting the decoder runs a core flat out and
+  gets through fewer windows than it receives. Widen it to find the beacon, then
+  bring it back down.
 - The **mini waterfall** draws the slice of spectrum being searched, with the
   measured beacon frequency marked once the decoder locks. It is only a picture:
   if the receiver is parked on another band the strip is blank and the window
@@ -2106,11 +2111,12 @@ in SDR Console.
 **APPLY CORRECTION** writes the corrected converter offset and reopens the
 receiver — the same brief interruption **Settings ▸ Radio ▸ Apply** makes, so a
 bad reading can never disturb a running receiver for more than that. The button
-stays disabled until the decoder has locked **twice** at the same frequency: a
-32-bit sync word matched within three bit errors and then a 16-bit CRC will pass
-by pure chance roughly once every couple of hours of searching, and one lock is
-not enough to change a setting on. After it is applied, the window shows what
-changed and when.
+stays disabled until the decoder has locked **twice** and the latest of those
+frames carried telemetry text: a 32-bit sync word matched within three bit
+errors and then a 16-bit CRC will pass by pure chance roughly once every couple
+of hours of searching, and one lock is not enough to change a setting on. The
+figure written is the one from that most recent lock. After it is applied, the
+window shows what changed and when.
 
 Because the coded frames the beacon alternates with are not decoded, a lock
 lands roughly every 20 seconds rather than every 10 — which is normal and not a

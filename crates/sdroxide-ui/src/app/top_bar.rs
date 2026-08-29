@@ -6405,7 +6405,10 @@ mod tests {
         assert_eq!(readout_digit_count(false, 0.0, 1_296_000_000.0), freq_display::DIGITS);
         // A 13 cm transverter (~2.256 GHz offset) is the nearest converter
         // below a 3 cm one and must not trip the extra column.
-        assert_eq!(readout_digit_count(false, -2_256_000_000.0, 144_000_000.0), freq_display::DIGITS);
+        assert_eq!(
+            readout_digit_count(false, -2_256_000_000.0, 144_000_000.0),
+            freq_display::DIGITS
+        );
     }
 
     #[test]

@@ -429,13 +429,9 @@ impl SdroxideApp {
 
         ui.add_space(6.0);
         ui.label(
-            RichText::new(status_line(
-                cfg.enabled,
-                status.as_ref(),
-                self.ctrl.engine_is_remote(),
-            ))
-            .size(9.5)
-            .color(theme::CYAN_DIM()),
+            RichText::new(status_line(cfg.enabled, status.as_ref(), self.ctrl.engine_is_remote()))
+                .size(9.5)
+                .color(theme::CYAN_DIM()),
         );
 
         let radio_cfg = self.ctrl.radio_config();
@@ -522,8 +518,8 @@ impl SdroxideApp {
                 egui::Button::new(RichText::new(" APPLY CORRECTION ").strong()),
             );
             let apply = apply.on_hover_text(if measured_hz.is_some() && !confirmed {
-                "Waiting for a second CRC-valid frame at this frequency before offering to write \
-                 it — one lock alone could be a chance match"
+                "Waiting for a second CRC-valid frame before offering to write this — one lock \
+                 alone could be a chance match"
             } else {
                 "Write the corrected converter/LNB offset and reopen the receiver — a brief \
                  interruption, the same one Settings ▸ Radio ▸ Apply makes"
