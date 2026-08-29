@@ -1122,9 +1122,12 @@ to transmit, and whether every over opens on the 1750 Hz burst. A channel that
 already has one comes up with the section open. Storing a memory captures
 whatever the DUPLEX and TONE controls are set to at the time — including plainly
 simplex with no tone, which is what lets the next recall take a shift back
-*off* rather than leaving the last repeater's on a simplex channel. The list
-shows what is stored beside the mode, so two memories on one dial read as the
-different channels they are. See
+*off* rather than leaving the last repeater's on a simplex channel. **Every
+recall sets DUPLEX and TONE**, including a channel from a `memories.json`
+written before this existed and one whose RPT section was never opened: those
+are read as plain simplex with no tone, because that is what the list is
+showing you. The list shows what is stored beside the mode, so two memories on
+one dial read as the different channels they are. See
 [2.18 Repeater operation](#218-repeater-operation-duplex-and-tone).
 
 The **Sort** row above the list says what order it is drawn in — **Stored** (as

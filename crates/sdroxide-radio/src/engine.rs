@@ -6127,8 +6127,9 @@ impl Engine {
                     rtty,
                     // Always captured, even plainly simplex with no tone: a
                     // repeater memory recalled after this one has to be able to
-                    // take the shift back off, and a channel that stored no
-                    // opinion could not.
+                    // take the shift back off. `None` survives only in channels
+                    // stored before this field existed, and a recall reads that
+                    // as simplex too — see `RecallMemory` below.
                     repeater: Some(self.state.repeater),
                 });
                 self.save_memories();
@@ -6154,9 +6155,17 @@ impl Engine {
                     // on resolves its shift against the frequency it is being
                     // recalled onto, and asking the band plan about the dial we
                     // are leaving would answer for the wrong band.
-                    if let Some(r) = m.repeater {
-                        self.set_repeater(r.clamped());
-                    }
+                    //
+                    // A channel stored before the field existed carries no
+                    // setup at all, and that is read as plain simplex rather
+                    // than as "leave whatever is set alone" (issue #204).
+                    // Nothing in the UI can express "no opinion" — the list
+                    // draws such a channel exactly like a simplex one — so
+                    // treating it as one is what the operator is being shown.
+                    // The alternative is the dangerous reading: recalling
+                    // 145.500 off a list that says 145.500 and transmitting
+                    // 600 kHz down with the last repeater's tone still on.
+                    self.set_repeater(m.repeater.unwrap_or_default().clamped());
                     if m.rtty.is_some() {
                         // Already in RTTY when recalled: the mode didn't change,
                         // so no rebuild happened and the live modem still holds
