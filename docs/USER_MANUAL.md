@@ -11353,6 +11353,22 @@ WGPU_BACKEND=vulkan sdroxide
 machine, and pinning it also turns the check above off — so `WGPU_BACKEND=gl`
 is how to force the steady path on a GPU sdroxide does not know about.
 
+**TUNE makes full power and FT8 makes full power, but speaking into the
+microphone makes milliwatts.**
+The transmitter is doing exactly what it is told: it was handed silence. TUNE is
+a carrier and FT8 is a synthesised burst, so neither goes anywhere near the
+microphone — a voice mode is the only thing that does, and if the microphone is
+not the card you are speaking into there is nothing to modulate. The drive
+slider, the power register and the meters all read correctly throughout, which
+is what makes it look like a power bug
+([#215](https://github.com/dividebysandwich/sdroxide/issues/215)).
+
+An over that goes out with nothing on the microphone now says so when you
+unkey — "That over went out with no audio". Pick the input under **Settings →
+General**; on a headset this is usually a separate device from the speaker, and
+"System Default" is whatever the desktop's sound settings point at rather than
+whatever is plugged in.
+
 **sdroxide died with `Failed to create staging buffer for index data`, or
 another panic naming `wgpu`, after running for a while.**
 The graphics driver refused an allocation and the renderer has no way to carry

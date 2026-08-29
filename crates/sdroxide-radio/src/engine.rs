@@ -1298,6 +1298,10 @@ struct TxChain {
 
 /// 10 ms of TX audio per iteration.
 const TX_AUDIO_BLOCK: usize = 480;
+/// The loudest a microphone may be over a whole voice over and still count as
+/// silent — about 60 dB below full scale, which is quieter than the noise floor
+/// of any sound card anyone transmits through.
+const SILENT_MIC_PEAK: f32 = 0.001;
 /// How far ahead of the transmitter a keying TCI client is asked to run
 /// (240 ms).
 ///
@@ -1857,6 +1861,10 @@ struct Engine {
     tx_eq_cfg: TxEqState,
     tx: Option<TxChain>,
     tx_active: bool,
+    /// The loudest the microphone got this over, and how many blocks of it were
+    /// modulated — see [`Engine::report_silent_microphone`].
+    voice_peak: f32,
+    voice_blocks: u32,
     /// Whether the radio's own PTT line is what is holding this over — set by
     /// [`Self::apply_hw_ptt`], and the reason its key-up is honoured.
     hw_ptt: bool,
@@ -2856,6 +2864,8 @@ fn engine_thread(
         tx_eq_cfg: TxEqState::default(),
         tx: None,
         tx_active: false,
+        voice_peak: 0.0,
+        voice_blocks: 0,
         hw_ptt: false,
         rig_tx: false,
         tx_freq_told: None,
@@ -8463,6 +8473,39 @@ impl Engine {
         }
     }
 
+    /// Say so when an over went out with nothing on the microphone.
+    ///
+    /// The one failure a transmit meter cannot show, because there is nothing
+    /// to show: the modulator was handed silence, so the transmitter made a few
+    /// milliwatts of nothing and every other control — the drive slider, the
+    /// power register, TUNE — reads exactly as it should. That is issue #215,
+    /// reported as "TUNE and FT8 make full power and SSB makes milliwatts",
+    /// which is what a microphone opening on the wrong sound card looks like
+    /// from the operator's side.
+    ///
+    /// Voice overs only, and only ones long enough to have said something: a
+    /// digital burst has no microphone by design, and neither has a tune.
+    fn report_silent_microphone(&mut self) {
+        let blocks = std::mem::take(&mut self.voice_blocks);
+        let peak = std::mem::take(&mut self.voice_peak);
+        // A tenth of a second, so a keyed-and-released PTT is not a complaint.
+        if blocks < 10 || peak > SILENT_MIC_PEAK {
+            return;
+        }
+        let what = if self.tci_tx {
+            "the TCI client sent none"
+        } else if self.mic.is_some() {
+            "the microphone sent nothing"
+        } else {
+            "there is no microphone open"
+        };
+        warn!(peak, blocks, "voice over with a silent microphone");
+        let _ = self.event_tx.send(RadioEvent::Notice(Some(format!(
+            "That over went out with no audio — {what}. Pick the right input under \
+             Settings → General."
+        ))));
+    }
+
     /// End a TCI-driven over: stop sourcing from the client, discard what it
     /// queued, and tell it we are no longer transmitting on its behalf.
     /// Idempotent — every path that could end the over calls it.
@@ -11315,6 +11358,7 @@ impl Engine {
             if !self.caps.full_duplex {
                 self.source.set_rx_paused(false);
             }
+            self.report_silent_microphone();
             self.tx = None;
             self.tx_active = false;
             // A burst belongs to the over that was carrying it; an over cut
@@ -11857,6 +11901,13 @@ impl Engine {
                 let take = self.mic_fifo.len().min(TX_AUDIO_BLOCK);
                 audio[..take].copy_from_slice(&self.mic_fifo[..take]);
                 self.mic_fifo.drain(..take);
+                // What the microphone actually delivered this over, before any
+                // gain: a transmitter making milliwatts of voice while TUNE
+                // makes full power is a silent microphone every time, and
+                // nothing on screen said so (issue #215).
+                self.voice_peak =
+                    self.voice_peak.max(audio[..take].iter().fold(0.0f32, |m, s| m.max(s.abs())));
+                self.voice_blocks += 1;
 
                 // Mic gain is the operator's microphone control; a TCI client sets
                 // its own level and uses `drive` for power, so it is left alone.
@@ -12080,6 +12131,11 @@ impl Engine {
             let take = self.mic_fifo.len().min(TX_AUDIO_BLOCK);
             audio[..take].copy_from_slice(&self.mic_fifo[..take]);
             self.mic_fifo.drain(..take);
+            // See the modulating path's copy of this: an over with nothing on
+            // the microphone is worth saying out loud (issue #215).
+            self.voice_peak =
+                self.voice_peak.max(audio[..take].iter().fold(0.0f32, |m, s| m.max(s.abs())));
+            self.voice_blocks += 1;
             // A TCI client sets its own audio level; the mic-gain control is for
             // the operator's microphone and would double-scale it.
             let gain = if self.tci_tx { 1.0 } else { self.state.tx.mic_gain * 2.0 };
