@@ -7420,7 +7420,10 @@ a DSP one.
 **Bias tee.** About 3 V at 50 mA on the antenna port, for an active antenna or a
 preamp. A HackRF One or Pro only — the Jawbreaker and the rad1o have no such
 circuit, and on those sdroxide does not send the command at all and says so
-rather than leaving a switch that quietly does nothing.
+rather than leaving a switch that quietly does nothing. A board that refuses the
+command anyway — the firmware answers it with a stall on anything that is not a
+One, an r9 or a Pro, and some boards do not identify themselves as any of those
+— is a radio with no antenna-port power, not a radio that will not open.
 
 ##### Transmit
 

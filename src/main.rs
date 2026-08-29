@@ -1512,7 +1512,15 @@ fn open_soapy_source(
     _settings: &Settings,
     _radio: &RadioConfig,
 ) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
-    bail!("SoapySDR support is not compiled into this build")
+    // The message a fresh install of a `-no-soapysdr` package meets, because
+    // `Backend::Soapy` is what an unconfigured `radio.json` says (issue #220).
+    // So it has to name the way out rather than only the fault.
+    bail!(
+        "SoapySDR support is not compiled into this build — open Settings → Radio and pick a \
+         built-in interface (HackRF, RTL-SDR, Airspy, AirspyHF+, SDRplay, RX-888, LimeSDR, \
+         PlutoSDR, HPSDR, a CAT rig, a network radio…), or install the SoapySDR build of \
+         sdroxide"
+    )
 }
 
 /// Build the CAT + sound-card source and its capabilities from radio.json.
