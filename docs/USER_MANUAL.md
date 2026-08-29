@@ -1555,6 +1555,19 @@ is not something to do to somebody else's machine by accident: it opens a
 configuration there and starts an engine, and everyone else connected to that
 station gets a tab for it.
 
+**Rearranging the strip.** The buttons in Settings → Radio can be **dragged**
+into any order you like: pick one up, and a cyan caret shows where it will land.
+The main window's tab strip follows the same order, and it is remembered between
+sessions. A short drag that never really moves is still a click, so switching
+radios costs exactly what it did before.
+
+What the order does *not* change is which radio is the station's first. That one
+holds the shared network services, takes the command line's settings and the
+configuration paths every earlier version used, and is the one radio that cannot
+be closed — wherever on the strip you put it. Connections to other stations can
+be dragged about too, but they are in no roster here, so they come back at the
+end of the strip next time.
+
 **Adding somebody else's station.** A radio in a tab does not have to be
 attached to this machine. **Settings → Remote** takes the address of an sdroxide
 server and gives it a tab of its own, exactly like a local radio

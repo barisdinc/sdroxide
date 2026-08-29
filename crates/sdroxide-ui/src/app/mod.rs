@@ -941,6 +941,16 @@ pub(crate) enum RadioTabRequest {
     /// delete somebody's radio. The tab named here is a *tab* id; the shell
     /// translates it into the id its station knows it by.
     RemoveFromStation(u32),
+    /// Show the radios in this left-to-right order (issue #224): the whole
+    /// strip, by tab id, as the operator dragged it.
+    ///
+    /// The whole order rather than "move this one there" so that applying it is
+    /// idempotent and cannot half-happen: the shell sorts its tabs to match and
+    /// ignores an id it does not have. Only this machine's own radios are
+    /// recorded — a connection is not in any roster here — so a reordered
+    /// connection stays where it was put for the session and comes back at the
+    /// end of the strip next time.
+    Reorder(Vec<u32>),
 }
 
 impl SdroxideApp {
