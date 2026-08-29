@@ -16,8 +16,9 @@ use sdroxide_adsb::{AdsbAction, AdsbController};
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
     AprsController, CwController, DigiAction, DigiController, DigiEngine, FsqController,
-    HellController, Js8Controller, PacketController, RadeController, RfPaintController,
-    RifpController, SstvController, TextModemController, WefaxController, WsprController,
+    HellController, Js8Controller, NavtexController, PacketController, RadeController,
+    RfPaintController, RifpController, SstvController, TextModemController, WefaxController,
+    WsprController,
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
@@ -5085,6 +5086,12 @@ impl Engine {
             Box::new(SstvController::new(mode, self.digi_config.clone(), tap_rate))
         } else if mode.is_wefax() {
             Box::new(WefaxController::new(self.digi_config.clone(), tap_rate))
+        } else if mode == Mode::Navtex {
+            // Ahead of the fall-through: NAVTEX has the shape of a keyboard
+            // mode and none of its behaviour — no callsign, no transmitter, and
+            // a framing of its own — and nothing further down would notice it
+            // had been handed a maritime safety broadcast.
+            Box::new(NavtexController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_rifp() {
             Box::new(RifpController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_aprs() {
@@ -12477,6 +12484,7 @@ fn rig_mode_class(m: Mode) -> u8 {
         | Mode::Rtty
         | Mode::Sstv
         | Mode::Wefax
+        | Mode::Navtex
         | Mode::Olivia
         | Mode::Thor
         | Mode::Fsq

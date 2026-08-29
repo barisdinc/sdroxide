@@ -96,7 +96,8 @@ pub use contacts::FsqContact;
 pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};
 pub use digi::{
     ClockHealth, CwStatus, Decode, DecodeSort, DigiConfig, DigiStatus, DxpedMode, FOX_MAX_SLOTS,
-    FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg, HOUND_ZONE_MAX_HZ, HellVariant, PACKET_HEARD_MAX,
+    FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg, HOUND_ZONE_MAX_HZ, HellVariant,
+    NAVTEX_MESSAGE_MAX, NAVTEX_TONE_HZ, NavtexMessage, NavtexStatus, PACKET_HEARD_MAX,
     PACKET_TERM_LINE_MAX, PACKET_TERM_MAX, PacketBaud, PacketHeard, PacketLink, PacketLinkOwner,
     PacketStatus, PacketTermKind, PacketTermLine, QsoLive, QsoRecord, QsoStep, QueuedCall,
     RTTY_CENTER_HZ, RadeStatus, TX_AUDIO_LEVEL_MIN, TX_AUDIO_LEVEL_MIN_DB, ThorMode,

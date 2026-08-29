@@ -629,6 +629,8 @@ impl eframe::App for SdroxideApp {
                                     self.rade_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_wefax() {
                                     self.wefax_panel(ui, &mut cmds, panel_h);
+                                } else if mode == Mode::Navtex {
+                                    self.navtex_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_image() {
                                     self.image_panel(ui, &mut cmds, mode);
                                 } else if mode.is_rf_paint() {

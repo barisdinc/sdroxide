@@ -22,6 +22,7 @@ pub(in crate::app) mod cw;
 pub(in crate::app) mod decodes;
 pub(in crate::app) mod fsq;
 pub(in crate::app) mod js8;
+mod navtex;
 pub(in crate::app) mod packet;
 pub(in crate::app) mod rade;
 pub(in crate::app) mod rf_paint;
@@ -71,6 +72,7 @@ pub(in crate::app) fn panel_panes(mode: Mode) -> &'static [&'static str] {
         // downlink, and the aircraft are not listening.
         Mode::Adsb => &["AIRCRAFT", "MAP"],
         Mode::Wefax => &["CHART", "SAVED"],
+        Mode::Navtex => &["MESSAGES", "READING"],
         Mode::RfPaint => &["TEXT", "IMAGE"],
         // The keyboard modes and RADE are one column already: receive above,
         // what you are sending below it.
@@ -359,6 +361,12 @@ fn digi_dial_freqs(mode: Mode) -> &'static [(&'static str, f64)] {
         // from and a band to be on, not a place anybody is transmitting RTTY
         // (issue #214). Store the real one in a memory.
         Mode::RttyFm => &[("6m", 50_150_000.0), ("2m", 145_500_000.0), ("70cm", 433_500_000.0)],
+        // The three NAVTEX channels, as *dial* frequencies: the service quotes
+        // the assigned frequency (518, 490, 4209.5 kHz), which for an F1B
+        // emission is the centre of the two tones, so upper sideband sits
+        // 1700 Hz below it — see `NAVTEX_TONE_HZ`. Labelled by the channel,
+        // because that is what a schedule names.
+        Mode::Navtex => &[("518", 516_300.0), ("490", 488_300.0), ("4209.5", 4_207_800.0)],
         // Olivia activity centres (USB dial).
         Mode::Olivia => &[
             ("80m", 3_581_000.0),

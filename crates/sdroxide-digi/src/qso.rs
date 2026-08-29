@@ -1006,6 +1006,7 @@ impl QsoMachine {
             fsq_messages: Vec::new(),
             rade: None,
             packet: None,
+            navtex: None,
             aprs: None,
             js8: None,
             fox_queue: self.fox.as_ref().map(Fox::status).unwrap_or_default(),

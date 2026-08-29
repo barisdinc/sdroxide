@@ -200,6 +200,16 @@ pub const FOX_MAX_SLOTS: u8 = 5;
 /// it — see [`Mode::holds_standard_tones`](crate::Mode::holds_standard_tones).
 pub const RTTY_CENTER_HZ: f32 = 2210.0;
 
+/// Where a NAVTEX signal's tone pair sits above the dial, in Hz.
+///
+/// The service's channel frequencies — 518, 490 and 4209.5 kHz — are the
+/// *assigned* frequency, and for an F1B emission that is the centre of the two
+/// tones rather than either of them. So a receiver in upper sideband tunes
+/// 1700 Hz below the channel and the tones land at 1615 and 1785 Hz, which is
+/// where the decoder looks for them. Fixed by the standard: unlike a keyboard
+/// mode's audio offset, there is nothing here for an operator to choose.
+pub const NAVTEX_TONE_HZ: f32 = 1700.0;
+
 impl DxpedMode {
     pub const ALL: [DxpedMode; 3] = [DxpedMode::Normal, DxpedMode::Hound, DxpedMode::Fox];
 
@@ -393,6 +403,11 @@ pub struct DigiStatus {
     /// AX.25 packet: channel and link state, when that mode is active.
     #[serde(default)]
     pub packet: Option<PacketStatus>,
+    /// NAVTEX: the messages received and the live text, when that mode is
+    /// active. `None` in every other mode, so the panel that draws it is its
+    /// own "are we in NAVTEX?" test — the rule the modes above follow.
+    #[serde(default)]
+    pub navtex: Option<NavtexStatus>,
     /// APRS: the stations on the map, the messages, and the channel. `None`
     /// in every other mode, so the panel that draws it is its own "are we in
     /// APRS?" test — the same rule [`DigiStatus::js8`] follows.
@@ -636,6 +651,101 @@ pub struct PacketStatus {
     pub term_partial: String,
 }
 
+/// One NAVTEX broadcast, as its header names it.
+///
+/// The header is four characters after `ZCZC`: the transmitter, what kind of
+/// message it is, and a serial number. Together they are what a receiver
+/// *filters* on — a station that has already printed B1=`S`, B2=`A`, serial 42
+/// does not print it again when it is repeated four hours later — so they are
+/// parsed out rather than left in the text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavtexMessage {
+    /// B1: which transmitter sent it, `A`..`Z` — a letter allocated by the
+    /// NAVAREA co-ordinator, and the only identification a NAVTEX broadcast
+    /// carries.
+    pub station: char,
+    /// B2: the subject. `A` navigational warning, `B` meteorological warning,
+    /// `C` ice report, `D` search and rescue, `E` meteorological forecast,
+    /// `L` a further navigational warning, `Z` no messages on hand — among
+    /// others. `A`, `B` and `D` may not be turned off by a ship's receiver,
+    /// which is why they are the ones this program never hides either.
+    pub kind: char,
+    /// B3B4: the serial number, 01–99, `00` for a message that must always be
+    /// printed.
+    pub serial: u8,
+    /// The body, as received, `*` where a character was lost.
+    pub text: String,
+    /// Unix time the header arrived.
+    pub at: i64,
+    /// Whether the closing `NNNN` was seen. A message that ends because the
+    /// next one started, or because the signal went, is still worth showing —
+    /// and worth marking, because half a gale warning is not a gale warning.
+    pub complete: bool,
+    /// Characters the FEC could not recover.
+    pub lost: u32,
+}
+
+impl NavtexMessage {
+    /// What the subject letter means, for the panel.
+    #[must_use]
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind {
+            'A' => "Navigational warning",
+            'B' => "Meteorological warning",
+            'C' => "Ice report",
+            'D' => "Search and rescue",
+            'E' => "Meteorological forecast",
+            'F' => "Pilot service",
+            'G' => "AIS / DECCA",
+            'H' => "LORAN",
+            'I' => "Alpha",
+            'J' => "SATNAV",
+            'K' => "Other electronic navaid",
+            'L' => "Navigational warning (additional)",
+            'T' => "Test transmission",
+            'V' | 'W' | 'X' | 'Y' => "Special service",
+            'Z' => "No messages on hand",
+            _ => "Unknown",
+        }
+    }
+
+    /// Whether a ship's receiver is forbidden to reject this class. The three
+    /// that cannot be switched off are the ones somebody's life may depend on,
+    /// and sdroxide does not offer to hide them either.
+    #[must_use]
+    pub fn is_mandatory(&self) -> bool {
+        matches!(self.kind, 'A' | 'B' | 'D')
+    }
+}
+
+/// Messages kept. A station transmits on a ten-minute slot every four hours
+/// and its neighbours fill the rest, so this is a day or two of a busy area.
+pub const NAVTEX_MESSAGE_MAX: usize = 200;
+
+/// What the NAVTEX receiver is doing.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NavtexStatus {
+    /// Whether the character phase is locked — the mode's own carrier detect.
+    pub in_sync: bool,
+    /// Smoothed level at the two tones, for a meter.
+    pub level: f32,
+    /// Messages received, newest last.
+    pub messages: Vec<NavtexMessage>,
+    /// The message being received now, if one is open.
+    pub live: Option<NavtexMessage>,
+    /// Everything decoded, whether or not it was inside a message — a coast
+    /// station's phasing and its idle chatter included. The honest view when a
+    /// header is missed.
+    pub text: String,
+    /// Characters taken straight, repaired from the repeat, and lost. The only
+    /// quality figure a mode with no checksum has.
+    pub direct: u64,
+    pub repaired: u64,
+    pub lost: u64,
+    /// Whether the tones are being read the other way up.
+    pub reverse: bool,
+}
+
 /// Most frames kept for the monitor pane. A busy VHF channel produces a few a
 /// second, and the pane is a rolling view rather than a log.
 pub const PACKET_HEARD_MAX: usize = 200;
@@ -704,6 +814,7 @@ impl DigiStatus {
             fsq_messages: Vec::new(),
             rade: None,
             packet: None,
+            navtex: None,
             aprs: None,
             js8: None,
             fox_queue: Vec::new(),
@@ -1007,6 +1118,13 @@ pub struct DigiConfig {
     /// nonsense until this is set — the "Reverse"/RV control other RTTY
     /// programs offer.
     pub rtty_reverse: bool,
+    /// The same swap for NAVTEX, and needed for the same reason: the tones are
+    /// fixed by the standard but which of them a receiver hears as a mark
+    /// depends on the sideband it is listening on. Off by default, which is
+    /// upper sideband on the channel frequency — the way every published
+    /// tuning instruction for the service reads.
+    #[serde(default)]
+    pub navtex_reverse: bool,
     /// Let the RTTY decoder track tuning error rather than staying pinned to
     /// the cursor. On by default; the matched-filter detector is much less
     /// forgiving of mistuning than a wideband discriminator would be.
@@ -1613,6 +1731,7 @@ impl Default for DigiConfig {
             rtty_baud: 45.45,
             rtty_shift_hz: 170.0,
             rtty_reverse: false,
+            navtex_reverse: false,
             rtty_afc: true,
             olivia_tones: 32,
             olivia_bw_hz: 1000.0,

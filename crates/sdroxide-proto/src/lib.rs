@@ -873,7 +873,21 @@ use sdroxide_types::{
 /// that asked for it, because the alternative is a gigabyte a minute over the
 /// link. That is a property of the feature and not of the wire, so nothing here
 /// carries the samples.
-pub const PROTO_VERSION: u16 = 103;
+/// **104** — NAVTEX (issue #212).
+///
+/// `Mode::Navtex` is appended to [`sdroxide_types::Mode`] and
+/// [`sdroxide_types::DigiStatus`] gains `navtex`
+/// ([`sdroxide_types::NavtexStatus`]) beside the other per-mode panes, carrying
+/// the messages received, the one arriving and the loose text.
+/// [`sdroxide_types::DigiConfig`] gains `navtex_reverse`, the tone-sense
+/// control — the mode's only setting, since there is nothing to transmit and no
+/// callsign to give.
+///
+/// Appending a mode is on its own enough to force the bump, for the reason
+/// v102's `Mode::RttyFm` and v99's `Mode::Adsb` were: a v103 peer handed the
+/// new one has no variant to decode it into and desynchronises on the rest of
+/// the message.
+pub const PROTO_VERSION: u16 = 104;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

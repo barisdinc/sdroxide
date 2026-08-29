@@ -148,6 +148,7 @@ impl<'a> Speaker<'a> {
             // A word, not four letters: nobody says "A P R S" out loud.
             Mode::Aprs => "aprs",
             Mode::Wefax => "wefax",
+            Mode::Navtex => "nav tex",
             Mode::Js8 => "J S eight",
             // Pronounced "whisper" — the joke the name is built on.
             Mode::Wspr => "whisper",

@@ -386,6 +386,9 @@ pub struct SdroxideApp {
     /// Fade clock for the sub-audible tone popup, like `skimmer_popup_since`.
     tone_popup_since: Option<f64>,
     /// Fade clock for the noise-reduction picker, like `tone_popup_since`.
+    /// Which NAVTEX message the reading pane is showing, or `None` for the one
+    /// arriving.
+    navtex_open: Option<usize>,
     nr_popup_since: Option<f64>,
     rec_popup_since: Option<f64>,
     /// Fade clocks for the repeater popups in the VFO box — the DUPLEX shift
@@ -1112,6 +1115,7 @@ impl SdroxideApp {
             skimmer_popup_since: None,
             layers_popup_since: None,
             tone_popup_since: None,
+            navtex_open: None,
             nr_popup_since: None,
             rec_popup_since: None,
             duplex_popup_since: None,

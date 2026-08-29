@@ -48,6 +48,7 @@ pub fn make_modulator(mode: Mode, rate: f64, passband: (f32, f32)) -> Option<Box
         | Mode::Rtty
         | Mode::Sstv
         | Mode::Wefax
+        | Mode::Navtex
         | Mode::Olivia
         | Mode::Thor
         | Mode::Fsq

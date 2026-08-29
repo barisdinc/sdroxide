@@ -16,7 +16,7 @@ or connects to a remote sdroxide server.
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
     - [2.21 QO-100 beacon calibration](#221-qo-100-beacon-calibration)
-3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B)](#3-digital-modes)
+3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
@@ -292,7 +292,7 @@ popup with three rows:
   has a standard calling frequency carry a cyan underline; see
   [§3.1](#31-general-considerations).
 - **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB SPEC`.
-- **DIGITAL:** `FT8 FT4 PSK RTTY RTTY-FM OLIVIA THOR FSQ HELL SSTV SSTV-FM RIFP RFPAINT RADE` (see
+- **DIGITAL:** `FT8 FT4 PSK RTTY RTTY-FM OLIVIA THOR FSQ HELL SSTV SSTV-FM NAVTEX RIFP RFPAINT RADE` (see
   [Digital modes](#3-digital-modes)).
 
 ![The band and mode selector popup](images/04-band-mode-popup.jpg)
@@ -3988,6 +3988,61 @@ strong aircraft 30 dB or more above the noise floor; if the loudest thing in the
 capture is 10 dB above it, no decoder will find anything in it.
 
 ---
+
+### 3.14 NAVTEX
+
+Choose **NAVTEX** from the DIGITAL row. It is the maritime safety broadcast
+every coast station in the world sends — navigational and meteorological
+warnings, search-and-rescue bulletins, ice reports, pilot notices — and one of
+the few utility services still worth leaving a receiver on
+([issue #212](https://github.com/dividebysandwich/sdroxide/issues/212)).
+
+**Receive only, and deliberately.** The service belongs to coast stations and
+sits next to distress traffic; an amateur transmitting on it would be putting
+out safety information nobody may act on. There is no transmit half of this
+panel and no callsign to set.
+
+**The channels.** The band buttons are the three services: **518 kHz**
+(international, always English), **490 kHz** (national language, so whatever
+your nearest coast station broadcasts in) and **4209.5 kHz** (tropical). What
+they tune is 1.7 kHz *below* the channel, because the quoted frequency is the
+assigned one — the centre of the two tones — and a receiver in upper sideband
+has to sit below it to put them at 1615 and 1785 Hz. That arithmetic is done
+for you, and the readout still says where the signal is.
+
+**What you see.** Two panes:
+
+- **MESSAGES** — one entry per message, newest first, headed by the four
+  characters the service identifies it with: the transmitter (a letter the
+  NAVAREA co-ordinator allocated), the subject, and a serial number.
+  Navigational warnings, meteorological warnings and search-and-rescue
+  bulletins are shown in red — a ship's receiver is not allowed to filter those
+  three out, and sdroxide does not offer to either. A message that was cut
+  short, or that lost characters, says so under its heading.
+- **READING** — the message selected, or the one arriving. Monospaced and
+  unwrapped, because a NAVTEX message is laid out in columns by the station
+  that sent it and reflowing it destroys the only formatting it has. With
+  nothing selected and nothing arriving it shows everything decoded, message or
+  not, which is the honest view when a header has been missed.
+
+**A station repeats itself, and that is the point.** Each transmitter has a ten
+minute slot every four hours, and it sends the same messages again on the next
+one. sdroxide keeps *one* entry per message — a repeat replaces the copy already
+held when it is better, meaning it reached its `NNNN` where the first did not, or
+lost fewer characters. So a warning that faded halfway through fills itself in
+over the next few hours instead of appearing four times half-copied.
+
+**The two numbers beside SYNC** are what the mode's error correction actually
+did. NAVTEX has no checksum: every character is sent twice, five character times
+apart, in an alphabet where exactly four of seven bits are marks — so a single
+bit error makes a code that cannot exist, and the repeat is what replaces it.
+*Repaired* counts the characters taken from the repeat and *lost* the ones where
+both copies were bad; a lost character stands in the text as `*`, marked rather
+than hidden, because half a gale warning has to look like half a gale warning.
+
+**REV** swaps the mark and space tones, for a signal received on the other
+sideband. Off is upper sideband on the channel, which is what every published
+tuning instruction for the service says.
 
 ## 4. Skimmers
 
@@ -12033,6 +12088,7 @@ using. Bind them under **Speech** on the Controls tab:
 | PSK | PSK31 keyboard mode (BPSK31 / varicode). |
 | RTTY | RTTY keyboard mode (Baudot; selectable shift and baud), on a sideband. |
 | RTTY-FM | The same modem on an FM carrier, the way a club bulletin is still sent on VHF. |
+| NAVTEX | The maritime safety broadcast on 518, 490 and 4209.5 kHz: navigational and meteorological warnings, search-and-rescue bulletins and ice reports, framed into messages. Receive only. |
 | OLIVIA | Robust MFSK keyboard mode (selectable tones/bandwidth). |
 | THOR | DominoEX-family IFK keyboard mode with FEC (THOR4…THOR32). |
 | FSQ | Fast Simple QSO — 33-tone IFK with directed (FSQCALL) messaging and images. |

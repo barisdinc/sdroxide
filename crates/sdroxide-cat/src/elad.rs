@@ -241,6 +241,7 @@ fn mode_digit(m: Mode) -> char {
         | Mode::Spec
         | Mode::Sstv
         | Mode::Wefax
+        | Mode::Navtex
         | Mode::RfPaint => '2',
     }
 }
