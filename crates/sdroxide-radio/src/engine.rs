@@ -2190,6 +2190,17 @@ struct Engine {
     /// not offer are held rather than dropped, so swapping back to the front
     /// end they belong to brings them back.
     want_gains: (GainSet, GainSet),
+    /// How far the operator wants the raw IQ decimated, held for the same
+    /// reason [`Self::want_gains`] is and re-asked of every front end that is
+    /// opened.
+    ///
+    /// Separate from [`RadioState::decimation`], which is what the *current*
+    /// device can actually carry. The two differ exactly when the front end has
+    /// no span to throw away — a rig on a sound card, and the 48 kHz stand-in a
+    /// radio switched off runs on — and keeping only the effective figure is
+    /// what used to make switching a radio off and on again forget the
+    /// decimation outright, session file included (issue #209).
+    want_decimation: u32,
     /// Where this engine's radio-scoped files live. See [`EngineConfig::store`].
     store: sdroxide_config::Store,
     /// This engine's radio id. See [`EngineConfig::instance`].
@@ -2367,7 +2378,20 @@ fn decimation_for(want: u32, device_rate_hz: f64, audio_mode: bool) -> u32 {
     if audio_mode || want < 2 {
         return 1;
     }
-    (1u32 << want.ilog2()).min(sdroxide_types::max_decimation(device_rate_hz))
+    wanted_decimation(want).min(sdroxide_types::max_decimation(device_rate_hz))
+}
+
+/// What the operator asked for, as a figure worth *remembering*: rounded down
+/// to a power of two and capped at [`sdroxide_types::MAX_DECIMATION`], but with
+/// no device rate involved.
+///
+/// The counterpart to [`decimation_for`], which answers the other half of the
+/// question — what this particular front end can carry. Kept apart because the
+/// answer to the second one is worthless as a memory: a radio switched off is
+/// on a 48 kHz stand-in that can carry nothing, and letting that overwrite the
+/// operator's choice is what issue #209 was.
+fn wanted_decimation(want: u32) -> u32 {
+    if want < 2 { 1 } else { (1u32 << want.ilog2()).min(sdroxide_types::MAX_DECIMATION) }
 }
 
 /// Drop the commands at the end of a drained batch that a later one in the same
@@ -2553,8 +2577,11 @@ fn engine_thread(
     // and the receiver chain are built at, and building them at the device rate
     // first would mean tearing them down again before the first block.
     let session = engine_cfg.remember_session.then(|| engine_cfg.store.load_session());
-    state.decimation =
-        decimation_for(session.as_ref().map_or(1, |s| s.decimation), radio_fs, audio_mode);
+    // Held separately from what this front end can carry: a start on a stand-in
+    // (a radio switched off, a rig that isn't there yet) must not be the thing
+    // that forgets it — see `Engine::want_decimation`.
+    let want_decimation = wanted_decimation(session.as_ref().map_or(1, |s| s.decimation));
+    state.decimation = decimation_for(want_decimation, radio_fs, audio_mode);
     let decim = (state.decimation > 1).then(|| Decimator::new(state.decimation));
     state.sample_rate = radio_fs / state.decimation as f64;
 
@@ -2859,6 +2886,7 @@ fn engine_thread(
         session,
         want_antenna,
         want_gains,
+        want_decimation,
         store: engine_cfg.store,
         instance: engine_cfg.instance,
         primary: engine_cfg.primary,
@@ -9740,7 +9768,10 @@ impl Engine {
             tx_eq: self.state.tx.eq,
             squelch_db: self.state.rx[0].squelch_db,
             noise_reduction: self.state.rx[0].noise_reduction,
-            decimation: self.state.decimation,
+            // The standing choice again, not what the front end of the moment
+            // could do with it: a session written while the radio was switched
+            // off would otherwise put 1 on disk and lose it for good.
+            decimation: self.want_decimation,
             repeater: self.state.repeater,
             // What the operator asked for rather than what the device currently
             // reports, for the antennas' reason again: a front end with no gain
@@ -9943,6 +9974,10 @@ impl Engine {
     /// factor that works, so the state the operator is shown is always the one
     /// the receiver is actually running.
     fn set_decimation(&mut self, factor: u32) {
+        // Noted before the clamp, and whether or not anything moves: this is
+        // the operator's standing choice, and it outlives the front end that
+        // happens to be open when they make it.
+        self.want_decimation = wanted_decimation(factor);
         let factor = decimation_for(factor, self.radio_fs, self.audio_mode);
         if factor == self.state.decimation {
             return;
@@ -10195,7 +10230,7 @@ impl Engine {
         // The decimation is the operator's, so it carries across the swap — but
         // re-asked of the new front end, which may not have the bandwidth to
         // spare for it (or, in audio mode, any IQ to decimate at all).
-        let decimation = decimation_for(self.state.decimation, self.radio_fs, self.audio_mode);
+        let decimation = decimation_for(self.want_decimation, self.radio_fs, self.audio_mode);
         self.decim = (decimation > 1).then(|| Decimator::new(decimation));
 
         // A swap changes the front end, not the operating position. The mode,
