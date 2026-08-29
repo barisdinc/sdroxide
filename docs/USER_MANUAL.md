@@ -1293,7 +1293,7 @@ is audible.
   dial plus that pitch — and it is what to log and what to give on the air. The
   big readout at the top of the window is the dial, which sits a sidetone-pitch
   *below* the signal, so with a 700 Hz pitch it reads 700 Hz low. The logbook's
-  **+ NEW ENTRY** ([3.2.6](#326-logging-and-the-logbook)) fills itself in from
+  **+ NEW ENTRY** ([3.2.7](#327-logging-and-the-logbook)) fills itself in from
   the same figure, not from the dial.
 - **On a transceiver that keys its own transmitter, that same figure is what
   the radio's VFO reads.** It has to be: the rig makes the carrier itself, on
@@ -2384,6 +2384,9 @@ Click **SETUP** in the QSO area to open the **FT8 / FT4 / FT2 Setup** window:
 - **TX watchdog / Give up after** — how long unattended transmitting may
   continue with no progress, and how many unanswered calls to one station are
   worth making. Both 0 to disable.
+- **Contest** — the special operating activity, if any: **None** or
+  **EU VHF Contest** (see [Contest operation](#325-contest-operation-eu-vhf)).
+  **Serial** is the number the next exchange will carry.
 - **DXpedition** — which side of an FT8 or FT2 pile-up you are on: **Normal**,
   **Hound**, or **Fox** (see [DXpedition mode](#324-dxpedition-mode-hound-and-fox)).
   **Fox signals** sets how many stations a Fox works at once. FT4 has no
@@ -2471,8 +2474,8 @@ Beyond the everyday exchange, the decode list understands the other FT8 message
 layouts: **compound and non-standard callsigns** (`DL/W1AW`, `W1AW/P`), **hashed
 callsigns** (shown as `<W1AW>` once that station has been heard, and as `<...>`
 until then), **free text** (13 characters, listed as `TEXT` since it names no
-sender), **contest exchanges** (ARRL RTTY Roundup, Field Day) and **DXpedition**
-messages. Transmitting works the same way round: a message that the standard
+sender), **contest exchanges** (EU VHF, ARRL RTTY Roundup, Field Day) and
+**DXpedition** messages. Transmitting works the same way round: a message that the standard
 layout can't carry is sent in the layout that can, and the transcript records
 what actually went on the air — addressing a compound call sends your own
 callsign hashed (`DL/W1AW <AB1CD> RR73`), which drops the signal report, and
@@ -2677,7 +2680,61 @@ sharing the transmitter's power, so more signals means each one is weaker.
 Contacts are logged as their `RR73` goes out; where a caller is waiting, that
 `RR73` shares its signal with the report opening the next contact.
 
-#### 3.2.5 Reporting what you hear
+#### 3.2.5 Contest operation (EU VHF)
+
+European VHF contests do not exchange a grid and a signal report — they exchange
+a **signal report, a serial number and a six-character locator**. That does not
+fit the everyday FT8 message, so the mode has one of its own, and both ends have
+to be in it for the exchange to be read at all.
+
+Set **Contest** to **EU VHF Contest** in the FT8 setup window and put a
+six-character locator in **My grid** (`JN88DD`, not `JN88`). Without one there
+is no honest message to send, so sdroxide sends the ordinary exchange instead
+and the setup window says so beside the serial number. The activity applies to
+FT8, FT4 and FT2; every other mode ignores it.
+
+The exchange then runs:
+
+```
+CQ TEST G4ABC/P IO91
+                             G4ABC/P PA9XYZ JO22
+<PA9XYZ> <G4ABC/P> 590003 IO91NP
+                             <G4ABC/P> <PA9XYZ> R 570007 JO22DB
+PA9XYZ G4ABC/P RR73
+```
+
+The first two messages and the last are ordinary ones, carrying both callsigns
+in full. The two in the middle are the contest layout: the callsigns travel as
+**hashes** — which is what buys the room for the locator and the serial — and are
+shown in angle brackets. A station whose callsign you have not yet heard spelled
+out appears as `<...>`; that is the layout's own bargain and not a fault. It is
+also why the exchange is preceded by the two ordinary messages.
+
+The number in the middle is the exchange itself: `59` is the signal report, as
+the two digits of an RS, and `0003` is the serial number. sdroxide derives the
+report from the measured signal exactly as WSJT-X does, so it is a real report
+and not a formality.
+
+**The serial number** advances by itself as each contact is logged, and is
+remembered between sessions — a contest runs over a weekend and across restarts.
+Set it by hand only to start a contest, or to pick up where a paper log got to.
+A contact keeps whatever serial it first sent, so a number that advances while
+an exchange is still in progress cannot change halfway through. It wraps back to
+1 past 2047, which is as far as the layout's field reaches.
+
+**In the log**, a contest contact keeps what was actually exchanged: the reports
+are the two RS values that went over the air rather than the signal-to-noise
+ratios behind them, the serial numbers land in ADIF's `STX` and `SRX`, and the
+exchanges whole in `STX_STRING` and `SRX_STRING`. The six-character locator
+becomes the station's grid, so the map and the distance get the better answer.
+
+> Only EU VHF is implemented. WSJT-X offers five other special operating
+> activities — ARRL Field Day, the RTTY Roundup, NA VHF, WW Digi and ARRL Digi —
+> each with its own message layout and its own exchange. sdroxide *decodes* the
+> Field Day and RTTY Roundup layouts when it hears them; it does not transmit
+> them.
+
+#### 3.2.6 Reporting what you hear
 
 Enable **Upload my FT8/FT4/FT2 decodes** on the Network settings tab to report every
 station you decode to [pskreporter.info](https://pskreporter.info), where your
@@ -2690,7 +2747,7 @@ line is shown on your station's page. The **Collector** host and port are there
 for testing: port 14739 is the project's test collector, which accepts reports
 without publishing them.
 
-#### 3.2.6 Logging and the logbook
+#### 3.2.7 Logging and the logbook
 
 Completed FT8/FT4/FT2 QSOs are logged automatically. Open the full logbook with the
 **LOG** button (System module).

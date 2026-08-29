@@ -210,6 +210,72 @@ pub const RTTY_CENTER_HZ: f32 = 2210.0;
 /// mode's audio offset, there is nothing here for an operator to choose.
 pub const NAVTEX_TONE_HZ: f32 = 1700.0;
 
+/// A "special operating activity": a contest whose exchange is not the
+/// everyday grid-and-report, so the slotted modes have to send and read
+/// something else (issue #223).
+///
+/// One entry so far. WSJT-X offers six, and each is its own 77-bit message
+/// layout with its own sequence and its own log fields — ARRL Field Day
+/// (`i3.n3 = 0.3`/`0.4`), the ARRL RTTY Roundup (`i3 = 3`), NA VHF and WW Digi
+/// (standard messages carrying a grid where the report goes). Naming the enum
+/// rather than a bare `eu_vhf` flag is what leaves room for them; adding one is
+/// a variant here, its messages in `sdroxide_digi::qso` and its packing in
+/// `sdroxide_digi::modem`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ContestMode {
+    /// No contest: the everyday exchange.
+    #[default]
+    None,
+    /// European VHF contests: a signal report, a serial number and a
+    /// **6-character** locator, exchanged in the `i3 = 5` layout.
+    EuVhf,
+}
+
+impl ContestMode {
+    pub const ALL: [ContestMode; 2] = [ContestMode::None, ContestMode::EuVhf];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ContestMode::None => "None",
+            ContestMode::EuVhf => "EU VHF Contest",
+        }
+    }
+
+    /// What a CQ in this activity says after "CQ" — the word that tells the
+    /// band which contest is being called, and which every other program
+    /// recognises. Empty outside a contest.
+    pub fn cq_word(self) -> &'static str {
+        match self {
+            ContestMode::None => "",
+            ContestMode::EuVhf => "TEST",
+        }
+    }
+}
+
+/// The signal report an EU VHF contest exchange carries, as the two digits of
+/// an RS: `5{n}` for `n` in 2..=9, from the measured signal-to-noise ratio.
+///
+/// WSJT-X's own arithmetic (`mainwindow.cpp`: `nn = (snr + 36) / 6`, clamped to
+/// 2..9, giving `5{nn}9` of which the exchange keeps the first two digits), and
+/// it has to be exactly that: the layout carries three bits for this field and
+/// reads them back as `52 + n`, so a value outside the range is not a rounding
+/// difference but a message the far end cannot unpack.
+/// The largest serial number an EU VHF contest exchange can carry: the layout
+/// gives the field eleven bits. Past it the count wraps back to 1 rather than
+/// sticking, because sending 2047 for the rest of a contest is worse than
+/// starting again — a duplicate serial is at least visibly one.
+pub const CONTEST_SERIAL_MAX: u32 = 2047;
+
+/// The serial number that follows `n`, wrapping at [`CONTEST_SERIAL_MAX`].
+pub fn next_contest_serial(n: u32) -> u32 {
+    if n >= CONTEST_SERIAL_MAX { 1 } else { n + 1 }
+}
+
+pub fn eu_vhf_rs(snr_db: i16) -> u8 {
+    let nn = (snr_db + 36).div_euclid(6).clamp(2, 9);
+    50 + nn as u8
+}
+
 impl DxpedMode {
     pub const ALL: [DxpedMode; 3] = [DxpedMode::Normal, DxpedMode::Hound, DxpedMode::Fox];
 
@@ -1261,6 +1327,23 @@ pub struct DigiConfig {
     /// FT8: which side of a DXpedition pile-up to operate (see [`DxpedMode`]).
     /// Ignored in every other mode.
     pub dxped_mode: DxpedMode,
+    /// The special operating activity the slotted modes are working, if any
+    /// (see [`ContestMode`]). Ignored in every other mode.
+    #[serde(default)]
+    pub contest: ContestMode,
+    /// The serial number the next contest exchange will carry.
+    ///
+    /// On the station rather than on the screen, and remembered: a contest is
+    /// worked over a weekend and across restarts, and every client composing
+    /// the same transmission has to compose the same number. Advanced by the
+    /// engine as each contact is logged, and settable by hand — an operator who
+    /// has been logging on paper starts where the paper got to.
+    ///
+    /// The `i3 = 5` layout carries eleven bits, so 1..=2047. Past that it wraps
+    /// rather than being clipped to 2047 and sending the same number for the
+    /// rest of the contest.
+    #[serde(default = "one_u32")]
+    pub contest_serial: u32,
     /// Fox mode: how many signals to transmit at once (1..=5, WSJT-X's limit).
     /// They are spaced 60 Hz apart starting at the transmit tone offset, and
     /// share the transmitter's power between them.
@@ -1758,6 +1841,8 @@ impl Default for DigiConfig {
             hold_tx_freq: false,
             tx_audio_hz: std::collections::HashMap::new(),
             dxped_mode: DxpedMode::Normal,
+            contest: ContestMode::None,
+            contest_serial: 1,
             fox_slots: 3,
             rade_mute_analog: false,
             js8_speed: crate::Js8Speed::Normal,
@@ -2825,6 +2910,11 @@ mod tests {
 /// `#[serde(default)]` helper: a bool that defaults to true.
 fn yes() -> bool {
     true
+}
+
+/// `#[serde(default)]` helper: the first serial number of a contest.
+fn one_u32() -> u32 {
+    1
 }
 
 /// `#[serde(default)]` helper: full scale.

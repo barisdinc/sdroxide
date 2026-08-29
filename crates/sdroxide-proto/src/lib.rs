@@ -887,7 +887,25 @@ use sdroxide_types::{
 /// v102's `Mode::RttyFm` and v99's `Mode::Adsb` were: a v103 peer handed the
 /// new one has no variant to decode it into and desynchronises on the rest of
 /// the message.
-pub const PROTO_VERSION: u16 = 104;
+/// **105** — EU VHF contest operation (issue #223).
+///
+/// [`sdroxide_types::DigiConfig`] gains `contest` (a new `ContestMode` enum)
+/// and `contest_serial`, and [`sdroxide_types::Command`] gains
+/// `SetContestSerial` — the number's own write route, because the engine
+/// advances it as each contact is logged and a client's copy of the
+/// configuration is stale the moment one completes.
+///
+/// Both config fields are appended at the tail of the struct and the command at
+/// the tail of the enum, so every field and variant already on the wire keeps
+/// its number; a v104 peer desynchronises on the tail of every `DigiConfig`
+/// regardless — it rides inside `Command::SetDigiConfig` and
+/// `DigiStatus.config` — and the handshake's equality test is what stops it
+/// trying.
+///
+/// The `i3 = 5` message layout the mode transmits is not on this wire at all:
+/// it is packed and unpacked inside the engine, and what crosses the link is
+/// the decoded text, exactly as for every other 77-bit layout.
+pub const PROTO_VERSION: u16 = 105;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

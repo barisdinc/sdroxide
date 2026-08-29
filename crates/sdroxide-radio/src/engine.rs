@@ -4908,6 +4908,18 @@ impl Engine {
                     let _ = self.event_tx.send(RadioEvent::Ft8Status(s));
                 }
                 DigiAction::QsoLogged(r) => {
+                    // A contact logged with a serial we sent is the one thing
+                    // that advances the contest count (issue #223) — not the
+                    // transmission, which may be repeated, and not the operator,
+                    // who would have to remember. `stx` is set only by a contest
+                    // exchange, so this is exactly once per contest contact.
+                    if let Some(sent) = r.stx {
+                        let next = sdroxide_types::next_contest_serial(sent);
+                        if self.digi_config.contest_serial != next {
+                            self.digi_config.contest_serial = next;
+                            self.push_contest_serial();
+                        }
+                    }
                     if let Some(w) = &self.wsjtx {
                         w.qso_logged(&r);
                     }
@@ -6155,6 +6167,13 @@ impl Engine {
                 }
             }
             SetRecordingMono(on) => self.state.recording_mono = on,
+            SetContestSerial(n) => {
+                let n = n.clamp(1, sdroxide_types::CONTEST_SERIAL_MAX);
+                if self.digi_config.contest_serial != n {
+                    self.digi_config.contest_serial = n;
+                    self.push_contest_serial();
+                }
+            }
             SetIqRecording(on) => {
                 if on {
                     self.start_iq_recording();
@@ -8544,6 +8563,25 @@ impl Engine {
             srv.broadcast_state(snap.clone());
             self.tci_last_snap = Some(snap);
         }
+    }
+
+    /// The contest serial has moved: give it to the controller, write it, and
+    /// tell every client.
+    ///
+    /// All three, because the number has three homes that must agree — the
+    /// controller composes the next exchange from it, the file is what a
+    /// restart mid-contest reads, and `DigiStatus.config` is what a panel's
+    /// readout shows. Its own method because both routes that change it (a
+    /// contact logged, the operator setting it) need all three.
+    fn push_contest_serial(&mut self) {
+        if let Some(d) = self.digi.as_mut() {
+            d.set_config(self.digi_config.clone());
+        }
+        if let Err(e) = sdroxide_config::save_digi_config(&self.digi_config) {
+            warn!("saving digi config: {e}");
+        }
+        self.mark_shared_store_write();
+        self.emit_digi_status();
     }
 
     fn emit_digi_status(&self) {
@@ -12676,6 +12714,11 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
 ///   `Command::SetDigiAudioFreq`.
 /// - `tx_audio_levels`, the per-mode transmit-audio levels, written by
 ///   `Command::SetDigiTxLevel`.
+/// - `contest_serial`, the next contest exchange's serial number, advanced by
+///   the engine itself as each contact is logged and set by hand through
+///   `Command::SetContestSerial`. The staleness here is not hypothetical: a
+///   panel seeded at the start of a contest holds serial 1 for the whole
+///   weekend, and any setting applied from it would send the count back there.
 ///
 /// Found the hard way, minutes after the offsets went in. 60 m's was set,
 /// recorded and saved; ticking Hold TX a moment later sent a copy seeded before
@@ -12686,6 +12729,7 @@ fn encode_png_gray(gray: &[u8], w: u16, h: u16) -> Option<Vec<u8>> {
 fn keep_engine_owned(mut incoming: DigiConfig, current: &DigiConfig) -> DigiConfig {
     incoming.tx_audio_hz = current.tx_audio_hz.clone();
     incoming.tx_audio_levels = current.tx_audio_levels.clone();
+    incoming.contest_serial = current.contest_serial;
     incoming
 }
 

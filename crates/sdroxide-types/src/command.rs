@@ -813,4 +813,22 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     SetIqRecording(bool),
+
+    /// Set the serial number the next contest exchange will carry (issue #223).
+    ///
+    /// Its own command rather than a whole [`DigiConfig`](crate::DigiConfig)
+    /// through `SetDigiConfig` for the same reason
+    /// [`Command::SetDigiTxLevel`] is: the *engine* advances this number, once
+    /// per logged contact, so every client's copy of the configuration is stale
+    /// the moment a contact completes and sending one back would put the count
+    /// where it was an hour ago. That makes `contest_serial` a field with a
+    /// write route outside `SetDigiConfig`, which is what puts it in the
+    /// engine's `keep_engine_owned` — and this is the route.
+    ///
+    /// Clamped to `1..=`[`crate::CONTEST_SERIAL_MAX`] engine-side: the layout's
+    /// field is eleven bits, and a number outside it is not a message the far
+    /// end can read.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetContestSerial(u32),
 }
