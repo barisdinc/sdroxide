@@ -1792,6 +1792,11 @@ struct Engine {
     /// Rows clocked since this engine started. Diagnostic; see the
     /// `sdroxide::panadapter` log.
     rows_clocked: u64,
+    /// Of those, the ones that reached a published frame. Diagnostic: the two
+    /// part company when a row is built on one picture and the frame that would
+    /// have carried it is of another, which is what a waterfall scrolling
+    /// slower than its own time axis looks like from here.
+    rows_sent: u64,
     /// The receive chain's DDC output rate, as of the top of this block.
     ///
     /// Cached rather than asked of the chain, because the frame builder may run
@@ -2863,6 +2868,7 @@ fn engine_thread(
         row_samples: 0,
         row_sample_clock: false,
         rows_clocked: 0,
+        rows_sent: 0,
         channel_rate_hz: 48_000.0,
         wide_window: None,
         wide_at: Instant::now(),
@@ -3148,7 +3154,12 @@ fn engine_thread(
     let mut lane_at = Instant::now();
     let mut lane_samples: u64 = 0;
     let mut lane_frames: u64 = 0;
+    // Frames the client never fetched, and whether the last one was among them
+    // — see the publish below.
+    let mut lane_dropped: u64 = 0;
+    let mut dropped_frame = false;
     let mut lane_rows: u64 = 0;
+    let mut lane_rows_sent: u64 = 0;
     let mut lane_ffts = 0u64;
     let mut lane_sweeps: u64 = 0;
     let mut next_rds = Instant::now();
@@ -3336,7 +3347,25 @@ fn engine_thread(
             next_frame = now + Duration::from_secs_f64(1.0 / engine.cfg.fps.max(1) as f64);
             let mut frame = engine.make_spectrum_frame();
             engine.attach_rows(&mut frame);
-            spec_in.write(frame);
+            // A triple buffer keeps only the newest value, so a client that
+            // repaints more slowly than this engine publishes loses whole
+            // frames — and every waterfall row that rode in them. The picture
+            // then scrolls slower than the time axis beside it says it does,
+            // by exactly the fraction dropped, and goes on doing so for ever.
+            //
+            // `publish` reports the overwrite, and the buffer handed back is
+            // the frame nobody fetched, so its rows can be carried into this
+            // one. Same rule and the same bound as the network client's
+            // `carry_rows_from` — a backlog longer than that is a client that
+            // stopped drawing, not a hitch to be made good.
+            if dropped_frame {
+                frame.carry_rows_from(spec_in.input_buffer());
+            }
+            *spec_in.input_buffer_mut() = frame;
+            dropped_frame = spec_in.publish();
+            if dropped_frame {
+                lane_dropped += 1;
+            }
             lane_frames += 1;
         }
         // Once a second, and only where somebody asked for it: this is the
@@ -3355,9 +3384,15 @@ fn engine_thread(
                 samples_per_s = lane_samples as f64 / secs,
                 fft_per_s = ffts_delta as f64 / secs,
                 frames_per_s = lane_frames as f64 / secs,
+                // Of those, the ones the client never fetched. Not a fault —
+                // publishing faster than a client repaints is ordinary — but
+                // their rows are carried forward rather than dropped, and this
+                // is how to tell whether that is happening.
+                frames_unfetched_per_s = lane_dropped as f64 / secs,
                 // The waterfall's real time resolution, which is the number
                 // this diagnostic exists to separate from the other two.
                 rows_per_s = engine.rows_clocked.saturating_sub(lane_rows) as f64 / secs,
+                rows_sent_per_s = engine.rows_sent.saturating_sub(lane_rows_sent) as f64 / secs,
                 // Finished sweeps from a front end that computes its own
                 // spectrum. Zero on an I/Q receiver; on a rig whose scope is
                 // the main panadapter it is the real picture rate, and the
@@ -3383,7 +3418,9 @@ fn engine_thread(
             lane_at = now;
             lane_samples = 0;
             lane_frames = 0;
+            lane_dropped = 0;
             lane_rows = engine.rows_clocked;
+            lane_rows_sent = engine.rows_sent;
             lane_sweeps = engine.wide_sweeps;
             lane_ffts = ffts;
         }
@@ -5416,19 +5453,30 @@ impl Engine {
         if !self.clocks_rows() {
             return None;
         }
-        // Idempotent, and here rather than at the half-dozen places a lane is
-        // built: a lane that quietly came up without its hold would draw rows
-        // of the latest transform instead of the loudest, which is a
-        // sensitivity bug nobody would see until they went looking for a weak
-        // signal that was there all along.
-        self.lanes().for_each(|a| {
-            a.set_row_hold(true);
-            a.set_read_hold(true);
-        });
+        // Arm every lane that could draw this row, then let the frame builder
+        // pick as it always does and ask afterwards which one it read.
+        //
+        // **Only that lane keeps the hold.** It costs a compare and a store per
+        // bin on every transform, over an array as long as the transform — half
+        // a megabyte on a device-wide analyser running a 131072-point window —
+        // and a lane nobody is pooling from pays all of it for nothing. That is
+        // the whole of what a zoomed panadapter on a 2.4 Msps front end was
+        // spending on the device-wide lane while the zoom lane drew the picture
+        // (issue #216).
+        //
+        // A lane that has just become the drawing one answers its first row
+        // from the running average — the current spectrum, which is exactly
+        // what every build before the row clock drew — and holds from the next.
+        self.lanes().for_each(|a| a.set_read_hold(true));
         let frame = self.make_spectrum_frame();
         self.lanes().for_each(|a| {
             a.set_read_hold(false);
-            a.reset_hold();
+            if a.took_row() {
+                a.set_row_hold(true);
+                a.reset_hold();
+            } else {
+                a.set_row_hold(false);
+            }
         });
         Some(frame)
     }
@@ -5522,9 +5570,13 @@ impl Engine {
             self.row_batch.clear();
             return;
         }
-        let axis = (frame.center_hz, frame.span_hz, frame.bins.len());
+        let cols = frame.bins.len();
+        let axis = (frame.center_hz, frame.span_hz, cols);
         if self.row_axis == Some(axis) || self.slide_batch(axis) {
             frame.rows = std::mem::take(&mut self.row_batch);
+            if cols > 0 {
+                self.rows_sent = self.rows_sent.wrapping_add((frame.rows.len() / cols) as u64);
+            }
         } else {
             self.row_batch.clear();
         }

@@ -823,6 +823,15 @@ lines, so history shortens as the rate rises (73 seconds at Medium, 9 at
 Fastest), and to a *remote* client every line is a byte per column on the
 link.
 
+The peak that makes each line "the strongest thing in its slice of time" is
+held only on the lane actually drawing the waterfall. It costs a comparison and
+a store per bin on every transform, over an array as long as the transform, and
+until v1.5.5 every analyser in the receiver paid it — including the full-rate
+one sitting behind a zoom lane, drawing nothing. On an RTL-SDR at 2.4 Msps that
+alone was most of the panadapter's share of the DSP thread, and dropping it
+halved that share
+([issue #216](https://github.com/dividebysandwich/sdroxide/issues/216)).
+
 
 ### 2.9 The S-meter
 
