@@ -678,7 +678,7 @@ impl UiSettings {
     /// Rows a second the 3D spectrum flows away from the viewer.
     ///
     /// The surface remembers a fixed number of spectra, so this is also how
-    /// much time its depth covers — at 64 rows deep, eight seconds at `Slow`
+    /// much time its depth covers — at 48 rows deep, eight seconds at `Slow`
     /// down to one at `Faster`. Slower is a longer memory and a surface that
     /// crawls; faster is a shorter one that moves, which is what makes a signal
     /// that is only there for a moment show up as a shape rather than a blip.
@@ -689,11 +689,11 @@ impl UiSettings {
     /// here anyway, for a hand-edited config.
     pub fn spectrum_3d_rows_per_sec(self) -> f32 {
         match self.spectrum_3d_speed {
-            Speed::Slow => 8.0,
-            Speed::Medium => 16.0,
-            Speed::Fast => 32.0,
-            Speed::Faster => 64.0,
-            Speed::Fastest => 128.0,
+            Speed::Slow => 6.0,
+            Speed::Medium => 12.0,
+            Speed::Fast => 24.0,
+            Speed::Faster => 48.0,
+            Speed::Fastest => 96.0,
         }
     }
 

@@ -845,13 +845,13 @@ The **surface** row picks between the two renderings:
   halves of the panadapter agree about what a strong signal looks like. Change
   the palette in Settings › Display.
 - **LINES** draws one trace per remembered spectrum in the flat line's own
-  colour: the shape without the levels. It is the *dearer* of the two rather
-  than the cheaper one — it draws the same surface and then strokes every crest
-  over the top of it — so on a machine that is struggling, SOLID is the one to
-  stay on.
+  colour: the shape without the levels. It strokes a line over the same surface
+  SOLID fills, so a column costs it more — and because both renderings are held
+  to the same drawing budget, it is given fewer of them. That makes it the
+  coarser of the two across the band, and the cheaper of the two to draw.
 
-The **flow** row sets how fast the surface travels: **Slow** (8 rows a second),
-**Medium** (16), **Fast** (32) or **Faster** (64). The surface is a fixed 64
+The **flow** row sets how fast the surface travels: **Slow** (6 rows a second),
+**Medium** (12), **Fast** (24) or **Faster** (48). The surface is a fixed 48
 rows deep, so this is also how much band it holds — eight seconds at Slow, one
 at Faster — and the two ends of the row are two different instruments. Slow is
 a memory: a signal that came up once in the last few seconds is still on screen
@@ -874,11 +874,13 @@ surface brings its own floor and its own amplitude axis instead.
 
 
 This is drawn on the client — the browser client has it too, on the same buttons
-— and it is off by default. It is not free: measured against the flat line on
-the same band, at 60 frames a second and a 1696-point-wide panadapter, the
-surface costs about a tenth of a core more in the solid rendering and a fifth in
-the line one. Nothing reaches the radio, though — no extra work is asked of the
-engine, and nothing more goes over the link to a remote station.
+— and it is off by default. It is not free, and it is the one display here that
+can double the client's own processor load: measured against the flat line on
+the same band, at 60 frames a second and a 1696-point-wide panadapter, 35% of a
+core for the flat line, 70% for the solid surface and 52% for the line one.
+Nothing reaches the radio, though — no extra work is asked of the engine, and
+nothing more goes over the link to a remote station, so a client that is
+struggling cannot slow the station down.
 
 #### Waterfall scroll speed
 

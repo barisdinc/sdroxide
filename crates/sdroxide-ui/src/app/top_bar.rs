@@ -4024,8 +4024,8 @@ impl SdroxideApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("flow").size(10.0).color(crate::theme::CYAN_DIM()))
                 .on_hover_text(
-                    "How fast the 3D spectrum flows away from you, in rows a second: Slow 8, \
-                     Medium 16, Fast 32, Faster 64. The surface is a fixed number of rows \
+                    "How fast the 3D spectrum flows away from you, in rows a second: Slow 6, \
+                     Medium 12, Fast 24, Faster 48. The surface is a fixed number of rows \
                      deep, so this is also how much time it holds. Slower is a longer memory \
                      and a surface that crawls; faster is a shorter one that moves. The \
                      waterfall keeps its own scroll rate, below.",

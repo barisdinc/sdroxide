@@ -12,15 +12,17 @@
 //! wgpu texture behind a paint callback, and a second GPU path would have to
 //! be written twice over (native and WebGL) and would put the browser client's
 //! panadapter on a lane the native one does not use. The cost of doing it this
-//! way is a vertex buffer rather than a texture upload — about 135k vertices a
-//! frame for forty rows across a 1696-point panadapter — which is what
-//! [`VERTEX_BUDGET`] is there to bound.
+//! way is a vertex buffer rather than a texture upload — a quarter of a million
+//! vertices a frame for [`DEPTH`] rows across a 1696-point panadapter — which
+//! is what [`VERTEX_BUDGET`] is there to bound.
 //!
-//! Measured on a release build at 60 fps, against the flat trace on the same
-//! synthetic band: 34% of a core flat, 43% solid, 52% lines. The line rendering
-//! is the *expensive* one, not the cheap one — it draws the same fill and then
-//! pays egui's polyline tessellation over the top of it — which is why it is
-//! given fewer columns for the same budget.
+//! Measured on a release build at 60 fps against the flat trace on the same
+//! synthetic band: 35% of a core flat, 70% solid, 52% lines. Both renderings
+//! are held to the same budget, and the line one spends more of it per column
+//! (it strokes a polyline over the same fill), so it is handed fewer columns
+//! and comes out the cheaper of the two — the budget is the knob, not the
+//! rendering. This is the only display in the client that can double its own
+//! CPU, which is why it is off until it is asked for.
 //!
 //! Hidden surface removal is the painter's algorithm and nothing else: rows go
 //! down back to front, each filled from its own curve to its own baseline, so
@@ -42,19 +44,20 @@ use crate::view::ViewState;
 /// Slow, one at Faster. Time is not labelled on this axis and does not need to
 /// be — the depth is there to show how a signal is changing, and the waterfall
 /// next to it is the instrument with a clock on it.
-pub const DEPTH: usize = 64;
+///
+/// Every one of them is drawn, every frame, which is what fixes the number:
+/// deciding row by row which are worth drawing is what made the far half of
+/// the surface shiver (see `draw`). Forty-eight is what a 1696-point-wide
+/// panadapter can carry at one column per point inside [`VERTEX_BUDGET`], and
+/// it puts a row every few points down an ordinary strip's depth axis — close
+/// enough that the surface between them reads as a surface.
+pub const DEPTH: usize = 48;
 
 /// Rows the flow may advance in one frame. A tab left in the background, or a
 /// hitch, would otherwise come back and rebuild the whole surface out of the
 /// one spectrum that happened to be current — the same clamp the waterfall's
 /// own scroll puts on `dt`.
 const MAX_STEP: usize = 8;
-
-/// Points between one drawn row and the next, measured where they land on
-/// screen. Rows closer together than this are dropped rather than drawn on top
-/// of one another: past about a row every few points they add nothing but
-/// vertices, and those are better spent across the band. See [`columns_for`].
-const ROW_PITCH: f32 = 3.5;
 
 /// Vertices the whole surface is allowed, near enough. What it buys differs by
 /// rendering: the solid one spends two a column (the top of the curtain and its
@@ -67,7 +70,7 @@ const ROW_PITCH: f32 = 3.5;
 /// vertex per point in the solid rendering — i.e. it is set so that the display
 /// most people have is not compromised at all, and only a very wide window
 /// starts trading columns for the budget.
-const VERTEX_BUDGET: usize = 240_000;
+const VERTEX_BUDGET: usize = 260_000;
 
 /// Fraction of the strip's height the receding axis takes; the rest is the
 /// amplitude the newest row is drawn at.
@@ -105,15 +108,43 @@ struct Row {
     bins: Vec<u8>,
 }
 
-/// The remembered spectra, newest last.
+impl Row {
+    /// Take a spectrum, keeping whatever allocation this row already had.
+    fn set(&mut self, center_hz: f64, span_hz: f64, values: &[f32]) {
+        self.center_hz = center_hz;
+        self.span_hz = span_hz;
+        self.bins.clear();
+        self.bins.extend(values.iter().map(|v| v.clamp(0.0, 255.0) as u8));
+    }
+}
+
+/// The remembered spectra, newest last, and the live one in front of them.
 #[derive(Default)]
 pub struct Surface {
     rows: VecDeque<Row>,
+    /// The spectrum as of this frame, which is what the *front* of the surface
+    /// is drawn from — not the newest remembered row.
+    ///
+    /// Without it the front row is however old the flow rate makes it, and the
+    /// surface arrives in steps: a sliver of empty floor opens at the front,
+    /// grows for a whole row, and is snapped shut by a row appearing out of
+    /// nothing. At Faster that happens 64 times a second and reads as motion;
+    /// at Slow it happens 8 times a second and reads as a stutter. Drawing the
+    /// live spectrum at the front and letting the remembered rows glide back
+    /// behind it makes the flow continuous at every rate — a row is laid down
+    /// as an exact copy of the live one, in the same place, so the moment it
+    /// joins the history is invisible.
+    live: Row,
     /// Wall clock the flow was last advanced at, and the fraction of a row
     /// carried over from it. The rate is absolute — rows a *second*, not rows a
     /// frame — so the surface flows at the speed the operator picked whatever
     /// the frame rate is, and a browser client at 30 fps and a desktop at 60
     /// show the same picture.
+    ///
+    /// The carry is not only bookkeeping: it is how far the remembered rows
+    /// have travelled since the last one was laid down, and the drawing adds it
+    /// to every row's depth. That is what turns the flow from a step per row
+    /// into a glide.
     last_now: f64,
     accum: f32,
 }
@@ -153,6 +184,7 @@ impl Surface {
         self.accum += dt as f32 * rows_per_sec;
         let due = (self.accum.floor() as usize).min(MAX_STEP);
         self.accum -= self.accum.floor();
+        self.live.set(center_hz, span_hz, values);
         for _ in 0..due {
             // Reuse the oldest row's allocation rather than freeing and asking
             // for it again a few kilobytes at a time, sixty times a second.
@@ -161,10 +193,7 @@ impl Surface {
             } else {
                 Row::default()
             };
-            row.center_hz = center_hz;
-            row.span_hz = span_hz;
-            row.bins.clear();
-            row.bins.extend(values.iter().map(|v| v.clamp(0.0, 255.0) as u8));
+            row.set(center_hz, span_hz, values);
             self.rows.push_back(row);
         }
     }
@@ -175,6 +204,7 @@ impl Surface {
     /// which is the same trap the full-band strip clears its history for.
     pub fn clear(&mut self) {
         self.rows.clear();
+        self.live.bins.clear();
         self.last_now = 0.0;
         self.accum = 0.0;
     }
@@ -299,35 +329,46 @@ pub fn draw(
     }
     let p = Proj::new(rect);
     draw_floor(painter, view, rect, &p);
-    if surface.rows.is_empty() {
+    if surface.live.bins.is_empty() && surface.rows.is_empty() {
         return;
     }
 
-    // Which rows to draw, and how many columns each of them can afford.
+    // Which rows to draw, front to back for the choosing and back to front for
+    // the drawing.
     //
-    // Chosen by where a row *lands* rather than by taking every nth of them:
-    // perspective spreads the near rows out and crowds the far ones together,
-    // so an even stride through the history draws the front of the surface too
-    // sparsely to read as a surface and the back of it several rows to the
-    // pixel. Keeping a row only once it clears the last kept one by
-    // [`ROW_PITCH`] spends the vertices where they can be seen.
+    // The live spectrum is the front of the surface and the remembered rows sit
+    // behind it, each one `accum` further back than the last row laid down —
+    // see [`Surface::live`]. Depth is counted in rows here and turned into a
+    // fraction of the axis at the end, so the carry is simply added.
     //
-    // Walked from the newest backwards, so the live spectrum is always the
-    // first row kept: it is the one the dB scale and every marker belong to,
-    // and losing it to a rounding rule would be losing the only row that is
-    // *now*. `INFINITY` is what makes it unconditional.
-    let newest = surface.rows.len() - 1;
-    let mut drawn: Vec<(usize, f32)> = Vec::with_capacity(DEPTH);
-    let mut last_y = f32::INFINITY;
-    for i in (0..surface.rows.len()).rev() {
-        let d = ((newest - i) as f32 / (DEPTH - 1) as f32).min(1.0);
-        let y = p.base_y(d);
-        if last_y - y >= ROW_PITCH {
-            drawn.push((i, d));
-            last_y = y;
-        }
-    }
-    // Oldest first from here on: the painter's algorithm is the depth buffer.
+    // *Every* remembered row, and no rule about which ones are worth drawing.
+    //
+    // A rule that reads the row's position on screen cannot be stable, because
+    // the position is what is moving: a row that clears its neighbour by a
+    // pixel this frame does not clear it the next, so the set being drawn
+    // alternates and the surface shivers between two versions of itself from
+    // the depth where the rows first crowd together — with the onset visible as
+    // a line across the picture. A rule that reads the row's *index* is no
+    // better: every row laid down renumbers them all, so an every-other-one
+    // stride swaps its two halves once a row.
+    //
+    // So the count is fixed instead, and [`DEPTH`] is chosen small enough that
+    // all of them can be afforded — the trade is made in [`columns_for`],
+    // where spending fewer columns costs a little sharpness and nothing else.
+    //
+    // Normalised by `DEPTH` rather than `DEPTH - 1` so the carry has somewhere
+    // to go: at `DEPTH - 1` the oldest row is pushed past the end of the axis
+    // the instant the flow moves at all, and popping out and back once a row is
+    // the same flicker in the one place it is least worth having.
+    let carry = surface.accum.clamp(0.0, 1.0);
+    let far = DEPTH as f32;
+    let newest = surface.rows.len().saturating_sub(1);
+    let live = (!surface.live.bins.is_empty()).then_some((&surface.live, 0.0));
+    let history =
+        (0..surface.rows.len()).rev().map(|i| (&surface.rows[i], (newest - i) as f32 + carry));
+    let mut drawn: Vec<(&Row, f32)> =
+        live.into_iter().chain(history).map(|(row, back)| (row, back / far)).collect();
+    // Back to front: the painter's algorithm is the depth buffer.
     drawn.reverse();
     let cols = columns_for(rect.width(), drawn.len(), solid);
 
@@ -347,10 +388,17 @@ pub fn draw(
     }
 
     let lut = crate::colormap::lut(palette);
+    // The crest of the row behind, kept so this one can be joined to it. A
+    // height field is a mesh in both directions and not a stack of independent
+    // profiles: a carrier is one column wide, perspective puts that column at a
+    // different x on every row, and without the strip between them a steady
+    // carrier comes out as a row of separate needles receding to the vanishing
+    // point instead of the wall it is.
+    let mut behind: Vec<egui::epaint::Vertex> = Vec::new();
     let mut line = Vec::with_capacity(cols);
+    let uv = egui::epaint::WHITE_UV;
 
-    for (i, d) in drawn {
-        let row = &surface.rows[i];
+    for (row, d) in drawn {
         let n = row.bins.len();
         if n == 0 || row.span_hz <= 0.0 {
             continue;
@@ -366,9 +414,17 @@ pub fn draw(
         let k = n as f64 / row.span_hz;
         let b = -lo * k;
 
+        // Three runs of vertices: the crest of the row behind, this row's own
+        // crest, and its feet. The strip between the first two is the surface
+        // itself; the strip between the last two is the curtain that hides
+        // everything the surface stands in front of.
+        let joined = behind.len() == cols;
         let mut mesh = egui::epaint::Mesh::default();
-        mesh.vertices.reserve(cols * 2);
-        mesh.indices.reserve((cols - 1) * 6);
+        mesh.vertices.reserve(cols * 3);
+        mesh.indices.reserve((cols - 1) * 12);
+        if joined {
+            mesh.vertices.extend_from_slice(&behind);
+        }
         line.clear();
         for c in 0..cols {
             // The strongest bin in the slice of band this column covers, not
@@ -397,24 +453,37 @@ pub fn draw(
                 // block of colour with a ragged top edge.
                 (dim(rgb, fog), dim(rgb, fog * 0.10))
             } else {
-                // The background, lifting a shade towards the back: the fill
-                // is here to hide what is behind it, and the lift is the only
-                // thing telling a far row's blank from a near one's.
+                // The background, lifting a shade towards the back: the fills
+                // are here to hide what is behind them, and the lift is the
+                // only thing telling a far row's blank from a near one's.
                 let g = (6.0 + 14.0 * d) as u8;
                 let c = Color32::from_gray(g);
                 (c, c)
             };
-            let uv = egui::epaint::WHITE_UV;
             mesh.vertices.push(egui::epaint::Vertex { pos: top, uv, color: c_top });
             mesh.vertices.push(egui::epaint::Vertex { pos: pos2(x, base_y), uv, color: c_base });
             if !solid {
                 line.push(top);
             }
         }
+        // Where the three runs start. Interleaved crest/foot for this row, so
+        // its two vertices for column `c` are adjacent.
+        let (back0, own0) = if joined { (0u32, cols as u32) } else { (0, 0) };
         for c in 0..cols - 1 {
-            let a = (c * 2) as u32;
-            mesh.indices.extend_from_slice(&[a, a + 1, a + 2, a + 2, a + 1, a + 3]);
+            let (a, e) = (own0 + (c * 2) as u32, own0 + ((c + 1) * 2) as u32);
+            // The surface between this row and the one behind it, first: it
+            // lies further away than anything else this row draws, and the
+            // painter's algorithm is the only depth test there is.
+            if joined {
+                let (q, r) = (back0 + c as u32, back0 + c as u32 + 1);
+                mesh.indices.extend_from_slice(&[q, r, a, a, r, e]);
+            }
+            // Then the curtain from this row's crest down to its own feet.
+            mesh.indices.extend_from_slice(&[a, a + 1, e, e, a + 1, e + 1]);
         }
+        // This row's crest becomes the row behind for the next one round.
+        behind.clear();
+        behind.extend(mesh.vertices[own0 as usize..].iter().step_by(2).copied());
         painter.add(Shape::mesh(mesh));
         if !solid {
             let c = TRACE;
@@ -438,9 +507,10 @@ const TRACE: Color32 = Color32::from_rgb(120, 220, 255);
 /// last half-pixel of sharpness is the most expensive thing on offer here and
 /// the least visible: a row is a couple of points tall.
 fn columns_for(width: f32, rows: usize, solid: bool) -> usize {
-    // Two vertices a column for the curtain, plus about five more for the
-    // polyline egui tessellates over it in the line rendering.
-    let per_col = if solid { 2 } else { 7 };
+    // Three vertices a column — the crest, its foot, and the copy of the crest
+    // that joins this row to the one behind — plus about five more for the
+    // polyline egui tessellates over the top in the line rendering.
+    let per_col = if solid { 3 } else { 8 };
     let affordable = VERTEX_BUDGET / per_col / rows.max(1);
     (width.round() as usize).clamp(48, affordable.max(48))
 }
@@ -499,6 +569,58 @@ mod tests {
             }
             let n = s.rows.len();
             assert!((31..=33).contains(&n), "at {fps} fps the flow laid down {n} rows, not 32");
+        }
+    }
+
+    /// The front of the surface is the *live* spectrum, and it is there from
+    /// the first frame — before the flow has had time to lay down a single
+    /// remembered row. Without it the surface is blank for an eighth of a
+    /// second at Slow, and its front row is always a row out of date.
+    #[test]
+    fn the_live_spectrum_is_the_front_of_the_surface_at_once() {
+        let mut s = Surface::default();
+        s.push(14_100_000.0, 100_000.0, &[7.0, 9.0], 100.0, 6.0);
+        assert!(s.rows.is_empty(), "a row was laid down before any time had passed");
+        assert_eq!(s.live.bins, vec![7, 9], "the live row was not taken");
+        // And it follows every frame, not every row: at eight rows a second
+        // sixty frames go by between one row and the next.
+        s.push(14_100_000.0, 100_000.0, &[1.0, 2.0], 100.008, 6.0);
+        assert_eq!(s.live.bins, vec![1, 2], "the live row went stale between rows");
+    }
+
+    /// The carry is what makes the flow a glide rather than a step: between one
+    /// row and the next it climbs through every value from 0 to 1, and the
+    /// drawing adds it to the depth of every remembered row. A carry that only
+    /// ever read 0 would put the whole surface back a whole row at a time —
+    /// which at Slow is eight visible jerks a second.
+    #[test]
+    fn the_carry_glides_between_one_row_and_the_next() {
+        let mut s = Surface::default();
+        let (rate, mut t) = (6.0f32, 100.0f64);
+        s.push(14_100_000.0, 100_000.0, &[1.0], t, rate);
+        let mut seen = Vec::new();
+        for _ in 0..60 {
+            t += 1.0 / 60.0;
+            s.push(14_100_000.0, 100_000.0, &[1.0], t, rate);
+            seen.push(s.accum);
+        }
+        assert!(seen.iter().all(|&a| (0.0..1.0).contains(&a)), "the carry left [0, 1): {seen:?}");
+        // A whole second at six rows a second: six rows laid down, and the
+        // carry seen at a spread of values on the way rather than sitting at 0.
+        assert_eq!(s.rows.len(), 6);
+        let distinct = seen.iter().filter(|a| **a > 0.05).count();
+        assert!(distinct > 40, "the carry only moved {distinct} of 60 frames");
+    }
+
+    /// Whatever the carry, every remembered row still lands on the axis.
+    /// Normalised by `DEPTH - 1` the oldest one is pushed off the end the
+    /// instant the flow moves at all and pops back a row later — flicker in the
+    /// one place it is least worth having, and the reason for the `DEPTH` here.
+    #[test]
+    fn the_carry_never_pushes_a_row_off_the_back() {
+        for carry in [0.0f32, 0.01, 0.5, 0.99] {
+            let d = ((DEPTH - 1) as f32 + carry) / DEPTH as f32;
+            assert!((0.0..1.0).contains(&d), "a carry of {carry} put the oldest row at {d}");
         }
     }
 
