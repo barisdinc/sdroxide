@@ -10930,6 +10930,7 @@ sdroxide stores its settings under the per-user config directory:
 | `rigctld.json` | JSON | Built-in Hamlib rigctld server: enabled, bind address, port, reported rig name, whether clients may transmit, and the client limit. |
 | `wsjtx.json` | JSON | WSJT-X UDP broadcast: enabled, destination host and port, and the name clients see. |
 | `scanner.json` | JSON | The scanner: memories or a range, the range and channel step, the level that counts as busy, the dwell, how it resumes, and which memories to skip. |
+| `renderer-fallback.txt` | text | Written only when a panic came from the graphics driver: the next start renders through OpenGL and says so. Delete it to go back to the default renderer ([14](#14-troubleshooting)). |
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
 | `adsb.json` | JSON | ADS-B decoder ([§3.13](#313-ads-b-aircraft-on-1090-mhz)): the two timeouts, how many history dots to keep, how far ahead the speed vectors reach, and the ceiling on the aircraft table. Restored at startup, and — like `ism.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
 | `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on, which band they watch and how wide a window they get. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
@@ -11309,6 +11310,30 @@ WGPU_BACKEND=vulkan sdroxide
 `WGPU_BACKEND` (`vulkan`, `gl`, `metal`, `dx12`) pins the renderer on any
 machine, and pinning it also turns the check above off — so `WGPU_BACKEND=gl`
 is how to force the steady path on a GPU sdroxide does not know about.
+
+**sdroxide died with `Failed to create staging buffer for index data`, or
+another panic naming `wgpu`, after running for a while.**
+The graphics driver refused an allocation and the renderer has no way to carry
+on without one. It is the driver's failure rather than sdroxide's — reported on
+an Intel HD Graphics 530 under Mesa, an hour into a session, with a wgpu
+validation error a moment before it
+([#219](https://github.com/dividebysandwich/sdroxide/issues/219)) — and nothing
+in the program can prevent it. What it can do is not walk into it twice: a panic
+that came from the graphics driver leaves a note in
+`renderer-fallback.txt` in the configuration directory
+([13](#13-configuration-files)), and the next start renders through **OpenGL**
+instead and says so:
+
+```
+sdroxide: the last session ended inside the graphics driver, so this window
+renders through OpenGL instead.
+```
+
+The note stays until you delete it — a driver that has crashed once will crash
+again, and re-learning that costs another lost session. Delete the file to go
+back to the default renderer, or set `WGPU_BACKEND` to pick one yourself, which
+turns the check off in both directions. A panic anywhere else in sdroxide leaves
+no note and changes no renderer.
 
 **A blank window appears for a moment, sdroxide exits, and the console says
 `Failed to wait for GPU to come idle before reconfiguring the Surface`.**
