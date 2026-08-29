@@ -8908,6 +8908,17 @@ A few things worth knowing:
   IQ stream.
 - **Receive pauses while you transmit**, unless the radio is full-duplex — the
   same as any other TCI rig.
+- **Transmit audio is paced by the server, not the client.** TCI has the radio
+  ask for each buffer of transmit audio as it needs it (a *chrono*), and the
+  client answers one packet per request. sdroxide asks for exactly what is
+  missing from the queue and no more, so a client that answers a run of
+  requests in one go — which is what an application whose audio comes off a GUI
+  timer does — is never handed back more than the queue can hold. The queue
+  itself deepens on its own, up to a quarter of a second, to whatever gaps the
+  client actually leaves. Nothing to set: it settles in the first over and stays
+  there. (Earlier versions asked once per 10 ms block regardless of what was
+  already on its way, and an FT8 slot could go out as a few seconds of signal —
+  [issue #202](https://github.com/dividebysandwich/sdroxide/issues/202).)
 
 #### 6.8.3 WSJT-X UDP broadcast
 
