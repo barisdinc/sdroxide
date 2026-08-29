@@ -253,6 +253,12 @@ pub struct WfTuning {
     pub spectrum_alpha: f32,
     /// Waterfall colour-palette index (from `UiSettings`).
     pub palette: usize,
+    /// Rows a second the 3D spectrum flows away from the viewer, from the SPEC
+    /// popup's **flow** row. Zero while the stream is stalled, which is what
+    /// holds the surface still — the same rule that stops the waterfall
+    /// scrolling rather than filling it with rows of a spectrum nobody is
+    /// measuring any more.
+    pub surface_rows_per_sec: f32,
     /// Optional vertical gradient `(top, bottom)` filling the spectrum area,
     /// `None` when disabled in the UI settings.
     pub gradient: Option<(Color32, Color32)>,
@@ -1891,7 +1897,13 @@ pub fn show_ext(
             // and have nothing to say about a surface, so neither is drawn —
             // the surface brings its own floor and its own amplitude axis.
             peaks.clear();
-            surface.push(f.center_hz, f.span_hz, f.seq, &smooth.bins);
+            surface.push(
+                f.center_hz,
+                f.span_hz,
+                &smooth.bins,
+                wf.now_unix,
+                wf.surface_rows_per_sec,
+            );
             crate::widgets::spectrum3d::draw(
                 &painter,
                 &spec_rect,

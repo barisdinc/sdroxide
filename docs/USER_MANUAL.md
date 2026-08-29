@@ -652,6 +652,8 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
     [The 3D spectrum](#the-3d-spectrum) below.
   - **surface** — how that surface is drawn: **LINES** or **SOLID**. Greyed
     until 3D is switched on.
+  - **flow** — how fast it flows away from you, and so how much time the
+    surface holds. Greyed until 3D is switched on.
   - **reaction** — how quickly the line follows the band: **Slow**, **Medium**
     or **Fast**. Slower averages more frames into each other, which steadies
     the line and holds a weak carrier still long enough to read. The waterfall
@@ -827,11 +829,11 @@ once.
 
 The **3D** button in the SPEC popup swaps the flat spectrum line for a receding
 surface: the newest spectrum lies across the front at full width, and the ones
-before it flow away from you, narrowing towards a vanishing point. The last
-couple of seconds of the band are on screen at once as a landscape, so a
-carrier that comes and goes reads as a ridge with a length to it rather than as
-a line that twitches, and a signal a couple of dB out of the noise is a bump
-you can follow backwards in time. The waterfall says the same thing in colour;
+before it flow away from you, narrowing towards a vanishing point. The last few
+seconds of the band are on screen at once as a landscape — how many is the
+**flow** row below — so a carrier that comes and goes reads as a ridge with a
+length to it rather than as a line that twitches, and a signal a couple of dB
+out of the noise is a bump you can follow backwards in time. The waterfall says the same thing in colour;
 this says it in shape.
 
 ![The 3D spectrum: the solid surface above, the line rendering below](images/spectrum-3d.png)
@@ -843,7 +845,22 @@ The **surface** row picks between the two renderings:
   halves of the panadapter agree about what a strong signal looks like. Change
   the palette in Settings › Display.
 - **LINES** draws one trace per remembered spectrum in the flat line's own
-  colour. It is the lighter of the two and the one to pick on a slow machine.
+  colour: the shape without the levels. It is the *dearer* of the two rather
+  than the cheaper one — it draws the same surface and then strokes every crest
+  over the top of it — so on a machine that is struggling, SOLID is the one to
+  stay on.
+
+The **flow** row sets how fast the surface travels: **Slow** (8 rows a second),
+**Medium** (16), **Fast** (32) or **Faster** (64). The surface is a fixed 64
+rows deep, so this is also how much band it holds — eight seconds at Slow, one
+at Faster — and the two ends of the row are two different instruments. Slow is
+a memory: a signal that came up once in the last few seconds is still on screen
+to be looked at. Faster is a motion display: the surface moves visibly, which is
+what makes a fade or a keying pattern something you watch rather than something
+you infer. The rate is in rows a *second* and not rows a frame, so the picture
+is the same on a browser client at 30 fps as on a desktop at 60; past the frame
+rate the extra rows are copies, which is why the buttons stop where they do. The
+waterfall keeps its own **scroll** rate, and neither touches the other.
 
 Both hide what is behind them, which is what makes the picture read as depth: a
 strong signal in front stands over the band it is covering, and a flat stretch
@@ -855,16 +872,13 @@ the filter was never set on. The flat grid and the **PEAK HOLD** trace both
 describe a single line and are not drawn at all while the surface is; the
 surface brings its own floor and its own amplitude axis instead.
 
-The depth is the last few dozen spectra, so how much time it covers is the
-frame rate the radio is publishing at — around two seconds at 30 fps. It is
-not labelled and is not meant to be measured: the waterfall beside it is the
-instrument with a clock on it. Panning, zooming and retuning are all live under
-it, and an older row keeps the window it was measured over, so it slides
-sideways with the band rather than being redrawn on a frequency it never saw.
 
 This is drawn on the client — the browser client has it too, on the same buttons
-— and it costs a few percent of a core more than the flat line. It is off by
-default.
+— and it is off by default. It is not free: measured against the flat line on
+the same band, at 60 frames a second and a 1696-point-wide panadapter, the
+surface costs about a tenth of a core more in the solid rendering and a fifth in
+the line one. Nothing reaches the radio, though — no extra work is asked of the
+engine, and nothing more goes over the link to a remote station.
 
 #### Waterfall scroll speed
 

@@ -11,8 +11,16 @@
 //! rendering, a polyline over it. Deliberately: the waterfall's history is a
 //! wgpu texture behind a paint callback, and a second GPU path would have to
 //! be written twice over (native and WebGL) and would put the browser client's
-//! panadapter on a lane the native one does not use. A few thousand vertices a
-//! frame costs less than that, and costs the same everywhere.
+//! panadapter on a lane the native one does not use. The cost of doing it this
+//! way is a vertex buffer rather than a texture upload — about 135k vertices a
+//! frame for forty rows across a 1696-point panadapter — which is what
+//! [`VERTEX_BUDGET`] is there to bound.
+//!
+//! Measured on a release build at 60 fps, against the flat trace on the same
+//! synthetic band: 34% of a core flat, 43% solid, 52% lines. The line rendering
+//! is the *expensive* one, not the cheap one — it draws the same fill and then
+//! pays egui's polyline tessellation over the top of it — which is why it is
+//! given fewer columns for the same budget.
 //!
 //! Hidden surface removal is the painter's algorithm and nothing else: rows go
 //! down back to front, each filled from its own curve to its own baseline, so
@@ -27,17 +35,48 @@ use eframe::egui::{self, Align2, Color32, FontId, Rect, Shape, Stroke, pos2};
 
 use crate::view::ViewState;
 
-/// Spectra the surface remembers, and so the depth of the picture. One is kept
-/// per *frame* the engine publishes, so the time this covers is the operator's
-/// spectrum frame rate: about two seconds at 30 fps, one at 60. Time is not
-/// labelled on this axis and does not need to be — the depth is there to show
-/// how a signal is changing, and the waterfall next to it is the instrument
-/// with a clock on it.
+/// Spectra the surface remembers, and so the depth of the picture. Rows are
+/// clocked off the wall clock at the operator's **flow** rate
+/// ([`sdroxide_types::UiSettings::spectrum_3d_rows_per_sec`]), so this is a
+/// fixed number of rows and the time it covers is that rate: eight seconds at
+/// Slow, one at Faster. Time is not labelled on this axis and does not need to
+/// be — the depth is there to show how a signal is changing, and the waterfall
+/// next to it is the instrument with a clock on it.
 pub const DEPTH: usize = 64;
+
+/// Rows the flow may advance in one frame. A tab left in the background, or a
+/// hitch, would otherwise come back and rebuild the whole surface out of the
+/// one spectrum that happened to be current — the same clamp the waterfall's
+/// own scroll puts on `dt`.
+const MAX_STEP: usize = 8;
+
+/// Points between one drawn row and the next, measured where they land on
+/// screen. Rows closer together than this are dropped rather than drawn on top
+/// of one another: past about a row every few points they add nothing but
+/// vertices, and those are better spent across the band. See [`columns_for`].
+const ROW_PITCH: f32 = 3.5;
+
+/// Vertices the whole surface is allowed, near enough. What it buys differs by
+/// rendering: the solid one spends two a column (the top of the curtain and its
+/// foot), the line one spends those plus egui's own polyline tessellation over
+/// the top, which is about five more. Both are counted in [`columns_for`], so
+/// the two renderings cost about the same and the line one simply comes out
+/// with fewer columns.
+///
+/// The number is what a 1696-point-wide panadapter needs to be drawn at one
+/// vertex per point in the solid rendering — i.e. it is set so that the display
+/// most people have is not compromised at all, and only a very wide window
+/// starts trading columns for the budget.
+const VERTEX_BUDGET: usize = 240_000;
 
 /// Fraction of the strip's height the receding axis takes; the rest is the
 /// amplitude the newest row is drawn at.
-const DEPTH_FRAC: f32 = 0.42;
+///
+/// Nearly half, because the two compete: what the depth axis is given is what
+/// separates one row from the next, and a surface whose noise floor alone is
+/// taller than its whole depth reads as a picket fence rather than as a
+/// landscape.
+const DEPTH_FRAC: f32 = 0.46;
 
 /// How hard the perspective narrows: the oldest row comes out `1/(1 + PERSP)`
 /// as wide as the newest, and its amplitude is foreshortened by the same
@@ -70,42 +109,74 @@ struct Row {
 #[derive(Default)]
 pub struct Surface {
     rows: VecDeque<Row>,
-    /// Sequence of the frame last folded in, so a repaint that carries no new
-    /// spectrum does not advance the surface — and so a radio drawn in two
-    /// panes of a split view advances it once, not twice.
-    last_seq: Option<u32>,
+    /// Wall clock the flow was last advanced at, and the fraction of a row
+    /// carried over from it. The rate is absolute — rows a *second*, not rows a
+    /// frame — so the surface flows at the speed the operator picked whatever
+    /// the frame rate is, and a browser client at 30 fps and a desktop at 60
+    /// show the same picture.
+    last_now: f64,
+    accum: f32,
 }
 
 impl Surface {
-    /// Remember one spectrum. `values` are the UI-smoothed bins the flat trace
-    /// would have been drawn from, so the *reaction* setting steadies this
-    /// surface exactly as it steadies the line.
-    pub fn push(&mut self, center_hz: f64, span_hz: f64, seq: u32, values: &[f32]) {
-        if self.last_seq == Some(seq) || values.is_empty() || span_hz <= 0.0 {
+    /// Advance the flow to `now` and lay down however many rows are due, from
+    /// the spectrum in `values` — the UI-smoothed bins the flat trace would
+    /// have been drawn from, so the *reaction* setting steadies this surface
+    /// exactly as it steadies the line.
+    ///
+    /// `rows_per_sec` of zero holds the surface still. That is what a stalled
+    /// stream comes through as (see `WfTuning::surface_rows_per_sec`): rows of
+    /// a spectrum that is no longer being measured would be time that never
+    /// happened, which is the same reason the waterfall stops scrolling.
+    ///
+    /// Above the frame rate the extra rows are copies of the same spectrum,
+    /// exactly as a waterfall clocked faster than its front end repeats lines.
+    pub fn push(
+        &mut self,
+        center_hz: f64,
+        span_hz: f64,
+        values: &[f32],
+        now: f64,
+        rows_per_sec: f32,
+    ) {
+        if values.is_empty() || span_hz <= 0.0 {
             return;
         }
-        self.last_seq = Some(seq);
-        // Reuse the oldest row's allocation rather than freeing and asking for
-        // it again a few kilobytes at a time, sixty times a second.
-        let mut row = if self.rows.len() >= DEPTH {
-            self.rows.pop_front().unwrap_or_default()
-        } else {
-            Row::default()
-        };
-        row.center_hz = center_hz;
-        row.span_hz = span_hz;
-        row.bins.clear();
-        row.bins.extend(values.iter().map(|v| v.clamp(0.0, 255.0) as u8));
-        self.rows.push_back(row);
+        // First call, or the clock jumped: start counting from here rather than
+        // treating the gap as time the surface owes rows for.
+        let dt = if self.last_now > 0.0 { (now - self.last_now).clamp(0.0, 0.3) } else { 0.0 };
+        self.last_now = now;
+        if rows_per_sec <= 0.0 {
+            self.accum = 0.0;
+            return;
+        }
+        self.accum += dt as f32 * rows_per_sec;
+        let due = (self.accum.floor() as usize).min(MAX_STEP);
+        self.accum -= self.accum.floor();
+        for _ in 0..due {
+            // Reuse the oldest row's allocation rather than freeing and asking
+            // for it again a few kilobytes at a time, sixty times a second.
+            let mut row = if self.rows.len() >= DEPTH {
+                self.rows.pop_front().unwrap_or_default()
+            } else {
+                Row::default()
+            };
+            row.center_hz = center_hz;
+            row.span_hz = span_hz;
+            row.bins.clear();
+            row.bins.extend(values.iter().map(|v| v.clamp(0.0, 255.0) as u8));
+            self.rows.push_back(row);
+        }
     }
 
     /// Forget everything. Called while the flat trace is the one being drawn:
     /// coming back to the surface with minutes-old rows still in it would draw
-    /// a band that has since been left as though it were the last two seconds,
+    /// a band that has since been left as though it were the last few seconds,
     /// which is the same trap the full-band strip clears its history for.
     pub fn clear(&mut self) {
         self.rows.clear();
-        self.last_seq = None;
+        self.last_now = 0.0;
+        self.accum = 0.0;
     }
 }
 
@@ -232,67 +303,99 @@ pub fn draw(
         return;
     }
 
-    // One vertex every couple of points across, and one row every couple of
-    // points down the depth axis. Not per pixel, unlike the flat trace: the
-    // rows are stacked a point or two apart, so detail past this is drawn on
-    // top of itself, and the vertex count is paid on every row rather than
-    // once. The whole surface stays a few thousand vertices, which is what
-    // keeps it the same widget in a browser as on a desktop.
-    let cols = ((rect.width() * 0.5).round() as usize).clamp(48, 240);
-    let want = ((p.depth_h * 0.5).round() as usize).clamp(12, DEPTH);
-    let stride = DEPTH.div_ceil(want).max(1);
+    // Which rows to draw, and how many columns each of them can afford.
+    //
+    // Chosen by where a row *lands* rather than by taking every nth of them:
+    // perspective spreads the near rows out and crowds the far ones together,
+    // so an even stride through the history draws the front of the surface too
+    // sparsely to read as a surface and the back of it several rows to the
+    // pixel. Keeping a row only once it clears the last kept one by
+    // [`ROW_PITCH`] spends the vertices where they can be seen.
+    //
+    // Walked from the newest backwards, so the live spectrum is always the
+    // first row kept: it is the one the dB scale and every marker belong to,
+    // and losing it to a rounding rule would be losing the only row that is
+    // *now*. `INFINITY` is what makes it unconditional.
+    let newest = surface.rows.len() - 1;
+    let mut drawn: Vec<(usize, f32)> = Vec::with_capacity(DEPTH);
+    let mut last_y = f32::INFINITY;
+    for i in (0..surface.rows.len()).rev() {
+        let d = ((newest - i) as f32 / (DEPTH - 1) as f32).min(1.0);
+        let y = p.base_y(d);
+        if last_y - y >= ROW_PITCH {
+            drawn.push((i, d));
+            last_y = y;
+        }
+    }
+    // Oldest first from here on: the painter's algorithm is the depth buffer.
+    drawn.reverse();
+    let cols = columns_for(rect.width(), drawn.len(), solid);
 
-    // The screen x and the frequency of each column, worked out once for the
-    // whole surface: they are the same for every row (the rows differ only in
-    // where they stand and how wide they are drawn), and `x_to_freq` is f64.
+    // The screen x of each column and the band it covers, worked out once for
+    // the whole surface: they are the same for every row (the rows differ only
+    // in where they stand and how wide they are drawn), and `x_to_freq` is f64.
+    // Half a column either side rather than the centre alone, because what is
+    // sampled is a *range* — see the peak below.
     let mut xs = Vec::with_capacity(cols);
-    let mut hzs = Vec::with_capacity(cols);
+    let mut edges = Vec::with_capacity(cols);
     let last = (cols - 1) as f32;
+    let half = rect.width() / last * 0.5;
     for c in 0..cols {
         let x = rect.left() + rect.width() * c as f32 / last;
         xs.push(x);
-        hzs.push(view.x_to_freq(x, rect));
+        edges.push((view.x_to_freq(x - half, rect), view.x_to_freq(x + half, rect)));
     }
 
     let lut = crate::colormap::lut(palette);
-    let newest = surface.rows.len() - 1;
-    // Oldest drawn row first: the painter's algorithm is the depth buffer.
-    let mut drawn: Vec<usize> = (0..surface.rows.len()).rev().step_by(stride).collect();
-    drawn.reverse();
     let mut line = Vec::with_capacity(cols);
 
-    for i in drawn {
+    for (i, d) in drawn {
         let row = &surface.rows[i];
         let n = row.bins.len();
         if n == 0 || row.span_hz <= 0.0 {
             continue;
         }
-        let d = ((newest - i) as f32 / (DEPTH - 1) as f32).min(1.0);
         let s = p.scale(d);
         let base_y = p.base_y(d);
         let fog = 1.0 - FOG * d;
         let lo = row.center_hz - row.span_hz / 2.0;
+
+        // The row's own bin axis as a line: bin = hz * k + b. Two multiplies a
+        // column instead of a divide, and it is the row's axis and not the
+        // view's, which is what lets an older row slide with the band.
+        let k = n as f64 / row.span_hz;
+        let b = -lo * k;
 
         let mut mesh = egui::epaint::Mesh::default();
         mesh.vertices.reserve(cols * 2);
         mesh.indices.reserve((cols - 1) * 6);
         line.clear();
         for c in 0..cols {
-            let bin = (hzs[c] - lo) / row.span_hz * n as f64;
-            // Off the end of the window this row was taken over: the floor,
-            // which is what the band outside a frame's own span always reads
-            // as (the flat trace does the same).
-            let raw = if (0.0..n as f64).contains(&bin) { row.bins[bin as usize] } else { 0 };
+            // The strongest bin in the slice of band this column covers, not
+            // the one that happens to land under its centre. Zoomed out there
+            // are several bins to a column, and point-sampling them drops a
+            // carrier the moment it falls between two columns — it flickers,
+            // and on a surface where every row samples the same axis it
+            // flickers as a hole punched through the ridge. Adjacent columns
+            // tile the axis, so the whole row still costs one pass over the
+            // bins however many columns there are.
+            let (f0, f1) = edges[c];
+            let (i0, i1) = (f0 * k + b, f1 * k + b);
+            let raw = peak(&row.bins, i0, i1);
             let v = raw as f32 / 255.0;
             let x = p.x(xs[c], s);
             let top = pos2(x, base_y - v * p.amp_h * s);
             let (c_top, c_base) = if solid {
                 let rgb =
                     [lut[raw as usize * 4], lut[raw as usize * 4 + 1], lut[raw as usize * 4 + 2]];
-                // The curtain under each column fades towards black, which is
-                // what separates one row from the row behind without a line
-                // drawn between them.
-                (dim(rgb, fog), dim(rgb, fog * 0.3))
+                // The curtain under each column falls away to almost black,
+                // which is what separates one row from the row behind without
+                // a line drawn between them. Nearly black rather than merely
+                // darker on purpose: the rows overlap several deep at any
+                // useful amplitude, so a crest read against a dim curtain is
+                // the only thing that makes the surface a surface and not a
+                // block of colour with a ragged top edge.
+                (dim(rgb, fog), dim(rgb, fog * 0.10))
             } else {
                 // The background, lifting a shade towards the back: the fill
                 // is here to hide what is behind it, and the lift is the only
@@ -327,47 +430,155 @@ pub fn draw(
 /// given a depth axis rather than as a different instrument.
 const TRACE: Color32 = Color32::from_rgb(120, 220, 255);
 
+/// Columns to draw each row with: one per point of width, cut back only if
+/// [`VERTEX_BUDGET`] says the surface cannot afford that many.
+///
+/// One vertex per *point* rather than per device pixel, which is where the
+/// flat trace samples. The trace is one polyline and this is dozens, so the
+/// last half-pixel of sharpness is the most expensive thing on offer here and
+/// the least visible: a row is a couple of points tall.
+fn columns_for(width: f32, rows: usize, solid: bool) -> usize {
+    // Two vertices a column for the curtain, plus about five more for the
+    // polyline egui tessellates over it in the line rendering.
+    let per_col = if solid { 2 } else { 7 };
+    let affordable = VERTEX_BUDGET / per_col / rows.max(1);
+    (width.round() as usize).clamp(48, affordable.max(48))
+}
+
+/// The largest bin between `i0` and `i1` on a row's bin axis, with the range
+/// clamped into the row and an empty one answered by the single bin it lands
+/// in. Anything wholly outside the row reads as the floor — which is what the
+/// band outside a frame's own span always is, exactly as the flat trace has it.
+fn peak(bins: &[u8], i0: f64, i1: f64) -> u8 {
+    let n = bins.len();
+    if n == 0 || i1 <= 0.0 || i0 >= n as f64 {
+        return 0;
+    }
+    let a = (i0.max(0.0) as usize).min(n - 1);
+    let b = (i1.max(0.0).ceil() as usize).clamp(a + 1, n);
+    bins[a..b].iter().copied().max().unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn surface_of(rows: usize) -> Surface {
-        let mut s = Surface::default();
-        for i in 0..rows {
-            s.push(14_100_000.0, 100_000.0, i as u32, &[10.0, 200.0, 30.0]);
+    /// Run the flow for `secs` at `rate`, in sixtieth-of-a-second frames.
+    fn flow(s: &mut Surface, secs: f64, rate: f32) {
+        let mut t = 100.0;
+        s.push(14_100_000.0, 100_000.0, &[10.0, 200.0, 30.0], t, rate);
+        for _ in 0..(secs * 60.0) as usize {
+            t += 1.0 / 60.0;
+            s.push(14_100_000.0, 100_000.0, &[10.0, 200.0, 30.0], t, rate);
         }
-        s
     }
 
     /// The history is a ring: it fills to [`DEPTH`] and then drops the oldest,
     /// rather than growing for as long as the radio is on.
     #[test]
     fn the_surface_keeps_a_fixed_depth() {
-        let s = surface_of(DEPTH * 3);
+        let mut s = Surface::default();
+        flow(&mut s, 30.0, 16.0);
         assert_eq!(s.rows.len(), DEPTH);
-        assert_eq!(s.last_seq, Some((DEPTH * 3 - 1) as u32));
     }
 
-    /// A repaint carrying the frame already folded in must not advance the
-    /// surface — nor must the second pane of a split view, which draws the
-    /// same radio from the same state a second time in the same frame.
+    /// The flow is rows a *second*, not rows a frame: that is what makes the
+    /// picture the same on a browser client at 30 fps as on a desktop at 60,
+    /// and what makes the **flow** chips mean seconds of band.
     #[test]
-    fn a_redrawn_frame_does_not_advance_the_surface() {
-        let mut s = Surface::default();
-        s.push(14_100_000.0, 100_000.0, 7, &[1.0, 2.0]);
-        s.push(14_100_000.0, 100_000.0, 7, &[1.0, 2.0]);
-        assert_eq!(s.rows.len(), 1, "the same spectrum was remembered twice");
+    fn the_flow_runs_on_the_clock_and_not_on_the_frame_rate() {
+        // Two seconds at sixteen rows a second is thirty-two rows, at either
+        // frame rate. One row of slack for where the fraction lands.
+        for fps in [30.0, 60.0] {
+            let mut s = Surface::default();
+            let mut t = 100.0;
+            s.push(14_100_000.0, 100_000.0, &[1.0], t, 16.0);
+            for _ in 0..(2.0 * fps) as usize {
+                t += 1.0 / fps;
+                s.push(14_100_000.0, 100_000.0, &[1.0], t, 16.0);
+            }
+            let n = s.rows.len();
+            assert!((31..=33).contains(&n), "at {fps} fps the flow laid down {n} rows, not 32");
+        }
     }
 
-    /// Clearing has to reset the seq as well, or the first frame after coming
-    /// back to the surface is dropped as one already seen.
+    /// A rate of zero is how a stalled stream reaches the surface. It must hold
+    /// still: rows of a spectrum nobody is measuring any more would be time
+    /// that never happened, which is exactly what the waterfall stops for.
     #[test]
-    fn a_cleared_surface_takes_the_frame_it_last_saw() {
+    fn a_stalled_stream_holds_the_surface_still() {
         let mut s = Surface::default();
-        s.push(14_100_000.0, 100_000.0, 9, &[1.0]);
+        flow(&mut s, 1.0, 16.0);
+        let before = s.rows.len();
+        assert!(before > 0);
+        let mut t = 200.0;
+        for _ in 0..120 {
+            t += 1.0 / 60.0;
+            s.push(14_100_000.0, 100_000.0, &[1.0], t, 0.0);
+        }
+        assert_eq!(s.rows.len(), before, "a stalled stream kept filling the surface");
+    }
+
+    /// A tab left in the background comes back with a long gap on the clock.
+    /// The surface must not rebuild itself out of the one spectrum that happens
+    /// to be current when it does.
+    #[test]
+    fn a_long_gap_does_not_rebuild_the_whole_surface() {
+        let mut s = Surface::default();
+        s.push(14_100_000.0, 100_000.0, &[1.0], 100.0, 64.0);
+        s.push(14_100_000.0, 100_000.0, &[1.0], 400.0, 64.0);
+        assert!(s.rows.len() <= MAX_STEP, "{} rows from one gap", s.rows.len());
+    }
+
+    /// Clearing has to reset the clock as well, or the first frame after coming
+    /// back to the surface is owed every row of the gap since it was left.
+    #[test]
+    fn a_cleared_surface_starts_its_clock_again() {
+        let mut s = Surface::default();
+        flow(&mut s, 1.0, 16.0);
         s.clear();
-        s.push(14_100_000.0, 100_000.0, 9, &[1.0]);
-        assert_eq!(s.rows.len(), 1);
+        s.push(14_100_000.0, 100_000.0, &[1.0], 500.0, 16.0);
+        assert_eq!(s.rows.len(), 0, "the gap across the clear was charged as rows");
+    }
+
+    /// A column stands for a slice of band, not for the one bin under its
+    /// centre. Point-sampling drops a carrier the moment it falls between two
+    /// columns; on a surface, where every row samples the same axis, that is a
+    /// hole punched clean through the ridge.
+    #[test]
+    fn a_column_takes_the_strongest_bin_it_covers() {
+        // One hot bin in a hundred, and a column covering ten of them.
+        let mut bins = vec![10u8; 100];
+        bins[43] = 250;
+        assert_eq!(peak(&bins, 40.0, 50.0), 250, "the carrier fell between two columns");
+        assert_eq!(peak(&bins, 50.0, 60.0), 10);
+        // A range narrower than a bin still reads the bin it lands in.
+        assert_eq!(peak(&bins, 43.2, 43.6), 250);
+        // And the band outside the row is the floor, from either end.
+        assert_eq!(peak(&bins, -20.0, -1.0), 0);
+        assert_eq!(peak(&bins, 100.0, 120.0), 0);
+        // A range that only half overlaps still sees what it covers.
+        assert_eq!(peak(&bins, -5.0, 44.0), 250);
+        assert_eq!(peak(&[], 0.0, 4.0), 0);
+    }
+
+    /// The columns follow the width, and the vertex budget is what stops a very
+    /// wide panadapter from spending the frame on them. The line rendering pays
+    /// egui's polyline tessellation as well, so it gets fewer.
+    #[test]
+    fn the_column_count_follows_the_width_until_the_budget_bites() {
+        // An ordinary panadapter is drawn at one vertex per point, uncut.
+        assert_eq!(columns_for(1696.0, 47, true), 1696);
+        // A very wide one is cut back rather than allowed to cost the frame.
+        let wide = columns_for(3440.0, 47, true);
+        assert!(wide < 3440, "a 3440-point surface was drawn at full width");
+        assert!(wide > 1000, "the budget cut a wide surface to {wide} columns");
+        // The line rendering is more expensive a column, so it gets fewer of
+        // them at the same width and row count — never more.
+        assert!(columns_for(1696.0, 47, false) <= columns_for(1696.0, 47, true));
+        // Whatever the budget says, a surface is never drawn as a handful of
+        // columns: a floor keeps the picture readable on a tall thin strip.
+        assert!(columns_for(1696.0, DEPTH, false) >= 48);
     }
 
     /// The front row is drawn at full width on the bottom edge, and the oldest

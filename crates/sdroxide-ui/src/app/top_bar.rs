@@ -3914,7 +3914,7 @@ impl SdroxideApp {
                         self.view.spectrum_3d = !self.view.spectrum_3d;
                     }
                 });
-                self.surface_row(ui);
+                self.spectrum_3d_rows(ui, &mut cfg);
                 speed_row(
                     ui,
                     "reaction",
@@ -3964,15 +3964,17 @@ impl SdroxideApp {
         }
     }
 
-    /// The surface row of [`Self::panadapter_controls`]: how the 3D display is
-    /// drawn, once the 3D chip above it is lit.
+    /// The two rows of [`Self::panadapter_controls`] that belong to the 3D
+    /// display: how the surface is drawn, and how fast it flows away from the
+    /// viewer. Both are live only once the 3D chip above them is lit.
     ///
     /// Greyed rather than hidden while the flat line is showing, the way the
-    /// detail row greys a width this machine cannot hold: a row that comes and
-    /// goes resizes the popup under the pointer, and the choice it holds is
-    /// still a real one — it is what the 3D chip will show when it is clicked.
-    fn surface_row(&mut self, ui: &mut egui::Ui) {
+    /// detail row greys a width this machine cannot hold: rows that come and go
+    /// resize the popup under the pointer, and the choices they hold are still
+    /// real ones — they are what the 3D chip will show when it is clicked.
+    fn spectrum_3d_rows(&mut self, ui: &mut egui::Ui, cfg: &mut sdroxide_types::UiSettings) {
         let on = self.view.spectrum_3d;
+        let grey = "Switch 3D on to set this";
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("surface").size(10.0).color(crate::theme::CYAN_DIM()))
                 .on_hover_text(
@@ -3985,8 +3987,10 @@ impl SdroxideApp {
                     false,
                     "LINES",
                     "One trace per remembered spectrum, in the flat line's own colour, each \
-                     hiding the ones behind it. The lightest of the two, and the one to pick \
-                     on a slow machine or where the shape alone is what you are reading.",
+                     hiding the ones behind it. The shape without the levels, and the reading \
+                     to pick when the shape is what you are after — it costs a little more \
+                     than the solid one rather than less, because it draws the same surface \
+                     and then strokes every crest on top of it.",
                 ),
                 (
                     true,
@@ -4008,7 +4012,37 @@ impl SdroxideApp {
                         self.view.spectrum_3d_solid = solid;
                     }
                 } else {
-                    r.on_disabled_hover_text("Switch 3D on to draw the surface this way");
+                    r.on_disabled_hover_text(grey);
+                }
+            }
+        });
+        // The flow rate, and what each step of it means on the surface: the
+        // depth is a fixed number of rows, so the rate *is* the seconds of band
+        // the picture holds, and that is the number worth putting on the hover
+        // rather than the rows a second nobody counts.
+        let depth = crate::widgets::spectrum3d::DEPTH as f32;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("flow").size(10.0).color(crate::theme::CYAN_DIM()))
+                .on_hover_text(
+                    "How fast the 3D spectrum flows away from you, in rows a second: Slow 8, \
+                     Medium 16, Fast 32, Faster 64. The surface is a fixed number of rows \
+                     deep, so this is also how much time it holds. Slower is a longer memory \
+                     and a surface that crawls; faster is a shorter one that moves. The \
+                     waterfall keeps its own scroll rate, below.",
+                );
+            for step in Speed::SURFACE {
+                let label = step.label().to_uppercase();
+                let r = crate::chrome::chip_enabled(ui, on, cfg.spectrum_3d_speed == step, &label);
+                if !on {
+                    r.on_disabled_hover_text(grey);
+                    continue;
+                }
+                let rate = sdroxide_types::UiSettings { spectrum_3d_speed: step, ..*cfg }
+                    .spectrum_3d_rows_per_sec();
+                let hint =
+                    format!("{:.0} rows a second — {:.0} seconds of band", rate, depth / rate);
+                if r.on_hover_text(hint).clicked() {
+                    cfg.spectrum_3d_speed = step;
                 }
             }
         });
@@ -4948,6 +4982,7 @@ fn panadapter_group_w(ui: &egui::Ui) -> f32 {
     let widest = [
         chips(&["SHOW SPECTRUM", "PEAK HOLD", "3D"]),
         caption("surface") + chips(&["LINES", "SOLID"]),
+        caption("flow") + speeds(&Speed::SURFACE),
         caption("reaction") + speeds(&Speed::ALL),
         caption("scroll") + speeds(&Speed::WATERFALL),
         caption("detail") + detail + caption("8192 columns"),
