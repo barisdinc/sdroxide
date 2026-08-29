@@ -1,7 +1,7 @@
 //! Waterfall colormap LUTs: 256×1 RGBA8.
 
-pub const NAMES: [&str; 8] =
-    ["Classic", "Viridis", "Gray", "Icom", "Neon", "Synthwave", "Matrix", "Tron"];
+pub const NAMES: [&str; 9] =
+    ["Classic", "Viridis", "Gray", "Icom", "Neon", "Synthwave", "Matrix", "Tron", "Amber"];
 
 /// Piecewise-linear gradient through (position, RGB) anchor points.
 /// Anchors must start at 0.0 and end at 1.0.
@@ -95,6 +95,21 @@ pub fn lut(index: usize) -> [u8; 256 * 4] {
             (0.86, [244, 252, 255]),
             (1.00, [255, 150, 26]),
         ]),
+        // Amber — the waterfall to wear with the Amber Phosphor UI theme: a
+        // single warm phosphor family, black through ember and amber to a
+        // white-hot peak, with no second hue anywhere in it. Anchored on that
+        // theme's own inks: 0xffb000 is its accent and 0xffeacc its strong
+        // text, so a loud signal here is the same amber as the chrome around
+        // it.
+        8 => gradient(&[
+            (0.00, [0, 0, 0]),
+            (0.18, [26, 12, 0]),
+            (0.38, [92, 42, 0]),
+            (0.56, [176, 86, 0]),
+            (0.72, [255, 176, 0]),
+            (0.88, [255, 210, 96]),
+            (1.00, [255, 234, 204]),
+        ]),
         // Gray (index 2) and any out-of-range fallback.
         _ => gradient(&[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])]),
     }
@@ -171,6 +186,55 @@ pub fn band_color(band: sdroxide_types::Band) -> [u8; 3] {
         Band::Cm6 => [150, 204, 236],  // pale sky
         // Not a band: nothing is ever binned here.
         Band::Gen => [128, 128, 128],
+    }
+}
+
+#[cfg(test)]
+mod lut_tests {
+    use super::*;
+
+    /// A palette added to [`NAMES`] without a matching arm in [`lut`] falls
+    /// through to the Gray fallback and is silently the wrong picture — the
+    /// name is in the combo, the waterfall is grey. Gray itself (index 2) is
+    /// the one that is meant to look like that.
+    #[test]
+    fn every_named_palette_has_its_own_lut() {
+        let gray = lut(2);
+        for (i, name) in NAMES.iter().enumerate() {
+            if i == 2 {
+                continue;
+            }
+            assert!(lut(i) != gray, "{name} (index {i}) has no arm in lut() — it is drawing Gray");
+        }
+    }
+
+    /// Every waterfall palette has to start dark and end brighter than it
+    /// started: the noise floor is most of the picture and it is the low end,
+    /// so a ramp that starts bright paints a wall. Not monotone all the way —
+    /// Icom deliberately comes back *down* to red at the top rather than
+    /// blowing out to white — so only the two ends are pinned.
+    #[test]
+    fn every_palette_runs_dark_to_bright() {
+        let sum = |c: &[u8; 256 * 4], i: usize| {
+            c[i * 4] as u32 + c[i * 4 + 1] as u32 + c[i * 4 + 2] as u32
+        };
+        for (i, name) in NAMES.iter().enumerate() {
+            let c = lut(i);
+            assert!(sum(&c, 0) < sum(&c, 128), "{name}: the floor is not darker than mid-scale");
+            assert!(sum(&c, 0) < sum(&c, 255), "{name}: the peak is not brighter than the floor");
+            assert!(c.chunks_exact(4).all(|p| p[3] == 255), "{name}: a transparent entry");
+        }
+    }
+
+    /// Amber is the waterfall for the Amber Phosphor theme, so it has to stay
+    /// in that one phosphor family — no blue anywhere, and never bluer than it
+    /// is red.
+    #[test]
+    fn the_amber_palette_stays_amber() {
+        let amber = NAMES.iter().position(|n| *n == "Amber").expect("an Amber palette");
+        for p in lut(amber).chunks_exact(4) {
+            assert!(p[2] <= p[1] && p[1] <= p[0], "not a warm ramp: {:?}", &p[..3]);
+        }
     }
 }
 

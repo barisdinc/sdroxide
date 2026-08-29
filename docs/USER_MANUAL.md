@@ -746,7 +746,8 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
 The **waterfall colour scheme** and the **spectrum background gradient** are set
 on the **UI** tab of the Settings window (see
 [§6.3](#63-ui-display-preferences-and-voice-announcements)). The colour scheme is one of
-`Classic`, `Viridis`, `Gray`, `Icom`, `Neon`, `Synthwave`, `Matrix`, or `Tron`;
+`Classic`, `Viridis`, `Gray`, `Icom`, `Neon`, `Synthwave`, `Matrix`, `Tron`, or
+`Amber`;
 the gradient fills the spectrum area from a top colour down to a bottom colour
 (default dark red → black) and can be turned off. The same tab also themes the
 UI itself — colour theme, button shape and window shape — independently of the
@@ -12113,5 +12114,6 @@ have are not offered.
 ### Waterfall colour schemes
 
 `Classic` (PowerSDR-style), `Viridis`, `Gray`, `Icom` (Icom-style palette,
-peaking at red with no white blow-out), `Neon`, `Synthwave`, `Matrix`, and
-`Tron`. Chosen on the **UI** tab of the Settings window ([6.3](#63-ui-display-preferences-and-voice-announcements)).
+peaking at red with no white blow-out), `Neon`, `Synthwave`, `Matrix`, `Tron`
+and `Amber` (one warm phosphor family, to wear with the **Amber Phosphor** UI
+theme). Chosen on the **UI** tab of the Settings window ([6.3](#63-ui-display-preferences-and-voice-announcements)).
