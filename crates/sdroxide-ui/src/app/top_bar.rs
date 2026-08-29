@@ -5037,11 +5037,8 @@ fn band_mode_menu(
             // DRM belongs with the analog modes rather than under "Digital"
             // below: that heading is the modes the digi engine decodes and
             // transmits, and DRM is a broadcast to listen to — a demodulator,
-            // like WFM beside it. ADS-B is here for the same reason: a
-            // receive-only signal to point the radio at, with no transmitter
-            // and nothing the digi engine touches.
+            // like WFM beside it.
             Mode::Drm,
-            Mode::Adsb,
             Mode::Digu,
             Mode::Digl,
             Mode::Dsb,
@@ -5055,7 +5052,12 @@ fn band_mode_menu(
     ui.add_space(6.0);
     crate::chrome::menu_caption(ui, "Digital");
     ui.horizontal_wrapped(|ui| {
-        for m in Mode::DIGITAL {
+        // ADS-B rides along at the end of this row rather than in
+        // [`Mode::DIGITAL`] itself: that list is what the digi engine decodes
+        // and transmits, and ADS-B is neither — its own lane, no QSO, no TX.
+        // It is a digital signal all the same, and this is where an operator
+        // looks for one.
+        for m in Mode::DIGITAL.into_iter().chain([Mode::Adsb]) {
             if crate::chrome::chip(ui, mode == m, m.label()).clicked() {
                 cmds.push(Command::SetMode { rx: RxId::Main, mode: m });
             }

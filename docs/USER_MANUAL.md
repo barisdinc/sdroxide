@@ -3797,9 +3797,9 @@ hundredths of an inch the protocol carries.
 
 ### 3.13 ADS-B (aircraft on 1090 MHz)
 
-Choose **ADS-B** from the mode row — beside DRM, with the demodulators rather
-than under DIGITAL, because it is something to point the radio at rather than
-something to work. Every civil aircraft in the sky transmits its identity,
+Choose **ADS-B** from the end of the **DIGITAL** row. It sits apart from the
+rest of that row all the same: there is no QSO to work and no transmitter, only
+a signal to point the radio at. Every civil aircraft in the sky transmits its identity,
 altitude, velocity and position on 1090 MHz, twice a second, in clear and with a
 checksum. The panel is a target list on the left and a radar picture on the
 right.
