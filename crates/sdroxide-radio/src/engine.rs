@@ -12329,14 +12329,15 @@ fn rig_mode_class(m: Mode) -> u8 {
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
         Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => 2,
         Mode::Cw => 3,
-        // RIFP, VHF packet, APRS and VHF SSTV are data on an FM carrier, so a
-        // rig reporting plain FM is still where we left it.
+        // RIFP, VHF packet, APRS, VHF SSTV and VHF RTTY are data on an FM
+        // carrier, so a rig reporting plain FM is still where we left it.
         Mode::Nfm
         | Mode::Wfm
         | Mode::Rifp
         | Mode::Packet
         | Mode::Aprs
         | Mode::SstvFm
+        | Mode::RttyFm
         // ADS-B is not a mode any rig has, and no rig will ever be in it: the
         // dial is at 1090 MHz. Grouped with FM so an echo is never read as the
         // operator having left the mode.

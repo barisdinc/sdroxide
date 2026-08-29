@@ -292,7 +292,7 @@ popup with three rows:
   has a standard calling frequency carry a cyan underline; see
   [§3.1](#31-general-considerations).
 - **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB SPEC`.
-- **DIGITAL:** `FT8 FT4 PSK RTTY OLIVIA THOR FSQ HELL SSTV SSTV-FM RIFP RFPAINT RADE` (see
+- **DIGITAL:** `FT8 FT4 PSK RTTY RTTY-FM OLIVIA THOR FSQ HELL SSTV SSTV-FM RIFP RFPAINT RADE` (see
   [Digital modes](#3-digital-modes)).
 
 ![The band and mode selector popup](images/04-band-mode-popup.jpg)
@@ -2241,7 +2241,7 @@ one of them, and reads **⇵ FREQ** when it is not. Clicking a frequency moves t
 **dial**; where you sit inside the audio passband is a separate control and is
 left alone.
 
-WEFAX has its own **STATIONS** button instead ([7.9](#79-wefax-radiofax)): its
+WEFAX has its own **STATIONS** button instead ([3.8](#38-weather-fax-wefax--radiofax)): its
 transmitters are not on any band plan, so they are listed by station rather than
 by band.
 
@@ -2732,6 +2732,30 @@ signals across each band's PSK/RTTY calling sub-bands. Clicking a label from any
 mode switches to PSK or RTTY, tunes onto the signal, and opens this panel — onto
 the standard tone pair in RTTY, so the offset you land on is the one you will
 transmit. A label already in that mode leaves your own offset alone.
+
+**On VHF and UHF, use RTTY-FM instead.** Some national societies still send
+their weekly bulletin as RTTY on a 2 m FM channel, and that is not the same
+signal as RTTY on a sideband — the tone pair modulates an FM carrier rather than
+riding on one edge of a passband. **RTTY-FM** is on the DIGITAL row beside RTTY
+([issue #214](https://github.com/dividebysandwich/sdroxide/issues/214)).
+
+Everything about the modem is the same: the same Baudot alphabet, the same
+2125/2295 Hz tone pair, the same shift, baud and **Reverse** controls and the
+same panel. What differs is the radio and the frequency:
+
+- A CAT-controlled rig is put in **FM data** (PKTFM / FM-D) rather than in USB.
+- The **dial is the channel**, not the foot of a passband, so nothing is offset
+  from it — a contact is logged on the frequency you tuned, where an HF RTTY
+  contact is logged 2.2 kHz above it.
+- The passband is an FM channel's, ±8 kHz, selectable 8k / 16k.
+- The transmit level is **deviation** and comes from the FM half of the digital
+  transmit level ([2.10](#210-transmit)), which is the same rail VHF
+  packet and APRS use.
+
+Its band buttons are the FM **calling** channels — 50.150, 145.500 and 433.500 —
+because RTTY on FM has no worldwide convention at all: where it is still used the
+frequency comes from the society running the bulletin. Tune the real one and
+store it in a memory.
 
 ### 3.4 Olivia, THOR and FSQ
 
@@ -11912,7 +11936,8 @@ using. Bind them under **Speech** on the Controls tab:
 | JS8 | JS8 — conversational messaging on FT8's waveform. Four speeds (Normal 15 s / Fast 10 s / Turbo 6 s / Slow 30 s); directed queries, heartbeats and multi-frame free text. |
 | WSPR | Weak Signal Propagation Reporter — a two-minute beacon carrying a callsign, grid and power. Not a QSO mode: it measures paths, uploads them to WSPRnet, and feeds the propagation heat map. See [3.11](#311-wspr-weak-signal-propagation-reporter). |
 | PSK | PSK31 keyboard mode (BPSK31 / varicode). |
-| RTTY | RTTY keyboard mode (Baudot; selectable shift and baud). |
+| RTTY | RTTY keyboard mode (Baudot; selectable shift and baud), on a sideband. |
+| RTTY-FM | The same modem on an FM carrier, the way a club bulletin is still sent on VHF. |
 | OLIVIA | Robust MFSK keyboard mode (selectable tones/bandwidth). |
 | THOR | DominoEX-family IFK keyboard mode with FEC (THOR4…THOR32). |
 | FSQ | Fast Simple QSO — 33-tone IFK with directed (FSQCALL) messaging and images. |

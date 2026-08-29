@@ -846,7 +846,19 @@ use sdroxide_types::{
 /// here, and a remote client's window shows that the reading is local-only
 /// rather than sitting on "starting…". If it is bridged later that is its own
 /// append and its own bump.
-pub const PROTO_VERSION: u16 = 101;
+/// **102** — RTTY on an FM carrier (issue #214).
+///
+/// `Mode::RttyFm` is appended to [`sdroxide_types::Mode`]: the same Baudot
+/// modem, the same tone pair and the same panel as `Mode::Rtty`, into an FM
+/// transmitter rather than onto a sideband. Appending a mode is on its own
+/// enough to force this bump — every mode already on the wire keeps its number,
+/// but a v101 peer handed the new one has no variant to decode it into and
+/// desynchronises on the rest of the message. Same reasoning as v99's
+/// `Mode::Adsb`, v98's `Mode::SstvFm` and v89's `Mode::Aprs`.
+///
+/// Nothing else changed: every table the new mode needs an answer in is
+/// derived from the mode, not carried beside it.
+pub const PROTO_VERSION: u16 = 102;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

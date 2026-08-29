@@ -352,6 +352,13 @@ fn digi_dial_freqs(mode: Mode) -> &'static [(&'static str, f64)] {
         // see `SSTV_FM_DIALS` for where each comes from and why the list is
         // this short.
         Mode::SstvFm => &[("6m", 50_510_000.0), ("2m", 144_500_000.0), ("70cm", 433_400_000.0)],
+        // RTTY on an FM carrier has no worldwide convention at all: where it is
+        // still used it is a national society's own bulletin on a local
+        // channel, and the frequency comes from that society rather than from
+        // a band plan. These are the FM calling channels — somewhere to start
+        // from and a band to be on, not a place anybody is transmitting RTTY
+        // (issue #214). Store the real one in a memory.
+        Mode::RttyFm => &[("6m", 50_150_000.0), ("2m", 145_500_000.0), ("70cm", 433_500_000.0)],
         // Olivia activity centres (USB dial).
         Mode::Olivia => &[
             ("80m", 3_581_000.0),

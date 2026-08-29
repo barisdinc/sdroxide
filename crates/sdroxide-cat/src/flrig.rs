@@ -566,7 +566,7 @@ fn candidates(m: Mode) -> &'static [&'static str] {
         Mode::Wfm | Mode::Adsb => &["WFM", "FM-W"],
         // Data over FM rather than over a sideband: the carrier is the
         // signal's centre, not one edge of it.
-        Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm => {
+        Mode::Rifp | Mode::Packet | Mode::Aprs | Mode::SstvFm | Mode::RttyFm => {
             &["PKT-FM", "PKTFM", "DATA-FM", "FM-D", "FM"]
         }
         Mode::Digl => &["DATA-R", "DATA-L", "DIGL", "PKT-LSB", "PKTLSB", "PKT-L", "LSB-D", "LSB"],
