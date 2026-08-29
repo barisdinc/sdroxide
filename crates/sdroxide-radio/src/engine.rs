@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use sdroxide_adsb::{AdsbAction, AdsbController};
 use sdroxide_config::BandStacks;
@@ -1298,43 +1298,32 @@ struct TxChain {
 
 /// 10 ms of TX audio per iteration.
 const TX_AUDIO_BLOCK: usize = 480;
-/// Standing depth (40 ms) the TCI TX queue starts out paced towards. Each block
-/// asks the client, via a `TxChrono`, for exactly what would restore this *and
-/// has not already been asked for* — so a client that honours chronos tracks
-/// our real consumption instead of guessing.
+/// How far ahead of the transmitter a keying TCI client is asked to run
+/// (240 ms).
 ///
-/// The floor rather than the figure: see [`TCI_TX_MAX_TARGET`].
-const TCI_TX_TARGET: usize = TX_AUDIO_BLOCK * 4;
-/// The deepest the TCI TX queue is ever paced towards (250 ms).
+/// The transmit clock is what drives the request — see [`TciTxPace`] — so this
+/// is the whole of the buffering: the client is asked for everything the
+/// transmitter has consumed *plus* this, and a chrono-honouring client's queue
+/// therefore stands at this depth and cannot exceed it. It has to cover the
+/// round trip from issuing a chrono to the audio landing, which for an
+/// application answering off a GUI timer is a couple of hundred milliseconds.
 ///
-/// 40 ms of standing depth assumes a client that answers a chrono about as
-/// promptly as this loop issues them. WSJT-X does not: its transmit audio comes
-/// off a GUI timer, so a run of chronos is answered in one go a couple of
-/// hundred milliseconds later, and a queue paced at 40 ms is empty for most of
-/// that. Padding the gap with silence chops the over — a quarter of an FT8
-/// burst is a decode nobody gets (issue #202).
+/// It is also the transmit latency: the over runs this far behind the client's
+/// own waveform, and `Engine::end_tci_tx` plays the remainder out rather than
+/// dropping it, so the tail of a timed burst is not cut off.
+const TCI_TX_LEAD: usize = TX_AUDIO_BLOCK * 24;
+/// Blocks (500 ms) of complete silence from a keyed TCI client before what it
+/// was asked for is written off and asked for again.
 ///
-/// So the depth is *learned*: every block that underruns deepens it by one
-/// block, which lands it at about the longest gap the client has shown, and it
-/// stops at this ceiling. It is not wound back down, because a client's cadence
-/// does not improve on its own and re-learning it would cost another chopped
-/// over; the price is transmit latency, and a quarter of a second of it is
-/// still less than the half-second cushion `TCI_TX_FIFO_CAP` already allows.
-const TCI_TX_MAX_TARGET: usize = TX_AUDIO_BLOCK * 25;
-/// Blocks (500 ms) of silence from a keyed TCI client before what it was asked
-/// for is written off and asked for again.
-///
-/// The outstanding count is what keeps this loop from asking twice for the same
-/// audio, so a chrono the client simply dropped would otherwise suppress every
-/// further request and leave the rest of the over silent. Twice the deepest
-/// queue, so a client that is merely slow is never written off while its answer
-/// is still on the way, and well inside [`TCI_TX_STARVE_LIMIT`], so a client
-/// that really has died is still unkeyed rather than asked forever.
+/// The request count is what keeps this loop from asking twice for the same
+/// audio, so a chrono the client simply dropped would otherwise leave the
+/// stream short by that much for the rest of the over. Long enough that a
+/// client which is merely slow is never written off while its answer is still
+/// on the way, and well inside [`TCI_TX_STARVE_LIMIT`], so a client that really
+/// has died is still unkeyed rather than asked forever.
 const TCI_TX_ASK_TIMEOUT_BLOCKS: u32 = 50;
 
-/// How a keying TCI client is asked for transmit audio: the standing queue
-/// depth it is paced towards, what it has already been asked for, and how long
-/// it has been quiet.
+/// How a keying TCI client is asked for transmit audio.
 ///
 /// A `TxChrono` is a request with no acknowledgement, so the loop that issues
 /// them has to do its own bookkeeping or it asks for the same missing audio on
@@ -1344,40 +1333,70 @@ const TCI_TX_ASK_TIMEOUT_BLOCKS: u32 = 50;
 /// jumping forward, which is how a 15 s FT8 slot went out as a few seconds of
 /// signal (issue #202).
 ///
+/// **The demand is the transmit clock, not the queue.** That distinction is the
+/// whole of this type. Pacing towards a standing queue depth — ask for whatever
+/// would refill it, minus what is already on its way — looks right and is
+/// unstable in exactly the case that matters: once the queue is dry it stays
+/// dry, every request is answered, and the arithmetic then asks for precisely
+/// what arrived and never a frame more. The ask rate is pinned to the arrival
+/// rate, wherever that happens to have fallen, and the shortfall is permanent.
+/// Measured against WSJT-X on a Hermes-Lite: a 13.6 s FT8 slot was asked for
+/// 372 135 frames, answered with 360 436 of them — 97 % of what it was asked
+/// for and 55 % of the over, with 44 % of the blocks going out as silence.
+///
+/// So the running total asked for is held at "everything the transmitter has
+/// consumed, plus [`TCI_TX_LEAD`]". Consumption is a wall clock — one block per
+/// block, whether that block was audio or the silence that stood in for it — so
+/// a client that falls behind is asked for *more*, not less, and one that has
+/// caught up is asked for exactly real time. It also bounds the queue by
+/// construction: a client is never asked for more than the transmitter will
+/// have used, so a chrono-honouring one cannot overrun the FIFO at all.
+///
 /// Its own type so the rules can be exercised without a socket, a rig or an
-/// engine: they are three interacting counters, and every case worth checking
+/// engine: they are a few interacting counters, and every case worth checking
 /// is a sequence of blocks.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct TciTxPace {
-    /// Frames asked for that have not arrived yet.
+    /// Frames asked for since key-down.
     asked: usize,
+    /// Frames that have arrived since key-down.
+    supplied: usize,
+    /// Frames the transmit clock has consumed since key-down, silence included.
+    played: usize,
     /// Consecutive blocks the client has sent nothing at all.
     quiet: u32,
-    /// The standing depth being paced towards, `TCI_TX_TARGET..=TCI_TX_MAX_TARGET`.
-    target: usize,
-}
-
-impl Default for TciTxPace {
-    fn default() -> Self {
-        TciTxPace { asked: 0, quiet: 0, target: TCI_TX_TARGET }
-    }
 }
 
 impl TciTxPace {
-    /// One block: `queued` frames are in hand and `got` arrived since the last
-    /// call. Returns the frame count to chrono for, or `None` when enough is
-    /// already in hand or already on its way.
-    fn request(&mut self, queued: usize, got: usize) -> Option<u32> {
-        self.asked = self.asked.saturating_sub(got);
+    /// One block: `queued` frames are in hand, `got` arrived since the last
+    /// call, and `playing` says whether a block is actually going on the air
+    /// (it is not during the pre-roll, which spins far faster than the transmit
+    /// clock and would otherwise run the demand away). Returns the frame count
+    /// to chrono for, or `None` when enough is already on its way.
+    fn request(&mut self, queued: usize, got: usize, playing: bool) -> Option<u32> {
+        self.supplied += got;
+        if playing {
+            self.played += TX_AUDIO_BLOCK;
+        }
         // A client that has gone quiet for longer than any answer could take is
-        // not going to send what it still owes; write it off so the next block
-        // asks again rather than waiting forever on it.
+        // not going to send what it still owes; write that off so the next
+        // block asks for it again rather than waiting on it forever.
         self.quiet = if got > 0 { 0 } else { self.quiet + 1 };
         if self.quiet >= TCI_TX_ASK_TIMEOUT_BLOCKS {
             self.quiet = 0;
-            self.asked = 0;
+            self.asked = self.supplied;
         }
-        let deficit = self.target.saturating_sub(queued + self.asked);
+        // A client that streams on its own clock and ignores chronos (as
+        // sdroxide's own does against a rig that never sends one) fills the
+        // queue without being asked; there is nothing to request while that
+        // much of its audio is already in hand. Twice the lead rather than the
+        // lead itself, because a chrono-honouring client's queue *stands* at
+        // the lead and this must not fire on the ordinary case.
+        if queued >= TCI_TX_LEAD * 2 {
+            return None;
+        }
+        let want = self.played + TCI_TX_LEAD;
+        let deficit = want.saturating_sub(self.asked);
         if deficit < TX_AUDIO_BLOCK {
             return None;
         }
@@ -1385,22 +1404,12 @@ impl TciTxPace {
         Some(deficit as u32)
     }
 
-    /// A block went out padded with silence: the standing depth was too shallow
-    /// for this client's cadence. One block per underrunning block lands it at
-    /// about the length of the gap, which is exactly the buffer that would have
-    /// covered it.
-    fn underran(&mut self) {
-        self.target = (self.target + TX_AUDIO_BLOCK).min(TCI_TX_MAX_TARGET);
-    }
-
-    /// A new over: nothing from the last one is owed to this one. The learned
-    /// depth is deliberately kept — the client's cadence is the same client's
-    /// cadence, and re-learning it would chop this over too.
+    /// A new over: none of the last one's counters carry into it.
     fn rekey(&mut self) {
-        self.asked = 0;
-        self.quiet = 0;
+        *self = TciTxPace::default();
     }
 }
+
 /// Consecutive short TX blocks (1.5 s) before we conclude a keyed TCI client
 /// has died and unkey. A brief gap is normal on a WebSocket and must not chop
 /// the over — half a transmitted FT8 burst decodes nowhere.
@@ -2181,6 +2190,9 @@ struct Engine {
     /// How the keying TCI client is being asked for transmit audio — see
     /// [`TciTxPace`].
     tci_pace: TciTxPace,
+    /// The client has unkeyed and what it already handed over is being played
+    /// out — see [`Engine::tci_key`]. Nothing more is read from it.
+    tci_tx_drain: bool,
     /// What we last published to TCI clients, so unchanged ticks cost nothing.
     tci_last_snap: Option<TciStateSnapshot>,
     /// Demod-audio (CAT-rig) mode: the source delivers already-demodulated real
@@ -2961,6 +2973,7 @@ fn engine_thread(
         tci_tx: false,
         tci_tx_starved: 0,
         tci_pace: TciTxPace::default(),
+        tci_tx_drain: false,
         tci_last_snap: None,
         audio_mode,
         radio_fs,
@@ -8195,6 +8208,13 @@ impl Engine {
         if clients_changed {
             self.emit_tci_status();
         }
+        // The tail of an over whose client has already unkeyed: end it the
+        // moment there is no longer a whole block of its audio left, so the
+        // transmitter stops on the client's last sample rather than on its PTT.
+        if self.tci_tx_drain && self.mic_fifo.len() < TX_AUDIO_BLOCK {
+            self.end_tci_tx();
+            self.apply(Command::SetPtt(false));
+        }
         // A client that stopped feeding audio without unkeying would otherwise
         // leave us transmitting silence indefinitely.
         if self.tci_tx_starved > TCI_TX_STARVE_LIMIT {
@@ -8244,6 +8264,20 @@ impl Engine {
     /// for the operator. A refusal is reflected straight back to the client.
     fn tci_key(&mut self, on: bool) {
         if !on {
+            // The client's unkey says it has stopped *sending*, not that what
+            // it already handed over may be thrown away: the transmitter runs
+            // up to [`TCI_TX_LEAD`] behind the client's own waveform, and
+            // cutting there takes the tail off every burst — which on a timed
+            // digital mode is the whole decode. Play out what is in hand
+            // first; `poll_tci_server` unkeys when it has run dry.
+            if self.tci_tx && !self.tci_tx_drain && self.mic_fifo.len() >= TX_AUDIO_BLOCK {
+                self.tci_tx_drain = true;
+                if let Some(s) = self.tci_srv.as_mut() {
+                    s.drain_tx_audio();
+                    s.deny_tx();
+                }
+                return;
+            }
             self.end_tci_tx();
             self.apply(Command::SetPtt(false));
             return;
@@ -8260,9 +8294,8 @@ impl Engine {
         if self.state.tx.ptt {
             self.tci_tx = true;
             self.tci_tx_starved = 0;
-            // Nothing from the last over is owed to this one. The learned
-            // depth is not reset with it: the client's cadence is the same
-            // client's cadence, and re-learning it would chop this over too.
+            self.tci_tx_drain = false;
+            // Nothing from the last over is owed to this one.
             self.tci_pace.rekey();
             // Start from an empty ring so a previous over's tail can't play.
             if let Some(s) = self.tci_srv.as_mut() {
@@ -8283,6 +8316,7 @@ impl Engine {
         }
         self.tci_tx = false;
         self.tci_tx_starved = 0;
+        self.tci_tx_drain = false;
         self.tci_pace.rekey();
         self.mic_fifo.clear();
         if let Some(s) = self.tci_srv.as_mut() {
@@ -11502,6 +11536,16 @@ impl Engine {
         if let Some(mic) = self.mic.as_mut() {
             while mic.consumer.pop().is_ok() {}
         }
+        // Playing out the tail of an over the client has already ended: it is
+        // not sending any more and must not be asked to.
+        if self.tci_tx_drain {
+            return true;
+        }
+        // `tx_pace` is unset until the first block goes out, which marks the
+        // pre-roll: this function is called from a loop that spins far faster
+        // than the transmit clock until then, and counting those calls as
+        // consumption would run the demand away before a frame had been sent.
+        let playing = self.tx_pace.is_some();
         if let Some(srv) = self.tci_srv.as_mut() {
             let mut block = [0.0f32; TX_AUDIO_BLOCK];
             let mut got = 0usize;
@@ -11513,20 +11557,30 @@ impl Engine {
                     break;
                 }
             }
-            // Closed-loop pacing: ask for exactly what would restore the target
-            // depth *and is not already on its way*. A client that honours
-            // chronos then follows our real consumption; one that self-paces
-            // (as sdroxide's own client does when a rig never chronos) simply
-            // ignores them and still works.
-            //
-            // Counting what is outstanding is the whole of the loop being
-            // closed. Without it, a client that answers a run of chronos in one
-            // go is asked for the same missing audio once per block for as long
-            // as its answer takes to arrive, and hands back several times what
-            // the queue can hold — see `Engine::tci_tx_asked`.
-            if let Some(frames) = self.tci_pace.request(self.mic_fifo.len(), got) {
+            // Closed-loop pacing against the transmit clock: ask for everything
+            // this over will have consumed plus a fixed lead, less what has
+            // already been asked for. A client that honours chronos then tracks
+            // real time whatever cadence it answers on; one that self-paces (as
+            // sdroxide's own client does when a rig never chronos) fills the
+            // queue past the lead and is not asked at all. See `TciTxPace`.
+            let asked = self.tci_pace.request(self.mic_fifo.len(), got, playing);
+            if let Some(frames) = asked {
                 srv.request_chrono(frames);
             }
+            // The whole of the pacing loop in one line, once a block. This is
+            // the only view there is of a third-party client's cadence — see
+            // issue #202, where the numbers behind two different failures
+            // (a chopped over and a silent one) look identical from outside.
+            trace!(
+                target: "sdroxide::tcitx",
+                got,
+                queued = self.mic_fifo.len(),
+                asked = asked.unwrap_or(0),
+                requested = self.tci_pace.asked,
+                supplied = self.tci_pace.supplied,
+                played = self.tci_pace.played,
+                "TCI TX pacing"
+            );
         }
         if self.mic_fifo.len() > TCI_TX_FIFO_CAP {
             let cut = self.mic_fifo.len() - TCI_TX_FIFO_CAP;
@@ -11540,7 +11594,6 @@ impl Engine {
         // chop the over, but count it so a dead client is eventually unkeyed.
         if self.mic_fifo.len() < TX_AUDIO_BLOCK {
             self.tci_tx_starved += 1;
-            self.tci_pace.underran();
         } else {
             self.tci_tx_starved = 0;
         }
@@ -13492,68 +13545,94 @@ mod collapse_tests {
 
 #[cfg(test)]
 mod tci_pace_tests {
-    use super::{
-        TCI_TX_ASK_TIMEOUT_BLOCKS, TCI_TX_MAX_TARGET, TCI_TX_TARGET, TX_AUDIO_BLOCK, TciTxPace,
-    };
+    use super::{TCI_TX_ASK_TIMEOUT_BLOCKS, TCI_TX_LEAD, TX_AUDIO_BLOCK, TciTxPace};
 
-    /// A client that answers every chrono at once is asked for exactly what it
-    /// consumed, and never twice for the same audio.
+    /// A client that answers every chrono at once is asked for exactly what the
+    /// transmitter consumes, and never twice for the same audio.
     #[test]
-    fn a_prompt_client_is_asked_for_what_it_consumed() {
+    fn a_prompt_client_is_asked_for_what_the_transmitter_consumes() {
         let mut p = TciTxPace::default();
-        // Key-down on an empty queue: the whole standing depth, once.
-        assert_eq!(p.request(0, 0), Some(TCI_TX_TARGET as u32));
-        // The next block, with nothing yet arrived, must ask for nothing: the
-        // first request covers it and is still on its way.
-        assert_eq!(p.request(0, 0), None);
-        // It lands and one block of it is played, so the queue is one block
-        // short of the standing depth — which is exactly what is asked for.
+        // Key-down on an empty queue: the lead, plus the block this one is
+        // about to consume, once.
+        let first = TCI_TX_LEAD + TX_AUDIO_BLOCK;
+        assert_eq!(p.request(0, 0, true), Some(first as u32));
+        // The next block, with nothing yet arrived, asks for one block — the
+        // one it will consume — and not for the lead again.
+        assert_eq!(p.request(0, 0, true), Some(TX_AUDIO_BLOCK as u32));
+        // It all lands and two blocks have been played, so the queue stands at
+        // the lead; one block is asked for, once per block, from here on.
         assert_eq!(
-            p.request(TCI_TX_TARGET - TX_AUDIO_BLOCK, TCI_TX_TARGET),
+            p.request(TCI_TX_LEAD, first + TX_AUDIO_BLOCK, true),
             Some(TX_AUDIO_BLOCK as u32),
-            "one block consumed, one block asked for"
         );
     }
 
-    /// The bug behind issue #202: a client that takes several blocks to answer
-    /// must not be asked again on every one of them. Whatever it is asked for
-    /// in total may never exceed the standing depth, because that is all the
-    /// queue can hold — anything past it is the client's waveform thrown away.
+    /// The bug behind the second half of issue #202: pacing towards a standing
+    /// queue depth pins the ask rate to the arrival rate, so a client that has
+    /// once fallen behind is asked for exactly what it manages to send and can
+    /// never catch up. Measured against WSJT-X: 55 % of a 13.6 s FT8 slot.
+    ///
+    /// The transmit clock is what fixes it — a dry queue asks for *more*.
     #[test]
-    fn a_slow_client_is_never_asked_for_more_than_the_queue_holds() {
+    fn a_client_that_has_fallen_behind_is_asked_for_real_time_not_for_what_it_sent() {
         let mut p = TciTxPace::default();
-        let mut asked = 0u32;
-        // Twenty-five blocks — a quarter of a second — with the client silent
-        // and the queue empty, which is exactly a GUI application answering on
-        // its own timer.
-        for _ in 0..25 {
-            asked += p.request(0, 0).unwrap_or(0);
+        // Half-rate client: one block of audio for every two blocks played.
+        let mut asked = 0usize;
+        let mut supplied = 0usize;
+        for i in 0..200 {
+            let got = if i % 2 == 0 { TX_AUDIO_BLOCK } else { 0 };
+            supplied += got;
+            // The queue never builds: everything that arrives goes straight out.
+            asked += p.request(0, got, true).unwrap_or(0) as usize;
         }
-        assert_eq!(
-            asked, TCI_TX_TARGET as u32,
-            "asking once per block would have asked for {}× the queue",
-            25
-        );
+        // Over 200 blocks the transmitter consumed 200 blocks, so that — plus
+        // the standing lead — is what the client must have been asked for. A
+        // loop pinned to the arrival rate would have asked for half of it.
+        let want = 200 * TX_AUDIO_BLOCK + TCI_TX_LEAD;
+        assert_eq!(asked, want, "asked for {asked} frames of a {want}-frame over");
+        assert!(asked > supplied * 2 - TX_AUDIO_BLOCK, "the shortfall must be asked for again");
     }
 
-    /// …but a chrono the client simply dropped must not silence the rest of the
-    /// over: after a spell of complete silence the outstanding request is
-    /// written off and asked for again.
+    /// …and a client that keeps up is never asked for more than the queue can
+    /// hold: the running total is bounded by what the transmitter has used.
+    #[test]
+    fn a_client_that_keeps_up_is_never_asked_for_more_than_the_lead() {
+        let mut p = TciTxPace::default();
+        let mut queued = 0usize;
+        // A client that answers every chrono in full, one block later.
+        let mut in_flight = 0usize;
+        for _ in 0..500 {
+            let got = std::mem::take(&mut in_flight);
+            queued += got;
+            in_flight = p.request(queued, got, true).unwrap_or(0) as usize;
+            queued = queued.saturating_sub(TX_AUDIO_BLOCK);
+            assert!(
+                queued <= TCI_TX_LEAD + TX_AUDIO_BLOCK,
+                "the queue reached {queued}, past the {TCI_TX_LEAD}-frame lead"
+            );
+        }
+        assert!(queued >= TCI_TX_LEAD - TX_AUDIO_BLOCK, "the queue drained to {queued}");
+    }
+
+    /// A chrono the client simply dropped must not silence the rest of the
+    /// over: after a spell of complete silence what is outstanding is written
+    /// off and asked for again.
     #[test]
     fn an_unanswered_chrono_is_eventually_asked_for_again() {
         let mut p = TciTxPace::default();
-        assert_eq!(p.request(0, 0), Some(TCI_TX_TARGET as u32));
+        assert_eq!(p.request(0, 0, false), Some(TCI_TX_LEAD as u32));
         // Nothing arrived on the block that made the request either, so that
-        // one counts towards the silence as well.
+        // one counts towards the silence as well. `playing` is false so the
+        // transmit clock cannot be what asks again — only the write-off can.
         let mut quiet_blocks = 1;
         let again = loop {
             quiet_blocks += 1;
             assert!(quiet_blocks < 500, "the outstanding request was never written off");
-            if let Some(frames) = p.request(0, 0) {
+            if let Some(frames) = p.request(0, 0, false) {
                 break frames;
             }
         };
-        assert_eq!(again, TCI_TX_TARGET as u32);
+        assert_eq!(again, TCI_TX_LEAD as u32);
         assert_eq!(
             quiet_blocks, TCI_TX_ASK_TIMEOUT_BLOCKS,
             "a client that has said nothing at all is asked again, but only after \
@@ -13561,21 +13640,36 @@ mod tci_pace_tests {
         );
     }
 
-    /// The standing depth follows the gaps the client leaves, so the next over
-    /// is buffered for the cadence this one showed — and stops at the ceiling.
+    /// The pre-roll spins far faster than the transmit clock, so its calls must
+    /// not count as consumption — a hundred of them before the first block goes
+    /// out would otherwise ask for a second of audio that nothing has used.
     #[test]
-    fn the_standing_depth_learns_the_clients_cadence_and_stops_at_the_ceiling() {
+    fn the_pre_roll_does_not_run_the_demand_away() {
         let mut p = TciTxPace::default();
-        p.underran();
-        assert_eq!(p.request(0, 0), Some((TCI_TX_TARGET + TX_AUDIO_BLOCK) as u32));
-
-        let mut p = TciTxPace::default();
-        for _ in 0..1000 {
-            p.underran();
+        let mut asked = p.request(0, 0, false).unwrap_or(0) as usize;
+        for _ in 0..(TCI_TX_ASK_TIMEOUT_BLOCKS - 2) {
+            asked += p.request(0, 0, false).unwrap_or(0) as usize;
         }
-        assert_eq!(p.request(0, 0), Some(TCI_TX_MAX_TARGET as u32));
-        // A new over keeps what was learned but owes nothing.
+        assert_eq!(asked, TCI_TX_LEAD, "the pre-roll asked for {asked} frames, not the lead");
+    }
+
+    /// A client that streams on its own clock and ignores chronos fills the
+    /// queue by itself; there is nothing to ask it for.
+    #[test]
+    fn a_self_pacing_client_is_left_alone() {
+        let mut p = TciTxPace::default();
+        assert_eq!(p.request(TCI_TX_LEAD * 3, TCI_TX_LEAD * 3, true), None);
+    }
+
+    /// A new over starts from nothing: last over's counters would make the
+    /// first block of this one look like a client hundreds of frames in debt.
+    #[test]
+    fn a_new_over_starts_from_nothing() {
+        let mut p = TciTxPace::default();
+        for _ in 0..100 {
+            p.request(0, TX_AUDIO_BLOCK, true);
+        }
         p.rekey();
-        assert_eq!(p.request(0, 0), Some(TCI_TX_MAX_TARGET as u32));
+        assert_eq!(p.request(0, 0, true), Some((TCI_TX_LEAD + TX_AUDIO_BLOCK) as u32));
     }
 }

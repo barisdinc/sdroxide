@@ -8928,15 +8928,19 @@ A few things worth knowing:
   same as any other TCI rig.
 - **Transmit audio is paced by the server, not the client.** TCI has the radio
   ask for each buffer of transmit audio as it needs it (a *chrono*), and the
-  client answers one packet per request. sdroxide asks for exactly what is
-  missing from the queue and no more, so a client that answers a run of
-  requests in one go — which is what an application whose audio comes off a GUI
-  timer does — is never handed back more than the queue can hold. The queue
-  itself deepens on its own, up to a quarter of a second, to whatever gaps the
-  client actually leaves. Nothing to set: it settles in the first over and stays
-  there. (Earlier versions asked once per 10 ms block regardless of what was
-  already on its way, and an FT8 slot could go out as a few seconds of signal —
-  [issue #202](https://github.com/dividebysandwich/sdroxide/issues/202).)
+  client answers one packet per request. sdroxide asks for everything the
+  transmitter has consumed plus a quarter of a second of lead, so a client that
+  falls behind is asked for *more* rather than for whatever it managed to send,
+  and one that runs ahead is not asked at all. When the client unkeys, the
+  audio it has already handed over is played out before the transmitter stops,
+  so the tail of a timed burst is not cut off. Nothing to set.
+- **A client that mislabels its transmit audio is still understood.** The TCI
+  header carries a channel count, and WSJT-X leaves it uninitialised — a
+  different random number in every packet. Taken at face value that collapses
+  each 10 ms packet to a single sample, which is what made a 15 s FT8 slot go
+  out as a few seconds of chopped signal
+  ([issue #202](https://github.com/dividebysandwich/sdroxide/issues/202)). The
+  payload is read instead where the field is not a channel count.
 
 #### 6.8.3 WSJT-X UDP broadcast
 
