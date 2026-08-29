@@ -1,7 +1,17 @@
 //! Waterfall colormap LUTs: 256×1 RGBA8.
 
-pub const NAMES: [&str; 9] =
-    ["Classic", "Viridis", "Gray", "Icom", "Neon", "Synthwave", "Matrix", "Tron", "Amber"];
+pub const NAMES: [&str; 10] = [
+    "Classic",
+    "Viridis",
+    "Gray",
+    "Icom",
+    "Neon",
+    "Synthwave",
+    "Matrix",
+    "Tron",
+    "Amber",
+    "Rainbow",
+];
 
 /// Piecewise-linear gradient through (position, RGB) anchor points.
 /// Anchors must start at 0.0 and end at 1.0.
@@ -109,6 +119,23 @@ pub fn lut(index: usize) -> [u8; 256 * 4] {
             (0.72, [255, 176, 0]),
             (0.88, [255, 210, 96]),
             (1.00, [255, 234, 204]),
+        ]),
+        // Rainbow — the full spectrum in order, to wear with the Rainbow UI
+        // theme: black into violet, then blue, cyan, green, yellow, orange and
+        // red, ending white-hot. Unlike Classic it spends no range on a long
+        // dark blue run, so the noise floor shows its texture and every step
+        // up the scale changes hue.
+        9 => gradient(&[
+            (0.00, [0, 0, 0]),
+            (0.10, [40, 0, 70]),
+            (0.22, [90, 0, 200]),
+            (0.34, [0, 80, 255]),
+            (0.46, [0, 200, 230]),
+            (0.58, [0, 220, 80]),
+            (0.70, [200, 240, 0]),
+            (0.80, [255, 180, 0]),
+            (0.90, [255, 70, 30]),
+            (1.00, [255, 255, 255]),
         ]),
         // Gray (index 2) and any out-of-range fallback.
         _ => gradient(&[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])]),
