@@ -3651,7 +3651,7 @@ impl SdroxideApp {
     /// SNR a track must reach before it earns a box on the waterfall. Fades out
     /// on its own like the band/mode popup.
     fn skimmer_button(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, extra: f32) {
-        let [_, skim, _] = DISPLAY_TOOL_CHIPS;
+        let [_, _, skim, _] = DISPLAY_TOOL_CHIPS;
         let btn = chip_stretched(ui, self.state.skimmer.any_enabled(), skim, extra).on_hover_text(
             "CW / PSK / RTTY skimmers — decode signals across the band and mark them on the waterfall",
         );
@@ -4009,7 +4009,7 @@ impl SdroxideApp {
         narrow: bool,
         extra: f32,
     ) {
-        let [fit, _, fft] = DISPLAY_TOOL_CHIPS;
+        let [fit, ctr, _, fft] = DISPLAY_TOOL_CHIPS;
         // Lit while the floor/ceiling are kept fitted by themselves. Switching
         // it on fits immediately, which is also how a one-off fit is asked for:
         // click it off and on again.
@@ -4025,6 +4025,23 @@ impl SdroxideApp {
             if self.view.auto_fit {
                 self.fit_levels_now(ui.input(|i| i.time));
             }
+        }
+        // FIT's twin for the frequency axis (issue #174): lit while the window
+        // follows the dial, so the tuned frequency stays in the middle of the
+        // picture and the band scrolls past it instead of the picture jumping a
+        // whole span every time the dial leaves it. Switching it on centres at
+        // once, which is also how a one-off "put me back in the middle" is
+        // asked for: click it on, and off again if you would rather pan freely.
+        if chip_stretched(ui, self.view.center_on_vfo, ctr, extra)
+            .on_hover_text(
+                "Keep the tuned frequency in the middle of the panadapter: the window slides \
+                 under the dial instead of the picture jumping a whole span when you tune off \
+                 the edge. Switch it on to centre at once; switch it off to pan and zoom \
+                 wherever you like.",
+            )
+            .clicked()
+        {
+            self.view.center_on_vfo = !self.view.center_on_vfo;
         }
         // In a box these two hang off chips of their own. A menu inlines
         // them below instead: a popup opened from a popup counts as a click
@@ -4475,9 +4492,10 @@ const SYSTEM_SPLIT: usize = 7;
 /// `app::solar`.
 pub(in crate::app) const DISPLAY_VIEW_CHIPS: [&str; 3] = ["☀ 3D", "SPEC", "WIDE"];
 
-/// The Display box's bottom row: the level fit, the skimmers, and the
-/// FFT/levels popup. Read by the measurement and by each chip's own draw site.
-const DISPLAY_TOOL_CHIPS: [&str; 3] = ["FIT", "SKIM", "FFT"];
+/// The Display box's bottom row: the level fit, centre tuning, the skimmers,
+/// and the FFT/levels popup. Read by the measurement and by each chip's own
+/// draw site.
+const DISPLAY_TOOL_CHIPS: [&str; 4] = ["FIT", "CTR", "SKIM", "FFT"];
 
 /// The keying chips' shared size: PTT and TUNE drawn to the wider of the two
 /// labels, so the chips match and the level blocks beside them start on the

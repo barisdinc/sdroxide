@@ -701,6 +701,22 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   which is also how to ask for a one-off fit: click it off and on again.
   Switching it off leaves the levels wherever you set them (the floor and
   ceiling in the FFT popup are yours to keep only while FIT is off).
+- **CTR** — keep the tuned frequency in the **middle** of the panadapter. Lit,
+  the window slides under the dial every time you tune, so the marker stays put
+  and the band scrolls past it. With it off — the way it has always worked — the
+  window holds still and the marker travels across it until the dial leaves the
+  span, at which point the picture jumps a whole window at once.
+
+  Zoomed in this costs nothing: the window is a viewport onto a wider captured
+  span, and the receiver is never disturbed. Zoomed all the way out there is
+  nowhere left to slide, so the receiver's own centre follows the dial instead —
+  the same thing a drag that reaches the edge of the picture already does. A
+  radio whose centre *is* its dial (a transceiver on a sound card, an Icom
+  sending its 12 kHz I.F.) is centred to begin with and has nothing to do.
+
+  Switching CTR **on** centres at once, which is also how to ask for a one-off
+  "put me back in the middle": click it on, and off again if you would rather
+  pan and zoom where you like.
 - **SKIM** — opens the skimmer popup (per-skimmer on/off and squelch); lit while
   any skimmer runs. See [Skimmers](#4-skimmers).
 - **SCAN** — opens the scanner window; lit while a scan is running, green while
@@ -753,9 +769,19 @@ the gradient fills the spectrum area from a top colour down to a bottom colour
 UI itself — colour theme, button shape and window shape — independently of the
 waterfall's palette; the screenshots in this manual show the **Default** theme.
 
-You can also resize the split between the spectrum line and the waterfall by
-dragging the frequency-scale strip between them, and hide either or both of
-them altogether from the **SPEC** popup in the Display module.
+The **frequency-scale strip** between the spectrum line and the waterfall is
+both a divider and an axis, and a drag on it picks one the moment it has a
+direction: **up and down** resizes the split between the two layers, **sideways**
+slides the band along under the picture. The sideways drag moves the *window*
+and never the dial — it is how to look somewhere else without leaving the
+frequency you are listening to — and once the view is the whole span it takes
+the receiver's own centre with it, so it keeps going rather than stopping at the
+edge. Either layer can also be hidden altogether from the **SPEC** popup in the
+Display module.
+
+The scale carries a labelled frequency every hundred points or so with
+unlabelled ticks between them, so a wide panadapter gets more markers to read
+against than a narrow one rather than the same handful stretched across it.
 
 ![Waterfall colour schemes](images/05-colormaps.png)
 
@@ -10333,7 +10359,7 @@ row of menu buttons:
 | **VFO** | A↔B, A→B, SPLIT, SUB, and the RIT/XIT offsets |
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |
-| **DISP** | ☀ 3D, WIDE, FIT, the panadapter boxes (the spectrum and waterfall switches, peak hold, their speeds and the detail), the skimmers, and the spectrum floor/ceiling and FFT size |
+| **DISP** | ☀ 3D, WIDE, FIT, CTR, the panadapter boxes (the spectrum and waterfall switches, peak hold, their speeds and the detail), the skimmers, and the spectrum floor/ceiling and FFT size |
 | **SYS** | LOG, SPOTS, AWARDS, BANDS, MEM, SETTINGS, HELP |
 
 A menu stays open until you tap outside it or tap its button again — the top-bar
