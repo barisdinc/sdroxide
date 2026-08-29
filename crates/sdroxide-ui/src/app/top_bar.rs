@@ -3900,7 +3900,21 @@ impl SdroxideApp {
                     {
                         self.view.peak_hold = !self.view.peak_hold;
                     }
+                    if crate::chrome::chip(ui, self.view.spectrum_3d, "3D")
+                        .on_hover_text(
+                            "Draw the spectrum as a receding surface instead of a flat line: \
+                             the newest spectrum across the front, the ones before it flowing \
+                             away from you. The last couple of seconds of the band as a \
+                             landscape — a carrier that comes and goes is a ridge rather than \
+                             a line that twitches. The grid and the peak hold belong to the \
+                             flat line and are not drawn on it.",
+                        )
+                        .clicked()
+                    {
+                        self.view.spectrum_3d = !self.view.spectrum_3d;
+                    }
                 });
+                self.surface_row(ui);
                 speed_row(
                     ui,
                     "reaction",
@@ -3948,6 +3962,56 @@ impl SdroxideApp {
             self.ui_settings = cfg;
             crate::app::persist::persist_ui_settings(&self.ui_settings);
         }
+    }
+
+    /// The surface row of [`Self::panadapter_controls`]: how the 3D display is
+    /// drawn, once the 3D chip above it is lit.
+    ///
+    /// Greyed rather than hidden while the flat line is showing, the way the
+    /// detail row greys a width this machine cannot hold: a row that comes and
+    /// goes resizes the popup under the pointer, and the choice it holds is
+    /// still a real one — it is what the 3D chip will show when it is clicked.
+    fn surface_row(&mut self, ui: &mut egui::Ui) {
+        let on = self.view.spectrum_3d;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("surface").size(10.0).color(crate::theme::CYAN_DIM()))
+                .on_hover_text(
+                    "How the 3D spectrum is drawn. Only the shape differs — both renderings \
+                     show the same spectra, and both hide what is behind them, so a strong \
+                     signal in front stands over the band it is covering.",
+                );
+            for (solid, label, hint) in [
+                (
+                    false,
+                    "LINES",
+                    "One trace per remembered spectrum, in the flat line's own colour, each \
+                     hiding the ones behind it. The lightest of the two, and the one to pick \
+                     on a slow machine or where the shape alone is what you are reading.",
+                ),
+                (
+                    true,
+                    "SOLID",
+                    "A filled surface coloured by the waterfall's palette, so the level is in \
+                     the colour as well as in the height and the two halves of the panadapter \
+                     agree about what a strong signal looks like. Change the palette in \
+                     Settings › Display.",
+                ),
+            ] {
+                let r = crate::chrome::chip_enabled(
+                    ui,
+                    on,
+                    self.view.spectrum_3d_solid == solid,
+                    label,
+                );
+                if on {
+                    if r.on_hover_text(hint).clicked() {
+                        self.view.spectrum_3d_solid = solid;
+                    }
+                } else {
+                    r.on_disabled_hover_text("Switch 3D on to draw the surface this way");
+                }
+            }
+        });
     }
 
     /// The detail row of [`Self::panadapter_controls`]: how many columns the
@@ -4882,7 +4946,8 @@ fn panadapter_group_w(ui: &egui::Ui) -> f32 {
         .map(|d| crate::chrome::chip_width(ui, &detail_chip_label(*d), None) + gap)
         .sum();
     let widest = [
-        chips(&["SHOW SPECTRUM", "PEAK HOLD"]),
+        chips(&["SHOW SPECTRUM", "PEAK HOLD", "3D"]),
+        caption("surface") + chips(&["LINES", "SOLID"]),
         caption("reaction") + speeds(&Speed::ALL),
         caption("scroll") + speeds(&Speed::WATERFALL),
         caption("detail") + detail + caption("8192 columns"),
