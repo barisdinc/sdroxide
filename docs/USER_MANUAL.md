@@ -15,6 +15,7 @@ or connects to a remote sdroxide server.
 
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
+    - [2.21 QO-100 beacon calibration](#221-qo-100-beacon-calibration)
 3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
@@ -2054,6 +2055,15 @@ cold morning and a warm afternoon. The **QO100** button in the System module
 opens a window that decodes the beacon, measures exactly how far it is from
 10489.750 MHz, and offers to write that figure into the converter/LNB offset in
 one click.
+
+**In brief.** With an LNB or converter offset set up in the receiver for the
+QO-100 (Es'hail-2) geostationary satellite, the decoder searches a few kHz
+either side of 10489.750 MHz, locks onto the beacon there, and decodes its
+AO-40 telemetry. Having tuned itself onto the signal to get a clean decode, it
+then works out from the frequency it actually found the beacon on how far the
+LNB or receiver offset is in error, and **APPLY CORRECTION** writes the
+corrected figure back. This is the same task the QO-100 beacon plugin performs
+in SDR Console.
 
 > **Note:** like the skimmers and the ISM decoder, this is a wideband feature.
 > It needs a true IQ source and is unavailable when a CAT radio is feeding
