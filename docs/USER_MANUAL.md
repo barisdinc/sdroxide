@@ -434,9 +434,9 @@ mode. What is in the box never changes; only where the two rows are cut does.
   refusing it. The sub receiver still has to live inside the span, so if it was
   parked outside the new one it is moved back in.
 - **MUTE** — mute the receiver (keyboard shortcut **M**).
-- **REC** / **MONO** — record what you hear and what you send
+- **REC** — record what you hear and what you send, or the raw spectrum
   to an MP3 file, and choose whether it is written in two channels or one. See
-  [2.20](#220-recording-the-audio).
+  [2.20](#220-recording-the-audio-and-the-spectrum).
 - **SQL** — squelch; below the open threshold it reads
   `off`.
 
@@ -1980,11 +1980,19 @@ guide are carried by the standard but not shown. The CELP and HVXC speech
 codecs of the original standard were withdrawn from it and nothing transmits
 them.
 
-### 2.20 Recording the audio
+### 2.20 Recording the audio and the spectrum
 
-**REC**, in the receiver box beside MUTE, records the session to an MP3
-file: press it to start, press it again to stop. While it runs, hovering it
-names the file being written. It has no keyboard shortcut by default, but
+**REC**, in the receiver box beside MUTE, opens a small picker with the two
+things that can be recorded — and they are different things, so either or both
+may run:
+
+- **MP3** — what you hear and what you send, described in the rest of this
+  section.
+- **I/Q WAV** — the raw spectrum the receiver is delivering, described under
+  [Recording the spectrum](#recording-the-spectrum) below.
+
+The chip lights while either is running and hovering it names the files. It has
+no keyboard shortcut by default, but
 **Record on/off** is in the bindable action list, so it can be put on a key, a
 mouse button or a MIDI pad ([6.4](#64-controls-keyboard-mouse-and-midi)).
 
@@ -2025,12 +2033,12 @@ them apart:
   nothing to keep apart, so both what you receive and what you send are written
   to both channels and the file plays centred instead of out of one ear.
 
-**MONO**, the button that follows REC, writes a single channel instead, with receive and
-transmit taking turns on it: a smaller file, and the honest format for a
-recording that is going to be played back in mono anyway.
+**MONO**, beside MP3 in the picker, writes a single channel instead, with
+receive and transmit taking turns on it: a smaller file, and the honest format
+for a recording that is going to be played back in mono anyway.
 
 Either way the layout is settled when the recording starts — which is why MONO
-is greyed out while REC is lit. A file already being written keeps the channel
+is greyed out while a recording runs. A file already being written keeps the channel
 count it began with, so switching the sub receiver on, or a broadcast's stereo
 pilot coming and going, cannot change it halfway through.
 
@@ -2060,10 +2068,44 @@ configured it says so rather than recording silence. It stops by itself if the
 audio output device is changed under it, and one still running when you quit is
 closed properly, so there is never a half-written file to repair.
 
-This is not `--record-iq` ([12](#12-command-line-reference)), which writes the
-raw IQ of the whole span — tens of megabytes a second — so that a band can be
-replayed offline. This records what came out of the receiver, at a size you can
-send to someone.
+#### Recording the spectrum
+
+**I/Q WAV**, the second row of the REC picker, records the whole span the
+receiver is delivering rather than the audio of one signal in it: a band you can
+replay afterwards and tune around inside, decode differently, or hand to someone
+else ([issue #217](https://github.com/dividebysandwich/sdroxide/issues/217)).
+Beside the chip is what it costs at the current sample rate before you start it,
+and the megabytes and minutes written once it is running.
+
+The file is a stereo 32-bit float WAV — I in the left channel, Q in the right —
+at the receiver's own sample rate, which is what **SDR#**, **SDRuno**,
+**HDSDR**, **SDRangel** and GNU Radio all read. The centre frequency travels
+both in the name and in the file's `auxi` chunk, because those are the two
+places those programs look, so a capture opens tuned to where it was made:
+
+```
+SDRoxide_20260829_134507Z_14074000Hz_2400000sps_IQ.wav
+```
+
+It also plays back here, with nothing to type — `sdroxide --file <capture>`
+takes the rate and the frequency out of the header. `--rate` and `--freq` still
+win if you give them.
+
+**It is large: eight bytes a sample.** At 2.4 Msps that is 19 MB a second, a
+gigabyte a minute. A WAV's sizes are 32-bit and so stop at 4 GB — three and a
+half minutes at that rate — so a capture that outgrows one is written as
+**RF64** instead, which every program above opens. Nothing to choose: the file
+is an ordinary WAV until it needs not to be.
+
+A radio that hands over demodulated audio rather than I/Q — a transceiver on a
+sound card — has no spectrum to record, and the chip says so instead of being
+missing. Started from a remote or browser client the capture is written on the
+machine the receiver is plugged into, for the same reason the MP3 is, and rather
+more urgently: a gigabyte a minute is not something to send over a link.
+
+This is the same data `--record-iq` ([12](#12-command-line-reference)) writes,
+in a container other programs can open — `--record-iq` writes the bare samples
+and starts with the program, which is what a headless capture wants.
 
 ### 2.21 QO-100 beacon calibration
 
@@ -11052,7 +11094,7 @@ remembered frequency is the first thing to check.
 
 Two things are kept outside the config directory, because they are things you
 will want to open in an ordinary file manager rather than program state:
-audio recordings go to `<Music>/sdroxide/` ([2.20](#220-recording-the-audio)),
+audio recordings go to `<Music>/sdroxide/` ([2.20](#220-recording-the-audio-and-the-spectrum)),
 and received weather-fax charts to
 `<Pictures>/sdroxide/wefax/`. Where the platform exposes no such folder, both
 fall back to the config directory.

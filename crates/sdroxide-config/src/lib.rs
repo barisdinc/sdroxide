@@ -860,6 +860,17 @@ pub fn solar_cache_dir() -> Result<PathBuf, ConfigError> {
 /// directory (`<Music>/sdroxide`), or the config directory
 /// (`~/.config/sdroxide/recordings`) when the platform exposes no music folder.
 pub fn recordings_dir() -> Result<PathBuf, ConfigError> {
+    // An isolated configuration is isolated: `SDROXIDE_CONFIG_DIR` is how a
+    // test, a second station or a throwaway session says "keep everything
+    // here", and a recording written into the operator's real music folder
+    // from one of those is the one file that escapes. Checked here rather than
+    // inside `config_dir` because the two answer different questions — that one
+    // is where settings live, and it has an isolated form already.
+    if std::env::var_os("SDROXIDE_CONFIG_DIR").is_some() {
+        let dir = config_dir()?.join("recordings");
+        fs::create_dir_all(&dir)?;
+        return Ok(dir);
+    }
     let dir = match directories::UserDirs::new()
         .and_then(|u| u.audio_dir().map(std::path::Path::to_path_buf))
     {

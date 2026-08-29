@@ -2104,6 +2104,11 @@ struct Engine {
     /// written from.
     iq_rec: Option<std::io::BufWriter<std::fs::File>>,
     iq_rec_buf: Vec<u8>,
+    /// The operator's own I/Q capture, started from the REC popup — a WAV file
+    /// other programs can open, where `iq_rec` above is the command line's raw
+    /// stream. Separate because they answer different questions: `--record-iq`
+    /// exists to be read back by `--file`, this one to be handed to somebody.
+    iq_wav: Option<crate::iq_wav::IqWavWriter>,
     /// The operator's persisted scanner settings. What the scanner is *doing*
     /// lives in `state.scan`, which every client already receives.
     scan_cfg: sdroxide_types::ScannerConfig,
@@ -2944,6 +2949,7 @@ fn engine_thread(
         qo100_cfg: sdroxide_types::Qo100Settings::default(),
         iq_rec,
         iq_rec_buf: Vec::new(),
+        iq_wav: None,
         scan_cfg,
         scan: None,
         scan_db: Vec::new(),
@@ -3429,6 +3435,16 @@ fn engine_thread(
         }
         if now >= next_meters {
             next_meters = now + METER_INTERVAL;
+            // How much of the disk the I/Q capture has taken, for the readout
+            // beside the button. At 2.4 Msps this climbs by 19 MB a second and
+            // an operator wants to see that before the disk fills.
+            if let Some(w) = engine.iq_wav.as_ref() {
+                let mb = (w.bytes() / (1 << 20)) as u32;
+                if engine.state.iq_recording_mb != mb {
+                    engine.state.iq_recording_mb = mb;
+                    let _ = engine.event_tx.send(RadioEvent::State(engine.state.clone()));
+                }
+            }
             // The transmitter is on the air whether this engine keyed it or the
             // operator did it at the radio (`rig_tx`). Both put the meter into
             // transmit, and the SWR of an over is worth reading either way —
@@ -3687,6 +3703,9 @@ impl Drop for Engine {
         if let Some(rec) = self.recorder.take() {
             rec.stop();
         }
+        // And the I/Q capture, which needs its header patched or the file
+        // reads as empty — every byte of it written and none of it playable.
+        self.stop_iq_recording();
         // Store a voice-keyer message that was still being recorded, rather
         // than throwing away what the operator had just said.
         self.voice.stop_record();
@@ -3747,6 +3766,7 @@ impl Engine {
     /// fifteenth one); on a slow one it is most of them, and there is nothing
     /// there to win anyway.
     fn process_block(&mut self, iq: &[Complex32], pool: Option<&rayon::ThreadPool>) {
+        self.capture_iq(iq);
         // Read while the chain is certainly in hand, and on both paths: the
         // frame builder asks for it and must never be answered with the
         // stand-in.
@@ -3798,6 +3818,42 @@ impl Engine {
         }
         if self.main.is_some() {
             self.finish_audio(iq);
+        }
+    }
+
+    /// Write the raw block to whichever captures are running.
+    ///
+    /// The first thing a block meets, and deliberately not part of the receive
+    /// chain: what is written has to be exactly what the receiver delivered,
+    /// before any lane takes its own decimation of it. It is also the one place
+    /// that must not depend on there being audio — a headless station with no
+    /// sound card still has a spectrum worth recording, and both of these used
+    /// to sit past the early return `EngineConfig` with no audio takes.
+    fn capture_iq(&mut self, iq: &[Complex32]) {
+        // The command line's raw stream, read back by `--file`.
+        if let Some(w) = self.iq_rec.as_mut() {
+            use std::io::Write;
+            self.iq_rec_buf.clear();
+            self.iq_rec_buf.reserve(iq.len() * 8);
+            for z in iq {
+                self.iq_rec_buf.extend_from_slice(&z.re.to_le_bytes());
+                self.iq_rec_buf.extend_from_slice(&z.im.to_le_bytes());
+            }
+            // A capture that cannot be written is worth one complaint and then
+            // silence: failing per block would fill the log faster than the disk.
+            if let Err(e) = w.write_all(&self.iq_rec_buf) {
+                warn!("IQ capture write failed, stopping the recording: {e}");
+                self.iq_rec = None;
+            }
+        }
+        // …and the operator's own, from the REC popup.
+        if let Some(w) = self.iq_wav.as_mut()
+            && let Err(e) = w.write(iq)
+        {
+            warn!("I/Q capture write failed, stopping the recording: {e}");
+            self.stop_iq_recording();
+            let _ =
+                self.event_tx.send(RadioEvent::Notice(Some(format!("I/Q recording stopped: {e}"))));
         }
     }
 
@@ -3932,24 +3988,6 @@ impl Engine {
             ddc.process(iq, &mut self.skim_buf);
             if let Some(sk) = self.skimmer.as_ref() {
                 sk.on_rx_iq(&self.skim_buf);
-            }
-        }
-        // The raw capture, before any of the lanes below take their own
-        // decimation of it — this is what `FileSource` will read back, so it has
-        // to be exactly what the receiver delivered.
-        if let Some(w) = self.iq_rec.as_mut() {
-            use std::io::Write;
-            self.iq_rec_buf.clear();
-            self.iq_rec_buf.reserve(iq.len() * 8);
-            for z in iq {
-                self.iq_rec_buf.extend_from_slice(&z.re.to_le_bytes());
-                self.iq_rec_buf.extend_from_slice(&z.im.to_le_bytes());
-            }
-            // A capture that cannot be written is worth one complaint and then
-            // silence: failing per block would fill the log faster than the disk.
-            if let Err(e) = w.write_all(&self.iq_rec_buf) {
-                warn!("IQ capture write failed, stopping the recording: {e}");
-                self.iq_rec = None;
             }
         }
         // ...and the ISM decoder from its own, wider decimation onto the 868 MHz
@@ -6100,6 +6138,14 @@ impl Engine {
                 }
             }
             SetRecordingMono(on) => self.state.recording_mono = on,
+            SetIqRecording(on) => {
+                if on {
+                    self.start_iq_recording();
+                } else {
+                    self.stop_iq_recording();
+                }
+                let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+            }
             SetSubRx(on) => {
                 self.state.sub_rx_enabled = on;
                 if on && self.sub.is_none() && self.main.is_some() {
@@ -7285,6 +7331,64 @@ impl Engine {
                     self.event_tx.send(RadioEvent::Notice(Some(format!("Recording failed: {e}"))));
             }
         }
+    }
+
+    /// Start the operator's raw I/Q capture.
+    ///
+    /// Named the way SDR# names one, so the file opens in SDR#, SDRuno, HDSDR
+    /// or SDRangel already tuned to where it was made — see
+    /// [`crate::iq_wav`].
+    fn start_iq_recording(&mut self) {
+        if self.iq_wav.is_some() {
+            return;
+        }
+        if self.audio_mode {
+            let _ = self.event_tx.send(RadioEvent::Notice(Some(
+                "This radio hands over demodulated audio, so there is no I/Q to record".into(),
+            )));
+            return;
+        }
+        let dir = match sdroxide_config::recordings_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = self
+                    .event_tx
+                    .send(RadioEvent::Notice(Some(format!("I/Q recording: no directory ({e})"))));
+                return;
+            }
+        };
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let rate = self.state.sample_rate.max(1.0) as u32;
+        let name = crate::iq_wav::capture_name(unix, self.state.center_hz, rate);
+        match crate::iq_wav::IqWavWriter::create(&dir.join(&name), rate, self.state.center_hz) {
+            Ok(w) => {
+                info!(path = %w.path().display(), rate, "recording I/Q");
+                self.iq_wav = Some(w);
+                self.state.iq_recording = true;
+                self.state.iq_recording_file = Some(name);
+                self.state.iq_recording_mb = 0;
+            }
+            Err(e) => {
+                let _ = self
+                    .event_tx
+                    .send(RadioEvent::Notice(Some(format!("I/Q recording failed: {e}"))));
+            }
+        }
+    }
+
+    /// Close the I/Q capture, patching its header so the file is playable.
+    fn stop_iq_recording(&mut self) {
+        if let Some(w) = self.iq_wav.take()
+            && let Err(e) = w.finish()
+        {
+            warn!("closing the I/Q capture: {e}");
+        }
+        self.state.iq_recording = false;
+        self.state.iq_recording_file = None;
+        self.state.iq_recording_mb = 0;
     }
 
     /// Stop and finalize any active recording.

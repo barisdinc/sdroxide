@@ -858,7 +858,22 @@ use sdroxide_types::{
 ///
 /// Nothing else changed: every table the new mode needs an answer in is
 /// derived from the mode, not carried beside it.
-pub const PROTO_VERSION: u16 = 102;
+/// **103** — recording the raw I/Q (issue #217).
+///
+/// [`sdroxide_types::Command`] gained `SetIqRecording`, and
+/// [`sdroxide_types::RadioState`] gained `iq_recording`, `iq_recording_file`
+/// and `iq_recording_mb` beside the audio recorder's three, so a remote client
+/// can start a capture and watch it grow. Both appended at the tail of their
+/// type, so every variant and field already on the wire keeps its number; a
+/// v102 peer desynchronises on the tail of every `RadioState` regardless, and
+/// the handshake's equality test is what stops it trying.
+///
+/// The file is written by the *engine*, on the machine the receiver is plugged
+/// into — a remote client's capture lands on the station, not on the laptop
+/// that asked for it, because the alternative is a gigabyte a minute over the
+/// link. That is a property of the feature and not of the wire, so nothing here
+/// carries the samples.
+pub const PROTO_VERSION: u16 = 103;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

@@ -798,4 +798,19 @@ pub enum Command {
     /// the same convention [`Command::SetIsmConfig`] follows. Appended for
     /// the usual reason: postcard numbers variants by position.
     SetQo100Config(crate::Qo100Settings),
+
+    /// Start (`true`) or stop (`false`) recording the receiver's raw I/Q to a
+    /// WAV file (issue #217).
+    ///
+    /// Independent of [`Command::SetRecording`]: one writes what the operator
+    /// *hears*, the other what the receiver *received*, and an operator
+    /// capturing a band for later analysis wants the second whether or not the
+    /// first is running. Both may run at once.
+    ///
+    /// The engine names the file — date, time, centre frequency and sample rate
+    /// — and puts it beside the audio recordings. Refused on a demod-audio
+    /// front end, which has no I/Q to capture.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetIqRecording(bool),
 }

@@ -387,6 +387,7 @@ pub struct SdroxideApp {
     tone_popup_since: Option<f64>,
     /// Fade clock for the noise-reduction picker, like `tone_popup_since`.
     nr_popup_since: Option<f64>,
+    rec_popup_since: Option<f64>,
     /// Fade clocks for the repeater popups in the VFO box — the DUPLEX shift
     /// and the TONE encoder — like `tone_popup_since`.
     duplex_popup_since: Option<f64>,
@@ -1112,6 +1113,7 @@ impl SdroxideApp {
             layers_popup_since: None,
             tone_popup_since: None,
             nr_popup_since: None,
+            rec_popup_since: None,
             duplex_popup_since: None,
             rpt_tone_popup_since: None,
             // Corrected on the first frame, once the viewport size is known.
