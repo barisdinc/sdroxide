@@ -27,6 +27,7 @@ use sdroxide_dsp::{
     make_modulator,
 };
 use sdroxide_ism::{IsmAction, IsmController};
+use sdroxide_qo100::Qo100Controller;
 use sdroxide_rigctld::{RigState, RigctldController};
 use sdroxide_skimmer::{SkimmerAction, SkimmerController};
 use sdroxide_tci::server::{ServerRequest, TciServerController, TciStateSnapshot};
@@ -1962,6 +1963,24 @@ struct Engine {
     /// panel that connected while the lane was down would sit on "starting the
     /// decoder" forever.
     adsb_idle_sent: Option<Option<String>>,
+    /// QO-100 beacon decoder: a fixed downconversion onto
+    /// [`sdroxide_types::QO100_BEACON_HZ`] plus a worker-thread demodulator,
+    /// present only while the decoder is enabled. Simpler than the ISM
+    /// window: the target frequency never moves, so retuning it is always
+    /// just re-seating the mixer — see `sync_qo100_window`.
+    qo100_ddc: Option<Ddc>,
+    qo100: Option<Qo100Controller>,
+    qo100_buf: Vec<Complex32>,
+    /// The stream rate `qo100_ddc` was built to decimate — the same reason
+    /// `ism_in_rate` exists.
+    qo100_in_rate: f64,
+    /// The last QO-100 setting the operator chose, held in step with
+    /// `state.qo100` for symmetry with `ism_cfg` and `skim_cfg`. Nothing
+    /// reads it back yet: like the ISM decoder, a source swap into audio mode
+    /// turns the decoder off and a swap back leaves it off until the operator
+    /// turns it on again. Not persisted to disk — there is nothing here worth
+    /// surviving a restart.
+    qo100_cfg: sdroxide_types::Qo100Settings,
     /// Open capture file for `--record-iq`, and the interleaving scratch it is
     /// written from.
     iq_rec: Option<std::io::BufWriter<std::fs::File>>,
@@ -2284,6 +2303,19 @@ fn skim_center_for(
             || !(lo..=hi).contains(&dial_hz)
             || (dial_hz - cur).abs() <= win_hz / 4.0);
     if holds { cur } else { want }
+}
+
+/// The QO-100 beacon decoder's down-converter output rate for a search
+/// half-width of `half_width_hz`: about 2.5× the search so the requested span
+/// fits under Nyquist with margin — see `sdroxide_qo100::bpsk` for why the
+/// decoder wants that oversampling — and floored at 16 kHz so the default
+/// (±5 kHz) and any narrower width still land on a sane, cheap rate. Widening
+/// the search really does widen the capture the decoder is handed; the
+/// demodulator inside it always runs at a fixed rate regardless
+/// (`sdroxide_qo100`'s `DEMOD_RATE_HZ`), which is what keeps the search cost
+/// from growing with the square of the width.
+fn qo100_capture_rate_for(half_width_hz: f64) -> f64 {
+    (half_width_hz * 2.5).max(16_000.0)
 }
 
 /// How soon after noticing a disconnected front-end the first reconnect attempt
@@ -2750,6 +2782,13 @@ fn engine_thread(
         adsb_cfg,
         adsb_home: None,
         adsb_idle_sent: None,
+        qo100_ddc: None,
+        qo100: None,
+        qo100_buf: Vec::new(),
+        qo100_in_rate: 0.0,
+        // Session-scoped only, unlike `skim_cfg`/`ism_cfg` — see
+        // `sync_qo100`'s doc for why this one is not read back from disk.
+        qo100_cfg: sdroxide_types::Qo100Settings::default(),
         iq_rec,
         iq_rec_buf: Vec::new(),
         scan_cfg,
@@ -2856,6 +2895,7 @@ fn engine_thread(
         engine.sync_ism(); // likewise, from ism.json
         engine.sync_adsb_home();
         engine.sync_adsb(); // and the aircraft lane, if the mode is already ADS-B
+        engine.sync_qo100(); // a no-op today: `qo100_cfg` starts disabled and is never loaded
     }
     // Start any enabled network spot feeds from the persisted config. The
     // operator identity comes from the digi config — one identity for the whole
@@ -3034,6 +3074,7 @@ fn engine_thread(
         engine.poll_skimmer();
         engine.poll_ism();
         engine.poll_adsb();
+        engine.poll_qo100();
         engine.poll_scanner();
         engine.poll_tci_server();
         engine.poll_rigctld();
@@ -3744,6 +3785,15 @@ impl Engine {
                 d.on_rx_iq(&self.adsb_buf);
             }
         }
+        // ...and the QO-100 beacon decoder from its own fixed downconversion
+        // onto the beacon frequency.
+        if let Some(ddc) = self.qo100_ddc.as_mut() {
+            self.qo100_buf.clear();
+            ddc.process(iq, &mut self.qo100_buf);
+            if let Some(c) = self.qo100.as_ref() {
+                c.on_rx_iq(&self.qo100_buf);
+            }
+        }
         // Feed TCI clients: the same clean tap the digital decoders use (so
         // muting or turning down sdroxide can't silence somebody's decoder),
         // resampled to the 48 kHz TCI mandates.
@@ -4161,6 +4211,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_qo100_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
             }
@@ -4367,6 +4418,10 @@ impl Engine {
         // target rather than a plan of them: 1090 MHz is where it has to be, and
         // the only question is whether the new span still reaches it.
         self.sync_adsb_window();
+        // The QO-100 window, unlike the ISM one, *does* follow the hardware
+        // centre — its one target frequency never moves, so re-seating the
+        // mixer is all a retune ever needs.
+        self.sync_qo100_window();
         // Re-seat the DDCs on the new centre. Without this the main receiver
         // keeps the offset it had against the old one, which is exactly how a
         // rig-initiated retune ends up demodulating somewhere the readout does
@@ -6507,6 +6562,18 @@ impl Engine {
                 }
             }
 
+            SetQo100Config(cfg) => {
+                self.state.qo100 = cfg;
+                // Held in step with the live setting for symmetry with the
+                // ISM and skimmer configs; see `qo100_cfg`'s own doc for why
+                // nothing reads it back and why it is not saved to disk.
+                self.qo100_cfg = cfg;
+                self.sync_qo100();
+                if let Some(c) = self.qo100.as_ref() {
+                    c.set_config(cfg);
+                }
+            }
+
             ReloadIsmDecoders => {
                 // Seeded here as well as at startup, so deleting the file to get
                 // the commented example back works without a restart.
@@ -7297,6 +7364,98 @@ impl Engine {
         self.ism_center_hz = center;
         if let Some(d) = self.ism.as_ref() {
             d.set_window(center, want_rate);
+        }
+    }
+
+    /// The QO-100 beacon decoder's downconverter output rate for a given
+    /// search width: comfortably oversampled against the 800 chip/s the
+    /// beacon transmits at — see `sdroxide_qo100::bpsk`'s module doc for why
+    /// the decoder wants that margin — and wide enough that the requested
+    /// search actually fits under Nyquist with room to spare, so widening the
+    /// window in the UI really does widen what the receiver hands the
+    /// decoder rather than asking it to search past the edge of what it can
+    /// see. Floored at 16 kHz, and still far short of what the ISM plan or
+    /// the skimmer ask for, so it costs the engine almost nothing at the
+    /// default width.
+    fn qo100_target_rate_hz(&self) -> f64 {
+        qo100_capture_rate_for(self.state.qo100.search_half_width_hz)
+    }
+
+    /// Construct or tear down the QO-100 beacon decoder, mirroring
+    /// [`Self::sync_ism`]'s shape. Simpler than the ISM window in one way —
+    /// the target frequency ([`sdroxide_types::QO100_BEACON_HZ`]) never moves
+    /// with the band — but not in another: the operator's search-width
+    /// buttons change how wide a downconversion the decoder needs, the same
+    /// reason ISM's own window resizes when the band plan does.
+    fn sync_qo100(&mut self) {
+        // Wideband-only, for the same reason as the skimmers and ISM: a CAT
+        // rig on a sound card hands over demodulated audio, not IQ to mix a
+        // downconverter from.
+        if self.audio_mode {
+            self.state.qo100.enabled = false;
+        }
+        match (self.state.qo100.enabled, self.qo100.is_some()) {
+            (true, false) => {
+                let mut ddc = Ddc::new(self.state.sample_rate, self.qo100_target_rate_hz());
+                ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+                let out_rate = ddc.out_rate();
+                self.qo100 = Some(Qo100Controller::new(out_rate, self.state.qo100));
+                self.qo100_ddc = Some(ddc);
+                self.qo100_in_rate = self.state.sample_rate;
+                info!(rate = out_rate, "QO-100 beacon decoder started");
+            }
+            (false, true) => {
+                self.qo100 = None;
+                self.qo100_ddc = None;
+                self.qo100_buf.clear();
+                info!("QO-100 beacon decoder stopped");
+            }
+            (true, true) => self.sync_qo100_window(),
+            _ => {}
+        }
+    }
+
+    /// Re-seat the downconverter's mixer after a retune, and rebuild it
+    /// outright if the sample rate feeding it has changed or the operator has
+    /// asked for a different search width — a `Ddc` bakes its input rate and
+    /// its decimation chain in at construction and neither can be changed in
+    /// place, the same reason `sync_ism_window` rebuilds on a rate change.
+    fn sync_qo100_window(&mut self) {
+        if self.qo100_ddc.is_none() {
+            return;
+        }
+        let want_rate = self.qo100_target_rate_hz();
+        let have_rate = self.qo100_ddc.as_ref().map(|d| d.out_rate()).unwrap_or(0.0);
+        // `Ddc` settles for the nearest *achievable* rate, so this compares
+        // against what a fresh chain would actually land on rather than the
+        // bare request — a request unchanged in effect must not rebuild the
+        // chain (and so drop whatever the decoder had buffered) every tick.
+        let rebuild = (self.state.sample_rate - self.qo100_in_rate).abs() >= 1.0
+            || (Ddc::rate_for(self.state.sample_rate, want_rate) - have_rate).abs() >= 1.0;
+        if rebuild {
+            let mut ddc = Ddc::new(self.state.sample_rate, want_rate);
+            ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+            let out_rate = ddc.out_rate();
+            self.qo100_ddc = Some(ddc);
+            self.qo100_in_rate = self.state.sample_rate;
+            // The controller bakes its sample rate into the worker's rolling
+            // buffer sizing and every `bpsk::acquire` call, so a rate change
+            // rebuilds it too rather than trying to reconfigure it in place —
+            // simple, and cheap: switching search width is a deliberate,
+            // infrequent click, not a hot path.
+            self.qo100 = Some(Qo100Controller::new(out_rate, self.state.qo100));
+            info!(rate = out_rate, "QO-100 window rebuilt");
+            return;
+        }
+        let Some(ddc) = self.qo100_ddc.as_mut() else { return };
+        ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
+    }
+
+    /// Drain the QO-100 beacon decoder's latest status and forward it.
+    fn poll_qo100(&mut self) {
+        let Some(c) = self.qo100.as_ref() else { return };
+        if let Some(status) = c.poll() {
+            let _ = self.event_tx.send(RadioEvent::Qo100Status(status));
         }
     }
 
@@ -9837,6 +9996,7 @@ impl Engine {
         self.sync_skimmer();
         self.sync_ism();
         self.sync_adsb();
+        self.sync_qo100();
         self.sync_audio_tap();
         self.sync_tci_iq();
         info!(factor, rate = self.state.sample_rate, "front-end decimation");
@@ -10199,6 +10359,7 @@ impl Engine {
             self.sync_skimmer();
             self.sync_ism();
             self.sync_adsb();
+            self.sync_qo100();
         }
         // Re-derive the TCI streams at the new device rate and push a fresh
         // state burst, so connected clients follow the swap.
@@ -11786,6 +11947,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_qo100_window();
                 true
             }
             Err(e) => {
@@ -12658,6 +12820,41 @@ mod skim_window_tests {
         let cur = 14_050_000.0;
         let view = Some((88_000_000.0, 88_200_000.0));
         assert_eq!(skim_center_for(view, 88_100_000.0, WIDE_CENTER, WIDE, WIN, Some(cur)), cur);
+    }
+}
+
+#[cfg(test)]
+mod qo100_rate_tests {
+    use super::qo100_capture_rate_for;
+
+    /// The engine default (±5 kHz) and anything narrower sit on the 16 kHz
+    /// floor — ×2.5 does not reach it until ±6.4 kHz.
+    #[test]
+    fn the_default_and_narrow_widths_sit_on_the_16_khz_floor() {
+        assert_eq!(qo100_capture_rate_for(5_000.0), 16_000.0);
+        assert_eq!(qo100_capture_rate_for(0.0), 16_000.0);
+        assert_eq!(qo100_capture_rate_for(6_400.0), 16_000.0);
+    }
+
+    /// Past the knee the capture tracks the search width, so widening the
+    /// window in the UI really does hand the decoder a wider span.
+    #[test]
+    fn a_wider_search_asks_for_a_proportionally_wider_capture() {
+        assert_eq!(qo100_capture_rate_for(10_000.0), 25_000.0);
+        assert_eq!(qo100_capture_rate_for(25_000.0), 62_500.0);
+        // ±50 kHz is the UI's MAX_HALF_WIDTH_HZ.
+        assert_eq!(qo100_capture_rate_for(50_000.0), 125_000.0);
+    }
+
+    #[test]
+    fn the_capture_rate_is_monotonic_and_never_below_the_floor() {
+        let mut prev = 0.0;
+        for hw in [0.0, 2_500.0, 5_000.0, 10_000.0, 20_000.0, 50_000.0] {
+            let r = qo100_capture_rate_for(hw);
+            assert!(r >= prev, "rate dropped at half-width {hw}");
+            assert!(r >= 16_000.0, "below the floor at half-width {hw}");
+            prev = r;
+        }
     }
 }
 
