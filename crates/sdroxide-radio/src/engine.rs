@@ -63,24 +63,30 @@ const MAX_BATCH_ROWS: usize = 64;
 /// The main panadapter's width is [`sdroxide_types::SpectrumConfig::bins`].
 pub const WIDE_BINS: usize = 2048;
 
-/// How much wider than the viewport the zoom lane's output has to be, so the
-/// decimator's transition band stays off the edge of the display.
-const ZOOM_LANE_MARGIN: f64 = 1.4;
-
 /// The zoom lane's FFT size for a display `display_bins` columns wide.
 ///
-/// The decimation ladder is powers of two, so the lane's output lands between
-/// [`ZOOM_LANE_MARGIN`] and twice that times the viewport — which means the
-/// bins that fall *inside* the viewport are between a 2.8th and a 1.4th of
-/// these. Twice the columns therefore puts about one bin per column inside it
-/// even at the narrow end of the ladder, which is the property the old fixed
-/// 4096 had back when every display was 2048 columns wide.
+/// Two dilutions sit between a transform and a column, and both have to be paid
+/// for. The decimation ladder is powers of two, so the lane's output lands
+/// between [`sdroxide_types::ZOOM_LANE_MARGIN`] and twice that times the
+/// viewport — the bins inside the viewport are between a 2.8th and a 1.4th of
+/// these. And the viewport is itself about twice the window actually on screen,
+/// the client asking for slack so that panning inside it needs no
+/// reconfiguration. So a column gets between a 5.6th and a 2.8th of the
+/// transform, and eight times the columns is what puts at least one bin under
+/// every one of them at the wide end of the ladder.
 ///
-/// Floored at that same 4096 so a 2048-column display is unchanged, and capped
-/// at 32768: past there a single transform covers more signal than the lane's
-/// hop can hide (see [`MAX_HOP_DIV`]).
+/// It used to be twice the columns, which counted only the first dilution and
+/// left about half a bin per column on screen. That was invisible while the
+/// client answered a zoom by growing the *device-wide* FFT instead — but that
+/// transform runs at the front end's whole rate and is several times the price
+/// of this one, which is what made zooming in on a 2 Msps HackRF start dropping
+/// samples (issue #195). This lane now resolves the window on its own, so it
+/// has to resolve it properly.
+///
+/// Floored at 4096 and capped at 32768: past there a single transform covers
+/// more signal than the lane's hop can hide (see [`MAX_HOP_DIV`]).
 fn zoom_lane_fft(display_bins: usize) -> usize {
-    (display_bins * 2).next_power_of_two().clamp(4096, 32_768)
+    (display_bins * 8).next_power_of_two().clamp(4096, 32_768)
 }
 
 /// How many transforms a waterfall row is built from, when there are enough to
@@ -3994,12 +4000,10 @@ impl Engine {
             return None;
         }
         // The narrowest output on the ladder that still spans the viewport with
-        // room for the decimator's skirt.
-        let want = span * ZOOM_LANE_MARGIN;
-        let mut decim = 1u32;
-        while decim < 1 << 14 && full / f64::from(decim * 2) >= want {
-            decim *= 2;
-        }
+        // room for the decimator's skirt. Shared with the client, which works
+        // out the same answer to decide how large a device-wide FFT is worth
+        // asking for — see `sdroxide_types::panadapter_fft_ceiling`.
+        let decim = sdroxide_types::zoom_lane_decimation(full, span);
         (decim > 1).then_some(((lo + hi) / 2.0, decim))
     }
 
@@ -13043,20 +13047,27 @@ mod qo100_rate_tests {
 mod zoom_lane_fft_tests {
     use super::zoom_lane_fft;
 
-    /// A client on the historic 2048-column panadapter gets the lane it always
-    /// had. The whole change has to be invisible to it.
+    /// Enough transform to put a bin under every column *on screen*, which is
+    /// eight times the columns: the lane's output is up to 2.8 times the
+    /// viewport, and the viewport is about twice the window actually being
+    /// looked at. Two dilutions, both paid for.
     #[test]
-    fn the_old_width_gets_the_old_lane() {
-        assert_eq!(zoom_lane_fft(2048), 4096);
+    fn a_column_on_screen_gets_a_bin_of_its_own() {
+        assert_eq!(zoom_lane_fft(2048), 16_384);
+        // It used to be twice the columns, which counted only the first
+        // dilution and left this lane resolving half a bin per column — fine
+        // while the client answered a zoom by growing the device-wide FFT
+        // instead, and not fine now that this lane is what draws the window
+        // (issue #195).
+        assert_ne!(zoom_lane_fft(2048), 4096);
     }
 
-    /// Twice the columns, twice the transform — so the bins that land inside
-    /// the viewport still outnumber the columns drawing them at every rung of
-    /// the decimation ladder.
+    /// A wider panadapter asks for more, until the ceiling: past there a single
+    /// transform covers more signal than the lane's hop can hide.
     #[test]
     fn a_wider_panadapter_gets_a_wider_transform() {
-        assert_eq!(zoom_lane_fft(4096), 8192);
-        assert_eq!(zoom_lane_fft(8192), 16_384);
+        assert_eq!(zoom_lane_fft(4096), 32_768);
+        assert_eq!(zoom_lane_fft(8192), 32_768);
     }
 
     /// Held at both ends: nothing below the lane's own floor, and nothing past

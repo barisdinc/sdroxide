@@ -788,6 +788,15 @@ Detail costs memory on the graphics card: 8 MB per radio tab at 2048, 16 at
 4096, 32 at 8192. Changing it restarts the waterfall's history from black,
 once.
 
+**Zooming in does not cost the receiver anything.** It used to: the resolution
+for a zoomed window came from a bigger transform over *everything the front end
+streams*, and on a wide SDR that could be most of the processor — enough, on a
+small machine, to start the driver dropping samples the moment somebody zoomed
+in ([issue #195](https://github.com/dividebysandwich/sdroxide/issues/195)). The
+window on screen is now mixed down and analysed at its own width instead, which
+resolves the same picture for a fraction of the work, and the full-rate
+transform stays the size the **detail** setting asks for. Nothing to set.
+
 #### Waterfall scroll speed
 
 How fast the waterfall scrolls, in lines a second, on the **scroll** row of the
