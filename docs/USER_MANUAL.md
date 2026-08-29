@@ -2210,11 +2210,16 @@ FM for VHF packet, APRS and RIFP, where the same control is the deviation
 instead. All of it lives in `digi.json`
 ([13](#13-configuration-files)).
 
-#### Bands with more than one agreed frequency
+#### The agreed frequencies for a mode
 
-Most modes have one agreed frequency per band, and the band buttons above are all
-you need. Some have several — and where they do, a **⇵** button appears in that
-mode's operating panel listing them:
+Every mode with a convention of its own carries a **⇵** button in its operating
+panel — FT8, FT4, FT2, JS8, WSPR, PSK, RTTY, FSQ, SSTV (analog and FM), RIFP and
+APRS. It lists **every band's** agreed frequency for that mode, grouped by band
+with the band you are already in at the top, so changing band is one click rather
+than a band button and then a number you had to remember.
+
+Several bands have more than one entry, and that is where the list earns its
+place twice over:
 
 | Mode | Where it happens |
 | --- | --- |
@@ -2226,6 +2231,10 @@ The button's face is the frequency you are on when the dial is already sitting o
 one of them, and reads **⇵ FREQ** when it is not. Clicking a frequency moves the
 **dial**; where you sit inside the audio passband is a separate control and is
 left alone.
+
+WEFAX has its own **STATIONS** button instead ([7.9](#79-wefax-radiofax)): its
+transmitters are not on any band plan, so they are listed by station rather than
+by band.
 
 The frequencies that differ by region — PSK31 and RTTY on 40 m, SSTV on 80 m and
 40 m — are not offered as a choice, because the **IARU region** setting
@@ -2359,8 +2368,8 @@ The panel has two halves:
   **CLEAR RX** empties the list by hand, for when the band has gone quiet and
   what is on screen is a list of stations that *were* there. Nothing on the air
   stops, and the next slot starts filling it again.
-- **QSO** (right) — a **⇵** frequency button when the band has more than one
-  agreed frequency for the mode ([3.1](#31-general-considerations)), a world map
+- **QSO** (right) — a **⇵** frequency button listing every band's agreed FT8/FT4
+  frequency ([3.1](#31-general-considerations)), a world map
   (your location, the station you are working, and
   a transmit indicator — see [the world map](#the-world-map) below), a station card showing the current step
   (`Idle`, `Wait CQ`, `Calling CQ`, `Tx Grid`, `Tx Report`, `Tx R+Report`,
@@ -10687,6 +10696,12 @@ traffic that is no longer on it. A connected station stays connected.
 Clicking the callsigns on a monitor line puts that station in the terminal's
 connect bar, path and all. That is how you find out who is reachable: by
 watching the channel, not by typing callsigns from memory.
+
+**SETUP** opens the packet settings — the station callsign above all, plus the
+speed, the TX delay, the packet length and window, the default digipeater path,
+the connect text, the beacon and the KISS server. It is the only route to them,
+and until a station callsign is set there **CONNECT** stays greyed out and
+nothing transmits: an unidentified signal is illegal everywhere.
 
 **TERMINAL** is the connected session — see below.
 

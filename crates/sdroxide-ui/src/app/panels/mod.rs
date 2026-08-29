@@ -669,14 +669,21 @@ impl SdroxideApp {
         cmds.push(Command::DigiTxActive(true));
     }
 
-    /// The band's other conventional frequencies for this mode, as a chip that
-    /// opens a picker.
+    /// The mode's conventional operating frequencies, as a chip that opens a
+    /// picker.
     ///
-    /// Only appears where there is actually a choice. Most modes have one
-    /// agreed frequency per band and the chip would be a button that does
-    /// nothing; the ones that have several — FT8's DXpedition window, PSK and
-    /// RTTY's region split, SSTV's move-up-when-busy convention — are exactly
-    /// the ones where an operator otherwise has to go and look the number up.
+    /// Every band the mode has a convention on, not only the one the dial is
+    /// in: an operator changing band for FT8 wants 14.074 from a list, and
+    /// having to remember it — or to reach for the band buttons and then a
+    /// separate number — is the trip to a web page this exists to remove
+    /// (issue #210). The band the dial is in leads, so the nearest useful
+    /// entries are under the cursor when the popup opens, and the rest follow
+    /// in frequency order.
+    ///
+    /// Absent only for a mode with no convention of its own — CW, SSB, and the
+    /// ones whose frequency is a property of what they are pointed at rather
+    /// than of the mode (RF Paint, RADE, WEFAX, which has its own station
+    /// picker instead).
     ///
     /// The dial is what moves. These are dial frequencies, and the audio
     /// offset within the passband is a separate control that must not be
@@ -684,9 +691,9 @@ impl SdroxideApp {
     pub(in crate::app) fn digi_freq_chip(&self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         let mode = self.state.rx[0].mode;
         let dial = self.state.active_freq_hz();
-        let band = sdroxide_types::Band::containing(dial);
-        let channels = sdroxide_types::digi_channels_in(mode, band);
-        if channels.len() < 2 {
+        let here_band = sdroxide_types::Band::containing(dial);
+        let channels = sdroxide_types::digi_channels(mode);
+        if channels.is_empty() {
             return;
         }
         // "On" when the dial is already sitting on one of them, so the chip
@@ -698,11 +705,26 @@ impl SdroxideApp {
         };
         let btn = crate::chrome::chip(ui, here.is_some(), RichText::new(face).size(11.0))
             .on_hover_text(format!(
-                "The {} frequencies agreed for {} on {}",
+                "The {} frequencies agreed for {} — picking one tunes the dial",
                 channels.len(),
-                mode.label(),
-                band.label()
+                mode.label()
             ));
+
+        // Grouped by band, the dial's own band first: everything else is a
+        // band change, and the entries next to where the operator already is
+        // are the ones they are most likely to want.
+        let mut groups: Vec<(sdroxide_types::Band, Vec<sdroxide_types::DigiChannel>)> = Vec::new();
+        for c in &channels {
+            let b = sdroxide_types::Band::containing(c.dial_hz);
+            match groups.iter_mut().find(|(gb, _)| *gb == b) {
+                Some((_, v)) => v.push(*c),
+                None => groups.push((b, vec![*c])),
+            }
+        }
+        if let Some(i) = groups.iter().position(|(b, _)| *b == here_band) {
+            groups.swap(0, i);
+        }
+        let flagged = channels.iter().any(|c| c.outside_data_segment(mode));
 
         let mut pick = None;
         let resp = egui::Popup::from_toggle_button_response(&btn)
@@ -712,35 +734,49 @@ impl SdroxideApp {
                 crate::chrome::window_body_bg(ui);
                 ui.set_max_width(300.0);
                 ui.label(
-                    RichText::new(format!("{} · {}", mode.label(), band.label()))
+                    RichText::new(format!("{} · conventional frequencies", mode.label()))
                         .color(crate::theme::CYAN_DIM())
                         .size(9.5)
                         .strong(),
                 );
                 ui.add_space(2.0);
-                for c in &channels {
-                    let on = here.map(|h| h.dial_hz) == Some(c.dial_hz);
-                    let mut text = format!("{:.3} MHz", c.dial_hz / 1e6);
-                    if !c.note.is_empty() {
-                        text.push_str(&format!("   {}", c.note));
+                // Scrolled rather than sized to the list: a mode with a
+                // convention on every band has more entries than a popup can
+                // be tall on a laptop screen.
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for (band, chans) in &groups {
+                        ui.label(
+                            RichText::new(band.label())
+                                .color(crate::theme::LINE_LIT())
+                                .size(9.5)
+                                .strong(),
+                        );
+                        for c in chans {
+                            let on = here.map(|h| h.dial_hz) == Some(c.dial_hz);
+                            let mut text = format!("   {:.3} MHz", c.dial_hz / 1e6);
+                            if !c.note.is_empty() {
+                                text.push_str(&format!("   {}", c.note));
+                            }
+                            let mut rich = RichText::new(text).size(12.0);
+                            if c.outside_data_segment(mode) {
+                                rich = rich.color(crate::theme::YELLOW());
+                            }
+                            let row = ui.selectable_label(on, rich);
+                            if c.outside_data_segment(mode) {
+                                row.clone().on_hover_text(format!(
+                                    "A global convention that the IARU Region {} band plan does \
+                                     not put narrow data on — check your own band plan before \
+                                     transmitting here.",
+                                    sdroxide_types::region().number()
+                                ));
+                            }
+                            if row.clicked() {
+                                pick = Some(c.dial_hz);
+                            }
+                        }
                     }
-                    let mut rich = RichText::new(text).size(12.0);
-                    if c.outside_data_segment(mode) {
-                        rich = rich.color(crate::theme::YELLOW());
-                    }
-                    let row = ui.selectable_label(on, rich);
-                    if c.outside_data_segment(mode) {
-                        row.clone().on_hover_text(format!(
-                            "A global convention that the IARU Region {} band plan does not put \
-                             narrow data on — check your own band plan before transmitting here.",
-                            sdroxide_types::region().number()
-                        ));
-                    }
-                    if row.clicked() {
-                        pick = Some(c.dial_hz);
-                    }
-                }
-                if channels.iter().any(|c| c.outside_data_segment(mode)) {
+                });
+                if flagged {
                     ui.add_space(2.0);
                     ui.label(
                         RichText::new(format!(
