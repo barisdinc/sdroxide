@@ -4194,6 +4194,26 @@ impl Engine {
                 // knob moves the dial and leaves the receiver exactly where it
                 // was, and something has to bring it along.
                 self.keep_vfo_in_span();
+                // And then put the receiver on the new dial, which is the part
+                // neither of the two calls above necessarily does. On a
+                // panadapter pairing — a transceiver on CAT beside an SDR that
+                // supplies the spectrum — the window deliberately does *not*
+                // follow the rig's knob, so `adopt_source_center` finds nothing
+                // to adopt, and a move inside the span gives
+                // `keep_vfo_in_span` nothing to do either. Without this the
+                // readout and the passband marker follow the rig while the DDC
+                // stays on the frequency before the move: flrig retunes from
+                // WSJT-X, the picture agrees and the audio does not (issue
+                // #206). Every operator-initiated tune already pairs
+                // `follow_dial` with this; the rig-initiated one was the odd
+                // path out.
+                //
+                // Not in audio mode, where there is no DDC and the rig's own
+                // dial is the tuning: `update_tuning` would command the
+                // frequency straight back at the radio that just reported it.
+                if !self.audio_mode {
+                    self.update_tuning();
+                }
                 self.update_display_center();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
             }
