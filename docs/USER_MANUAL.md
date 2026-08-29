@@ -6243,6 +6243,29 @@ radio you actually own. Press **Test connection** to see which it reported. (If
 a firmware publishes no limits at all, sdroxide says so rather than quoting the
 fallback figures as fact.)
 
+**70 MHz is not the floor any more.** The two figures above are the ones
+Analog Devices' own firmware publishes. The community firmware that most of the
+current AD936x work happens in — [**tezuka**](https://github.com/F5OEO/tezuka_fw),
+by F5OEO — takes the same silicon down to **47.5 MHz**, which is what puts
+**6 m and 4 m** inside a Pluto's range instead of just outside it. It also adds
+an 8-bit complex sample mode (about 14 MHz of span over USB, 45 MHz over
+gigabit Ethernet), RX1/RX2 and TX1/TX2 switching, and — the part worth having
+on its own — **SD-card boot**, so a firmware that does not suit you is undone
+by taking the card out rather than by unbricking a board. It builds for about
+ten boards: the original Pluto, PlutoPlus, ANTSDR E200/E310, Fishball/PlutoSky,
+SignalSDR Pro, LibreSDR/ZynqSDR, Pluto Nano and the PCIe and Mini
+OpenSDRLab boards.
+
+Nothing has to be configured in sdroxide to use it. The tuning range, the
+sample rate and the on-the-wire sample format are all read off the device as it
+connects rather than assumed, so a board running tezuka reports its own limits
+and its own format and sdroxide follows them. What that means in practice is
+that the band buttons open up as far as the firmware says and no further. This
+is read from what the firmware publishes rather than measured here — no
+tezuka board has been on this bench — so treat the 47.5 MHz figure as the
+firmware's claim, and press **Test connection** to see what your own board
+actually answers.
+
 **Full duplex** — the checkbox above the port boxes, off by default. With it
 off, receive stops for the length of an over and the whole link goes to
 transmit, exactly as the HPSDR backend does. The reason is the link, not the
@@ -11639,7 +11662,10 @@ All in [§6.2.7](#627-plutosdr-adalm-pluto):
   `192.168.2.1`, your computer `192.168.2.10`; the tab wants an address, not
   a serial. **Test connection** reports model, firmware, and the tuning range
   this particular board has (stock AD9363: 325 MHz–3.8 GHz; the well-known
-  AD9364 firmware change: 70 MHz–6 GHz).
+  AD9364 firmware change: 70 MHz–6 GHz; F5OEO's
+  [tezuka](https://github.com/F5OEO/tezuka_fw) firmware: 47.5 MHz–6 GHz, which
+  brings 6 m and 4 m into range). The limits are read off the board, so none of
+  this is a setting.
 - A stock Pluto cannot go below about **2.084 Msps**; leave the analog filter
   on `auto`; the RX gain slider only works in **Manual** AGC (the AD9361 owns
   the register otherwise). TX gain is attenuation — 0 dB is full output — and
