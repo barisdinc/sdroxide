@@ -1441,24 +1441,54 @@ fn write_frame_within(
     failed
 }
 
-/// Whether the rig's own repeater shift needs putting back to simplex, given
-/// the dial this end believes it is on and the band that was last asserted for.
+/// The lowest frequency a transceiver has a repeater shift on. Below it the
+/// only thing that can put a duplex setting back is a band stacking register,
+/// which is a band crossing; above it there are auto-repeater functions that
+/// arm on the *frequency*, so the assertion has to follow every move.
 ///
-/// True once per band: the first dial a fresh connection learns, and every
-/// crossing after that. `asserted` is updated in place, so a caller that acts
-/// on the answer will not be told again until the dial moves somewhere else.
+/// 28 MHz rather than 30: 10 m FM repeaters live at 29.6, and they are the
+/// lowest ones anybody works.
+pub const DUPLEX_FLOOR_HZ: f64 = 28_000_000.0;
+
+/// Whether the rig's own repeater shift needs putting back to simplex, given
+/// the dial this end believes it is on and the dial that was last asserted for.
+///
+/// On HF this is true once per band: the first dial a fresh connection learns,
+/// and every crossing after that, because a band stacking register is the only
+/// thing down there that can restore a duplex setting and it does so when the
+/// dial crosses into the band.
+///
+/// From [`DUPLEX_FLOOR_HZ`] up it is true on **every** move of the dial. Icom's
+/// auto-repeater function (and its equivalents) arms on the frequency, not on
+/// the band: tuning from one 2 m channel to another inside the same band puts
+/// DUP back without ever crossing a band edge, and the over then goes out a
+/// shift away from where the operator asked for it (issue #233). A frame per
+/// settled dial position is what that costs; the rig NAKs it if it has no such
+/// command, and the poll already carries more traffic than this does.
+///
+/// `asserted` is updated in place, so a caller that acts on the answer will not
+/// be told again until the dial moves somewhere else.
 ///
 /// A dial outside every amateur band is [`sdroxide_types::Band::Gen`], and two
-/// such frequencies are the same "band" here — a radio whose duplex is
+/// such HF frequencies are the same "band" here — a radio whose duplex is
 /// re-stacked between two out-of-band frequencies is not one this can see, and
 /// there is nothing to transmit there anyway.
-fn needs_simplex(dial_hz: Option<f64>, asserted: &mut Option<sdroxide_types::Band>) -> bool {
+fn needs_simplex(dial_hz: Option<f64>, asserted: &mut Option<f64>) -> bool {
     let Some(hz) = dial_hz else { return false };
-    let band = sdroxide_types::Band::containing(hz);
-    if *asserted == Some(band) {
+    let same = match *asserted {
+        None => false,
+        Some(prev) => {
+            prev == hz
+                || (prev < DUPLEX_FLOOR_HZ
+                    && hz < DUPLEX_FLOOR_HZ
+                    && sdroxide_types::Band::containing(prev)
+                        == sdroxide_types::Band::containing(hz))
+        }
+    };
+    if same {
         return false;
     }
-    *asserted = Some(band);
+    *asserted = Some(hz);
     true
 }
 
@@ -1963,12 +1993,12 @@ fn serial_thread(
         // Only forward genuine changes so the engine isn't re-notified every poll.
         let mut emit_freq: Option<f64> = None;
         let mut emit_mode: Option<Mode> = None;
-        // The band this end has already put the rig's own repeater shift back
-        // to simplex for (see [`Protocol::clear_duplex`]). `None` on a fresh
-        // connection, so the first dial the rig reports — the opening poll's
-        // answer, a round trip after the port opens — asserts it once, and
-        // every band change after that re-asserts it.
-        let mut simplex_band: Option<sdroxide_types::Band> = None;
+        // The dial this end has already put the rig's own repeater shift back
+        // to simplex for (see [`Protocol::clear_duplex`] and [`needs_simplex`]).
+        // `None` on a fresh connection, so the first dial the rig reports — the
+        // opening poll's answer, a round trip after the port opens — asserts it
+        // once, and a move after that re-asserts it.
+        let mut simplex_dial: Option<f64> = None;
         // The rig's own transmit state as last reported upwards, and when its
         // last answer arrived. `None` = never answered, which is where a family
         // with no such read stays for good.
@@ -2061,6 +2091,29 @@ fn serial_thread(
                             last_sent_freq = Some(hz);
                             emit_freq = Some(hz); // suppress the poll echo
                             freq_deadline = Instant::now() + Duration::from_millis(50);
+                        }
+                        // …and on a shift the rig may have re-armed on that
+                        // frequency by itself (issue #233). Only when the dial
+                        // actually moved for this over — `needs_simplex` says
+                        // no for the ordinary case where transmit lands where
+                        // we listen, so a digital burst still keys with nothing
+                        // queued in front of it.
+                        if on {
+                            let mut failed = false;
+                            if needs_simplex(emit_freq, &mut simplex_dial) {
+                                for f in protocol.clear_duplex() {
+                                    failed |= write_frame(
+                                        &mut *port,
+                                        &mut *protocol,
+                                        &f,
+                                        &mut last_write,
+                                        &mut io,
+                                    );
+                                }
+                            }
+                            if failed {
+                                break 'io true;
+                            }
                         }
                         let failed = match cfg.ptt {
                             PttMethod::Vox => false,
@@ -2297,7 +2350,7 @@ fn serial_thread(
             // transmit frequency went out with the key-down — and the one
             // moment the bus must not carry a receive setting is the one the
             // meters are being read in.
-            if !ptt && needs_simplex(emit_freq, &mut simplex_band) {
+            if !ptt && needs_simplex(emit_freq, &mut simplex_dial) {
                 let mut failed = false;
                 for f in protocol.clear_duplex() {
                     failed |= write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io);
@@ -2622,31 +2675,46 @@ mod tests {
     use super::*;
     use sdroxide_types::CatFamily;
 
-    /// The rig's own repeater shift is put back to simplex once per band, not
-    /// once per connection: an IC-9700 keeps a band stacking register per band
-    /// and restores that band's duplex the moment the dial crosses into it,
-    /// which is what left 70 cm and 23 cm stuck on DUP− (issue #192).
+    /// The rig's own repeater shift is put back to simplex once per band on HF,
+    /// not once per connection: an IC-9700 keeps a band stacking register per
+    /// band and restores that band's duplex the moment the dial crosses into
+    /// it, which is what left 70 cm and 23 cm stuck on DUP− (issue #192).
     #[test]
     fn the_duplex_is_re_asserted_on_every_band_change() {
-        use sdroxide_types::Band;
-        let mut asserted: Option<Band> = None;
+        let mut asserted: Option<f64> = None;
         // Nothing is claimed about a rig that has not said where it is.
         assert!(!needs_simplex(None, &mut asserted));
         assert_eq!(asserted, None);
         // The first dial a fresh connection learns arms it once…
-        assert!(needs_simplex(Some(145_500_000.0), &mut asserted));
-        assert_eq!(asserted, Some(Band::M2));
-        // …and only once: a dial that moves inside the band changes nothing,
-        // and neither does the same frequency arriving on every poll.
-        assert!(!needs_simplex(Some(145_500_000.0), &mut asserted));
-        assert!(!needs_simplex(Some(144_500_000.0), &mut asserted));
+        assert!(needs_simplex(Some(14_074_000.0), &mut asserted));
+        // …and on HF only once: a dial that moves inside the band changes
+        // nothing, and neither does the same frequency arriving on every poll.
+        assert!(!needs_simplex(Some(14_074_000.0), &mut asserted));
+        assert!(!needs_simplex(Some(14_200_000.0), &mut asserted));
+        // A band crossing re-asserts it.
+        assert!(needs_simplex(Some(7_074_000.0), &mut asserted));
+        // And back again — a band already visited is still a band change.
+        assert!(needs_simplex(Some(14_074_000.0), &mut asserted));
+    }
+
+    /// Above the VHF floor it is every *move*, not every band: Icom's
+    /// auto-repeater arms on the frequency, so tuning between two 2 m channels
+    /// puts DUP back without ever crossing a band edge (issue #233).
+    #[test]
+    fn a_vhf_dial_re_asserts_the_duplex_wherever_it_moves() {
+        let mut asserted: Option<f64> = None;
+        assert!(needs_simplex(Some(147_000_000.0), &mut asserted));
+        // The same frequency arriving on every poll is not a move.
+        assert!(!needs_simplex(Some(147_000_000.0), &mut asserted));
+        // Another channel in the same band is.
+        assert!(needs_simplex(Some(146_875_000.0), &mut asserted));
+        assert!(needs_simplex(Some(147_000_000.0), &mut asserted));
         // 70 cm and 23 cm are where the IC-9700 puts DUP− back.
         assert!(needs_simplex(Some(432_500_000.0), &mut asserted));
-        assert_eq!(asserted, Some(Band::M70));
         assert!(needs_simplex(Some(1_297_000_000.0), &mut asserted));
-        assert_eq!(asserted, Some(Band::Cm23));
-        // And back again — a band already visited is still a band change.
-        assert!(needs_simplex(Some(145_500_000.0), &mut asserted));
+        // 10 m FM repeaters are above the floor too.
+        assert!(needs_simplex(Some(29_680_000.0), &mut asserted));
+        assert!(needs_simplex(Some(29_620_000.0), &mut asserted));
     }
 
     /// `FE FE 00 94 00 …` — the rig telling the bus its dial has moved.

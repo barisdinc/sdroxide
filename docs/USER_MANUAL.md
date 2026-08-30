@@ -1885,7 +1885,8 @@ not, which on 70 cm (a 7.6 MHz shift in Region 1) it never is.
 > **NOTE:** The built-in shifts are transcribed from published band plans and
 > have not been checked against a repeater. They cover the sub-bands whose
 > shift is settled across a whole region — 10 m, 6 m and 4 m in Region 1, 2 m
-> and 70 cm in all three, 1.25 m and 33 cm in Region 2, 23 cm — and say nothing
+> and 70 cm in all three (in Regions 2 and 3 alike, outputs above 147 MHz take
+> their inputs 600 kHz *up*), 1.25 m and 33 cm in Region 2, 23 cm — and say nothing
 > anywhere else, deliberately: a missing entry leaves you simplex, which is
 > obvious the moment nobody comes back, while a wrong one transmits confidently
 > onto somebody else's channel. Set the region under
@@ -1897,13 +1898,17 @@ moving the radio's dial for the length of the over — the same way RIT, XIT and
 split do on a rig whose VFO is its whole frequency control — so the radio's own
 duplex setting has to be off, or the two would be added together and the over
 would go out a shift away from where you asked for it. sdroxide therefore puts
-an Icom back to simplex whenever the dial moves to another band.
+an Icom back to simplex whenever the dial moves — on HF once per band, and on
+VHF and up every time the dial moves at all, including into the transmit
+frequency at the start of an over.
 
-That matters on a radio that remembers a duplex setting per band, which an
-IC-9700 does: switching to 70 cm or 23 cm recalls whatever that band was last
-left on, normally DUP−, and before this the SIMPLEX button on screen could not
-take it off again. Set the shift here rather than on the radio; the radio's own
-DUP button will be overridden the next time you change band.
+That matters on a radio that puts a duplex setting back by itself. An IC-9700
+remembers one per band, so switching to 70 cm or 23 cm recalls whatever that
+band was last left on, normally DUP−; and the auto-repeater function fitted to
+several regional versions arms on the *frequency*, so simply tuning from one
+2 m channel to the next puts a shift back without ever crossing a band edge.
+Set the shift here rather than on the radio; the radio's own DUP button will be
+overridden the next time the dial moves.
 
 #### The tone — TONE
 

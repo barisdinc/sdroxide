@@ -51,7 +51,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use sdroxide_cat::civ;
+use sdroxide_cat::{DUPLEX_FLOOR_HZ, civ};
 use sdroxide_dsp::Ddc;
 use sdroxide_icomnet::{IcomNetDevice, IcomNetOptions};
 use sdroxide_radio::rtrb;
@@ -198,10 +198,10 @@ pub struct IcomNetSource {
     /// answer that crossed a command on the wire, which would otherwise put the
     /// rail back where the radio was before the operator moved it.
     squelch_set: bool,
-    /// The band this end has already put the radio's own repeater shift back
+    /// The dial this end has already put the radio's own repeater shift back
     /// to simplex for — see [`civ::simplex_frame`], and [`Self::pump`] for why
-    /// it is a band rather than a one-off.
-    simplex_band: Option<Band>,
+    /// it is a dial rather than a one-off.
+    simplex_dial: Option<f64>,
 }
 
 impl IcomNetSource {
@@ -318,7 +318,7 @@ impl IcomNetSource {
             last_telem: None,
             transmitting: false,
             squelch_set: false,
-            simplex_band: None,
+            simplex_dial: None,
         };
         notes.extend(src.configure(cfg));
         // Adopt the radio's current dial before returning, the way the CAT
@@ -527,18 +527,16 @@ impl IcomNetSource {
         }
 
         // The radio's own repeater shift, put back to simplex whenever the dial
-        // has moved to another band. A band stacking register restores whatever
-        // duplex that band was last left on the moment the dial crosses into it,
-        // so clearing it once with the other offsets in `configure` is not
-        // enough — see [`civ::simplex_frame`] (issue #192). Not while keyed: the
-        // transmit frequency went out with the key-down, and mid-over the link
-        // belongs to the meters.
+        // has moved. A band stacking register restores whatever duplex that
+        // band was last left on the moment the dial crosses into it, so
+        // clearing it once with the other offsets in `configure` is not enough
+        // — see [`civ::simplex_frame`] (issue #192) — and the auto-repeater
+        // function arms on the *frequency*, so a move between two channels of
+        // one band puts it back without crossing a band edge at all (issue
+        // #233). Not while keyed: the transmit frequency went out with the
+        // key-down, and mid-over the link belongs to the meters.
         if !self.transmitting && self.dial.vfo > 0.0 {
-            let band = Band::containing(self.dial.vfo);
-            if self.simplex_band != Some(band) {
-                self.simplex_band = Some(band);
-                self.send(civ::simplex_frame(self.civ_addr));
-            }
+            self.assert_simplex(self.dial.vfo);
         }
 
         if self.last_poll.elapsed() >= POLL_PERIOD {
@@ -552,6 +550,31 @@ impl IcomNetSource {
             }
         }
         self.watch_scope();
+    }
+
+    /// Put the radio's own repeater shift back to simplex for `dial_hz`, unless
+    /// that has already been done for this dial.
+    ///
+    /// The HF/VHF split is [`sdroxide_cat`]'s: below 28 MHz nothing but a band
+    /// stacking register can restore a duplex setting, so once per band is
+    /// enough and the link stays quiet while the operator tunes; above it an
+    /// auto-repeater function arms on the frequency and every move has to be
+    /// answered.
+    fn assert_simplex(&mut self, dial_hz: f64) {
+        let same = match self.simplex_dial {
+            None => false,
+            Some(prev) => {
+                prev == dial_hz
+                    || (prev < DUPLEX_FLOOR_HZ
+                        && dial_hz < DUPLEX_FLOOR_HZ
+                        && Band::containing(prev) == Band::containing(dial_hz))
+            }
+        };
+        if same {
+            return;
+        }
+        self.simplex_dial = Some(dial_hz);
+        self.send(civ::simplex_frame(self.civ_addr));
     }
 
     fn on_reply(&mut self, reply: civ::CivReply) {
@@ -861,6 +884,11 @@ impl IqSource for IcomNetSource {
         // listen borrows the dial until unkey.
         if let Some(f) = self.dial.begin_tx(center_hz) {
             self.send(civ::set_freq_frame(self.civ_addr, f));
+            // …and the radio may have armed a shift of its own on that
+            // frequency the moment it took it (issue #233). Only on a dial the
+            // over actually moved: where transmit lands where we listen there
+            // is nothing new for an auto-repeater to have acted on.
+            self.assert_simplex(f);
         }
         self.send(civ::ptt_frame(self.civ_addr, true));
         self.transmitting = true;
