@@ -2845,6 +2845,18 @@ ratios behind them, the serial numbers land in ADIF's `STX` and `SRX`, and the
 exchanges whole in `STX_STRING` and `SRX_STRING`. The six-character locator
 becomes the station's grid, so the map and the distance get the better answer.
 
+> **The FT8 exchange takes a second decoding pass, so it only runs with the
+> contest selected.** The 77-bit layout the exchange rides in is one the FT8
+> decoder underneath sdroxide does not know how to write out, and it discards
+> what it cannot write — so the exchange used to decode correctly and then be
+> thrown away before anything could see it, in FT8 and only in FT8 (FT4 and FT2
+> take a different path and were never affected). sdroxide now runs a second
+> pass over each slot that keeps exactly that layout and nothing else. It costs
+> about what the ordinary decode costs, which is why it runs only while
+> **Contest** is set to **EU VHF Contest**: switch the contest on to *hear*
+> contest exchanges, not only to send them. A four-character grid is no
+> obstacle to hearing them — it only stops you sending the exchange.
+
 > Only EU VHF is implemented. WSJT-X offers five other special operating
 > activities — ARRL Field Day, the RTTY Roundup, NA VHF, WW Digi and ARRL Digi —
 > each with its own message layout and its own exchange. sdroxide *decodes* the
