@@ -371,7 +371,7 @@ impl SdroxideApp {
             // Zoomed out past the passband: the whole view is the request, and
             // there is no zoom factor to grow the transform by — the wide lane
             // has whatever resolution it has.
-            if self.view.span() > full_span {
+            if self.view.span() > full_span * WIDER_THAN_PASSBAND {
                 (
                     Some(slack_viewport(
                         out_center,
@@ -937,6 +937,21 @@ fn base_fft_for_rate(chip: u32, rate_hz: f64) -> u32 {
     chip.min(afford).max(1024)
 }
 
+/// How much wider than the passband a view has to be before it counts as
+/// zoomed out past it.
+///
+/// Not a bare `>`. A front end restates its sample rate as it measures it, and
+/// a GPS-disciplined one restates it *differently every session*: a KiwiSDR
+/// reported 11998.876241, .876277, .876288, .876369, .876561 and .876576 across
+/// six connections to the same receiver. A view fitted to one of those and
+/// restored against another is a ten-thousandth of a hertz wider — enough for a
+/// bare comparison to declare it zoomed out, whereupon the client asks for
+/// twice the passband, the engine answers from the full-band lane, and a
+/// 12 kHz window pooled from 29 kHz bins draws as a flat line across the
+/// panadapter. A tenth of a percent is far below any zoom step and far above
+/// that.
+const WIDER_THAN_PASSBAND: f64 = 1.001;
+
 /// Whether a jump in the device window should re-fit the view to it.
 ///
 /// True only for an audio-mode front end whose window grew by a large factor
@@ -950,11 +965,40 @@ fn refit_on_window_growth(audio_mode: bool, prev_rate: f64, new_rate: f64, view_
 
 #[cfg(test)]
 mod tests {
+    use super::WIDER_THAN_PASSBAND;
     use super::{
         AutoFit, FIT_ARRIVED_DB, FIT_MIN_GAP_S, FIT_SETTLE_S, FIT_STEP_S, average_in,
         base_fft_for_rate, fit_due, glide_step, levels_drifted, pick_levels,
         refit_on_window_growth, slack_viewport,
     };
+
+    /// The six sample rates one KiwiSDR reported across six connections. A view
+    /// fitted to any of them must still read as "the whole passband" against
+    /// any other, or the panadapter falls onto the full-band lane and draws a
+    /// flat line — see [`WIDER_THAN_PASSBAND`].
+    #[test]
+    fn a_view_fitted_to_one_session_is_not_zoomed_out_in_the_next() {
+        const SEEN: [f64; 6] =
+            [11998.876241, 11998.876277, 11998.876288, 11998.876369, 11998.876561, 11998.876576];
+        for fitted in SEEN {
+            for now in SEEN {
+                assert!(
+                    !(fitted > now * WIDER_THAN_PASSBAND),
+                    "a view fitted at {fitted} reads as zoomed out against {now}"
+                );
+            }
+        }
+    }
+
+    /// It still has to notice a real zoom-out. One step of the wheel is a few
+    /// percent, and the smallest thing anyone would call zoomed out is well
+    /// past that.
+    #[test]
+    fn a_real_zoom_out_is_still_recognised() {
+        let rate = 11998.876241;
+        assert!(rate * 1.02 > rate * WIDER_THAN_PASSBAND, "one wheel step must count");
+        assert!(30e6 > rate * WIDER_THAN_PASSBAND, "the whole band certainly counts");
+    }
 
     /// The crash this replaced: an RX-888 scrolled to the top of its band, at a
     /// zoom where the 2× slack covers the whole device window. `dev_hi - slack`

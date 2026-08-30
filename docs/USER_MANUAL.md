@@ -713,7 +713,10 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   picture of the whole 0–30 MHz, and without this the panadapter could only ever
   show the 12 kHz. The picture coarsens at the moment it crosses over, because
   the full-band bins are all there is out there; zoom back in and the I/Q's own
-  resolution returns.
+  resolution returns. A window too narrow for those bins to resolve is never
+  drawn from them — a KiwiSDR's are 29 kHz apiece, and a few kilohertz pooled
+  out of one of them would be a flat line — so the I/Q keeps the picture
+  wherever it has anything to say.
 
   Zooming back in **somewhere else** brings the receiver with you. On these
   front ends the panadapter is the receiver — there is no looking without

@@ -5944,6 +5944,7 @@ impl Engine {
             self.stream_center_hz,
             self.state.sample_rate,
             (wide_center, wide_span),
+            self.wide_bins.len(),
         )
         .then_some((wide_center, wide_span))
     }
@@ -13709,8 +13710,20 @@ fn wide_covers_viewport(
     dev_center: f64,
     dev_span: f64,
     (_wide_center, wide_span): (f64, f64),
+    wide_bins: usize,
 ) -> bool {
-    if !(dev_span > 0.0 && wide_span > dev_span) {
+    if !(dev_span > 0.0 && wide_span > dev_span) || wide_bins == 0 {
+        return false;
+    }
+    // Never for a window this lane cannot resolve. Its bins are the whole band
+    // divided a thousand-odd ways — 29 kHz apiece on a KiwiSDR — so a viewport
+    // a few kilohertz wide pools down into one of them and draws as a flat line
+    // straight across the panadapter. Whatever the I/Q has is worth more than
+    // that, even where it does not cover the whole window; and a window this
+    // narrow sitting outside the passband is a retune waiting to happen rather
+    // than a picture to be drawn (`follow_view_into_the_band`).
+    const MIN_BINS_ACROSS: f64 = 8.0;
+    if (vp_hi - vp_lo) < wide_span / wide_bins as f64 * MIN_BINS_ACROSS {
         return false;
     }
     let (dev_lo, dev_hi) = (dev_center - dev_span / 2.0, dev_center + dev_span / 2.0);
@@ -13724,19 +13737,25 @@ fn wide_covers_viewport(
 
 #[cfg(test)]
 mod wide_main_window_tests {
-    use super::wide_covers_viewport;
 
-    /// A KiwiSDR: 12 kHz of I/Q at 10 MHz, and a picture of the whole 0-30 MHz.
+    /// A KiwiSDR: 12 kHz of I/Q at 10 MHz, and a 1024-bin picture of the whole
+    /// 0-30 MHz — 29.3 kHz a bin.
     const KIWI_DEV: (f64, f64) = (10_000_000.0, 12_000.0);
     const KIWI_WIDE: (f64, f64) = (15_000_000.0, 30_000_000.0);
+    const KIWI_WIDE_BINS: usize = 1024;
+
+    /// [`wide_covers_viewport`] with this file's KiwiSDR figures.
+    fn covers(vp: (f64, f64), dev: (f64, f64)) -> bool {
+        super::wide_covers_viewport(vp, dev.0, dev.1, KIWI_WIDE, KIWI_WIDE_BINS)
+    }
 
     /// Zoomed in, or fitted to the passband: the I/Q is finer and covers it.
     #[test]
     fn the_passband_keeps_its_own_picture() {
         let (c, span) = KIWI_DEV;
-        assert!(!wide_covers_viewport((c - 1_000.0, c + 1_000.0), c, span, KIWI_WIDE));
+        assert!(!covers((c - 1_000.0, c + 1_000.0), (c, span)));
         assert!(
-            !wide_covers_viewport((c - span / 2.0, c + span / 2.0), c, span, KIWI_WIDE),
+            !covers((c - span / 2.0, c + span / 2.0), (c, span)),
             "a view fitted exactly to the passband must not fall to the coarser lane"
         );
     }
@@ -13747,29 +13766,45 @@ mod wide_main_window_tests {
     fn a_viewport_a_whisker_outside_still_counts_as_inside() {
         let (c, span) = KIWI_DEV;
         let nudge = span * 1e-9;
-        assert!(!wide_covers_viewport(
-            (c - span / 2.0 - nudge, c + span / 2.0 + nudge),
-            c,
-            span,
-            KIWI_WIDE
-        ));
+        assert!(!covers((c - span / 2.0 - nudge, c + span / 2.0 + nudge), (c, span)));
     }
 
     /// Zoomed out past the I/Q — the case the whole thing exists for.
     #[test]
     fn zooming_out_past_the_iq_reaches_the_wide_lane() {
         let (c, span) = KIWI_DEV;
-        assert!(wide_covers_viewport((c - 500_000.0, c + 500_000.0), c, span, KIWI_WIDE));
-        assert!(wide_covers_viewport((0.0, 30_000_000.0), c, span, KIWI_WIDE));
+        assert!(covers((c - 500_000.0, c + 500_000.0), (c, span)));
+        assert!(covers((0.0, 30_000_000.0), (c, span)));
     }
 
-    /// Panned off the edge without being any wider: the device analyser has
-    /// nothing there either, so the test is containment and not width.
+    /// Panned off the edge rather than widened: the device analyser has nothing
+    /// there either, so the test is containment and not width. Wide enough for
+    /// the lane to resolve, which a window of a few kilohertz is not — see
+    /// `a_window_too_narrow_for_the_lane_is_left_to_the_iq`.
     #[test]
     fn a_viewport_panned_off_the_edge_reaches_it_too() {
         let (c, span) = KIWI_DEV;
-        let lo = c + span; // a whole passband to the right of it
-        assert!(wide_covers_viewport((lo, lo + span), c, span, KIWI_WIDE));
+        let lo = c + 5e6;
+        assert!(covers((lo, lo + 1e6), (c, span)));
+    }
+
+    /// The flat line this cost before it was caught: the receiver restates its
+    /// sample rate every session — a KiwiSDR's arrives as 11998.876277 one
+    /// time and 11998.876241 the next — so a view fitted to one of those is a
+    /// fraction of a hertz wider than the other, and the client asked for a
+    /// window twice the passband. The lane's bins are 29 kHz apiece, so a
+    /// 24 kHz window pooled from them is a single bin drawn straight across the
+    /// panadapter. Refused on resolution: whatever the I/Q has beats that.
+    #[test]
+    fn a_window_too_narrow_for_the_lane_is_left_to_the_iq() {
+        let (c, span) = KIWI_DEV;
+        // Twice the passband, centred on it — outside it at both ends.
+        assert!(!covers((c - span, c + span), (c, span)));
+        // Even far away from the passband, where the I/Q covers none of it.
+        assert!(!covers((c + 5e6, c + 5e6 + span), (c, span)));
+        // Eight of the lane's own bins is enough to draw.
+        let bin = KIWI_WIDE.1 / KIWI_WIDE_BINS as f64;
+        assert!(covers((c + 5e6, c + 5e6 + bin * 8.5), (c, span)));
     }
 
     /// A front end whose "wide" lane is no bigger than its I/Q has nothing to
@@ -13777,14 +13812,17 @@ mod wide_main_window_tests {
     #[test]
     fn a_wide_lane_no_wider_than_the_iq_is_never_used() {
         let (c, span) = (10_000_000.0, 2_000_000.0);
-        assert!(!wide_covers_viewport((c - 5e6, c + 5e6), c, span, (c, 100_000.0)));
-        assert!(!wide_covers_viewport((c - 5e6, c + 5e6), c, span, (c, span)));
+        let narrow_lane = |wide: (f64, f64)| {
+            super::wide_covers_viewport((c - 5e6, c + 5e6), c, span, wide, KIWI_WIDE_BINS)
+        };
+        assert!(!narrow_lane((c, 100_000.0)));
+        assert!(!narrow_lane((c, span)));
     }
 
     /// A front end still coming up, before it has said what it streams.
     #[test]
     fn nothing_happens_before_the_passband_is_known() {
-        assert!(!wide_covers_viewport((0.0, 1e6), 0.0, 0.0, KIWI_WIDE));
+        assert!(!covers((0.0, 1e6), (0.0, 0.0)));
     }
 
     /// The lag case: the centre the samples were taken at is the one that
@@ -13795,12 +13833,7 @@ mod wide_main_window_tests {
         let span = 12_000.0;
         let stream_center = 10_000_000.0;
         // A viewport still sitting on the samples in hand.
-        assert!(!wide_covers_viewport(
-            (stream_center - 4_000.0, stream_center + 4_000.0),
-            stream_center,
-            span,
-            KIWI_WIDE
-        ));
+        assert!(!covers((stream_center - 4_000.0, stream_center + 4_000.0), (stream_center, span)));
     }
 }
 
