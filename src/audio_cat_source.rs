@@ -792,6 +792,16 @@ impl IqSource for AudioCatSource {
         Some(self.cat.antennas().iter().map(|a| a.to_string()).collect())
     }
 
+    /// The radio's own power switch, over the CAT link (issue #239).
+    fn set_rig_power(&mut self, on: bool) -> Result<()> {
+        self.cat.set_rig_power(on);
+        Ok(())
+    }
+
+    fn commands_rig_power(&self) -> bool {
+        self.cat.commands_rig_power()
+    }
+
     /// The panel's width control, sent to the only filter in the path.
     ///
     /// There is no demodulator on this side of a CAT rig — the audio arrives

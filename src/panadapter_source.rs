@@ -228,6 +228,10 @@ impl PanadapterSource {
             // The receiver's too — it is the one drawing the band — and the
             // engine overwrites it from `Self::wide_span_hz` in any case.
             wide_span_hz: rx.wide_span_hz,
+            // The transceiver's: the power switch on offer here is the switch
+            // on the radio being *listened to*, and switching the receiver
+            // painting the picture off would leave nothing to draw with.
+            commands_rig_power: ctrl.commands_rig_power,
         }
     }
 
@@ -591,6 +595,19 @@ impl IqSource for PanadapterSource {
     /// being listened to — see `merge_caps`.
     fn commands_squelch(&self) -> bool {
         self.ctrl.commands_squelch() && self.cfg.audio == PanadapterAudio::Transceiver
+    }
+
+    /// The transceiver's power switch, not the receiver's: it is the radio
+    /// being listened to, and the one an operator away from the shack means
+    /// when they say "switch the radio off" (issue #239). Switching off the
+    /// receiver painting the picture would leave the pairing with no picture
+    /// and no way back.
+    fn set_rig_power(&mut self, on: bool) -> Result<()> {
+        self.ctrl.set_rig_power(on)
+    }
+
+    fn commands_rig_power(&self) -> bool {
+        self.ctrl.commands_rig_power()
     }
 
     /// Gated on the same test, so the two answers cannot disagree: a level that

@@ -2680,6 +2680,7 @@ fn engine_thread(
     caps.center_is_dial = source.center_is_dial();
     caps.cw_audio_keyed = source.cw_audio_keyed();
     caps.commands_squelch = source.commands_squelch();
+    caps.commands_rig_power = source.commands_rig_power();
     caps.wide_span_hz = source.wide_span_hz();
     let audio_mode = caps.audio_mode;
     let radio_fs = source.sample_rate();
@@ -6654,6 +6655,18 @@ impl Engine {
                 if let Err(e) = self.source.set_device_setting(&key, &value) {
                     warn!("set {key} = {value}: {e}");
                     self.notice(&format!("The radio would not take {key} = {value}: {e}"));
+                }
+            }
+            // The radio's own power switch. Nothing else here changes: what
+            // sdroxide believes about a radio that has just been switched off is
+            // the link's business to notice, and the reconnect that follows is
+            // what puts a radio switched back on into a known state.
+            SetRigPower(on) => {
+                if !self.caps.commands_rig_power {
+                    return;
+                }
+                if let Err(e) = self.source.set_rig_power(on) {
+                    warn!("switching the radio {}: {e}", if on { "on" } else { "off" });
                 }
             }
             SetAntenna { dir, name } => {
@@ -11042,6 +11055,7 @@ impl Engine {
         self.caps.center_is_dial = self.source.center_is_dial();
         self.caps.cw_audio_keyed = self.source.cw_audio_keyed();
         self.caps.commands_squelch = self.source.commands_squelch();
+        self.caps.commands_rig_power = self.source.commands_rig_power();
         self.caps.wide_span_hz = self.source.wide_span_hz();
         self.audio_mode = self.caps.audio_mode;
         self.radio_fs = self.source.sample_rate();

@@ -200,6 +200,22 @@ pub trait IqSource: Send {
     fn learned_antennas(&self) -> Option<Vec<String>> {
         None
     }
+    /// Switch the *radio* off, or back on again, over its control link.
+    ///
+    /// The radio's own power switch, not sdroxide's: an Icom answers `18 00` /
+    /// `18 01` on CI-V and keeps the control end of the link alive while the
+    /// set is off, which is what lets the second of those reach it (issue
+    /// #239). A no-op on every front end whose only power switch is its USB
+    /// cable, and the engine does not offer the control there — see
+    /// [`Self::commands_rig_power`].
+    fn set_rig_power(&mut self, _on: bool) -> Result<()> {
+        Ok(())
+    }
+    /// Whether [`Self::set_rig_power`] reaches this radio, for
+    /// `DeviceCaps::commands_rig_power`.
+    fn commands_rig_power(&self) -> bool {
+        false
+    }
     /// Whether the receive port is the source's own to decide, so a remembered
     /// one must not be restored over the top of it.
     ///
@@ -948,6 +964,12 @@ impl IqSource for ConvertedSource {
     }
     fn learned_antennas(&self) -> Option<Vec<String>> {
         self.inner.learned_antennas()
+    }
+    fn set_rig_power(&mut self, on: bool) -> Result<()> {
+        self.inner.set_rig_power(on)
+    }
+    fn commands_rig_power(&self) -> bool {
+        self.inner.commands_rig_power()
     }
 
     fn owns_rx_antenna(&self) -> bool {

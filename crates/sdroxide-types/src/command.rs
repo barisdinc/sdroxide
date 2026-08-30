@@ -831,4 +831,20 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     SetContestSerial(u32),
+
+    /// Switch the *radio* off (`false`), or back on again (`true`) — its own
+    /// power switch, over the control link (issue #239).
+    ///
+    /// Not sdroxide's power switch: the tab strip's one closes the interface
+    /// and leaves the radio running, and this one leaves the interface open and
+    /// switches the radio off — which is exactly what an operator away from the
+    /// shack wants, because the link has to survive for the switch back on to
+    /// reach anything.
+    ///
+    /// Ignored on a front end with no such command
+    /// ([`crate::DeviceCaps::commands_rig_power`]), which is every SDR: their
+    /// only power switch is the USB cable.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetRigPower(bool),
 }

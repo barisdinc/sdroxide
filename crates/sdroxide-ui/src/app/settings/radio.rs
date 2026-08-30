@@ -77,6 +77,47 @@ fn radio_antenna_row(
     ui.end_row();
 }
 
+/// The radio's own power switch, for a control link that carries one.
+///
+/// Two buttons rather than a toggle, because there is nothing here that *reads*
+/// the switch: a radio that is off answers nothing, so the only honest thing a
+/// toggle could show is the last thing it was told, and an operator away from
+/// the shack would be reading their own last click back. Two buttons say what
+/// they do and claim nothing about what the radio is currently doing.
+fn radio_power_row(
+    ui: &mut egui::Ui,
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    cmds: &mut Vec<Command>,
+) {
+    if !caps.is_some_and(|c| c.commands_rig_power) {
+        return;
+    }
+    ui.label("Radio power").on_hover_text(
+        "Switch the radio itself off, and back on again, over the control \
+         link — not sdroxide's own on/off, which closes the interface and \
+         leaves the radio running.\n\n\
+         For the switch back on to reach anything, the radio's control end has \
+         to stay awake while it is off. Over the network that is what \
+         Network Control does. Over a serial cable it is the radio's CI-V \
+         port, which stays powered from the mains supply on a set that is \
+         switched off at the front rather than unplugged; sdroxide sends the \
+         wake-up run Icom's own documentation asks for in front of the \
+         power-on.\n\n\
+         Switching off ends the audio and the meters — there is no radio \
+         behind them — and sdroxide keeps the control link open so the \
+         switch back on has somewhere to go.",
+    );
+    ui.horizontal(|ui| {
+        if ui.button("On").clicked() {
+            cmds.push(Command::SetRigPower(true));
+        }
+        if ui.button("Off").clicked() {
+            cmds.push(Command::SetRigPower(false));
+        }
+    });
+    ui.end_row();
+}
+
 pub(in crate::app) fn settings_cat_tab(
     ui: &mut egui::Ui,
     serial_ports: &[String],
@@ -670,6 +711,7 @@ pub(in crate::app) fn settings_cat_tab(
 
         if cfg.cat.family == CatFamily::Icom {
             radio_antenna_row(ui, caps, antenna_rx, "cat_icom_antenna", cmds);
+            radio_power_row(ui, caps, cmds);
         }
 
         if matches!(cfg.cat.family, CatFamily::Icom | CatFamily::Xiegu) {
@@ -2194,6 +2236,7 @@ pub(in crate::app) fn settings_icomnet_tab(
         ui.end_row();
 
         radio_antenna_row(ui, caps, antenna_rx, "icomnet_antenna", cmds);
+        radio_power_row(ui, caps, cmds);
 
         ui.label("Audio sample rate");
         ComboBox::from_id_salt("icomnet_rate")

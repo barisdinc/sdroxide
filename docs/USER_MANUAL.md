@@ -5771,6 +5771,21 @@ only.
   A radio with four sockets (the IC-785x line) is offered the first two; select
   ANT3 or ANT4 at the radio, and sdroxide shows no socket rather than claiming
   the wrong one.
+- **Radio power** (Icom only) — **On** and **Off** switch *the radio* over the
+  CI-V link, the way RS-BA1 and wfview do. This is not sdroxide's own on/off in
+  the tab strip, which closes the interface and leaves the radio running: this
+  one leaves the interface open and switches the radio off, which is the way
+  round that matters, because the link has to survive for the switch back on to
+  reach anything. Over the network that is what **Network Control** keeps
+  awake; over a serial cable it is the radio's CI-V port, which stays powered
+  on a set switched off at the front rather than unplugged. Powering on sends
+  the run of wake-up bytes Icom's own documentation asks for, sized to the port's
+  baud rate, because a sleeping radio's control receiver loses the first bytes
+  of anything sent to it.
+
+  Two buttons rather than a switch, deliberately: a radio that is off answers
+  nothing, so there is no position to read back, and a toggle could only ever
+  show you your own last click.
 - **Radio ID (hex)** — the CI-V address, for Icom and Xiegu radios.
 - **Show the radio's spectrum scope** (Icom only) — stream the radio's own
   scope sweep over the CI-V link and draw it as the panadapter, the same way
@@ -7093,7 +7108,9 @@ One connection carries three things:
 
 - **Control** — the whole CI-V command set, tunnelled over the network. Dial,
   mode, PTT, the S-meter, SWR, the antenna selector (`ANT1`/`ANT2`, on a radio
-  that has one) and the radio's own CW keyer.
+  that has one), the radio's own CW keyer, and its **power switch** — the radio
+  can be switched off and on again from here, since its network module stays
+  awake while the set is off.
 - **Audio**, both ways, at up to 48 kHz.
 - **The radio's spectrum scope** — its own sweep, 475 points on most models and
   689 on an IC-7610 or IC-7760, up to ±500 kHz wide. On the AF path this is the *main*

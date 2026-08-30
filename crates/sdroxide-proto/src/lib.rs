@@ -949,7 +949,18 @@ use sdroxide_types::{
 /// Appended, so every field already on the wire keeps its number; the memory
 /// list is sent whole, so a v107 peer desynchronises on the tail of any channel
 /// regardless, which is what the handshake's equality test prevents.
-pub const PROTO_VERSION: u16 = 108;
+/// **109** — switching the radio itself off and on again.
+///
+/// [`sdroxide_types::Command`] gains `SetRigPower(bool)` and
+/// [`sdroxide_types::DeviceCaps`] gains `commands_rig_power` at its tail: the
+/// radio's own power switch, over its control link, on a front end that has one
+/// (issue #239).
+///
+/// The command variant is appended, so every variant already on the wire keeps
+/// its number, and the caps field likewise; `DeviceCaps` is sent whole, so a
+/// v108 peer desynchronises on the tail of it regardless, which is what the
+/// handshake's equality test prevents.
+pub const PROTO_VERSION: u16 = 109;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

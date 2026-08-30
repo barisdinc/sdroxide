@@ -420,6 +420,24 @@ trait Protocol: Send {
     fn read_antenna(&self) -> Vec<Vec<u8>> {
         Vec::new()
     }
+    /// Frames that switch the *radio* off, or back on again — its own power
+    /// switch, over the control link (issue #239). `baud` is the port's line
+    /// rate, which a power-*on* needs: a sleeping radio's control receiver has
+    /// to be woken with a run of bytes long enough to cover the time it takes
+    /// to come up, and how many bytes that is depends on how fast they go out.
+    ///
+    /// Empty — the default — for a family with no such command, and the caller
+    /// publishes no power switch for it (see
+    /// [`sdroxide_types::DeviceCaps::commands_rig_power`]).
+    fn set_rig_power(&mut self, _on: bool, _baud: u32) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+    /// Whether [`Protocol::set_rig_power`] reaches this family at all. Asked
+    /// before a frame has gone out, so it cannot be inferred from the above.
+    fn commands_rig_power(&self) -> bool {
+        false
+    }
+
     /// Whether [`Protocol::antennas`] is a *claim about the family* or a
     /// *question for the radio*.
     ///
@@ -699,6 +717,14 @@ impl Protocol for Civ {
     fn antennas_probed(&self) -> bool {
         true
     }
+    /// `18 00` / `18 01`, with the wake-up run in front of a power-on — see
+    /// [`civ::power_frames`].
+    fn set_rig_power(&mut self, on: bool, baud: u32) -> Vec<Vec<u8>> {
+        civ::power_frames(self.radio, on, civ::wake_bytes_for(baud))
+    }
+    fn commands_rig_power(&self) -> bool {
+        true
+    }
     fn set_antenna(&mut self, name: &str) -> Vec<Vec<u8>> {
         civ::set_antenna_frame(self.radio, name).into_iter().collect()
     }
@@ -973,6 +999,8 @@ enum CatCmd {
     Filter(Mode, f32, f32),
     /// Which antenna socket to receive on, by name.
     Antenna(String),
+    /// Switch the radio itself off, or back on again.
+    RigPower(bool),
     Stop,
 }
 
@@ -992,6 +1020,7 @@ pub struct CatHandle {
     commands_filter: bool,
     commands_squelch: bool,
     antennas: &'static [&'static str],
+    commands_rig_power: bool,
     /// Whether the sockets in `antennas` may be offered yet — see
     /// [`Protocol::antennas_probed`]. `false` from the start on a family whose
     /// list is a question for the radio, and set by the serial thread the
@@ -1078,6 +1107,18 @@ impl CatHandle {
         } else {
             &[]
         }
+    }
+    /// Switch the radio off, or back on again. Silently ignored on a family
+    /// with no such command — see [`Self::commands_rig_power`].
+    pub fn set_rig_power(&self, on: bool) {
+        if !self.commands_rig_power {
+            return;
+        }
+        let _ = self.cmd_tx.send(CatCmd::RigPower(on));
+    }
+    /// Whether [`Self::set_rig_power`] reaches this rig.
+    pub fn commands_rig_power(&self) -> bool {
+        self.commands_rig_power
     }
     /// Put the receiver on `name`, one of [`Self::antennas`]. Silently ignored
     /// on a rig with one socket, and on a name that rig has never heard of.
@@ -1252,6 +1293,7 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
     // some have a selector — the list is held back until the radio has replied
     // to the opening read.
     let antennas = make_protocol(&cfg).antennas();
+    let commands_rig_power = make_protocol(&cfg).commands_rig_power();
     let antennas_known = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
         !make_protocol(&cfg).antennas_probed(),
     ));
@@ -1275,6 +1317,7 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
         commands_filter,
         commands_squelch,
         antennas,
+        commands_rig_power,
         antennas_known,
     }
 }
@@ -2296,6 +2339,39 @@ fn serial_thread(
                         }
                         if failed {
                             break 'io true;
+                        }
+                    }
+                    // The radio's own power switch. Written straight out
+                    // rather than debounced: it is a button an operator
+                    // presses, and the wake-up run in front of a power-on is
+                    // the one frame here that is *meant* to be long.
+                    Ok(CatCmd::RigPower(on)) => {
+                        let mut failed = false;
+                        for f in protocol.set_rig_power(on, cfg.serial.baud) {
+                            failed |= write_frame(
+                                &mut *port,
+                                &mut *protocol,
+                                &f,
+                                &mut last_write,
+                                &mut io,
+                            );
+                        }
+                        if failed {
+                            break 'io true;
+                        }
+                        // Switching the radio off takes the link with it: the
+                        // reads that follow go unanswered, and everything this
+                        // end believes about the rig is about to be about a
+                        // radio that is not there. Forget it, so a radio
+                        // switched back on is re-asserted from scratch rather
+                        // than from a cache of how it used to be.
+                        if !on {
+                            last_sent_freq = None;
+                            last_sent_power.forget();
+                            last_sent_squelch = None;
+                            last_sent_antenna = None;
+                            simplex_dial = None;
+                            mode_memory = ModeMemory::default();
                         }
                     }
                     Ok(CatCmd::Stop) => return,

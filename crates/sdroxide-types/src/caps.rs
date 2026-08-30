@@ -238,6 +238,21 @@ pub struct DeviceCaps {
     /// the wire keeps its number.
     #[serde(default)]
     pub wide_span_hz: f64,
+    /// The radio can be switched off — and back on — from here.
+    ///
+    /// A transceiver with a remote-control port, not an SDR: an Icom answers
+    /// `18 00` / `18 01` on CI-V whether that link is a serial cable or the
+    /// radio's own network socket, and keeps the control end of it alive while
+    /// the set is off so that the second of those can reach it (issue #239).
+    /// False everywhere else, including on every I/Q front end, where the only
+    /// power switch is the USB cable.
+    ///
+    /// Reported by the source (`IqSource::commands_rig_power`), for the reason
+    /// [`Self::commands_squelch`] is: a backend that is not a CAT rig has no
+    /// such field and still has an answer. Appended last, so every field
+    /// already on the wire keeps its number.
+    #[serde(default)]
+    pub commands_rig_power: bool,
 }
 
 impl DeviceCaps {

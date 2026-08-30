@@ -919,6 +919,23 @@ impl IqSource for IcomNetSource {
     /// at all until it has. Every Icom speaks one dialect and only some have a
     /// selector, so the list is a question for the radio rather than a claim
     /// about the protocol; see [`civ::ANTENNAS`].
+    /// The radio's own power switch, over the network (issue #239).
+    ///
+    /// The point of doing it here rather than over a serial cable: the radio's
+    /// network module stays awake while the set is off — that is what
+    /// **Network > Network Control** leaves running — so the control session
+    /// this rides on is still there to carry the switch back on again.
+    fn set_rig_power(&mut self, on: bool) -> Result<()> {
+        for f in civ::power_frames(self.civ_addr, on, civ::WAKE_BYTES_LAN) {
+            self.send(f);
+        }
+        Ok(())
+    }
+
+    fn commands_rig_power(&self) -> bool {
+        true
+    }
+
     fn learned_antennas(&self) -> Option<Vec<String>> {
         Some(match self.antenna {
             Some(_) => civ::ANTENNAS.iter().map(|a| a.to_string()).collect(),

@@ -350,6 +350,55 @@ pub fn parse_squelch_reply(data: &[u8]) -> Option<f32> {
     Some(decode_meter(&data[1..])?.min(255) as f32 / 255.0)
 }
 
+/// Switch the radio off (`18 00`) or on (`18 01`).
+///
+/// Powering **on** is the awkward direction. A sleeping Icom's CI-V receiver is
+/// clocked down, and the first bytes of a frame arriving at it are lost — so
+/// Icom's own instruction is to send a run of `0xFE` wake-up bytes in front of
+/// the frame, long enough to cover the time the receiver takes to come up. How
+/// many depends on how fast they go out, which is why `wake` is a count rather
+/// than a constant: [`WAKE_BYTES_FOR`] works it out from the port's baud rate,
+/// and a link with no baud rate to speak of — the radio's own network socket —
+/// passes the figure Icom's remote-control software uses there.
+///
+/// Switching **off** needs none of that: the radio is awake and listening.
+///
+/// Transcribed from the CI-V reference guides (the command is `0x18` on every
+/// model that has it) and from wfview, which drives the same two frames over
+/// both link types. Not exercised against a radio here (issue #239).
+pub fn power_frames(radio: u8, on: bool, wake: usize) -> Vec<Vec<u8>> {
+    let f = frame(radio, 0x18, &[u8::from(on)]);
+    if !on || wake == 0 {
+        return vec![f];
+    }
+    vec![vec![0xFE; wake], f]
+}
+
+/// How many `0xFE` wake-up bytes go in front of a power-on frame at `baud`.
+///
+/// Icom's figure is a *duration* — the radio's CI-V receiver needs roughly
+/// 14 ms of line activity to come up — so the count scales with the rate. The
+/// standard rates are the table Icom's own guides print and Hamlib sends; any
+/// other rate falls back to the same 14 ms worked out from the line speed, with
+/// a floor under it so a very slow port still sends a recognisable run.
+pub fn wake_bytes_for(baud: u32) -> usize {
+    match baud {
+        4800 => 7,
+        9600 => 13,
+        19200 => 27,
+        38400 => 53,
+        57600 => 79,
+        115200 => 159,
+        // Ten bit-times to the byte on an 8N1 line, 14 ms of them.
+        b => ((b as f64 * 0.014) / 10.0).round().max(7.0) as usize,
+    }
+}
+
+/// The wake-up run to send over a link with no baud rate — the radio's own
+/// network socket, where the frame goes out in one packet. Icom's remote
+/// software sends 150 there and so does wfview.
+pub const WAKE_BYTES_LAN: usize = 150;
+
 /// The antenna sockets an Icom's antenna selector switches between, in the
 /// order the command numbers them: `ANT1` is `0x00`.
 ///
@@ -1204,6 +1253,39 @@ mod tests {
         // And is not one of the once-per-connection offset clears, which is
         // the whole point: a band stacking register puts it back.
         assert!(!clear_offsets_frames(0x94).contains(&simplex_frame(0x94)));
+    }
+
+    /// The radio's own power switch is command `0x18`, and a power-*on* has to
+    /// wake the radio's control receiver first (issue #239).
+    #[test]
+    fn a_power_on_is_preceded_by_a_wake_up_run() {
+        // Off: one frame, nothing in front of it. The radio is awake.
+        assert_eq!(
+            power_frames(0x94, false, 27),
+            vec![vec![0xFE, 0xFE, 0x94, 0xE0, 0x18, 0x00, 0xFD]]
+        );
+        // On: the wake-up run, then the frame.
+        let on = power_frames(0x94, true, 27);
+        assert_eq!(on.len(), 2);
+        assert_eq!(on[0], vec![0xFE; 27]);
+        assert_eq!(on[1], vec![0xFE, 0xFE, 0x94, 0xE0, 0x18, 0x01, 0xFD]);
+        // A link that needs no wake sends the frame alone.
+        assert_eq!(
+            power_frames(0x94, true, 0),
+            vec![vec![0xFE, 0xFE, 0x94, 0xE0, 0x18, 0x01, 0xFD]]
+        );
+        // The run is a duration, so it scales with the line rate — Icom's own
+        // table, which is Hamlib's too.
+        assert_eq!(wake_bytes_for(4800), 7);
+        assert_eq!(wake_bytes_for(9600), 13);
+        assert_eq!(wake_bytes_for(19200), 27);
+        assert_eq!(wake_bytes_for(38400), 53);
+        assert_eq!(wake_bytes_for(57600), 79);
+        assert_eq!(wake_bytes_for(115200), 159);
+        // An off-table rate is worked out rather than refused, and never so
+        // short that it could not wake anything.
+        assert_eq!(wake_bytes_for(230400), 323);
+        assert_eq!(wake_bytes_for(300), 7);
     }
 
     /// The antenna selector is command `0x12`: a socket number, and the
