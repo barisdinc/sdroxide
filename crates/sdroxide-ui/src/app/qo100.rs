@@ -301,13 +301,12 @@ impl SdroxideApp {
             );
             if run.clicked() {
                 cfg.enabled = !cfg.enabled;
-                if cfg.enabled {
-                    // Visual convenience only — the decoder reads raw IQ
-                    // straight off the hardware and works regardless of
-                    // where the main dial happens to be, as long as the
-                    // beacon is inside what the hardware actually captures.
-                    cmds.push(Command::SetVfo { vfo: Vfo::A, hz: QO100_BEACON_HZ });
-                }
+                // The main dial is left exactly where it is: the decoder mixes
+                // its own downconversion onto the beacon out of the raw IQ, so
+                // as long as 10489.750 MHz is inside what the hardware is
+                // already capturing there is nothing to retune. An operator
+                // whose capture does not reach the beacon still has the
+                // explicit "Tune to 10489.750 MHz" button below.
             }
             if !reachable {
                 run.on_hover_text(

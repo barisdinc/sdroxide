@@ -2275,13 +2275,14 @@ satellite — a geostationary one, which is why it needs no Doppler correction
 and why its calibration is the only thing it does need.
 
 **In brief.** With an LNB or converter offset set up in the receiver for the
-QO-100 (Es'hail-2) geostationary satellite, the decoder searches a few kHz
-either side of 10489.750 MHz, locks onto the beacon there, and decodes its
-AO-40 telemetry. Having tuned itself onto the signal to get a clean decode, it
-then works out from the frequency it actually found the beacon on how far the
-LNB or receiver offset is in error, and **APPLY CORRECTION** writes the
-corrected figure back. This is the same task the QO-100 beacon plugin performs
-in SDR Console.
+QO-100 (Es'hail-2) geostationary satellite, the decoder searches ±25 kHz either
+side of 10489.750 MHz — without moving the main dial, since it works off the raw
+IQ the hardware is already delivering — locks onto the beacon there, and decodes
+its AO-40 telemetry. From the frequency it actually found the beacon on it works
+out how far the LNB or receiver offset is in error, and **APPLY CORRECTION**
+writes the corrected figure back; the receiver reopens on the new offset and the
+decoder re-centres itself on the now-corrected dial. This is the same task the
+QO-100 beacon plugin performs in SDR Console.
 
 > **Note:** like the skimmers and the ISM decoder, this is a wideband feature.
 > It needs a true IQ source and is unavailable when a CAT radio is feeding
@@ -2291,8 +2292,9 @@ in SDR Console.
 
 - **ON / OFF** starts the decoder. It reads the raw IQ straight from the
   hardware, so it works regardless of where the main dial is pointed, as long as
-  the beacon is inside the span the receiver is delivering — turning it on also
-  tunes VFO A to 10489.750 MHz as a convenience, nothing more. Like SCAN and a
+  the beacon is inside the span the receiver is delivering — **the main dial is
+  left exactly where it is**. If your capture does not reach 10489.750 MHz, the
+  page offers an explicit **Tune to 10489.750 MHz** button. Like SCAN and a
   satellite lock, the **SAT** chip stays lit whenever the decoder is running,
   window open or not, and the QO-100 tab carries a dot — so a hunt in progress
   is visible from the other tab as well as from outside the window.
@@ -2300,16 +2302,17 @@ in SDR Console.
   is unreachable — the usual cause is that no converter/LNB offset has been set
   up yet (**Settings ▸ Radio ▸ Converter**).
 - **width ± / −** sets how far either side of 10489.750 MHz the search looks, in
-  5 kHz steps from ±5 to ±50 kHz. Start at the default ±5 kHz; widen it only if
-  the beacon is not found, which means the LNB is further off than usual. A
-  wider search asks the receiver for a wider capture and takes longer to sweep,
-  so it is not free. The demodulator itself always runs at a fixed rate whatever
-  the capture, which keeps that in hand up to a point: the default ±5 kHz sweeps
-  in a fraction of a second and ±25 kHz in a few seconds, both comfortably
-  inside the window they are searching. ±50 kHz takes longer than the window
-  does to fill, so at the widest setting the decoder runs a core flat out and
-  gets through fewer windows than it receives. Widen it to find the beacon, then
-  bring it back down.
+  5 kHz steps from ±5 to ±50 kHz. It opens at **±25 kHz** — wide enough to catch
+  an uncalibrated LNB, whose LO can be tens of kHz off, on the first pass — and
+  is narrowed right down once a correction has been applied. A wider search asks
+  the receiver for a wider capture and takes longer to sweep, so it is not free.
+  The demodulator itself always runs at a fixed rate whatever the capture, which
+  keeps that in hand up to a point: ±5 kHz sweeps in a fraction of a second and
+  the ±25 kHz it opens at in a few seconds, both comfortably inside the window
+  they are searching. ±50 kHz takes longer than the window does to fill, so at
+  the widest setting the decoder runs a core flat out and gets through fewer
+  windows than it receives. Widen it to ±50 kHz only if the beacon is not found,
+  then bring it back down.
 - The **mini waterfall** draws the slice of spectrum being searched, with the
   measured beacon frequency marked once the decoder locks. It is only a picture:
   if the receiver is parked on another band the strip is blank and the window
@@ -2322,9 +2325,9 @@ in SDR Console.
   is a warning that no number above would catch.
 - The status line under the strip is the honest measure, the same
   "attempted vs. succeeded" idea as the ISM decoder's bursts/decoded line: the
-  first search window fills after about 24 seconds, then repeats, and a search
-  that is running but has not found the beacon reads differently from one that
-  never started.
+  first search window fills after about 24 seconds, then repeats (a wide search
+  sweeps each window more slowly), and a search that is running but has not
+  found the beacon reads differently from one that never started.
 
 #### Applying the correction
 
