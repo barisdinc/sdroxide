@@ -37,6 +37,15 @@
 //! *is* the calibration answer: its frequency offset is exactly how far the
 //! beacon sits from where it was assumed to be.
 //!
+//! Before that sweep, [`coarse_carrier_hz`] takes one look at the block's
+//! power spectrum for the beacon's give-away shape — two lobes with a null
+//! between them at the carrier and another near ±[`CHIP_RATE`] out, left/right
+//! symmetric. When it finds one, the sweep starts there instead of at DC and,
+//! if that estimate is further out than the configured half-width, reaches out
+//! to it — so a station whose LNB has never been calibrated is still found.
+//! The estimate never decides a lock: a wrong one only reorders the grid the
+//! CRC was going to be tried against anyway.
+//!
 //! The differential+Manchester combination is decoded in one pass, without
 //! ever resolving absolute carrier phase: comparing each chip against the one
 //! immediately before it (a delay-and-multiply, not a coherent reference)
@@ -47,6 +56,7 @@
 //! comparisons recovers the original data directly. See the derivation in
 //! this module's tests.
 
+use rustfft::FftPlanner;
 use sdroxide_dsp::Complex32;
 
 /// Chips per second on the air. Manchester encoding sends two of these per
@@ -341,6 +351,156 @@ fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> V
     out
 }
 
+/// A confident twin-lobe estimate ([`coarse_carrier_hz`]) is allowed to pull
+/// [`acquire`]'s sweep this far from the assumed centre even when
+/// `search_half_width_hz` is smaller — generous enough for any real LNB that
+/// has never been calibrated, and capped so a stray estimate can never send
+/// the sweep clear across the capture.
+const ACQ_RANGE_MAX_HZ: f64 = 60_000.0;
+/// Margin kept either side of a seed when it decides how far the sweep reaches.
+const SEED_MARGIN_HZ: f64 = 2_000.0;
+
+/// Welch power spectrum of `iq`: a Blackman–Harris window, 50 % overlap, the
+/// mean of every whole segment's periodogram, left in natural FFT order.
+fn welch_psd(iq: &[Complex32], nfft: usize) -> Vec<f32> {
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(nfft);
+    let win = sdroxide_dsp::blackman_harris(nfft);
+    let mut acc = vec![0.0f32; nfft];
+    let mut seg = vec![Complex32::new(0.0, 0.0); nfft];
+    let hop = (nfft / 2).max(1);
+    let mut segments = 0u32;
+    let mut start = 0usize;
+    while start + nfft <= iq.len() {
+        for (s, (&x, &w)) in seg.iter_mut().zip(iq[start..start + nfft].iter().zip(&win)) {
+            *s = x * w;
+        }
+        fft.process(&mut seg);
+        for (a, s) in acc.iter_mut().zip(&seg) {
+            *a += s.norm_sqr();
+        }
+        segments += 1;
+        start += hop;
+    }
+    if segments > 0 {
+        let inv = 1.0 / segments as f32;
+        acc.iter_mut().for_each(|v| *v *= inv);
+    }
+    acc
+}
+
+/// A coarse estimate of where the beacon's carrier sits, in Hz relative to
+/// the assumed centre (DC) — or `None` when the spectrum holds nothing shaped
+/// like the beacon.
+///
+/// The beacon is DBPSK + Manchester at 400 baud, so it shows in a spectrum
+/// not as a carrier peak but as a *pair* of lobes with a null between them at
+/// the carrier and another null near ±[`CHIP_RATE`] Hz further out (see the
+/// module doc). This scores every candidate centre across the whole captured
+/// span by exactly that shape — two shoulders up, a notch in the middle,
+/// quiet past the outer nulls, left/right symmetric — and returns the best
+/// only if it clears every part of that test by a margin. A bare carrier, an
+/// SSB signal or noise all fail it, so a `Some` here is worth seeding
+/// [`acquire`] with; being wrong could at worst reorder candidates it would
+/// have tried anyway.
+pub(crate) fn coarse_carrier_hz(
+    iq: &[Complex32],
+    rate_hz: f64,
+    search_half_width_hz: f64,
+) -> Option<f64> {
+    if rate_hz <= 0.0 || search_half_width_hz <= 0.0 {
+        return None;
+    }
+    // ~15–25 Hz bins: fine enough to resolve the ±CHIP_RATE null structure,
+    // coarse enough that even a short buffer still averages many segments.
+    let nfft = ((rate_hz / 22.0).round() as usize).clamp(512, 32_768).next_power_of_two();
+    if iq.len() < nfft * 2 {
+        return None;
+    }
+    let psd = welch_psd(iq, nfft);
+    let bin_hz = rate_hz / nfft as f64;
+
+    // Linear PSD at a signed frequency, nearest bin, wrapping natural FFT
+    // order; `None` past the transform's own edge.
+    let at = |f: f64| -> Option<f32> {
+        let k = (f / bin_hz).round() as i64;
+        let k = if k < 0 { k + nfft as i64 } else { k };
+        (0..nfft as i64).contains(&k).then(|| psd[k as usize])
+    };
+    // Mean linear PSD over `c ± [lo, hi]`, both sides together.
+    let band_mean = |c: f64, lo: f64, hi: f64| -> Option<f32> {
+        let (mut sum, mut n) = (0.0f32, 0u32);
+        let mut d = lo;
+        while d <= hi {
+            if let (Some(a), Some(b)) = (at(c + d), at(c - d)) {
+                sum += a + b;
+                n += 2;
+            }
+            d += bin_hz;
+        }
+        (n > 0).then(|| sum / n as f32)
+    };
+
+    // Scan the whole captured span, not just ±search_half_width_hz — finding
+    // a beacon the configured width does not cover is half the point.
+    let reach = (search_half_width_hz + 1_500.0).min(rate_hz * 0.47);
+
+    // A robust noise floor for the SNR gate: the median across the span, which
+    // the beacon's own two lobes cannot lift far.
+    let mut span: Vec<f32> = Vec::new();
+    let mut f = -reach;
+    while f <= reach {
+        if let Some(p) = at(f) {
+            span.push(p);
+        }
+        f += bin_hz;
+    }
+    if span.len() < 32 {
+        return None;
+    }
+    span.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = span[span.len() / 2].max(1e-20);
+    let db = |x: f32| 10.0 * (x.max(1e-20) as f64).log10();
+
+    let mut best: Option<(f64, f64)> = None; // (score, fc)
+    let mut fc = -reach;
+    while fc <= reach {
+        if let (Some(lobe), Some(notch), Some(outer)) = (
+            band_mean(fc, 200.0, 600.0),
+            band_mean(fc, 0.0, 60.0),
+            band_mean(fc, CHIP_RATE + 200.0, CHIP_RATE + 700.0),
+        ) {
+            let null_depth = db(lobe) - db(notch);
+            let lobe_excess = db(lobe) - db(outer);
+            let snr = db(lobe) - db(floor);
+
+            // Left/right evenness across the lobe band, 1.0 = perfectly even.
+            let (mut asym, mut m) = (0.0f64, 0u32);
+            let mut d = 200.0;
+            while d <= 600.0 {
+                if let (Some(a), Some(b)) = (at(fc + d), at(fc - d)) {
+                    let (a, b) = (a as f64, b as f64);
+                    if a + b > 0.0 {
+                        asym += (a - b).abs() / (a + b);
+                        m += 1;
+                    }
+                }
+                d += bin_hz;
+            }
+            let sym = if m > 0 { 1.0 - asym / m as f64 } else { 0.0 };
+
+            if null_depth >= 2.5 && lobe_excess >= 3.0 && snr >= 3.0 && sym >= 0.55 {
+                let score =
+                    null_depth.min(12.0) + lobe_excess.min(12.0) + snr.min(12.0) + 8.0 * sym;
+                if best.is_none_or(|(s, _)| score > s) {
+                    best = Some((score, fc));
+                }
+            }
+        }
+        fc += bin_hz;
+    }
+    best.map(|(_, fc)| fc)
+}
+
 /// Search `iq` (complex baseband, `rate_hz` samples/s, the beacon assumed to
 /// sit somewhere within `±search_half_width_hz` of DC) for one CRC-valid
 /// AO-40 uncoded frame, stepping the candidate frequency by `freq_step_hz`.
@@ -356,11 +516,15 @@ fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> V
 /// search width, so the total grew with the *square* of the width and the
 /// widest settings ran many times slower than real time.
 ///
-/// Candidates are tried from the centre outward, so a beacon near the assumed
-/// frequency — the common case for a roughly-calibrated station — is found
-/// without walking the whole grid first. `cancel` is polled between
-/// candidates so the engine can drop the controller (turning the decoder off,
-/// or changing the search width) without waiting out a search in progress.
+/// Candidates are tried outward from [`coarse_carrier_hz`]'s spectral seed
+/// when it found one, else from the centre, so a beacon near where it is
+/// expected — the common case for a roughly-calibrated station — is found
+/// without walking the whole grid first. A seed past `search_half_width_hz`
+/// also widens the grid out to it (capped at [`ACQ_RANGE_MAX_HZ`] and
+/// Nyquist), which is what lets an uncalibrated station be found at all.
+/// `cancel` is polled between candidates so the engine can drop the
+/// controller (turning the decoder off, or changing the search width) without
+/// waiting out a search in progress.
 ///
 /// `iq` needs to span at least one whole frame (`FRAME_BITS` bits plus the
 /// sync word, [`BAUD`] bits/s) for a frame to have any chance of falling
@@ -381,10 +545,27 @@ pub fn acquire(
     }
     let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
     let dr = rate_hz / deci as f64;
-    let steps = (search_half_width_hz / freq_step_hz).round() as i64;
-    // 0, +1, -1, +2, -2, … — centre outward.
-    let order = (0..=2 * steps).map(|i| if i % 2 == 0 { i / 2 } else { -(i / 2 + 1) });
-    for step in order {
+
+    // The spectral seed, and how far it lets the grid reach: never narrower
+    // than the configured half-width, no wider than a confident seed needs
+    // (plus a margin), and never past a sane cap or Nyquist.
+    let seed_hz = coarse_carrier_hz(iq, rate_hz, search_half_width_hz);
+    let reach_hz = match seed_hz {
+        Some(s) => (s.abs() + SEED_MARGIN_HZ)
+            .min(ACQ_RANGE_MAX_HZ)
+            .min(rate_hz * 0.47)
+            .max(search_half_width_hz),
+        None => search_half_width_hz,
+    };
+    let steps = (reach_hz / freq_step_hz).round().max(0.0) as i64;
+    let seed_step = seed_hz.map(|s| (s / freq_step_hz).round() as i64).unwrap_or(0);
+
+    // Every grid point in range, ordered by distance from the seed step (ties
+    // to the high side, as the plain centre-out sweep did). With no seed this
+    // is exactly `0, +1, -1, +2, -2, …` from DC.
+    let mut cands: Vec<i64> = (-steps..=steps).collect();
+    cands.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
+    for step in cands {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
@@ -667,5 +848,89 @@ pub(crate) mod tests {
     fn the_demod_tolerates_a_realistic_residual_frequency_error_unaided() {
         let iq = synth_signal("CAPTURE RANGE", TEST_RATE, 100.0, 0.0, 1);
         assert!(try_frequency(&iq, TEST_RATE).is_some());
+    }
+
+    /// Stack `copies` of one synthesized frame end to end — a longer buffer so
+    /// [`welch_psd`] has several segments to average, like the worker's
+    /// rolling window gives it.
+    fn stacked(
+        text: &str,
+        rate_hz: f64,
+        offset_hz: f64,
+        noise: f32,
+        seed: u64,
+        copies: usize,
+    ) -> Vec<Complex32> {
+        let one = synth_signal(text, rate_hz, offset_hz, noise, seed);
+        let mut out = Vec::with_capacity(one.len() * copies);
+        for _ in 0..copies {
+            out.extend_from_slice(&one);
+        }
+        out
+    }
+
+    #[test]
+    fn the_coarse_estimator_reads_the_carrier_off_the_twin_lobes() {
+        // A real Manchester beacon 4 kHz off centre, captured wide enough to
+        // see both lobes and a stretch of clean floor either side.
+        let iq = stacked("COARSE EST", 20_000.0, 4_000.0, 0.05, 7, 3);
+        let est = coarse_carrier_hz(&iq, 20_000.0, 8_000.0).expect("the twin lobes should be seen");
+        assert!((est - 4_000.0).abs() <= 200.0, "estimated {est}");
+    }
+
+    #[test]
+    fn the_coarse_estimator_declines_on_noise_and_on_a_bare_carrier() {
+        let n = (20_000.0f64 * 6.0) as usize;
+
+        let mut rng = TestRng::new(41);
+        let noise: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+        assert!(coarse_carrier_hz(&noise, 20_000.0, 8_000.0).is_none(), "noise is not a beacon");
+
+        // A plain unmodulated carrier 3 kHz off: a peak, not two lobes with a
+        // null — must be rejected, or it would seed the search wrong.
+        let tone: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let ph = std::f64::consts::TAU * 3_000.0 * i as f64 / 20_000.0;
+                Complex32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        assert!(
+            coarse_carrier_hz(&tone, 20_000.0, 8_000.0).is_none(),
+            "a bare carrier is not a beacon"
+        );
+    }
+
+    /// The acquisition-range win: a beacon sitting outside the configured
+    /// half-width is out of reach of the plain centre-out sweep, but the
+    /// spectral seed pulls the grid out to it and it still locks.
+    #[test]
+    fn a_seed_pulls_the_search_past_the_configured_half_width() {
+        // ±8 kHz width, captured 2.5× wide (the engine's rule); beacon at
+        // 9 kHz — 1 kHz beyond the width, well inside the capture.
+        let rate = 20_000.0;
+        let iq = stacked("OUT OF WIDTH", rate, 9_000.0, 0.02, 11, 3);
+        let lock = acq(&iq, rate, 8_000.0).expect("the seed should extend the reach to it");
+        assert!((lock.offset_hz - 9_000.0).abs() <= 2.0, "found {}", lock.offset_hz);
+        assert!(lock.text.starts_with("OUT OF WIDTH"), "{:?}", lock.text);
+    }
+
+    #[test]
+    fn the_coarse_estimator_needs_a_buffer_worth_averaging() {
+        // Fewer than two FFT segments' worth of samples: no estimate at all,
+        // so `acquire` just falls back to the plain centre-out sweep.
+        let short = synth_signal("TOO SHORT", TEST_RATE, 40.0, 0.0, 1);
+        assert!(coarse_carrier_hz(&short[..1024], TEST_RATE, 150.0).is_none());
+    }
+
+    /// A seed near the true offset must not cost the plain sweep its
+    /// precision: a narrow-width search still lands on the exact drift.
+    #[test]
+    fn a_seed_does_not_disturb_a_narrow_width_result() {
+        let iq = synth_signal("SEEDED NARROW", TEST_RATE, 91.0, 0.02, 2);
+        let lock = acq(&iq, TEST_RATE, 150.0).expect("still locks");
+        assert!((lock.offset_hz - 91.0).abs() <= 1.0, "found {}", lock.offset_hz);
+        assert!(lock.text.starts_with("SEEDED NARROW"));
     }
 }
