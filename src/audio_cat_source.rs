@@ -788,8 +788,8 @@ impl IqSource for AudioCatSource {
     /// answered the read the link sends when the port opens (issue #238). That
     /// answer lands a round trip after the capabilities went out, which is what
     /// this exists to catch up with.
-    fn learned_antennas(&self) -> Option<Vec<String>> {
-        Some(self.cat.antennas().iter().map(|a| a.to_string()).collect())
+    fn learned_antennas(&self) -> Option<&'static [&'static str]> {
+        Some(self.cat.antennas())
     }
 
     /// The radio's own power switch, over the CAT link (issue #239).

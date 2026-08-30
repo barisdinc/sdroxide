@@ -10490,10 +10490,14 @@ impl Engine {
     /// and nothing happens.
     fn refresh_antennas(&mut self) {
         let Some(list) = self.source.learned_antennas() else { return };
-        if list == self.caps.antennas_rx {
+        // Compared without building anything: this runs on every pass of the
+        // loop and the answer changes once a session at most.
+        if list.len() == self.caps.antennas_rx.len()
+            && list.iter().zip(&self.caps.antennas_rx).all(|(a, b)| a == b)
+        {
             return;
         }
-        self.caps.antennas_rx = list;
+        self.caps.antennas_rx = list.iter().map(|a| (*a).to_string()).collect();
         let _ = self.event_tx.send(RadioEvent::Capabilities(self.caps.clone()));
         // A port the session remembered may only now be one this radio offers.
         self.restore_antennas();

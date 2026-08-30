@@ -197,7 +197,13 @@ pub trait IqSource: Send {
     /// after the port opens. Answering `Some` here re-publishes the list when
     /// it changes — see `Engine::refresh_antennas`, which is the same shape as
     /// `refresh_center_is_dial` and exists for the same reason.
-    fn learned_antennas(&self) -> Option<Vec<String>> {
+    ///
+    /// Borrowed names rather than owned ones, because this is asked on every
+    /// pass of the engine loop and a control link's vocabulary is fixed: the
+    /// answer is a slice of the family's own constant, and building two short
+    /// `String`s a thousand times a second to compare them against the same two
+    /// would be the whole cost of the check.
+    fn learned_antennas(&self) -> Option<&'static [&'static str]> {
         None
     }
     /// Switch the *radio* off, or back on again, over its control link.
@@ -962,7 +968,7 @@ impl IqSource for ConvertedSource {
     fn current_antenna(&self) -> String {
         self.inner.current_antenna()
     }
-    fn learned_antennas(&self) -> Option<Vec<String>> {
+    fn learned_antennas(&self) -> Option<&'static [&'static str]> {
         self.inner.learned_antennas()
     }
     fn set_rig_power(&mut self, on: bool) -> Result<()> {

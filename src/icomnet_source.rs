@@ -936,10 +936,10 @@ impl IqSource for IcomNetSource {
         true
     }
 
-    fn learned_antennas(&self) -> Option<Vec<String>> {
+    fn learned_antennas(&self) -> Option<&'static [&'static str]> {
         Some(match self.antenna {
-            Some(_) => civ::ANTENNAS.iter().map(|a| a.to_string()).collect(),
-            None => Vec::new(),
+            Some(_) => &civ::ANTENNAS,
+            None => &[],
         })
     }
 
