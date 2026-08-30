@@ -25,6 +25,16 @@ pub struct SpectrumAnalyzer {
 
     /// Averaged linear power per bin, natural FFT order.
     avg_power: Vec<f32>,
+    /// [`Self::avg_power`] (or [`Self::hold`]) rotated into display order and
+    /// DC-patched, rebuilt at the top of every [`Self::make_frame`].
+    ///
+    /// Kept rather than recomputed per bin because the rotation is `(i + half)
+    /// % n` and `n` is not a constant, so that `%` is a real integer division —
+    /// twenty-odd cycles, once per FFT bin, on every frame *and* every
+    /// waterfall row. At a 65536-point transform with a frame at 79 Hz and rows
+    /// at 112 Hz that was twelve million divisions a second, and `make_frame`
+    /// was the largest single symbol in a profile of the running receiver.
+    view: Vec<f32>,
     /// Peak of [`Self::avg_power`] since the last waterfall row was taken —
     /// empty while nobody is clocking rows.
     ///
@@ -65,6 +75,89 @@ pub struct SpectrumAnalyzer {
     /// transform landed between them, so a lane can publish at 30 fps while
     /// showing the same numbers for a tenth of a second. Diagnostic only.
     transforms: u64,
+}
+
+/// `10·log10(p)` for a display column, without libm.
+///
+/// A power spectrum drawn as `u8` over the operator's floor-to-ceiling range
+/// quantises to about a third of a dB per level, and `log10f` is a ~40-cycle
+/// call the vectoriser has to break the loop for — one per column, on every
+/// frame and every waterfall row. This reads the exponent off the float and
+/// fits the mantissa with a degree-5 polynomial: worst case under 1e-4 dB over
+/// `[1, 2)`, four thousand times finer than one level of the picture it draws,
+/// and it inlines into a vector loop.
+///
+/// `p` must be positive and normal; every caller adds `1e-20` first, which is
+/// eleven orders of magnitude above `f32`'s smallest normal.
+#[inline(always)]
+fn db10(p: f32) -> f32 {
+    const C: [f32; 6] =
+        [0.043_428_365, -0.404_862_3, 1.593_884_6, -3.492_466, 5.046_853, -2.786_805_6];
+    let bits = p.to_bits();
+    let exp = (((bits >> 23) & 0xff) as i32 - 127) as f32;
+    // The mantissa on its own, as a float in `[1, 2)`.
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
+    let log2m =
+        C[0].mul_add(m, C[1]).mul_add(m, C[2]).mul_add(m, C[3]).mul_add(m, C[4]).mul_add(m, C[5]);
+    // 10·log10(x) = 10·log10(2)·log2(x).
+    3.010_3 * (exp + log2m)
+}
+
+crate::simd::kernel! {
+    /// [`pool_to_bins`] where the columns divide the transform exactly.
+    ///
+    /// The whole-window view — no zoom — is the common case and it is a
+    /// fixed-stride reduction: every column is the same number of bins, taken
+    /// from a slice that starts at zero. Saying so lets the compiler unroll the
+    /// reduction and overlap the dB polynomial of one column with the maximum
+    /// of the next, where the general form below re-derives two `f64` bounds
+    /// and builds a fresh sub-slice for every column.
+    fn pool_to_bins_uniform / pool_to_bins_uniform_portable / pool_to_bins_uniform_avx2 / pool_to_bins_uniform_avx512 (
+        out: &mut [u8],
+        view: &[f32],
+        per: usize,
+        db_floor: f32,
+        scale: f32,
+    ) {
+        for (o, w) in out.iter_mut().zip(view.chunks_exact(per)) {
+            let mut m = 0.0f32;
+            for &p in w {
+                m = m.max(p);
+            }
+            *o = ((db10(m + 1e-20) - db_floor) * scale).clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+crate::simd::kernel! {
+    /// Pool the spectrum into display columns and map each to `u8`.
+    ///
+    /// One column is the strongest bin in its slice — a maximum, not a mean, so
+    /// a carrier narrower than a column still reaches the screen at its own
+    /// height. Fused with the dB conversion and the level mapping so the whole
+    /// frame is one pass with no libm call in it: at a 65536-point transform
+    /// with a frame clock at 79 Hz and rows at 112 Hz this runs over twelve
+    /// million bins a second, and it was the largest single symbol in a profile
+    /// of the running receiver.
+    fn pool_to_bins / pool_to_bins_portable / pool_to_bins_avx2 / pool_to_bins_avx512 (
+        out: &mut [u8],
+        view: &[f32],
+        lo_bin: f64,
+        step: f64,
+        db_floor: f32,
+        scale: f32,
+    ) {
+        let n = view.len();
+        for (b, o) in out.iter_mut().enumerate() {
+            let lo = ((lo_bin + b as f64 * step) as usize).min(n.saturating_sub(1));
+            let hi = ((lo_bin + (b + 1) as f64 * step) as usize).clamp(lo + 1, n);
+            let mut m = 0.0f32;
+            for &p in &view[lo..hi] {
+                m = m.max(p);
+            }
+            *o = ((db10(m + 1e-20) - db_floor) * scale).clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 crate::simd::kernel! {
@@ -152,6 +245,7 @@ impl SpectrumAnalyzer {
             scratch,
             work: vec![Complex32::default(); fft_size],
             avg_power: vec![0.0; fft_size],
+            view: Vec::new(),
             hold: Vec::new(),
             read_hold: false,
             hold_read: false,
@@ -385,20 +479,28 @@ impl SpectrumAnalyzer {
         } else {
             None
         };
-        let shifted = |i: usize| {
-            let nat = (i + half) % n;
-            if let Some(repl) = dc_repl {
-                if nat.min(n - nat) <= 2 {
-                    return repl;
-                }
-            }
-            power[nat]
-        };
+        // Rotate into display order once. Natural bin `nat` is drawn at
+        // `(nat + half) % n`, which for an even `n` is the top half of the
+        // spectrum followed by the bottom — two contiguous runs, so the whole
+        // rotation is two `copy_from_slice` calls. See [`Self::view`] for why
+        // this is not done per bin.
+        self.view.clear();
+        self.view.reserve(n);
+        self.view.extend_from_slice(&power[half..]);
+        self.view.extend_from_slice(&power[..half]);
+        if let Some(repl) = dc_repl {
+            // The five bins the old per-bin test picked out — naturally
+            // `0, 1, 2, n-2, n-1` — are contiguous once rotated, because DC is
+            // the middle of a DC-centred display.
+            self.view[half - 2..=half + 2].fill(repl);
+        }
+        let view = &self.view[..];
         let lo_bin = frac_lo * n as f64;
         let bin_range = (frac_hi - frac_lo) * n as f64;
 
-        let mut bins = Vec::with_capacity(out_bins);
+        let mut bins = vec![0u8; out_bins];
         if bin_range < out_bins as f64 {
+            bins.clear();
             // Stretching, not pooling: the window holds fewer bins than there
             // are columns to fill, so each bin has to cover several. Reading
             // between them rather than repeating them — a repeated bin is a
@@ -415,21 +517,19 @@ impl SpectrumAnalyzer {
                 let at = lo_bin + (b as f64 + 0.5) * bin_range / out_bins as f64 - 0.5;
                 let k = at.floor().clamp(0.0, (n - 1) as f64) as usize;
                 let t = (at - k as f64).clamp(0.0, 1.0) as f32;
-                let (p0, p1) = (shifted(k), shifted((k + 1).min(n - 1)));
-                let db = 10.0 * (p0 + (p1 - p0) * t + 1e-20).log10();
+                let (p0, p1) = (view[k], view[(k + 1).min(n - 1)]);
+                let db = db10(p0 + (p1 - p0) * t + 1e-20);
                 bins.push(((db - db_floor) * scale).clamp(0.0, 255.0) as u8);
             }
         } else {
-            for b in 0..out_bins {
-                let lo = (lo_bin + b as f64 * bin_range / out_bins as f64) as usize;
-                let hi = ((lo_bin + (b + 1) as f64 * bin_range / out_bins as f64) as usize)
-                    .clamp(lo + 1, n);
-                let mut max_p = 0.0f32;
-                for i in lo..hi.max(lo + 1).min(n) {
-                    max_p = max_p.max(shifted(i));
-                }
-                let db = 10.0 * (max_p + 1e-20).log10();
-                bins.push(((db - db_floor) * scale).clamp(0.0, 255.0) as u8);
+            let step = bin_range / out_bins as f64;
+            // Whole window, and a column width that lands on bin boundaries.
+            let per = step.round() as usize;
+            if lo_bin == 0.0 && (step - per as f64).abs() < 1e-9 && per >= 1 && per * out_bins <= n
+            {
+                pool_to_bins_uniform(&mut bins, &view[..per * out_bins], per, db_floor, scale);
+            } else {
+                pool_to_bins(&mut bins, view, lo_bin, step, db_floor, scale);
             }
         }
 
@@ -575,6 +675,75 @@ mod tests {
             plain.make_frame(0.0, fs, -120.0, 0.0, n, None).bins,
             held.make_frame(0.0, fs, -120.0, 0.0, n, None).bins,
         );
+    }
+
+    /// The fast dB conversion has to agree with the real one far more closely
+    /// than the picture it draws can show.
+    ///
+    /// A frame is `u8` over `db_ceil - db_floor`, so one level is a fraction of
+    /// a dB — 0.31 for the 80 dB range a panadapter typically sits at. The
+    /// assertion below is two orders of magnitude tighter than that, over the
+    /// whole range of powers a spectrum can hold, so no rounding this does can
+    /// move a column by one level.
+    #[test]
+    fn the_fast_db_conversion_is_far_finer_than_one_display_level() {
+        let mut worst: f32 = 0.0;
+        let mut at = 0.0f32;
+        // Every octave from the `1e-20` floor every caller adds up to a
+        // full-scale-squared power, sampled finely inside each.
+        let mut p = 1e-20f32;
+        while p < 1e6 {
+            for k in 0..97 {
+                let x = p * (1.0 + k as f32 / 97.0);
+                let err = (db10(x) - 10.0 * x.log10()).abs();
+                if err > worst {
+                    worst = err;
+                    at = x;
+                }
+            }
+            p *= 2.0;
+        }
+        assert!(worst < 0.002, "worst error {worst} dB at p = {at:e}");
+    }
+
+    /// DC suppression must hide exactly the five bins it always hid, and no
+    /// others.
+    ///
+    /// The rotation into display order used to be an `(i + half) % n` computed
+    /// per bin, with the replacement chosen by `nat.min(n - nat) <= 2` — so
+    /// "which bins get patched" was a property of that arithmetic. Now it is a
+    /// `fill` over one range, and the two have to pick out the same bins: one
+    /// off either way either leaves half the LO spike on screen or punches a
+    /// wider hole through the middle of whatever the operator is tuned to.
+    #[test]
+    fn dc_suppression_replaces_the_five_centre_columns_and_nothing_else() {
+        let fs = 1_000_000.0;
+        let n = 1024;
+        let mut an = SpectrumAnalyzer::new(n, fs, 0.0);
+        an.set_dc_suppress(false);
+
+        // A flat floor with a large spike at DC, which is what LO leakage is.
+        let mut iq: Vec<Complex32> = (0..n * 2)
+            .map(|i| {
+                let ph = TAU * 300_000.0 * i as f32 / fs as f32;
+                Complex32::new(ph.cos() * 0.01, ph.sin() * 0.01)
+            })
+            .collect();
+        for s in iq.iter_mut() {
+            *s += Complex32::new(1.0, 0.0);
+        }
+        an.process(&iq);
+
+        // One output bin per FFT bin, so a column *is* a bin.
+        let off = an.make_frame(0.0, fs, -120.0, 0.0, n, None);
+        an.set_dc_suppress(true);
+        let on = an.make_frame(0.0, fs, -120.0, 0.0, n, None);
+
+        let changed: Vec<usize> = (0..n).filter(|&i| off.bins[i] != on.bins[i]).collect();
+        let want: Vec<usize> = (n / 2 - 2..=n / 2 + 2).collect();
+        assert_eq!(changed, want, "DC patch covered the wrong columns");
+        // And it really was a spike being taken out, not a no-op comparison.
+        assert!(off.bins[n / 2] > on.bins[n / 2] + 40, "the LO spike should have been replaced");
     }
 
     #[test]
