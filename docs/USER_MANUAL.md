@@ -4221,13 +4221,19 @@ part you are tuned into.
   PSK or RTTY for a digimode spot (which also opens the messaging panel,
   [3.3](#33-psk31-and-rtty)).
 
-**Band-aware gating.** To avoid noise and false decodes, each skimmer only runs
-where its mode is used: the CW skimmer in CW sub-bands, and the PSK and RTTY
-skimmers in each band's PSK/RTTY calling sub-bands — with the FT8, FT4, FT2, WSPR, and
-QRSS watering-holes excluded so their signals aren't mistaken for PSK or RTTY
+**Band-aware gating.** To avoid noise and false decodes — and to avoid paying
+for either — each skimmer only runs where its mode is used: the CW skimmer in CW
+sub-bands, and the PSK and RTTY skimmers in each band's PSK/RTTY calling
+sub-bands — with the FT8, FT4, FT2, WSPR, and QRSS watering-holes excluded so
+their signals aren't mistaken for PSK or RTTY
 (the WSPR window and the slow-CW/QRSS beacons just below it sit inside the RTTY
-sub-band on several bands, so they're carved out explicitly). The skimmer-decoded
-text is a coarse best-effort copy; switch to the mode (click a box) for a clean
+sub-band on several bands, so they're carved out explicitly). A skimmer whose
+window holds none of its own sub-bands stands down completely and costs nothing
+until you tune back onto one — so an SDR parked on the broadcast FM band, the air
+band or any other non-amateur allocation is not running a neural CW decoder over
+it. Which frequencies count is the band plan's to say
+([`bandplan.json`](#the-band-plan-file)), and it ships with the HF allocations
+only. The skimmer-decoded text is a coarse best-effort copy; switch to the mode (click a box) for a clean
 decode — the CW skimmer runs the same decoder as the CW panel, but over hundreds
 of signals at once and re-reading each one only twice a second, so a signal you
 care about is always better copied on the panel.
