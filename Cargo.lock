@@ -5167,6 +5167,7 @@ name = "sdroxide-qo100"
 version = "1.6.1"
 dependencies = [
  "crossbeam-channel",
+ "rustfft",
  "sdroxide-dsp",
  "sdroxide-types",
  "tracing",
