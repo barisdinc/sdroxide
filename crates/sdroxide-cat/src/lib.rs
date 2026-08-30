@@ -420,6 +420,19 @@ trait Protocol: Send {
     fn read_antenna(&self) -> Vec<Vec<u8>> {
         Vec::new()
     }
+    /// Whether [`Protocol::antennas`] is a *claim about the family* or a
+    /// *question for the radio*.
+    ///
+    /// An ELAD FDM-DUO has two sockets and says so from the model name alone.
+    /// A CI-V rig does not: the same dialect covers an IC-7610 with a selector
+    /// and an IC-705 with one connector, and the only thing that tells them
+    /// apart is whether the rig answers the antenna read at all. A family that
+    /// answers true here publishes no sockets until it has (see
+    /// [`CatHandle::antennas`]), so a radio with one antenna shows no antenna
+    /// control rather than a switch that does nothing.
+    fn antennas_probed(&self) -> bool {
+        false
+    }
 
     /// Whether a mode change can move this rig's *dial*.
     ///
@@ -678,6 +691,20 @@ impl Protocol for Civ {
     fn commands_squelch(&self) -> bool {
         true
     }
+    /// ANT1/ANT2, and only once the radio has answered the read below — see
+    /// [`Protocol::antennas_probed`] and [`civ::ANTENNAS`].
+    fn antennas(&self) -> &'static [&'static str] {
+        &civ::ANTENNAS
+    }
+    fn antennas_probed(&self) -> bool {
+        true
+    }
+    fn set_antenna(&mut self, name: &str) -> Vec<Vec<u8>> {
+        civ::set_antenna_frame(self.radio, name).into_iter().collect()
+    }
+    fn read_antenna(&self) -> Vec<Vec<u8>> {
+        vec![civ::read_antenna_frame(self.radio)]
+    }
     /// The same enable sequence the LAN backend sends, because it is the same
     /// scope: run it, stream it here, and — when a span is chosen — put it in
     /// centre mode so it follows the dial, since a scope left in a fixed mode
@@ -751,6 +778,15 @@ impl Protocol for Civ {
                         if let Some(m) = civ::civ_to_mode(b) {
                             out.push(CatUpdate::Mode(m));
                         }
+                    }
+                }
+                // Which antenna socket the rig is on (0x12), asked for once
+                // when the port opens. A radio with a single connector NAKs
+                // the read instead, which is what keeps the antenna control
+                // off the screen for it — see `Protocol::antennas_probed`.
+                0x12 => {
+                    if let Some(name) = civ::parse_antenna_reply(&reply.data) {
+                        out.push(CatUpdate::Antenna(name));
                     }
                 }
                 // Level read (0x14): the transmit power (0x0A) and the
@@ -956,6 +992,11 @@ pub struct CatHandle {
     commands_filter: bool,
     commands_squelch: bool,
     antennas: &'static [&'static str],
+    /// Whether the sockets in `antennas` may be offered yet — see
+    /// [`Protocol::antennas_probed`]. `false` from the start on a family whose
+    /// list is a question for the radio, and set by the serial thread the
+    /// moment the rig answers the antenna read.
+    antennas_known: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CatHandle {
@@ -1027,15 +1068,21 @@ impl CatHandle {
         let _ = self.cmd_tx.send(CatCmd::Filter(mode, lo_hz, hi_hz));
     }
     /// The antenna sockets this rig can put its receiver on, or empty where the
-    /// family has no such command. What the caller publishes as
-    /// `DeviceCaps::antennas_rx`.
+    /// family has no such command — and, on a family whose list has to be
+    /// asked for ([`Protocol::antennas_probed`]), empty until the radio has
+    /// answered. What the caller publishes as `DeviceCaps::antennas_rx`, and
+    /// what `IqSource::learned_antennas` re-publishes when the answer lands.
     pub fn antennas(&self) -> &'static [&'static str] {
-        self.antennas
+        if self.antennas_known.load(std::sync::atomic::Ordering::Relaxed) {
+            self.antennas
+        } else {
+            &[]
+        }
     }
     /// Put the receiver on `name`, one of [`Self::antennas`]. Silently ignored
     /// on a rig with one socket, and on a name that rig has never heard of.
     pub fn set_antenna(&self, name: &str) {
-        if !self.antennas.contains(&name) {
+        if !self.antennas().contains(&name) {
             return;
         }
         let _ = self.cmd_tx.send(CatCmd::Antenna(name.to_string()));
@@ -1200,13 +1247,22 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
     let commands_squelch = make_protocol(&cfg).commands_squelch();
     // And the same again for the antenna sockets: the caps this device
     // publishes are built before a single frame has gone out, so the list has
-    // to come from the framing rather than from the rig.
+    // to come from the framing rather than from the rig. Where the framing
+    // cannot answer for the model — every CI-V rig shares one dialect and only
+    // some have a selector — the list is held back until the radio has replied
+    // to the opening read.
     let antennas = make_protocol(&cfg).antennas();
+    let antennas_known = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        !make_protocol(&cfg).antennas_probed(),
+    ));
+    let antennas_known_in = antennas_known.clone();
     let scope = std::sync::Arc::new(std::sync::Mutex::new(None));
     let scope_in = scope.clone();
     std::thread::Builder::new()
         .name("sdroxide-cat".into())
-        .spawn(move || serial_thread(cfg, cmd_rx, event_tx, telem_tx, signal_tx, scope_in))
+        .spawn(move || {
+            serial_thread(cfg, cmd_rx, event_tx, telem_tx, signal_tx, scope_in, antennas_known_in)
+        })
         .expect("spawn cat thread");
     CatHandle {
         cmd_tx,
@@ -1219,6 +1275,7 @@ pub fn spawn(cfg: CatConfig) -> CatHandle {
         commands_filter,
         commands_squelch,
         antennas,
+        antennas_known,
     }
 }
 
@@ -1763,6 +1820,7 @@ fn serial_thread(
     telem_tx: Sender<TxTelemetry>,
     signal_tx: Sender<f32>,
     scope_out: std::sync::Arc<std::sync::Mutex<Option<ScopeFrame>>>,
+    antennas_known: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut protocol = make_protocol(&cfg);
     let poll_period = poll_period(&cfg);
@@ -2608,6 +2666,12 @@ fn serial_thread(
                 // put the panel back on the port the operator just left, and leave it disagreeing
                 // with the radio.
                 if let CatUpdate::Antenna(a) = u {
+                    // The radio answered at all, so it has a selector: the
+                    // sockets can be offered now (see
+                    // [`Protocol::antennas_probed`]). Marked whether or not the
+                    // report itself is forwarded — a rig that has one is a rig
+                    // that has one, however the answer crossed our command.
+                    antennas_known.store(true, std::sync::atomic::Ordering::Relaxed);
                     if last_sent_antenna.is_none_or(|w| w == a) {
                         let _ = event_tx.send(u);
                     }

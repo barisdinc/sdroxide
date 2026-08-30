@@ -198,6 +198,11 @@ pub struct IcomNetSource {
     /// answer that crossed a command on the wire, which would otherwise put the
     /// rail back where the radio was before the operator moved it.
     squelch_set: bool,
+    /// Which antenna socket the radio says it is on, and whether it has a
+    /// selector at all: empty until it has answered the read `configure` sends,
+    /// which a radio with one connector NAKs instead — see
+    /// [`civ::read_antenna_frame`].
+    antenna: Option<&'static str>,
     /// The dial this end has already put the radio's own repeater shift back
     /// to simplex for — see [`civ::simplex_frame`], and [`Self::pump`] for why
     /// it is a dial rather than a one-off.
@@ -318,6 +323,7 @@ impl IcomNetSource {
             last_telem: None,
             transmitting: false,
             squelch_set: false,
+            antenna: None,
             simplex_dial: None,
         };
         notes.extend(src.configure(cfg));
@@ -355,6 +361,10 @@ impl IcomNetSource {
         // And where its squelch is, adopted the same way and for the same
         // reason — on AF it is the gate the operator hears (issue #192).
         self.send(civ::read_squelch_frame(self.civ_addr));
+        // Which antenna socket it is on — and, because a radio with a single
+        // connector NAKs this rather than answering it, whether there is a
+        // selector here to offer at all (issue #238).
+        self.send(civ::read_antenna_frame(self.civ_addr));
 
         match model.lan_afif_select {
             Some(item) => {
@@ -608,6 +618,15 @@ impl IcomNetSource {
                 }
                 if let Some(m) = civ::civ_to_mode(b) {
                     self.pending.push(ControlUpdate::Mode(m));
+                }
+            }
+            // Which antenna socket the radio is on, asked for once when the
+            // session opens. Adopted, and its arrival is also what says the
+            // radio has a selector — see `Self::learned_antennas`.
+            0x12 => {
+                if let Some(name) = civ::parse_antenna_reply(&reply.data) {
+                    self.antenna = Some(name);
+                    self.pending.push(ControlUpdate::Antenna(name));
                 }
             }
             // The transmit power the radio is set to, asked for once when the
@@ -876,6 +895,35 @@ impl IqSource for IcomNetSource {
     /// heard here and the engine's own threshold is the one that does.
     fn commands_squelch(&self) -> bool {
         self.rx_source == IcomRxSource::Af
+    }
+
+    /// Put the radio on one of its antenna sockets. Icom's selector is one
+    /// relay for both directions, so there is no transmit port to pick
+    /// separately (issue #238).
+    fn set_antenna(&mut self, name: &str) -> Result<()> {
+        // A name from whatever front end was on this radio before is dropped
+        // rather than turned into a socket number by accident.
+        let Some(frame) = civ::set_antenna_frame(self.civ_addr, name) else {
+            return Ok(());
+        };
+        self.send(frame);
+        self.antenna = civ::ANTENNAS.iter().find(|a| a.eq_ignore_ascii_case(&name)).copied();
+        Ok(())
+    }
+
+    fn current_antenna(&self) -> String {
+        self.antenna.unwrap_or_default().to_string()
+    }
+
+    /// ANT1/ANT2, once the radio has answered the opening read — and nothing
+    /// at all until it has. Every Icom speaks one dialect and only some have a
+    /// selector, so the list is a question for the radio rather than a claim
+    /// about the protocol; see [`civ::ANTENNAS`].
+    fn learned_antennas(&self) -> Option<Vec<String>> {
+        Some(match self.antenna {
+            Some(_) => civ::ANTENNAS.iter().map(|a| a.to_string()).collect(),
+            None => Vec::new(),
+        })
     }
 
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {

@@ -938,7 +938,18 @@ use sdroxide_types::{
 /// Appended, so every field already on the wire keeps its number; `DeviceCaps`
 /// is sent whole, so a v106 peer desynchronises on the tail of it regardless,
 /// which is what the handshake's equality test prevents.
-pub const PROTO_VERSION: u16 = 107;
+/// **108** — the antenna a memory channel was stored on.
+///
+/// [`sdroxide_types::MemoryChannel`] gains `antenna` at its tail: which socket
+/// the radio was on when the channel was stored, so recalling a 2 m repeater
+/// puts the beam back and recalling a 40 m net puts the wire back (issue #235).
+/// `None` there means "leave the antenna alone", which is deliberately not how
+/// the neighbouring `repeater` field reads an absent value — see the field.
+///
+/// Appended, so every field already on the wire keeps its number; the memory
+/// list is sent whole, so a v107 peer desynchronises on the tail of any channel
+/// regardless, which is what the handshake's equality test prevents.
+pub const PROTO_VERSION: u16 = 108;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

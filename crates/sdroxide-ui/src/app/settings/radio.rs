@@ -36,12 +36,54 @@ fn probe_only<R>(ui: &mut egui::Ui, can_probe: bool, add: impl FnOnce(&mut egui:
 
 /// CAT / Audio interface: serial + PTT parameters (the interface itself is
 /// chosen by the selector in `settings_body`).
+/// The antenna-socket row for a radio whose port list is the radio's own —
+/// every Icom with a selector, reached over CAT or over the network.
+///
+/// Drawn from the *capabilities* rather than from the configuration, because
+/// there is nothing here to configure: whether the radio has a selector is only
+/// known once it has answered the read its control link sends when the session
+/// opens, and a radio with one connector NAKs that and gets no row at all
+/// (issues #235, #238). Applies immediately, like every other antenna control.
+fn radio_antenna_row(
+    ui: &mut egui::Ui,
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    antenna_rx: &str,
+    id: &str,
+    cmds: &mut Vec<Command>,
+) {
+    let ports: Vec<String> = caps.map(|c| c.antennas_rx.clone()).unwrap_or_default();
+    if ports.len() < 2 {
+        return;
+    }
+    ui.label("Antenna").on_hover_text(
+        "Which socket on the back the radio is using — its own ANT command, the \
+         same setting as the ANT button on the front panel.\n\n\
+         Applies immediately, and it is the radio's setting rather than a copy \
+         kept here: the socket the radio is on is read back when the session \
+         opens.\n\n\
+         The choice is remembered per band. Switch to the beam on 2 m and the \
+         wire on 40, and each comes back the next time the dial crosses into \
+         that band — and the next time sdroxide starts. A memory channel \
+         stored here carries its socket too.",
+    );
+    let shown = if antenna_rx.is_empty() { "—" } else { antenna_rx };
+    ComboBox::from_id_salt(id).selected_text(shown).show_styled(ui, |ui| {
+        for a in &ports {
+            if ui.selectable_label(antenna_rx == a, a).clicked() {
+                cmds.push(Command::SetAntenna { dir: Direction::Rx, name: a.clone() });
+            }
+        }
+    });
+    ui.end_row();
+}
+
 pub(in crate::app) fn settings_cat_tab(
     ui: &mut egui::Ui,
     serial_ports: &[String],
     radio_edit: &mut Option<sdroxide_types::RadioConfig>,
-    // Which antenna socket the radio says it is receiving on — for the one
-    // family here whose rig has two.
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    // Which antenna socket the radio says it is receiving on — for the
+    // families here whose rigs have two.
     antenna_rx: &str,
     can_probe: bool,
     cmds: &mut Vec<Command>,
@@ -624,6 +666,10 @@ pub(in crate::app) fn settings_cat_tab(
                 cfg.cat.icom_radio_id = addr;
             }
             ui.end_row();
+        }
+
+        if cfg.cat.family == CatFamily::Icom {
+            radio_antenna_row(ui, caps, antenna_rx, "cat_icom_antenna", cmds);
         }
 
         if matches!(cfg.cat.family, CatFamily::Icom | CatFamily::Xiegu) {
@@ -2079,10 +2125,13 @@ pub(in crate::app) fn settings_tci_tab(
 pub(in crate::app) fn settings_icomnet_tab(
     ui: &mut egui::Ui,
     radio_edit: &mut Option<sdroxide_types::RadioConfig>,
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    antenna_rx: &str,
     test: &mut bool,
     copy_report: &mut bool,
     test_result: &Option<crate::app::settings::TestOutcome>,
     can_probe: bool,
+    cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::{CwKeying, IcomNetConfig, IcomRxSource, IcomScopeSpan};
     let Some(cfg) = radio_edit.as_mut() else {
@@ -2143,6 +2192,8 @@ pub(in crate::app) fn settings_icomnet_tab(
                 }
             });
         ui.end_row();
+
+        radio_antenna_row(ui, caps, antenna_rx, "icomnet_antenna", cmds);
 
         ui.label("Audio sample rate");
         ComboBox::from_id_salt("icomnet_rate")

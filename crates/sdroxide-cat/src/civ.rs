@@ -350,6 +350,57 @@ pub fn parse_squelch_reply(data: &[u8]) -> Option<f32> {
     Some(decode_meter(&data[1..])?.min(255) as f32 / 255.0)
 }
 
+/// The antenna sockets an Icom's antenna selector switches between, in the
+/// order the command numbers them: `ANT1` is `0x00`.
+///
+/// Two, not four. The command carries a socket *number* and there is nothing in
+/// CI-V that says how many a given model has: an IC-7610 and an IC-7700 have
+/// two, the IC-785x line has four, and most of the range — an IC-7300, an
+/// IC-705, an IC-9700, whose three sockets are one per band and not selectable
+/// — has one and answers [`read_antenna_frame`] with a NAK. Two is what every
+/// model with a *selector* has at least, and offering a fourth socket to a
+/// radio with two would move a relay to a connector that is not there. See
+/// `Protocol::antennas` for how the list is only published once the rig has
+/// answered that read at all.
+pub const ANTENNAS: [&str; 2] = ["ANT1", "ANT2"];
+
+/// Put the receiver — and the transmitter with it; Icom's selector is one
+/// relay — on `name`, one of [`ANTENNAS`]. `None` for a name from another
+/// radio's list, which must never be allowed to pick a socket number by
+/// accident.
+///
+/// Three bytes rather than two: `12 <socket> <rx-antenna>`, the form wfview
+/// sends and the one the models with a separate receive-antenna connector
+/// (IC-7610, IC-7851) expect. The trailing byte is that connector's own
+/// setting and is left at `0` — sdroxide does not offer it, and writing
+/// anything else here would switch a receive-only input the operator never
+/// asked about.
+pub fn set_antenna_frame(radio: u8, name: &str) -> Option<Vec<u8>> {
+    let n = ANTENNAS.iter().position(|a| a.eq_ignore_ascii_case(name))? as u8;
+    Some(frame(radio, 0x12, &[n, 0x00]))
+}
+
+/// Ask which socket the rig is on (cmd `0x12`, no payload).
+///
+/// Sent once when the link opens, and it asks two questions at once: which
+/// socket, and — because a radio with one antenna NAKs it — whether there is a
+/// selector here at all.
+pub fn read_antenna_frame(radio: u8) -> Vec<u8> {
+    frame(radio, 0x12, &[])
+}
+
+/// Read an antenna reply (cmd `0x12`) back to one of [`ANTENNAS`].
+///
+/// The payload is the socket number, optionally followed by the receive-antenna
+/// connector's setting, which is ignored here. A socket past the two this end
+/// offers — a four-socket IC-785x left on ANT3 — answers `None` rather than
+/// being rounded onto one of them: it is a real port sdroxide cannot name, and
+/// claiming the radio is on ANT1 would be a lie the operator could act on.
+pub fn parse_antenna_reply(data: &[u8]) -> Option<&'static str> {
+    let n = *data.first()? as usize;
+    ANTENNAS.get(n).copied()
+}
+
 /// Hand the rig's *own* RIT, ΔTX (XIT) and split back to neutral.
 ///
 /// sdroxide carries all three on the dial itself (see `AudioCatSource`), so an
@@ -1153,6 +1204,36 @@ mod tests {
         // And is not one of the once-per-connection offset clears, which is
         // the whole point: a band stacking register puts it back.
         assert!(!clear_offsets_frames(0x94).contains(&simplex_frame(0x94)));
+    }
+
+    /// The antenna selector is command `0x12`: a socket number, and the
+    /// receive-antenna byte behind it that sdroxide always leaves at zero
+    /// (issue #238).
+    #[test]
+    fn the_antenna_selector_carries_a_socket_number() {
+        assert_eq!(
+            set_antenna_frame(0x94, "ANT1"),
+            Some(vec![0xFE, 0xFE, 0x94, 0xE0, 0x12, 0x00, 0x00, 0xFD])
+        );
+        assert_eq!(
+            set_antenna_frame(0x94, "ANT2"),
+            Some(vec![0xFE, 0xFE, 0x94, 0xE0, 0x12, 0x01, 0x00, 0xFD])
+        );
+        // A name off another radio's list must never pick a socket by accident.
+        assert_eq!(set_antenna_frame(0x94, "LNAW"), None);
+        assert_eq!(set_antenna_frame(0x94, ""), None);
+        // The read asks for the socket and, by being answered at all, for
+        // whether there is a selector here.
+        assert_eq!(read_antenna_frame(0x94), vec![0xFE, 0xFE, 0x94, 0xE0, 0x12, 0xFD]);
+        // The reply is the socket, optionally with the receive-antenna
+        // connector's own setting behind it, which is not ours to read.
+        assert_eq!(parse_antenna_reply(&[0x00]), Some("ANT1"));
+        assert_eq!(parse_antenna_reply(&[0x01, 0x00]), Some("ANT2"));
+        assert_eq!(parse_antenna_reply(&[0x01, 0x01]), Some("ANT2"));
+        // A four-socket rig left on ANT3 is a real port this end cannot name,
+        // and calling it ANT1 would be a lie the operator could act on.
+        assert_eq!(parse_antenna_reply(&[0x02]), None);
+        assert_eq!(parse_antenna_reply(&[]), None);
     }
 
     /// Squelch is a level on command `0x14`, sub-command `0x03`, on the same

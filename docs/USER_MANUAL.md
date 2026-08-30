@@ -5300,6 +5300,15 @@ exposes, and nothing it does not:
   port, and a **TX** one when it has more than one transmit port. A LimeSDR
   receives on `LNAH`/`LNAL`/`LNAW` and transmits on `BAND1`/`BAND2`; a HackRF
   has a single `TX/RX` port and gets no drop-down at all.
+
+> **The antenna is remembered per band, everywhere it can be chosen.** Whichever
+> front end you are on — an Icom's ANT1/ANT2, an RSPdx's A/B/Hi-Z, a LimeSDR's
+> LNA ports — the socket you pick is remembered against the band you picked it
+> on, and put back the next time the dial crosses into that band. It survives a
+> restart, and a memory channel stored while the radio is on a socket carries
+> that socket with it and selects it again on recall. A band you have never
+> chosen a socket on is left exactly where the radio already is, so nothing
+> moves a relay for you until you have said what belongs on that band.
 - **Stream** — **Sample rate** and **Baseband filter**, listing the values this
   device says it accepts. Both default to leaving things as they were: the rate
   falls back to the app-wide `sample_rate`, and the filter to whatever the
@@ -5751,6 +5760,17 @@ only.
   is the only safe answer for a radio this list has never been told about. The
   IC-7000 is listed but has no such command either: its data input is selected
   at the radio.
+- **Antenna** (Icom only) — `ANT1` / `ANT2`, the radio's own antenna selector:
+  the same setting as the **ANT** button on its front panel. The row only
+  appears on a radio that *has* a selector, because that is not something CI-V
+  states: every Icom speaks one dialect, an IC-7610 answers the antenna read and
+  an IC-705 refuses it, so sdroxide asks when the port opens and draws the row
+  only if an answer comes back. The socket it is on is read back at the same
+  time, so the control opens showing the truth rather than a remembered guess,
+  and the choice is remembered per band like every other antenna in sdroxide.
+  A radio with four sockets (the IC-785x line) is offered the first two; select
+  ANT3 or ANT4 at the radio, and sdroxide shows no socket rather than claiming
+  the wrong one.
 - **Radio ID (hex)** — the CI-V address, for Icom and Xiegu radios.
 - **Show the radio's spectrum scope** (Icom only) — stream the radio's own
   scope sweep over the CI-V link and draw it as the panadapter, the same way
@@ -7072,7 +7092,8 @@ protocol, not the one on the controller.
 One connection carries three things:
 
 - **Control** — the whole CI-V command set, tunnelled over the network. Dial,
-  mode, PTT, the S-meter, SWR and the radio's own CW keyer.
+  mode, PTT, the S-meter, SWR, the antenna selector (`ANT1`/`ANT2`, on a radio
+  that has one) and the radio's own CW keyer.
 - **Audio**, both ways, at up to 48 kHz.
 - **The radio's spectrum scope** — its own sweep, 475 points on most models and
   689 on an IC-7610 or IC-7760, up to ±500 kHz wide. On the AF path this is the *main*

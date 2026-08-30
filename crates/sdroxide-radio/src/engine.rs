@@ -2396,6 +2396,11 @@ struct Engine {
     /// held rather than dropped: swapping back to the radio it belongs to
     /// restores it.
     want_antenna: (Option<String>, Option<String>),
+    /// The socket the operator last chose on each band, `(RX, TX)`, restored
+    /// as the dial crosses into that band — see
+    /// [`sdroxide_config::Session::band_antenna`] and
+    /// [`Engine::follow_band_antenna`].
+    band_antenna: sdroxide_config::BandAntennas,
     /// The front-end gain stages the operator has set, RX then TX, as
     /// `(element, dB)` — held for the same reason [`Self::want_antenna`] is,
     /// and applied by [`Engine::restore_gains`] after every open.
@@ -2906,6 +2911,7 @@ fn engine_thread(
     // the operator last set on this radio, and nothing at all on a first run.
     let want_gains =
         session.as_ref().map(|s| (s.gains.clone(), s.tx_gains.clone())).unwrap_or_default();
+    let band_antenna = session.as_ref().map(|s| s.band_antenna.clone()).unwrap_or_default();
 
     let mut engine = Engine {
         // Out of declaration order on purpose: literal fields are evaluated
@@ -3113,6 +3119,7 @@ fn engine_thread(
         next_rot_emit: Instant::now(),
         session,
         want_antenna,
+        band_antenna,
         want_gains,
         want_decimation,
         store: engine_cfg.store,
@@ -3327,6 +3334,9 @@ fn engine_thread(
         // whether the front end's centre is a dial we can move is not fixed for
         // every source (see `Self::refresh_center_is_dial`).
         engine.refresh_center_is_dial();
+        // …and whether it has an antenna selector, which a CI-V rig only
+        // answers once its control link has been open a round trip.
+        engine.refresh_antennas();
 
         // Drive the FT8/FT4 slot machine (runs in both RX and TX). Returns
         // owned actions to avoid borrowing `engine.digi` and `engine` at once.
@@ -4885,6 +4895,10 @@ impl Engine {
         if std::mem::replace(&mut self.band_seen, band) == band {
             return;
         }
+        // The antenna first, and outside the WSPR exemption below: a beam that
+        // hears 2 m and a vertical that hears 40 are not a mode's business, and
+        // a receiver left on the wrong socket hears nothing to decode.
+        self.follow_band_antenna(band);
         if self.state.rx[0].mode.is_wspr() {
             return;
         }
@@ -6642,22 +6656,30 @@ impl Engine {
                     self.notice(&format!("The radio would not take {key} = {value}: {e}"));
                 }
             }
-            SetAntenna { dir, name } => match dir {
-                Direction::Rx => {
-                    if let Err(e) = self.source.set_antenna(&name) {
-                        warn!("set RX antenna {name}: {e}");
+            SetAntenna { dir, name } => {
+                match dir {
+                    Direction::Rx => {
+                        if let Err(e) = self.source.set_antenna(&name) {
+                            warn!("set RX antenna {name}: {e}");
+                        }
+                        self.state.antenna_rx = self.source.current_antenna();
+                        self.want_antenna.0 = Some(name.clone());
+                        self.band_antenna.entry(self.state.band).or_default().0 = Some(name);
                     }
-                    self.state.antenna_rx = self.source.current_antenna();
-                    self.want_antenna.0 = Some(name);
-                }
-                Direction::Tx => {
-                    if let Err(e) = self.source.set_tx_antenna(&name) {
-                        warn!("set TX antenna {name}: {e}");
+                    Direction::Tx => {
+                        if let Err(e) = self.source.set_tx_antenna(&name) {
+                            warn!("set TX antenna {name}: {e}");
+                        }
+                        self.state.antenna_tx = self.source.current_tx_antenna();
+                        self.want_antenna.1 = Some(name.clone());
+                        self.band_antenna.entry(self.state.band).or_default().1 = Some(name);
                     }
-                    self.state.antenna_tx = self.source.current_tx_antenna();
-                    self.want_antenna.1 = Some(name);
                 }
-            },
+                // The choice belongs to the band it was made on, so the band it
+                // is next left on is the one it has to be remembered against —
+                // `poll_band_change` puts it back when the dial returns.
+                self.band_seen = self.state.band;
+            }
             StoreMemory { name } => {
                 let id = self.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
                 let rx = &self.state.rx[0];
@@ -6684,6 +6706,11 @@ impl Engine {
                     // stored before this field existed, and a recall reads that
                     // as simplex too — see `RecallMemory` below.
                     repeater: Some(self.state.repeater),
+                    // Only where there is a socket to choose. A front end with
+                    // one antenna stores `None`, which is what tells a recall
+                    // to leave the relay alone — see `MemoryChannel::antenna`.
+                    antenna: (self.caps.antennas_rx.len() > 1 && !self.state.antenna_rx.is_empty())
+                        .then(|| self.state.antenna_rx.clone()),
                 });
                 self.save_memories();
             }
@@ -6719,6 +6746,18 @@ impl Engine {
                     // 145.500 off a list that says 145.500 and transmitting
                     // 600 kHz down with the last repeater's tone still on.
                     self.set_repeater(m.repeater.unwrap_or_default().clamped());
+                    // The antenna the channel was stored on, where this front
+                    // end still has that socket. Absent means "leave it alone",
+                    // unlike the repeater setup above — see
+                    // `MemoryChannel::antenna` for why the two read an empty
+                    // field differently.
+                    if let Some(name) = m
+                        .antenna
+                        .filter(|n| self.caps.antennas_rx.contains(n))
+                        .filter(|n| !self.source.owns_rx_antenna() && self.state.antenna_rx != *n)
+                    {
+                        self.apply(SetAntenna { dir: Direction::Rx, name });
+                    }
                     if m.rtty.is_some() {
                         // Already in RTTY when recalled: the mode didn't change,
                         // so no rebuild happened and the live modem still holds
@@ -10347,6 +10386,74 @@ impl Engine {
         }
     }
 
+    /// Put the socket the operator last chose on `band` back, as the dial
+    /// crosses into it.
+    ///
+    /// A station with more than one antenna has one per band rather than one
+    /// altogether, and a radio with a selector is expected to know that: an
+    /// Icom's band stacking register carries the socket beside the frequency,
+    /// and an SDRplay operator switching between an HF wire and a VHF discone
+    /// should not have to reach for the control every time (issues #235, #238).
+    ///
+    /// Only bands the operator has actually chosen on are remembered, so a band
+    /// never worked leaves the front end exactly where it was — the same
+    /// "no preference means no assertion" rule [`Engine::restore_antennas`]
+    /// follows, and for the same reason.
+    fn follow_band_antenna(&mut self, band: Band) {
+        // Not where the source owns the receive port: a LimeRFE listens on the
+        // socket it is cabled to whatever the band. Same exemption as
+        // `restore_antennas`.
+        let Some((rx, tx)) = self.band_antenna.get(&band).cloned() else { return };
+        let mut moved = false;
+        if let Some(name) = rx.filter(|n| {
+            !self.source.owns_rx_antenna()
+                && self.caps.antennas_rx.contains(n)
+                && self.state.antenna_rx != *n
+        }) {
+            if let Err(e) = self.source.set_antenna(&name) {
+                warn!("switching to RX antenna {name} for {band:?}: {e}");
+            }
+            self.state.antenna_rx = self.source.current_antenna();
+            self.want_antenna.0 = Some(name);
+            moved = true;
+        }
+        if let Some(name) =
+            tx.filter(|n| self.caps.antennas_tx.contains(n) && self.state.antenna_tx != *n)
+        {
+            if let Err(e) = self.source.set_tx_antenna(&name) {
+                warn!("switching to TX antenna {name} for {band:?}: {e}");
+            }
+            self.state.antenna_tx = self.source.current_tx_antenna();
+            self.want_antenna.1 = Some(name);
+            moved = true;
+        }
+        if moved {
+            let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+        }
+    }
+
+    /// Re-publish the antenna list when the *radio* has since said what it is.
+    ///
+    /// The same shape as [`Engine::refresh_center_is_dial`], and there for the
+    /// same reason: a control link answers a round trip after the device was
+    /// built, and the capabilities went out before it did. Every CI-V rig
+    /// speaks one dialect, so whether this one has an antenna selector is not
+    /// known until it answers — or NAKs — the read the link sends on opening.
+    /// A front end whose ports are a fact about the hardware says nothing here
+    /// and nothing happens.
+    fn refresh_antennas(&mut self) {
+        let Some(list) = self.source.learned_antennas() else { return };
+        if list == self.caps.antennas_rx {
+            return;
+        }
+        self.caps.antennas_rx = list;
+        let _ = self.event_tx.send(RadioEvent::Capabilities(self.caps.clone()));
+        // A port the session remembered may only now be one this radio offers.
+        self.restore_antennas();
+        self.follow_band_antenna(self.state.band);
+        let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+    }
+
     /// Note down a gain stage the operator has set, so it can be put back on
     /// the next open — and, through `session.json`, on the next start.
     ///
@@ -10488,6 +10595,7 @@ impl Engine {
             gains: self.want_gains.0.clone(),
             tx_gains: self.want_gains.1.clone(),
             recording_mono: self.state.recording_mono,
+            band_antenna: self.band_antenna.clone(),
         };
         if now == *saved {
             return;

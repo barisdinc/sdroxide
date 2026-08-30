@@ -1064,7 +1064,29 @@ pub struct Session {
     /// rides here rather than in `config.toml` because the UI is the only thing
     /// that sets it, and the engine is what owns writing it back.
     pub recording_mono: bool,
+    /// The antenna sockets the operator last chose **on each band**, as
+    /// `(RX, TX)`.
+    ///
+    /// A station with more than one antenna does not have one preference, it
+    /// has one per band: the beam on 2 m, the vertical on 40, the Hi-Z port on
+    /// 160. Radios with an antenna selector remember it that way themselves —
+    /// an Icom's band stacking register holds the socket beside the frequency
+    /// and the mode — and an operator who has to reach for the switch on every
+    /// band change has an antenna selector that is not doing its job (issues
+    /// #235 and #238).
+    ///
+    /// Only bands the operator has actually chosen a socket on appear here, so
+    /// a band never worked opens on whatever the front end is already set to.
+    /// Absent in a session written before this existed.
+    #[serde(default)]
+    pub band_antenna: BandAntennas,
 }
+
+/// Which antenna socket was last chosen on each band — see
+/// [`Session::band_antenna`]. `(RX, TX)`; either may be `None` where that
+/// direction has no port to choose.
+pub type BandAntennas =
+    std::collections::HashMap<sdroxide_types::Band, (Option<String>, Option<String>)>;
 
 impl Default for Session {
     fn default() -> Self {
@@ -1100,6 +1122,7 @@ impl Default for Session {
             gains: Vec::new(),
             tx_gains: Vec::new(),
             recording_mono: radio.recording_mono,
+            band_antenna: BandAntennas::new(),
         }
     }
 }
@@ -1899,6 +1922,10 @@ mod tests {
             gains: vec![("LNA".into(), 24.0), ("VGA".into(), 16.0)],
             tx_gains: vec![("PAD".into(), -6.0)],
             recording_mono: true,
+            band_antenna: BandAntennas::from([
+                (sdroxide_types::Band::M40, (Some("ANT1".into()), None)),
+                (sdroxide_types::Band::M2, (Some("ANT2".into()), Some("ANT2".into()))),
+            ]),
         };
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);

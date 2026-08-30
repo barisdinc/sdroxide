@@ -780,6 +780,18 @@ impl IqSource for AudioCatSource {
         self.antenna.clone()
     }
 
+    /// The sockets the rig has since said it has.
+    ///
+    /// An ELAD's list is settled from the family name and never changes here.
+    /// A CI-V rig's is not: every Icom speaks one dialect and only some have an
+    /// antenna selector, so the handle publishes nothing until the radio has
+    /// answered the read the link sends when the port opens (issue #238). That
+    /// answer lands a round trip after the capabilities went out, which is what
+    /// this exists to catch up with.
+    fn learned_antennas(&self) -> Option<Vec<String>> {
+        Some(self.cat.antennas().iter().map(|a| a.to_string()).collect())
+    }
+
     /// The panel's width control, sent to the only filter in the path.
     ///
     /// There is no demodulator on this side of a CAT rig — the audio arrives

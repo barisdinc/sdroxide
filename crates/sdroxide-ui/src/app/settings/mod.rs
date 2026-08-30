@@ -1891,6 +1891,7 @@ impl SdroxideApp {
                         ui,
                         &self.serial_ports,
                         io.radio_edit,
+                        self.caps.as_ref(),
                         &self.state.antenna_rx,
                         io.can_probe,
                         cmds,
@@ -1905,10 +1906,13 @@ impl SdroxideApp {
                     Backend::IcomNet => settings_icomnet_tab(
                         ui,
                         io.radio_edit,
+                        self.caps.as_ref(),
+                        &self.state.antenna_rx,
                         io.icomnet_test,
                         io.icomnet_copy_report,
                         &self.icomnet_test_result,
                         io.can_probe,
+                        cmds,
                     ),
                     Backend::SmartSdr => settings_smartsdr_tab(
                         ui,

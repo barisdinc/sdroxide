@@ -186,6 +186,20 @@ pub trait IqSource: Send {
     fn current_antenna(&self) -> String {
         String::new()
     }
+    /// The receive antenna sockets the *radio* has since said it has, when that
+    /// is not settled at the moment the device is opened.
+    ///
+    /// `None` — the default — leaves `DeviceCaps::antennas_rx` exactly as it
+    /// was built, which is the right answer for every front end whose ports are
+    /// a fact about the hardware. A control link is different: every Icom
+    /// speaks one dialect, and whether this one has an antenna selector is only
+    /// learned when it answers (or NAKs) the read that goes out a round trip
+    /// after the port opens. Answering `Some` here re-publishes the list when
+    /// it changes — see `Engine::refresh_antennas`, which is the same shape as
+    /// `refresh_center_is_dial` and exists for the same reason.
+    fn learned_antennas(&self) -> Option<Vec<String>> {
+        None
+    }
     /// Whether the receive port is the source's own to decide, so a remembered
     /// one must not be restored over the top of it.
     ///
@@ -931,6 +945,9 @@ impl IqSource for ConvertedSource {
 
     fn current_antenna(&self) -> String {
         self.inner.current_antenna()
+    }
+    fn learned_antennas(&self) -> Option<Vec<String>> {
+        self.inner.learned_antennas()
     }
 
     fn owns_rx_antenna(&self) -> bool {
