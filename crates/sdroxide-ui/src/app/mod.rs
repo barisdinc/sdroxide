@@ -742,8 +742,10 @@ pub struct SdroxideApp {
     /// The SAT window and everything it remembers between frames.
     show_sat: bool,
     sat_win: sat::SatWinState,
-    /// The QO-100 BEACON window and everything it remembers between frames.
-    show_qo100: bool,
+    /// Which page of the SAT window is showing. QO-100 is one of them — it is
+    /// a satellite, and it has no window of its own.
+    sat_tab: sat::SatTab,
+    /// What the QO-100 page remembers between frames.
     qo100_win: qo100::Qo100WinState,
     /// The rotctld client's health, mirrored from
     /// [`RadioEvent::RotatorStatus`].
@@ -1309,7 +1311,7 @@ impl SdroxideApp {
             sat_track: None,
             show_sat: false,
             sat_win: Default::default(),
-            show_qo100: false,
+            sat_tab: sat::SatTab::default(),
             qo100_win: Default::default(),
             rotator_status: None,
             rot_cfg_edit: Default::default(),

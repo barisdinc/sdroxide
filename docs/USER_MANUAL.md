@@ -115,7 +115,7 @@ or connects to a remote sdroxide server.
   [ISM band decoder](#5-ism-band-decoder).
 - **QO-100 beacon calibration** — decodes the 10489.750 MHz narrowband beacon,
   measures how far your LNB has drifted, and writes the converter offset for
-  you. See [§2.21](#221-qo-100-beacon-calibration).
+  you. In the **SAT** window's QO-100 tab; see [§2.21](#221-qo-100-beacon-calibration).
 - **Many radio backends:** SoapySDR devices, OpenHPSDR (Hermes/Metis) Ethernet
   SDRs, a TCI server (ExpertSDR3/Thetis), a SmartSDR radio (FlexRadio
   FLEX-6000/8000), RTL-SDR, RX-888, Airspy HF+ and SDRplay RSP receivers over
@@ -1484,6 +1484,13 @@ lock on, and every voice and digital mode works through it with Doppler
 corrected continuously. The button glows green while a lock is running, because
 the correction keeps being applied whether or not the window is open.
 
+The window has two tabs. **SATELLITES** is the picker and the live lock
+described below. **QO-100** is the beacon calibration
+([2.21](#221-qo-100-beacon-calibration)) — a geostationary bird needs no
+Doppler, but it does need its LNB offset measured, and that is the whole of
+working it. Either tab carries a dot while its own work is running, and the
+**SAT** button glows for both.
+
 **The picker** lists every satellite the station tracks — the amateur group
 subscription, anything you pasted into the TLE tab
 ([6.10](#610-tle-satellites-and-their-frequencies)), and the curated set — with
@@ -2201,10 +2208,12 @@ edge, at **10489.750 MHz**, that transmits AO-40 telemetry as 400 baud
 Manchester BPSK. Every ground station receives that beacon through an LNB, whose
 local oscillator is only roughly on frequency and drifts with temperature — so
 the dial and the signal disagree by a few kHz, and by different amounts on a
-cold morning and a warm afternoon. The **QO100** button in the System module
-opens a window that decodes the beacon, measures exactly how far it is from
-10489.750 MHz, and offers to write that figure into the converter/LNB offset in
-one click.
+cold morning and a warm afternoon. The **QO-100** tab of the **SAT** window
+([2.16](#216-satellite-operation-sat)) decodes the beacon, measures exactly how
+far it is from 10489.750 MHz, and offers to write that figure into the
+converter/LNB offset in one click. It lives there because QO-100 is a
+satellite — a geostationary one, which is why it needs no Doppler correction
+and why its calibration is the only thing it does need.
 
 **In brief.** With an LNB or converter offset set up in the receiver for the
 QO-100 (Es'hail-2) geostationary satellite, the decoder searches a few kHz
@@ -2219,13 +2228,15 @@ in SDR Console.
 > It needs a true IQ source and is unavailable when a CAT radio is feeding
 > demodulated audio.
 
-#### What the window shows
+#### What the page shows
 
 - **ON / OFF** starts the decoder. It reads the raw IQ straight from the
   hardware, so it works regardless of where the main dial is pointed, as long as
   the beacon is inside the span the receiver is delivering — turning it on also
-  tunes VFO A to 10489.750 MHz as a convenience, nothing more. Like SCAN and
-  SAT, the button stays lit whenever the decoder is running, window open or not.
+  tunes VFO A to 10489.750 MHz as a convenience, nothing more. Like SCAN and a
+  satellite lock, the **SAT** chip stays lit whenever the decoder is running,
+  window open or not, and the QO-100 tab carries a dot — so a hunt in progress
+  is visible from the other tab as well as from outside the window.
   It is greyed out only if the receiver's own configuration says 10489.750 MHz
   is unreachable — the usual cause is that no converter/LNB offset has been set
   up yet (**Settings ▸ Radio ▸ Converter**).
@@ -10520,7 +10531,7 @@ row of menu buttons:
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |
 | **DISP** | ☀ 3D, WIDE, FIT, CTR, the panadapter boxes (the spectrum and waterfall switches, peak hold, their speeds and the detail), the skimmers, and the spectrum floor/ceiling and FFT size |
-| **SYS** | LOG, SPOTS, AWARDS, BANDS, MEM, SETTINGS, HELP |
+| **SYS** | LOG, SPOTS, AWARDS, BANDS, SAT, ISM, WEB SDR, MAIL, MEM, SCAN, SETTINGS, HELP |
 
 A menu stays open until you tap outside it or tap its button again — the top-bar
 popups do not fade away on a touch screen the way they do under a mouse, because

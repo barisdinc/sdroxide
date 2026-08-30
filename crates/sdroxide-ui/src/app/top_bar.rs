@@ -4279,7 +4279,7 @@ impl SdroxideApp {
     /// The first five window chips — the condensed System box's top row.
     /// `extra` stretches each chip past its label; the popup passes 0.
     fn system_chips_top(&mut self, ui: &mut egui::Ui, extra: f32) {
-        let [log, spots, awards, bands, sat_label, qo100_label, ism, websdr, ..] = SYSTEM_CHIPS;
+        let [log, spots, awards, bands, sat_label, ism, websdr] = SYSTEM_CHIPS_TOP;
         if chip_stretched(ui, self.show_logbook, log, extra)
             .on_hover_text("Logbook — all QSOs (digital + manual)")
             .clicked()
@@ -4307,10 +4307,13 @@ impl SdroxideApp {
         {
             self.show_bands = !self.show_bands;
         }
-        // Accented while a satellite lock is running, like the scanner:
-        // Doppler is being applied whether or not the window is open, and
-        // that has to be visible.
-        let sat_chip = if self.sat_track.is_some() {
+        // Accented while a satellite lock *or* the QO-100 beacon hunt is
+        // running, like the scanner: both spend the receiver whether or not the
+        // window is open, and that has to be visible. QO-100 shares this chip
+        // because it shares the window — it is a satellite, and the only reason
+        // it ever had a chip of its own was that its calibration arrived first.
+        let qo100_running = self.state.qo100.enabled;
+        let sat_chip = if self.sat_track.is_some() || qo100_running {
             accent_chip_stretched(
                 ui,
                 true,
@@ -4323,36 +4326,16 @@ impl SdroxideApp {
             chip_stretched(ui, self.show_sat, sat_label, extra)
         };
         if sat_chip
-            .on_hover_text(match &self.sat_track {
-                Some(t) => format!("Satellite — locked on {}", t.name),
-                None => "Satellite — lock on and operate with Doppler correction".into(),
+            .on_hover_text(match (&self.sat_track, qo100_running) {
+                (Some(t), _) => format!("Satellite — locked on {}", t.name),
+                (None, true) => "Satellite — the QO-100 beacon calibration is running".into(),
+                (None, false) => {
+                    "Satellite — Doppler tracking, and the QO-100 beacon calibration".into()
+                }
             })
             .clicked()
         {
             self.show_sat = !self.show_sat;
-        }
-        // Accented while the beacon hunt is running, like the satellite lock:
-        // it is worth knowing at a glance even with the window closed.
-        let qo100_chip = if self.state.qo100.enabled {
-            accent_chip_stretched(
-                ui,
-                true,
-                qo100_label,
-                crate::theme::GREEN(),
-                crate::theme::INK_ON_BRIGHT(),
-                extra,
-            )
-        } else {
-            chip_stretched(ui, self.show_qo100, qo100_label, extra)
-        };
-        if qo100_chip
-            .on_hover_text(
-                "QO-100 beacon — calibrate the LNB/converter offset against the 10489.750 MHz \
-                 beacon",
-            )
-            .clicked()
-        {
-            self.show_qo100 = !self.show_qo100;
         }
         // Accented while the decoder is actually running, like the scanner and
         // the satellite lock: it is spending CPU on four downconverters whether
@@ -4389,7 +4372,7 @@ impl SdroxideApp {
 
     /// The remaining window chips — the condensed System box's bottom row.
     fn system_chips_bottom(&mut self, ui: &mut egui::Ui, extra: f32) {
-        let [.., mail, mem, scan_label, settings, help] = SYSTEM_CHIPS;
+        let [mail, mem, scan_label, settings, help] = SYSTEM_CHIPS_BOTTOM;
         if chip_stretched(ui, self.mail.open, mail, extra)
             .on_hover_text("Winlink radio email")
             .clicked()
@@ -4456,7 +4439,7 @@ impl SdroxideApp {
     /// chips splitting its share of the packer's stretch evenly.
     fn windows_condensed(&mut self, ui: &mut egui::Ui, w: f32) {
         let inner = w - 2.0 * crate::chrome::MODULE_MARGIN_X;
-        let (top, bottom) = (&SYSTEM_CHIPS[..SYSTEM_SPLIT], &SYSTEM_CHIPS[SYSTEM_SPLIT..]);
+        let (top, bottom): (&[&str], &[&str]) = (&SYSTEM_CHIPS_TOP, &SYSTEM_CHIPS_BOTTOM);
         let extra1 = ((inner - chip_row_w(ui, top)) / top.len() as f32).max(0.0);
         let extra2 = ((inner - chip_row_w(ui, bottom)) / bottom.len() as f32).max(0.0);
         crate::chrome::module_bare_h(ui, w, crate::chrome::MODULE_TALL_H, |ui| {
@@ -4556,38 +4539,21 @@ impl PttPress {
     }
 }
 
-/// The System box's chips, in the order they are drawn.
+/// The System box's chips, a row at a time, in the order they are drawn.
 ///
-/// One list, read by both the box that reserves the width and the rows that
-/// draw into it. `system_chips_top` and `system_chips_bottom` destructure it —
-/// the first taking [`SYSTEM_SPLIT`] labels and the second the rest — so a
-/// chip added to a row without a label added here does not compile, which is
-/// what keeps the reservation honest. A box reserved narrower than its
-/// contents does not clip them: the row simply carries on past the box, and
-/// whatever crosses the window edge is lost. That is how SCAN, SETTINGS and
-/// HELP came to vanish on the layouts where the strip put this box near the
-/// end of a row.
-const SYSTEM_CHIPS: [&str; 13] = [
-    "LOG",
-    "SPOTS",
-    "AWARDS",
-    "BANDS",
-    "SAT",
-    "QO100",
-    "ISM",
-    "WEB SDR",
-    "MAIL",
-    "MEM",
-    "SCAN",
-    "⚙ SETTINGS",
-    "? HELP",
-];
+/// **One array per row, and `system_chips_top` / `system_chips_bottom`
+/// destructure their own exhaustively** — no `..` — so a chip added to a row
+/// without a label added here does not compile. That is what keeps the width
+/// reservation honest, and it has to be structural rather than a comment: a box
+/// reserved narrower than its contents does not clip them. The row simply
+/// carries on past the box, and whatever crosses the window edge is lost. That
+/// is how SCAN, SETTINGS and HELP came to vanish on the layouts where the strip
+/// put this box near the end of a row — and, later, how WEB SDR did, drawn in
+/// the top row while a single split index still counted it in the bottom one.
+const SYSTEM_CHIPS_TOP: [&str; 7] = ["LOG", "SPOTS", "AWARDS", "BANDS", "SAT", "ISM", "WEB SDR"];
 
-/// Where [`SYSTEM_CHIPS`] breaks into the condensed box's two rows. Has to
-/// agree with the destructuring patterns in `system_chips_top` / `_bottom` —
-/// the array length pins both, so a chip added to the list forces all three
-/// to be revisited together.
-const SYSTEM_SPLIT: usize = 7;
+/// The rest of them. See [`SYSTEM_CHIPS_TOP`].
+const SYSTEM_CHIPS_BOTTOM: [&str; 5] = ["MAIL", "MEM", "SCAN", "⚙ SETTINGS", "? HELP"];
 
 /// The Display box's top row: the solar view, then the chips that choose what
 /// the panadapter draws — the last of those only on a front end with a
@@ -5049,12 +5015,12 @@ fn accent_chip_stretched(
     crate::chrome::chip_accent_sized(ui, selected, label, fill, ink, size)
 }
 
-/// Width the System box needs for [`SYSTEM_CHIPS`] over its two rows: the
+/// Width the System box needs for its chips over the two rows: the
 /// wider row plus the box's side margins. Measured against the live style
 /// rather than fixed, because a touched layout pads every chip out past its
 /// desktop width — see `the_condensed_system_box_fits_its_chips`.
 fn system_rows_w(ui: &egui::Ui) -> f32 {
-    chip_row_w(ui, &SYSTEM_CHIPS[..SYSTEM_SPLIT]).max(chip_row_w(ui, &SYSTEM_CHIPS[SYSTEM_SPLIT..]))
+    chip_row_w(ui, &SYSTEM_CHIPS_TOP).max(chip_row_w(ui, &SYSTEM_CHIPS_BOTTOM))
         + 2.0 * crate::chrome::MODULE_MARGIN_X
 }
 
@@ -5849,7 +5815,7 @@ mod tests {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.spacing_mut().item_spacing =
                             egui::vec2(MODULE_ROW_SPACING, MODULE_ROW_SPACING);
-                        for row in [&SYSTEM_CHIPS[..SYSTEM_SPLIT], &SYSTEM_CHIPS[SYSTEM_SPLIT..]] {
+                        for row in [&SYSTEM_CHIPS_TOP[..], &SYSTEM_CHIPS_BOTTOM[..]] {
                             ui.horizontal(|ui| {
                                 for label in row {
                                     let right = chip_stretched(ui, false, label, 0.0).rect.right();

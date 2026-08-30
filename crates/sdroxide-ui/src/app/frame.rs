@@ -818,7 +818,6 @@ impl eframe::App for SdroxideApp {
         self.awards_window(&ctx);
         self.bands_window(&ctx);
         self.sat_window(&ctx, &mut cmds);
-        self.qo100_window(&ctx, &mut cmds);
         self.help.ui(&ctx);
         // Last, so it lands on top of everything else that opened this frame.
         self.oob_tx_window(&ctx);
