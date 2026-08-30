@@ -54,6 +54,9 @@ pub struct SpectrumAnalyzer {
     /// Whether the last [`Self::make_frame`] was a row build — see
     /// [`Self::took_row`].
     hold_read: bool,
+    /// Whether the last [`Self::make_frame`] came out of an analyser that had
+    /// not yet run a transform — see [`Self::drew_empty`].
+    drew_empty_flag: bool,
     alpha: f32,
     primed: bool,
     peak_abs: f32,
@@ -249,6 +252,7 @@ impl SpectrumAnalyzer {
             hold: Vec::new(),
             read_hold: false,
             hold_read: false,
+            drew_empty_flag: false,
             alpha: 1.0,
             primed: false,
             peak_abs: 0.0,
@@ -330,6 +334,66 @@ impl SpectrumAnalyzer {
     /// first time either changed.
     pub fn took_row(&mut self) -> bool {
         std::mem::take(&mut self.hold_read)
+    }
+
+    /// Whether the last [`Self::make_frame`] was built out of an average with
+    /// nothing in it, and clear the flag.
+    ///
+    /// An analyser that has not yet run a transform holds zeros, and zero maps
+    /// to the display floor in every column — a black band the full width of
+    /// the waterfall, lasting as long as it takes `fft_size` samples to arrive.
+    /// On a zoom lane running at 62 kHz through a 16384-point window that is a
+    /// quarter of a second. Read the same way as [`Self::took_row`], so a
+    /// caller that cannot easily say in advance which lane will draw can ask
+    /// afterwards whether the picture it got was one.
+    pub fn drew_empty(&mut self) -> bool {
+        std::mem::take(&mut self.drew_empty_flag)
+    }
+
+    /// Whether a transform has ever been folded in, so there is a spectrum here
+    /// to draw.
+    pub fn primed(&self) -> bool {
+        self.primed
+    }
+
+    /// Take over the part of `src`'s averaged spectrum this analyser covers,
+    /// resampled onto its own transform size, and count as primed.
+    ///
+    /// `window` is the fraction of `src`'s span this one looks at, ascending in
+    /// frequency: `(0.0, 1.0)` for an analyser rebuilt over the same band,
+    /// something narrower for a lane mixed down onto part of it.
+    ///
+    /// A new analyser holds zeros, and zero is the display floor in every
+    /// column, so everything drawn from it before its first transform is a
+    /// black band the full width of the waterfall — a quarter of a second for a
+    /// zoom lane, well over a second for the digital modes' channel analyser.
+    /// Seeded, it starts from the picture the wider lane already had of the same
+    /// band: coarser than it will settle at, and honest, and it sharpens to its
+    /// own resolution as the transforms fold in.
+    ///
+    /// Ignored where there is nothing to copy — an empty source, or a window
+    /// reaching outside the band `src` measured.
+    pub fn seed_from(&mut self, src: &SpectrumAnalyzer, window: (f64, f64)) {
+        let (n, m) = (self.fft_size, src.fft_size);
+        let (lo, hi) = window;
+        if !src.primed || n == 0 || m == 0 || !(0.0..hi).contains(&lo) || hi > 1.0 {
+            return;
+        }
+        let (nh, mh) = (n / 2, m / 2);
+        // Both sides read and written in *display* order — frequency-ascending
+        // — because natural FFT order puts the two edges of the band next to
+        // each other and an interpolation across that seam is a blend of
+        // opposite ends of the spectrum.
+        let src_at = |k: usize| src.avg_power[if k < mh { k + mh } else { k - mh }];
+        for i in 0..n {
+            let f = lo + (i as f64 + 0.5) / n as f64 * (hi - lo);
+            let at = (f * m as f64 - 0.5).clamp(0.0, (m - 1) as f64);
+            let k = at.floor() as usize;
+            let t = (at - k as f64) as f32;
+            let (p0, p1) = (src_at(k), src_at((k + 1).min(m - 1)));
+            self.avg_power[if i < nh { i + nh } else { i - nh }] = p0 + (p1 - p0) * t;
+        }
+        self.primed = true;
     }
 
     /// Begin a fresh row: the peak starts again from where the spectrum is now,
@@ -464,6 +528,7 @@ impl SpectrumAnalyzer {
         // average, which is the current spectrum and so a correct row; the
         // hold starts on the next one.
         self.hold_read = self.read_hold;
+        self.drew_empty_flag = !self.primed;
         let power: &[f32] =
             if self.read_hold && !self.hold.is_empty() { &self.hold } else { &self.avg_power };
 

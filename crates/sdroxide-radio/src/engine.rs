@@ -91,6 +91,26 @@ fn zoom_lane_fft(display_bins: usize) -> usize {
     (display_bins * 8).next_power_of_two().clamp(4096, 32_768)
 }
 
+/// Where a `span_hz` window on `center_hz` sits inside a `full_span_hz` band on
+/// `full_center_hz`, as the ascending pair of fractions
+/// [`SpectrumAnalyzer::seed_from`] takes.
+///
+/// Outside `0.0..=1.0` where the window is not wholly inside the band, which is
+/// what `seed_from` refuses on: there is no picture of what it cannot see.
+fn span_fraction(
+    full_center_hz: f64,
+    full_span_hz: f64,
+    center_hz: f64,
+    span_hz: f64,
+) -> (f64, f64) {
+    if full_span_hz <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let base = full_center_hz - full_span_hz / 2.0;
+    let lo = (center_hz - span_hz / 2.0 - base) / full_span_hz;
+    (lo, lo + span_hz / full_span_hz)
+}
+
 /// How many transforms a waterfall row is built from, when there are enough to
 /// choose. More than one so a signal straddling a window boundary is still seen
 /// whole in a neighbouring window, and so the peak hold has something to pick a
@@ -1724,17 +1744,38 @@ impl ZoomLane {
     /// `in_rate_hz`. A lane that is keeps its filters and its averaging — and
     /// so keeps the waterfall running — across everything except a real change
     /// of window.
+    ///
+    /// **Where the window sits is not part of that.** Moving it is a matter of
+    /// re-pointing the NCO ([`ZoomLane::aim`]), and the filter ladder behind it
+    /// does not care where it was pointed; only the decimation it runs at and
+    /// the rate it is fed decide what those filters are. A pan sends a viewport
+    /// once per displayed frame, so a lane that treated a moved window as a
+    /// different lane rebuilt itself sixty times a second — and each of those
+    /// replacements held no spectrum at all until its first transform, which is
+    /// a quarter of a second at the rate a zoom lane runs at. The waterfall
+    /// went black for the whole of the drag and stayed black until after the
+    /// operator let go.
     fn serves(&self, want: (f64, u32), in_rate_hz: f64) -> bool {
-        self.decim == want.1
-            && (self.center_hz - want.0).abs() < 0.5
-            && (self.in_rate_hz - in_rate_hz).abs() < 0.5
+        self.decim == want.1 && (self.in_rate_hz - in_rate_hz).abs() < 0.5
     }
 
-    /// Re-point the NCO after the front end moved out from under the lane —
-    /// which, since the panadapter's own pan can now move it, happens under an
-    /// operator's hand rather than only at a band change.
-    fn point_at(&mut self, dev_center_hz: f64) {
-        let want = self.center_hz - dev_center_hz;
+    /// Put the lane's window on `center_hz` with the front end on
+    /// `dev_center_hz` — either of which may have moved: the operator drags the
+    /// window across the band, and the panadapter's own pan carries the front
+    /// end under it.
+    ///
+    /// The NCO retunes phase-continuously and the decimator keeps its state, so
+    /// this costs a `sin`/`cos` and the averaging survives. The one thing that
+    /// does not survive is the filter's memory of the old window, which washes
+    /// out over a few tap lengths — a hundredth of what rebuilding costs.
+    ///
+    /// Written only when it is worth a write: the comparison is against the
+    /// offset actually in force, not against the last request, so a drag of
+    /// many sub-hertz steps cannot creep away from the window it is labelled
+    /// with.
+    fn aim(&mut self, center_hz: f64, dev_center_hz: f64) {
+        self.center_hz = center_hz;
+        let want = center_hz - dev_center_hz;
         if (want - self.offset_hz).abs() >= 0.5 {
             self.offset_hz = want;
             self.ddc.set_offset_hz(want);
@@ -3412,27 +3453,34 @@ fn engine_thread(
         if now >= next_frame {
             next_frame = now + Duration::from_secs_f64(1.0 / engine.cfg.fps.max(1) as f64);
             let mut frame = engine.make_spectrum_frame();
-            engine.attach_rows(&mut frame);
-            // A triple buffer keeps only the newest value, so a client that
-            // repaints more slowly than this engine publishes loses whole
-            // frames — and every waterfall row that rode in them. The picture
-            // then scrolls slower than the time axis beside it says it does,
-            // by exactly the fraction dropped, and goes on doing so for ever.
-            //
-            // `publish` reports the overwrite, and the buffer handed back is
-            // the frame nobody fetched, so its rows can be carried into this
-            // one. Same rule and the same bound as the network client's
-            // `carry_rows_from` — a backlog longer than that is a client that
-            // stopped drawing, not a hitch to be made good.
-            if dropped_frame {
-                frame.carry_rows_from(spec_in.input_buffer());
+            // Nothing measured yet on the lane that drew — see
+            // `Engine::drew_empty`. Held back rather than published: the client
+            // goes on showing the picture it has, and the batched rows wait for
+            // a frame that has something in it. The next tick is scheduled
+            // either way, so this costs at most one frame period.
+            if !engine.drew_empty() {
+                engine.attach_rows(&mut frame);
+                // A triple buffer keeps only the newest value, so a client that
+                // repaints more slowly than this engine publishes loses whole
+                // frames — and every waterfall row that rode in them. The picture
+                // then scrolls slower than the time axis beside it says it does,
+                // by exactly the fraction dropped, and goes on doing so for ever.
+                //
+                // `publish` reports the overwrite, and the buffer handed back is
+                // the frame nobody fetched, so its rows can be carried into this
+                // one. Same rule and the same bound as the network client's
+                // `carry_rows_from` — a backlog longer than that is a client that
+                // stopped drawing, not a hitch to be made good.
+                if dropped_frame {
+                    frame.carry_rows_from(spec_in.input_buffer());
+                }
+                *spec_in.input_buffer_mut() = frame;
+                dropped_frame = spec_in.publish();
+                if dropped_frame {
+                    lane_dropped += 1;
+                }
+                lane_frames += 1;
             }
-            *spec_in.input_buffer_mut() = frame;
-            dropped_frame = spec_in.publish();
-            if dropped_frame {
-                lane_dropped += 1;
-            }
-            lane_frames += 1;
         }
         // Once a second, and only where somebody asked for it: this is the
         // measurement that tells a starved front end from a lane that is
@@ -4180,11 +4228,12 @@ impl Engine {
                 return;
             }
             Some(want) => match self.zoom.as_mut() {
-                // The same window: only the front end may have moved under it.
-                Some(z) if z.serves(want, in_rate) => z.point_at(dev_center),
+                // The same lane: the window, the front end, or both may have
+                // moved under it, and re-pointing is all either needs.
+                Some(z) if z.serves(want, in_rate) => z.aim(want.0, dev_center),
                 _ => {
                     let fft = zoom_lane_fft(self.cfg.bins());
-                    let lane = ZoomLane::new(
+                    let mut lane = ZoomLane::new(
                         in_rate,
                         want.1,
                         want.0,
@@ -4192,6 +4241,15 @@ impl Engine {
                         self.cfg.avg_tc,
                         fft,
                         f64::from(self.cfg.rows()),
+                    );
+                    // Start it on the device-wide analyser's picture of the
+                    // same window, so the zoom step that builds it does not
+                    // black the waterfall out for as long as the lane takes to
+                    // fill — a quarter of a second at the rate a deep zoom runs
+                    // at. See [`SpectrumAnalyzer::seed_from`].
+                    lane.analyzer.seed_from(
+                        &self.analyzer,
+                        span_fraction(dev_center, in_rate, lane.center_hz, lane.rate_hz),
                     );
                     debug!(
                         center = lane.center_hz,
@@ -5475,7 +5533,20 @@ impl Engine {
                 // 16k-point FFT over the ~50 kHz channel ≈ 3 Hz/bin, enough to
                 // resolve 6.25 Hz FT8 tones.
                 let ch_rate = self.channel_rate_hz;
-                self.channel_analyzer = Some(SpectrumAnalyzer::new(16_384, ch_rate, 0.10));
+                let mut ca = SpectrumAnalyzer::new(16_384, ch_rate, 0.10);
+                // 16384 points at the channel rate is over a second of signal
+                // before the first transform lands, and this window *is* the
+                // panadapter while a digital mode is up — so unseeded, entering
+                // FT8 blacks the display out for the whole of it. The
+                // device-wide analyser has the same band already.
+                let window = span_fraction(
+                    self.display_center_hz(),
+                    self.state.sample_rate,
+                    self.state.rx_freq_hz(),
+                    ch_rate,
+                );
+                ca.seed_from(&self.analyzer, window);
+                self.channel_analyzer = Some(ca);
             }
             // Covers arriving in CW from a digital mode, where the analyzer is
             // already up and nothing else would take it down.
@@ -5563,6 +5634,38 @@ impl Engine {
             .chain(self.channel_analyzer.as_mut())
     }
 
+    /// Whether the frame just built came out of an analyser holding nothing —
+    /// a lane rebuilt a moment ago, or one reset across a transmit — and so
+    /// reads the display floor in every column.
+    ///
+    /// The invariant: **a picture nobody has measured is not published.** A
+    /// black frame is a lie about the band, and a black waterfall row is a
+    /// permanent one — it scrolls away up the history and stays there. Holding
+    /// the last honest picture for the millisecond or two an analyser takes to
+    /// fill is what every part of this file's row plumbing already does when
+    /// there is nothing new to say.
+    ///
+    /// Asked afterwards rather than worked out in advance for the same reason
+    /// [`SpectrumAnalyzer::took_row`] is: which lane draws is a dozen
+    /// conditions deep in [`Engine::make_spectrum_frame`], and a second copy of
+    /// that branch here would go wrong the first time either changed. Every
+    /// lane is polled, not just until one answers, so no flag is left standing
+    /// for the next frame to trip over.
+    ///
+    /// **Not the channel analyser.** Every other lane is fed straight off the
+    /// front end and fills within one transform of it, so waiting is a matter
+    /// of milliseconds. That one is fed from the receive chain's DDC output and
+    /// there may not be a receive chain — an engine with no audio configured
+    /// never feeds it at all — so holding the panadapter until it has something
+    /// could hold it for ever. It is seeded instead, where there is a wider
+    /// picture to seed it from.
+    fn drew_empty(&mut self) -> bool {
+        std::iter::once(&mut self.analyzer)
+            .chain(std::iter::once(&mut self.tx_analyzer))
+            .chain(self.zoom.as_mut().map(|z| &mut z.analyzer))
+            .fold(false, |empty, a| a.drew_empty() | empty)
+    }
+
     /// One waterfall row: the strongest thing each column saw since the last
     /// row was taken.
     ///
@@ -5607,7 +5710,9 @@ impl Engine {
                 a.set_row_hold(false);
             }
         });
-        Some(frame)
+        // A row is history: published black it stays black for as long as the
+        // operator scrolls back. See [`Engine::drew_empty`].
+        (!self.drew_empty()).then_some(frame)
     }
 
     /// Feed the panadapter lanes a block, clocking waterfall rows off the
@@ -6015,7 +6120,15 @@ impl Engine {
         }
         // The zoomed window at its own resolution, where the device-wide
         // analyser has run out of bins to give it.
-        if let Some(z) = self.zoom.as_mut() {
+        //
+        // Only once the lane has a spectrum. A lane just built holds zeros, and
+        // zero is the display floor in every column — so the frames and the
+        // waterfall rows drawn from it between its construction and its first
+        // transform are black, for a quarter of a second at the rate a deep
+        // zoom's lane runs at. The device-wide analyser covers the same window
+        // the whole time, coarser but live, which is exactly the picture the
+        // operator had one zoom step ago.
+        if let Some(z) = self.zoom.as_mut().filter(|z| z.analyzer.primed()) {
             return z.analyzer.make_frame(
                 z.center_hz,
                 z.rate_hz,
@@ -6674,12 +6787,21 @@ impl Engine {
                     self.zoom = None;
                 }
                 if rebuild {
-                    self.analyzer = build_analyzer(
+                    let mut next = build_analyzer(
                         self.cfg.fft_size as usize,
                         rate,
                         self.cfg.avg_tc,
                         f64::from(self.cfg.rows()),
                     );
+                    // The replacement covers the same span, so the picture in
+                    // hand is a true picture of it — coarser or finer than what
+                    // this one will settle at, but a picture. Started empty it
+                    // would answer the display floor until its first transform
+                    // instead, which is the waterfall going black; and since
+                    // the client grows its FFT as the operator zooms, that is
+                    // once per zoom step rather than once a session.
+                    next.seed_from(&self.analyzer, (0.0, 1.0));
+                    self.analyzer = next;
                     self.tx_analyzer = SpectrumAnalyzer::new(
                         self.cfg.fft_size as usize,
                         TX_MONITOR_RATE,
