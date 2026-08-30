@@ -211,6 +211,53 @@ fn gesture_step(carried: Option<f64>, echoed: f64, dhz: f64) -> f64 {
     carried.unwrap_or(echoed) + dhz
 }
 
+/// Bring the receiver to a view that has been zoomed back in somewhere it is
+/// not listening.
+///
+/// Only on a front end whose I/Q is a narrow window onto a wider band — one
+/// with a full-band lane ([`WindowPan::outer`]). There, zooming out shows the
+/// whole band from that lane and zooming back in lands wherever the pointer
+/// was, which is usually *not* the slice the receiver is streaming. The
+/// panadapter then goes on drawing from the coarse full-band bins however far
+/// in the operator zooms, because those really are the only bins covering what
+/// they are looking at — detail that never arrives, and no visible reason why.
+///
+/// So the receiver follows. On these front ends the panadapter *is* the
+/// receiver: there is no looking without listening, and a zoom onto a signal
+/// is a request to hear it — the same request clicking the full-band strip
+/// makes, answered the same way.
+///
+/// Two conditions keep it quiet. The view has to have come back inside a
+/// passband's *width*, so panning about while zoomed out never retunes
+/// anything; and the dial has to be outside the view, which is what makes this
+/// fire once and then stop — once the engine has brought the receiver over,
+/// the dial is in the view and there is nothing left to ask for.
+fn follow_view_into_the_band(
+    view: &ViewState,
+    state: &RadioState,
+    dev_center: f64,
+    dev_span: f64,
+    pan: WindowPan,
+    cmds: &mut Vec<Command>,
+) {
+    if pan.outer.is_none() || !(dev_span > 0.0) || view.span() > dev_span {
+        return;
+    }
+    let (v_lo, v_hi) = (view.view_lo_hz, view.view_hi_hz);
+    // Already looking at what is being received: the passband covers the view.
+    let (dev_lo, dev_hi) = (dev_center - dev_span / 2.0, dev_center + dev_span / 2.0);
+    if v_lo >= dev_lo && v_hi <= dev_hi {
+        return;
+    }
+    // Already asked: the dial is in the view and the engine is bringing the
+    // receiver over. Asking again every frame would be a retune per frame.
+    let vfo = state.active_freq_hz();
+    if (v_lo..=v_hi).contains(&vfo) {
+        return;
+    }
+    cmds.push(Command::SetVfo { vfo: state.active_vfo, hz: (v_lo + v_hi) / 2.0 });
+}
+
 fn pan_center(
     dev_center: &mut f64,
     state: &mut RadioState,
@@ -1883,6 +1930,7 @@ pub fn show_ext(
     if pan.known {
         view.clamp_to(zoom_center, zoom_span);
     }
+    follow_view_into_the_band(view, state, dev_center, dev_span, pan, cmds);
     let (lo_now, hi_now, span_now) = (view.view_lo_hz, view.view_hi_hz, view.span());
     if ui.data(|d| d.get_temp::<(f64, f64)>(view_log_id)) != Some((lo_now, hi_now)) {
         ui.data_mut(|d| d.insert_temp(view_log_id, (lo_now, hi_now)));
@@ -3597,6 +3645,68 @@ mod tests {
         let (c, span) = wide_pan.view_bounds(DEV_C, DEV_SPAN);
         view.clamp_to(c, span);
         assert_eq!((view.view_lo_hz, view.view_hi_hz), (0.0, 30_000_000.0));
+    }
+
+    /// Zoom out on a KiwiSDR, then zoom back in somewhere else: the view is
+    /// narrow again but the 12 kHz the receiver streams is elsewhere, so the
+    /// panadapter would go on drawing from the coarse full-band bins for ever.
+    /// The receiver follows instead.
+    #[test]
+    fn zooming_back_in_off_the_passband_brings_the_receiver_over() {
+        const DEV_C: f64 = 10_000_000.0;
+        const DEV_SPAN: f64 = 12_000.0;
+        let pan = WindowPan::default().with_outer(Some((15e6, 30e6)), DEV_SPAN);
+        let state = RadioState { vfo_a_hz: DEV_C, active_vfo: Vfo::A, ..RadioState::default() };
+
+        // Zoomed back in at 15 MHz, five megahertz from what is being received.
+        let view =
+            ViewState { view_lo_hz: 14_997_000.0, view_hi_hz: 15_003_000.0, ..Default::default() };
+        let mut cmds = Vec::new();
+        follow_view_into_the_band(&view, &state, DEV_C, DEV_SPAN, pan, &mut cmds);
+        assert_eq!(cmds, vec![Command::SetVfo { vfo: Vfo::A, hz: 15_000_000.0 }]);
+    }
+
+    /// Still zoomed out: panning about the band view must not retune anything.
+    #[test]
+    fn panning_while_zoomed_out_never_retunes() {
+        const DEV_C: f64 = 10_000_000.0;
+        const DEV_SPAN: f64 = 12_000.0;
+        let pan = WindowPan::default().with_outer(Some((15e6, 30e6)), DEV_SPAN);
+        let state = RadioState { vfo_a_hz: DEV_C, active_vfo: Vfo::A, ..RadioState::default() };
+        let view = ViewState { view_lo_hz: 12e6, view_hi_hz: 18e6, ..Default::default() };
+        let mut cmds = Vec::new();
+        follow_view_into_the_band(&view, &state, DEV_C, DEV_SPAN, pan, &mut cmds);
+        assert!(cmds.is_empty(), "a view wider than the passband is not a tuning request");
+    }
+
+    /// Asked once, not once a frame: with the dial inside the view the engine
+    /// is already bringing the receiver over.
+    #[test]
+    fn the_request_is_not_repeated_while_it_is_being_answered() {
+        const DEV_SPAN: f64 = 12_000.0;
+        let pan = WindowPan::default().with_outer(Some((15e6, 30e6)), DEV_SPAN);
+        // The dial has moved to the view; the receiver has not caught up yet.
+        let state =
+            RadioState { vfo_a_hz: 15_000_000.0, active_vfo: Vfo::A, ..RadioState::default() };
+        let view =
+            ViewState { view_lo_hz: 14_997_000.0, view_hi_hz: 15_003_000.0, ..Default::default() };
+        let mut cmds = Vec::new();
+        follow_view_into_the_band(&view, &state, 10_000_000.0, DEV_SPAN, pan, &mut cmds);
+        assert!(cmds.is_empty());
+    }
+
+    /// A front end with no full-band lane is untouched: its view can never
+    /// leave its passband in the first place.
+    #[test]
+    fn a_front_end_without_a_wide_lane_is_never_retuned_by_a_zoom() {
+        const DEV_SPAN: f64 = 2_000_000.0;
+        let pan = WindowPan::default();
+        let state = RadioState { vfo_a_hz: 10e6, active_vfo: Vfo::A, ..RadioState::default() };
+        let view =
+            ViewState { view_lo_hz: 14_997_000.0, view_hi_hz: 15_003_000.0, ..Default::default() };
+        let mut cmds = Vec::new();
+        follow_view_into_the_band(&view, &state, 10e6, DEV_SPAN, pan, &mut cmds);
+        assert!(cmds.is_empty());
     }
 
     /// A "wide" lane no wider than the I/Q — an Icom's scope at a narrow span —

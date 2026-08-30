@@ -714,6 +714,14 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   show the 12 kHz. The picture coarsens at the moment it crosses over, because
   the full-band bins are all there is out there; zoom back in and the I/Q's own
   resolution returns.
+
+  Zooming back in **somewhere else** brings the receiver with you. On these
+  front ends the panadapter is the receiver — there is no looking without
+  listening — so a zoom onto a signal you spotted while zoomed out is read as a
+  request to hear it, exactly as clicking the strip would be. Without that the
+  panadapter would go on drawing from the coarse full-band bins however far in
+  you zoomed, because out there those really are the only bins covering what you
+  are looking at. Panning about while still zoomed out never retunes anything.
   The strip is not shown in the digital modes, whose layout gives the height to
   the operating panel instead.
 - **FIT** — keep the waterfall floor and ceiling set for the best contrast.
