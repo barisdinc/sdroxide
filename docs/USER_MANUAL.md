@@ -8706,6 +8706,16 @@ spoken announcements below them under `[speech]`:
   tall, so a small laptop gets most of this without being told; the setting is
   for the rest of it, and for anyone who wants the tighter panels in a window
   on a large screen.
+
+  **Whatever the layout, no control is ever off the bottom of an operating
+  panel.** The panel keeps a floor under its own height — taken from the
+  waterfall above it, which is the thing that can shrink — sized to the rows
+  that layout actually draws, so a touched layout's taller chips get the extra
+  points they need. Where a panel still holds more than it can show at once
+  (the WSPR beacon's controls, the SSTV compositor), it scrolls rather than
+  running off the edge. The divider between the waterfall and the panel is
+  draggable in every mode: put the pointer on the `— — —` handle between them
+  and drag to give either one more of the window.
 - **Theme** — the colour scheme for the whole UI: **Default** (the navy, cyan
   and hot pink every screenshot in this manual shows), **Light** (white panels
   and near-black text, for a bright shack or a screen read in daylight),
