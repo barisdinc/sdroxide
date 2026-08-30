@@ -67,6 +67,53 @@ pub struct SpectrumAnalyzer {
     transforms: u64,
 }
 
+crate::simd::kernel! {
+    /// Window one frame into the transform's working buffer.
+    fn apply_window / apply_window_portable / apply_window_avx2 / apply_window_avx512 (
+        dst: &mut [Complex32],
+        src: &[Complex32],
+        win: &[f32],
+    ) {
+        for (w, (x, k)) in dst.iter_mut().zip(src.iter().zip(win)) {
+            *w = x * k;
+        }
+    }
+}
+
+crate::simd::kernel! {
+    /// Fold one transform's power into the running average.
+    fn fold_power / fold_power_portable / fold_power_avx2 / fold_power_avx512 (
+        avg: &mut [f32],
+        work: &[Complex32],
+        norm: f32,
+        alpha: f32,
+    ) {
+        for (a, x) in avg.iter_mut().zip(work) {
+            let p = x.norm_sqr() * norm;
+            *a += alpha * (p - *a);
+        }
+    }
+}
+
+crate::simd::kernel! {
+    /// [`fold_power`] for a lane that is also holding the peak between rows.
+    fn fold_power_hold / fold_power_hold_portable / fold_power_hold_avx2 / fold_power_hold_avx512 (
+        avg: &mut [f32],
+        hold: &mut [f32],
+        work: &[Complex32],
+        norm: f32,
+        alpha: f32,
+    ) {
+        for ((a, h), x) in avg.iter_mut().zip(hold).zip(work) {
+            let p = x.norm_sqr() * norm;
+            *a += alpha * (p - *a);
+            if *a > *h {
+                *h = *a;
+            }
+        }
+    }
+}
+
 impl SpectrumAnalyzer {
     pub fn new(fft_size: usize, sample_rate: f64, avg_tc_secs: f32) -> Self {
         Self::with_hop_div(fft_size, sample_rate, avg_tc_secs, 2)
@@ -242,30 +289,19 @@ impl SpectrumAnalyzer {
         let mut at = 0;
         while self.pending.len() - at >= self.fft_size {
             let frame = &self.pending[at..at + self.fft_size];
-            for (w, (x, win)) in self.work.iter_mut().zip(frame.iter().zip(&self.window)) {
-                *w = x * win;
-            }
+            apply_window(&mut self.work, frame, &self.window);
             self.fft.process_with_scratch(&mut self.work, &mut self.scratch);
 
             let norm = 1.0 / (self.coherent_gain * self.coherent_gain);
             let alpha = if self.primed { self.alpha } else { 1.0 };
             self.primed = true;
-            // Two loops rather than one with a branch inside: this runs
+            // Two kernels rather than one with a branch inside: this runs
             // `fft_size` times per transform and hundreds of times a second on
             // a wide front end, and the hold is off on most lanes.
             if self.hold.is_empty() {
-                for (avg, x) in self.avg_power.iter_mut().zip(&self.work) {
-                    let p = x.norm_sqr() * norm;
-                    *avg += alpha * (p - *avg);
-                }
+                fold_power(&mut self.avg_power, &self.work, norm, alpha);
             } else {
-                for ((avg, h), x) in self.avg_power.iter_mut().zip(&mut self.hold).zip(&self.work) {
-                    let p = x.norm_sqr() * norm;
-                    *avg += alpha * (p - *avg);
-                    if *avg > *h {
-                        *h = *avg;
-                    }
-                }
+                fold_power_hold(&mut self.avg_power, &mut self.hold, &self.work, norm, alpha);
             }
             self.transforms = self.transforms.wrapping_add(1);
             at += self.hop;
