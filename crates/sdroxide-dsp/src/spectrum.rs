@@ -380,6 +380,20 @@ impl SpectrumAnalyzer {
             return;
         }
         let (nh, mh) = (n / 2, m / 2);
+        // A bin holds the noise in its own width, so a picture resampled onto
+        // narrower bins has to be scaled to them or its floor arrives at the
+        // wider lane's level. `(hi - lo) · m / n` is exactly that ratio — a
+        // half-span window through the same transform is half the width a bin,
+        // a same-span rebuild at twice the points likewise — and it is what
+        // keeps the seeded rows at the level the real transforms are about to
+        // settle on instead of a band of saturated white across the waterfall.
+        //
+        // Right for the noise the eye reads the floor off, and wrong by the
+        // same factor for a carrier, which arrives that much too quiet for the
+        // one transform interval the seed lasts. That is the better of the two
+        // errors by a long way: a carrier a shade dim for a tenth of a second
+        // against every column of the picture pinned to the ceiling.
+        let scale = ((hi - lo) * m as f64 / n as f64) as f32;
         // Both sides read and written in *display* order — frequency-ascending
         // — because natural FFT order puts the two edges of the band next to
         // each other and an interpolation across that seam is a blend of
@@ -391,7 +405,7 @@ impl SpectrumAnalyzer {
             let k = at.floor() as usize;
             let t = (at - k as f64) as f32;
             let (p0, p1) = (src_at(k), src_at((k + 1).min(m - 1)));
-            self.avg_power[if i < nh { i + nh } else { i - nh }] = p0 + (p1 - p0) * t;
+            self.avg_power[if i < nh { i + nh } else { i - nh }] = (p0 + (p1 - p0) * t) * scale;
         }
         self.primed = true;
     }
