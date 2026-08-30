@@ -482,6 +482,46 @@ impl SdroxideApp {
                 self.mem_folder_name.clear();
             }
         });
+        // A channel list from somewhere else. CHIRP's CSV because that is what
+        // every repeater directory hands out — RepeaterBook exports it by
+        // county, and the marine and PMR tables circulate as it — so an
+        // operator who wants their local machines in here already has the file
+        // (issue #234).
+        ui.horizontal(|ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if crate::chrome::chip(ui, false, "IMPORT")
+                .on_hover_text(
+                    "Read a channel list from a CHIRP CSV file (.csv) — a repeater \
+                     directory export, a marine or PMR channel table, or anything \
+                     else CHIRP can write.\n\n\
+                     Each channel brings its frequency, mode, repeater shift and \
+                     CTCSS or DCS tone with it. Channels already on this list — same \
+                     frequency, same mode — are skipped, so re-importing an updated \
+                     directory adds what is new rather than doubling what is not.",
+                )
+                .clicked()
+            {
+                crate::download::load_text("CHIRP CSV", "csv", self.chirp_import_inbox.clone());
+            }
+            let have = !self.memories.is_empty();
+            ui.add_enabled_ui(have, |ui| {
+                if crate::chrome::chip(ui, false, "EXPORT")
+                    .on_hover_text(
+                        "Write this list out as a CHIRP CSV file, to load into a \
+                         handheld or to keep as a backup.",
+                    )
+                    .clicked()
+                {
+                    let csv = sdroxide_types::memories_to_chirp_csv(&self.memories);
+                    crate::download::save("sdroxide-memories.csv", csv.as_bytes());
+                }
+            });
+            ui.label(
+                RichText::new(format!("{} channel", self.memories.len()))
+                    .size(11.0)
+                    .color(crate::theme::gray(150)),
+            );
+        });
         self.memory_sort_bar(ui);
         ui.separator();
         if self.memories.is_empty() && self.mem_folders.is_empty() {

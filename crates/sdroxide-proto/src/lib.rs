@@ -960,7 +960,13 @@ use sdroxide_types::{
 /// its number, and the caps field likewise; `DeviceCaps` is sent whole, so a
 /// v108 peer desynchronises on the tail of it regardless, which is what the
 /// handshake's equality test prevents.
-pub const PROTO_VERSION: u16 = 109;
+/// **110** — importing a channel list.
+///
+/// [`sdroxide_types::Command`] gains `ImportMemories(Vec<MemoryChannel>)`: a
+/// repeater directory or a channel table read from a CHIRP CSV file, appended
+/// to the station's memories (issue #234). Appended, so every variant already
+/// on the wire keeps its number.
+pub const PROTO_VERSION: u16 = 110;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

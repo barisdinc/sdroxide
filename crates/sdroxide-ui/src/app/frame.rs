@@ -191,6 +191,9 @@ impl eframe::App for SdroxideApp {
         }
 
         let mut cmds = Vec::new();
+        // A channel list chosen in the memories window: parsed here and sent
+        // to the engine, which owns the list and the numbering in it.
+        self.poll_chirp_import(&mut cmds);
         // The keyboard, the mouse buttons and the control surface belong to
         // the focused radio alone. In a split view every visible radio runs
         // this frame loop, and without the gate one arrow key would tune all

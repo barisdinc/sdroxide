@@ -685,6 +685,10 @@ pub struct SdroxideApp {
     /// Inbox for an ADIF file chosen via the native "Import" dialog (a picker
     /// thread writes; the UI drains it each frame).
     adif_import_inbox: crate::download::LoadInbox,
+    /// Inbox for a CHIRP CSV channel list chosen via the memories window's
+    /// "Import" button — its own, beside the ADIF one, so a log import and a
+    /// channel import cannot land in each other's parser.
+    chirp_import_inbox: crate::download::LoadInbox,
     /// Callsigns queued for lookup, drained into commands each frame.
     pending_lookups: Vec<String>,
     /// Everything callsign lookup has resolved this session, by callsign. Kept
@@ -1288,6 +1292,7 @@ impl SdroxideApp {
             login_tests: std::collections::HashMap::new(),
             login_tests_pending: std::collections::HashSet::new(),
             adif_import_inbox: Arc::new(Mutex::new(None)),
+            chirp_import_inbox: Arc::new(Mutex::new(None)),
             pending_lookups: Vec::new(),
             callsign_cache: Default::default(),
             pending_uploads: Vec::new(),

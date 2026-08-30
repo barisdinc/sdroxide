@@ -171,6 +171,15 @@ pub fn run_multi(
             .with_app_id("sdroxide")
             .with_icon(sdroxide_ui::app_icon())
             .with_title("sdroxide"),
+        // On a first start there is no saved geometry, and where the window
+        // manager puts a window then is its own business — Windows cascades
+        // them, which on a screen barely wider than the window pushes the
+        // right-hand edge, and the Setup gear on it, off the display. Centred,
+        // the window is on the screen from the first frame;
+        // `MultiApp::fit_window` then deals with one that is bigger than the
+        // screen altogether (issue #234). Ignored once a size and position have
+        // been remembered.
+        centered: true,
         ..Default::default()
     };
     // Engine threads are joined by each controller's `shutdown()` — on tab
@@ -383,6 +392,9 @@ pub fn run_remote(url: &str) -> Result<()> {
             .with_app_id("sdroxide")
             .with_icon(sdroxide_ui::app_icon())
             .with_title(format!("sdroxide — remote {url}")),
+        // Centred on a first start, for the reason the local window is — see
+        // `run` above (issue #234).
+        centered: true,
         ..Default::default()
     };
     // Connect inside the creator so the socket can wake the UI (repaint) the

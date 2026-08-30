@@ -847,4 +847,16 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     SetRigPower(bool),
+
+    /// Add channels to the memory list — a repeater directory or a channel
+    /// table read from a file (issue #234).
+    ///
+    /// The ids the caller sends are ignored: the engine owns the numbering,
+    /// because only it knows what is already stored. Channels whose frequency
+    /// and mode a memory already carries are skipped rather than duplicated, so
+    /// re-importing an updated directory adds what is new instead of doubling
+    /// what is not.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    ImportMemories(Vec<crate::MemoryChannel>),
 }

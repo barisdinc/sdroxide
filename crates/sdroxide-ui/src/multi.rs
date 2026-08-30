@@ -179,6 +179,14 @@ pub struct MultiApp {
     /// dragged. `None` only where every tab is somebody else's station, which
     /// is every browser client.
     station_radio: Option<u32>,
+    /// Whether the window has been checked against the screen it opened on.
+    ///
+    /// Once, on the first frame that knows both sizes. A window is only ever
+    /// brought *in* — see [`crate::layout::fit_inner_size`] — and doing it
+    /// every frame would fight an operator dragging their window bigger than
+    /// the display on purpose.
+    #[cfg(not(target_arch = "wasm32"))]
+    fitted: bool,
 }
 
 impl MultiApp {
@@ -248,6 +256,8 @@ impl MultiApp {
             pending_preset: None,
             peers_opened: std::collections::HashSet::new(),
             station_radio,
+            #[cfg(not(target_arch = "wasm32"))]
+            fitted: false,
         }
     }
 
@@ -1124,9 +1134,61 @@ impl MultiApp {
     }
 }
 
+impl MultiApp {
+    /// Bring a window that opened bigger than its screen back onto it.
+    ///
+    /// The size asked for at startup is in *points*, and a scaled display has
+    /// fewer of them than its pixel count suggests: a 1920×1080 screen at 150%
+    /// is 1280×720 points, and the 1280×800 window sdroxide asks for is then
+    /// wider than the whole desktop and 80 points taller. What that looks like
+    /// is the controls along the right-hand edge — the Setup gear at the end of
+    /// the top bar among them — simply not being on the display (issue #234).
+    ///
+    /// Run once, on the first frame where the window manager has reported both
+    /// the screen and the window, and it only ever makes the window smaller. An
+    /// operator who has deliberately dragged a window past the edge of their
+    /// display keeps it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fit_window(&mut self, ctx: &egui::Context) {
+        if self.fitted {
+            return;
+        }
+        let (monitor, inner, outer) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.monitor_size, v.inner_rect.map(|r| r.size()), v.outer_rect.map(|r| r.size()))
+        });
+        // Nothing is claimed until the window manager has answered. On a
+        // desktop that never does, the check simply never runs — which is the
+        // behaviour every release before this one had.
+        let (Some(monitor), Some(inner), Some(outer)) = (monitor, inner, outer) else {
+            return;
+        };
+        self.fitted = true;
+        // The floor is the window's own minimum, as `gui_main` sets it: a
+        // screen too small for that is one where something has to be cut off
+        // either way.
+        if let Some(want) =
+            crate::layout::fit_inner_size(monitor, outer, inner, egui::vec2(800.0, 500.0))
+        {
+            tracing::info!(
+                "window {}x{} does not fit a {}x{} point screen — bringing it in to {}x{}",
+                inner.x.round(),
+                inner.y.round(),
+                monitor.x.round(),
+                monitor.y.round(),
+                want.x.round(),
+                want.y.round(),
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+        }
+    }
+}
+
 impl eframe::App for MultiApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.fit_window(&ctx);
         let now = ctx.input(|i| i.time);
         self.sanitize_panes(&ctx);
         // Pane order → tab index; `sanitize_panes` guaranteed each exists.

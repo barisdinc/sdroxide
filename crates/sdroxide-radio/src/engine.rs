@@ -6789,6 +6789,40 @@ impl Engine {
                     }
                 }
             }
+            ImportMemories(channels) => {
+                // The engine owns the numbering: an id that came in over the
+                // wire, or out of somebody's file, is not one this list can
+                // trust not to collide with what is already stored.
+                let mut next = self.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+                let mut added = 0usize;
+                for mut m in channels {
+                    let name = m.name.trim().to_string();
+                    if !m.freq_hz.is_finite() || m.freq_hz <= 0.0 {
+                        continue;
+                    }
+                    // A channel already on the list is not stored twice, so
+                    // re-importing an updated directory adds what is new
+                    // rather than doubling what is not. Frequency and mode
+                    // rather than name: two clubs name the same machine
+                    // differently, and nobody wants it twice for that.
+                    if self
+                        .memories
+                        .iter()
+                        .any(|o| (o.freq_hz - m.freq_hz).abs() < 1.0 && o.mode == m.mode)
+                    {
+                        continue;
+                    }
+                    m.id = next;
+                    m.name = name;
+                    m.repeater = Some(m.repeater.unwrap_or_default().clamped());
+                    next += 1;
+                    self.memories.push(m);
+                    added += 1;
+                }
+                if added > 0 {
+                    self.save_memories();
+                }
+            }
             DeleteMemory(id) => {
                 self.memories.retain(|m| m.id != id);
                 self.save_memories();

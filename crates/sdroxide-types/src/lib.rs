@@ -13,6 +13,7 @@ mod bandplan;
 pub mod broadcast;
 mod callsign;
 mod caps;
+mod chirp;
 mod command;
 mod contacts;
 mod controller;
@@ -92,6 +93,7 @@ pub use bandplan::{BandPlan, BandPlanError, RegionPlan, band_plan, set_band_plan
 pub use broadcast::{BroadcastStation, BroadcastStations};
 pub use callsign::{CallsignInfo, LoginTarget, LoginTestResult, UploadResult, UploadTarget};
 pub use caps::{DeviceCaps, DeviceSetting, Direction, GainElement, SettingKind};
+pub use chirp::{chirp_csv_to_memories, memories_to_chirp_csv};
 pub use command::Command;
 pub use contacts::FsqContact;
 pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};

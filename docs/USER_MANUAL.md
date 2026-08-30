@@ -1249,6 +1249,34 @@ showing you. The list shows what is stored beside the mode, so two memories on
 one dial read as the different channels they are. See
 [2.18 Repeater operation](#218-repeater-operation-duplex-and-tone).
 
+#### Importing and exporting a channel list
+
+**IMPORT** reads a channel list from a **CHIRP CSV** file (`.csv`) — the format
+CHIRP writes and the one every repeater directory hands out. RepeaterBook
+exports it by county, most national societies publish their machine lists in it,
+and the marine, PMR and aviation channel tables circulate as it too, so a list of
+local repeaters is usually one download away rather than four hundred stores.
+
+Each channel brings its frequency, its mode, the repeater shift and offset, and
+the CTCSS tone or DCS code to transmit. A channel already on the list — same
+frequency, same mode — is skipped, so re-importing an updated directory adds what
+is new instead of doubling what is not; the names of the channels you already
+have are left alone. A line the file's own format cannot account for (a blank
+row, a trailing note, a frequency that is not a number) is skipped and counted
+rather than failing the import, and the network log at the bottom of the window
+says how many channels were read and how many lines were not.
+
+The columns are matched by *name*, from the file's header row, so a file that
+carries only some of them or carries them in another order still reads. A file
+with no header row is refused — its first line would be a real channel, and
+mistaking one for a heading would silently lose it.
+
+**EXPORT** writes the list back out in the same format, to load into a handheld
+or to keep as a backup. Not everything survives the trip: CHIRP's format has no
+place for a folder, an RTTY modem setup or an antenna socket, and its `Mode`
+column is the *modulation*, so a channel stored in a digital mode exports as the
+sideband it rides on. The frequency, the name, the shift and the tone all do.
+
 The **Sort** row above the list says what order it is drawn in — **Stored** (as
 stored, the historic order), **Name** (ignoring case), **Freq**, or **Band**
 (each band's channels together, general coverage last, by frequency inside
