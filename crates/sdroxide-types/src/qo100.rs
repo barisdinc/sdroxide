@@ -21,12 +21,16 @@ pub struct Qo100Settings {
     pub enabled: bool,
     /// Half the width, in Hz, of the frequency range searched around
     /// [`QO100_BEACON_HZ`] — set from the QO-100 window's own width buttons.
+    /// Starts at 25 kHz: this is a first-run calibration tool, and an
+    /// uncalibrated LNB's LO can sit tens of kHz off, so the opening search is
+    /// wide enough to catch that in one pass. Once a correction has been
+    /// applied the operator can narrow it right down.
     pub search_half_width_hz: f64,
 }
 
 impl Default for Qo100Settings {
     fn default() -> Self {
-        Self { enabled: false, search_half_width_hz: 5_000.0 }
+        Self { enabled: false, search_half_width_hz: 25_000.0 }
     }
 }
 

@@ -2717,8 +2717,8 @@ fn skim_center_for(
 /// The QO-100 beacon decoder's down-converter output rate for a search
 /// half-width of `half_width_hz`: about 2.5× the search so the requested span
 /// fits under Nyquist with margin — see `sdroxide_qo100::bpsk` for why the
-/// decoder wants that oversampling — and floored at 16 kHz so the default
-/// (±5 kHz) and any narrower width still land on a sane, cheap rate. Widening
+/// decoder wants that oversampling — and floored at 16 kHz so the narrow
+/// widths (±5 kHz and near it) still land on a sane, cheap rate. Widening
 /// the search really does widen the capture the decoder is handed; the
 /// demodulator inside it always runs at a fixed rate regardless
 /// (`sdroxide_qo100`'s `DEMOD_RATE_HZ`), which is what keeps the search cost
@@ -15246,10 +15246,10 @@ mod skim_window_tests {
 mod qo100_rate_tests {
     use super::qo100_capture_rate_for;
 
-    /// The engine default (±5 kHz) and anything narrower sit on the 16 kHz
+    /// The narrowest width (±5 kHz) and anything down to it sit on the 16 kHz
     /// floor — ×2.5 does not reach it until ±6.4 kHz.
     #[test]
-    fn the_default_and_narrow_widths_sit_on_the_16_khz_floor() {
+    fn the_narrowest_widths_sit_on_the_16_khz_floor() {
         assert_eq!(qo100_capture_rate_for(5_000.0), 16_000.0);
         assert_eq!(qo100_capture_rate_for(0.0), 16_000.0);
         assert_eq!(qo100_capture_rate_for(6_400.0), 16_000.0);
