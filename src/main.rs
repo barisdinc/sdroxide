@@ -2419,6 +2419,7 @@ fn open_tci_source(
         radio.tci.iq_sample_rate_hz,
         center_hz,
         radio.tci.rx,
+        radio.tci.stream_delay_ms,
     )
     .context("connecting to TCI server")?;
     let caps = tci_caps(&radio.tci.address, src.sample_rate_hz(), radio.tci.rx);

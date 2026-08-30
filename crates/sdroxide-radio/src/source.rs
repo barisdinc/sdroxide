@@ -320,6 +320,35 @@ pub trait IqSource: Send {
     /// centre or that don't expose a per-VFO offset.
     fn set_if_offset(&mut self, _hz: f64) {}
 
+    /// How long after [`IqSource::set_center_hz`] returns the samples arriving
+    /// here are actually on the new centre. Default: no delay worth naming.
+    ///
+    /// A retune is a command, not an event: the engine learns the new centre
+    /// the instant the call returns, but the pipeline behind it is still full
+    /// of samples taken at the old one. Label those with the new centre and
+    /// they are drawn at the wrong frequency — by the distance the centre moved
+    /// in the meantime. Standing still nobody would ever see it, because the
+    /// centre stops moving and the picture catches up within one delay. It is a
+    /// **drag** that makes it visible: with the view fully zoomed out a pan
+    /// sends `SetCenter` once per displayed frame (issue #133), so the label
+    /// runs continuously ahead of the data and the whole spectrum sits
+    /// displaced by `drag rate × delay` — in the direction of the drag — until
+    /// the operator lets go and it snaps back.
+    ///
+    /// A local USB front end is a millisecond or two of this and nothing to
+    /// see. A radio at the end of a socket is not: measured on a SunSDR2DX
+    /// through ExpertSDR3's TCI on the loopback interface, **131 ms** at
+    /// 192 kHz — of which only 21 ms was sdroxide's own ring, the rest inside
+    /// the rig. Nothing on the wire marks it, either: the `dds:` echo comes
+    /// back in 0.4 ms, so it acknowledges the command rather than the data.
+    ///
+    /// Hence a declaration rather than a measurement. Sources that do not
+    /// override this are unchanged in every respect — the engine's compensation
+    /// is skipped outright at zero.
+    fn stream_delay_s(&self) -> f64 {
+        0.0
+    }
+
     /// The frequency this radio would transmit on — split, XIT and a satellite
     /// uplink already in it — told to the source *while receiving*, whenever it
     /// changes.
@@ -978,6 +1007,12 @@ impl IqSource for ConvertedSource {
     /// Relative (VFO minus IQ centre), so untouched.
     fn set_if_offset(&mut self, hz: f64) {
         self.inner.set_if_offset(hz);
+    }
+
+    /// A property of the pipeline behind the converter, which a frequency
+    /// translation does not change.
+    fn stream_delay_s(&self) -> f64 {
+        self.inner.stream_delay_s()
     }
 
     /// A transmit frequency, so it takes the transmit offset: what the hardware

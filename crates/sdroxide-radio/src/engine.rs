@@ -6,6 +6,7 @@
 //! (persisted engine-side), hardware gain/antenna control, and
 //! viewport-aware spectrum frames. TX arrives in M5.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1752,6 +1753,40 @@ struct Engine {
     caps: DeviceCaps,
     state: RadioState,
     cfg: SpectrumConfig,
+    /// Where the centre has been, newest last, for a front end whose samples
+    /// arrive later than the command that moved them
+    /// ([`IqSource::stream_delay_s`]).
+    ///
+    /// The panadapter's axis is a statement about the samples in the frame, not
+    /// about the last order given to the radio, and on a radio at the end of a
+    /// socket those are a tenth of a second apart. Empty — and never even
+    /// looked at — for every source that answers zero.
+    ///
+    /// Stamped with [`Engine::samples_read`] rather than with a clock. The
+    /// question is "how much signal has gone by since that retune", and a wall
+    /// clock answers it only while nothing is queued: a frame is built some
+    /// time *after* the block it draws was read, and at a drag's speed that gap
+    /// is worth as much error as a whole step. Counting samples is the same
+    /// arithmetic against the clock that actually carries the data.
+    center_trail: VecDeque<(u64, f64)>,
+    /// The centre the samples now arriving were taken at: the last entry of
+    /// [`Engine::center_trail`] to have aged in. Seeded from the front end's
+    /// own centre at open, and re-seeded whenever the source is replaced.
+    stream_center_hz: f64,
+    /// Device-rate samples this engine has taken from the front end, ever.
+    ///
+    /// A position on the stream, not a statistic — the only thing that reads it
+    /// is [`Engine::display_center_hz`]. At 32 Msps a `u64` runs for eighteen
+    /// thousand years.
+    samples_read: u64,
+    /// How many samples the newest block held.
+    ///
+    /// [`Engine::samples_read`] is the position at the *end* of that block, and
+    /// the picture drawn from it covers the whole of it — so taking the end as
+    /// "when this was" reads the stream half a block too new, every time. On a
+    /// pan that bias is half a block of drag, and it showed up as a frame here
+    /// and there jumping a whole step ahead of the rest.
+    last_block: u64,
     analyzer: SpectrumAnalyzer,
     /// The newest finished sweep from a source that computes its own spectrum.
     ///
@@ -2835,6 +2870,9 @@ fn engine_thread(
         // top to bottom and the `state` shorthand below moves it, so the band
         // has to be copied out of it first.
         band_seen: state.band,
+        // Read before `state` is moved below, for the same reason `band_seen`
+        // is: the stream starts wherever the front end already was.
+        stream_center_hz: state.center_hz,
         source,
         caps,
         state,
@@ -2880,6 +2918,9 @@ fn engine_thread(
         swr_tripped: None,
         wide_bins: Vec::new(),
         row_batch: Vec::new(),
+        center_trail: VecDeque::new(),
+        samples_read: 0,
+        last_block: 0,
         row_axis: None,
         row_samples: 0,
         row_sample_clock: false,
@@ -3298,6 +3339,8 @@ fn engine_thread(
             // over on the air as chirps. See `IqSource::read_available`.
             if engine.caps.full_duplex && !engine.audio_mode {
                 if let Ok(n @ 1..) = engine.source.read_available(&mut buf) {
+                    engine.samples_read += n as u64;
+                    engine.last_block = n as u64;
                     engine.adc.observe(&buf[..n]);
                     let iq = decimate(engine.decim.as_mut(), &buf[..n], &mut dbuf);
                     engine.run_audio(iq);
@@ -3308,11 +3351,17 @@ fn engine_thread(
                 Ok(0) => continue, // timeout
                 Ok(n) if engine.audio_mode => {
                     lane_samples += n as u64;
+                    engine.samples_read += n as u64;
+                    engine.last_block = n as u64;
                     engine.adc.observe(&buf[..n]);
                     engine.run_audio_mode(&buf[..n]);
                 }
                 Ok(n) => {
                     lane_samples += n as u64;
+                    // Where on the stream we are, for a front end whose retunes
+                    // land later than they are given — see `center_trail`.
+                    engine.samples_read += n as u64;
+                    engine.last_block = n as u64;
                     // Ahead of the blanker and of `decimate`, both of which
                     // destroy what this is looking for. See `AdcMeter`.
                     engine.adc.observe(&buf[..n]);
@@ -4119,6 +4168,12 @@ impl Engine {
     /// [`Engine::feed_panadapter`] and the two analysers then run side by side.
     fn sync_zoom(&mut self) {
         let in_rate = self.state.sample_rate;
+        // The lane mixes down by an offset from the front end's centre, so the
+        // centre it is pointed with has to be the one the *samples* carry —
+        // otherwise, on a source whose stream lags its retunes, the lane lands
+        // beside the window it labels itself with. Same reasoning as
+        // [`Engine::display_center_hz`], which labels the frame.
+        let dev_center = self.display_center_hz();
         match self.wanted_zoom() {
             None => {
                 self.zoom = None;
@@ -4126,14 +4181,14 @@ impl Engine {
             }
             Some(want) => match self.zoom.as_mut() {
                 // The same window: only the front end may have moved under it.
-                Some(z) if z.serves(want, in_rate) => z.point_at(self.state.center_hz),
+                Some(z) if z.serves(want, in_rate) => z.point_at(dev_center),
                 _ => {
                     let fft = zoom_lane_fft(self.cfg.bins());
                     let lane = ZoomLane::new(
                         in_rate,
                         want.1,
                         want.0,
-                        self.state.center_hz,
+                        dev_center,
                         self.cfg.avg_tc,
                         fft,
                         f64::from(self.cfg.rows()),
@@ -4656,6 +4711,13 @@ impl Engine {
             return;
         }
         self.state.center_hz = center;
+        // A move we did not command, learned about from a report that arrives
+        // *after* the rig made it — so the stream is already there, or as near
+        // as anything here can tell. Anything still queued in the trail was
+        // superseded by it. Compensating a move nobody timed would be guessing
+        // in the other direction.
+        self.center_trail.clear();
+        self.stream_center_hz = center;
         // Where the hardware demonstrably is, is by definition a frequency it
         // took — this is the dial the rig itself just reported.
         self.good_vfo_hz = self.state.active_freq_hz();
@@ -5827,6 +5889,53 @@ impl Engine {
         )
     }
 
+    /// Remember where the centre went, for a front end whose stream lags the
+    /// command that moved it. A no-op — and no allocation — at zero delay.
+    fn note_center_change(&mut self, center_hz: f64) {
+        if self.source.stream_delay_s() <= 0.0 {
+            return;
+        }
+        self.center_trail.push_back((self.samples_read, center_hz));
+    }
+
+    /// The centre the samples now being drawn were actually taken at.
+    ///
+    /// [`Engine::note_center_change`] logs each retune; this reads back the one
+    /// in force `stream_delay_s` ago and drops everything older, so the trail
+    /// stays a handful of entries however long a drag runs. A source that
+    /// declares no delay never reaches past the first line, and gets the
+    /// commanded centre exactly as before.
+    fn display_center_hz(&mut self) -> f64 {
+        let delay = self.source.stream_delay_s();
+        if delay <= 0.0 {
+            return self.state.center_hz;
+        }
+        // The samples the analyser is holding were taken this far back up the
+        // stream. Counted at the *device* rate, which is what
+        // [`Engine::samples_read`] counts: `state.sample_rate` is what is left
+        // after front-end decimation, and using it would under-count the delay
+        // by exactly that factor.
+        let behind = (delay * self.radio_fs) as u64 + self.last_block / 2;
+        let Some(cutoff) = self.samples_read.checked_sub(behind) else {
+            return self.state.center_hz;
+        };
+        // Every entry at or before the cutoff has now reached the analyser; the
+        // last of them is the centre these samples were taken at, and anything
+        // still ahead of the cutoff is a retune the stream has yet to show.
+        let mut center = None;
+        while let Some(&(at, hz)) = self.center_trail.front() {
+            if at > cutoff {
+                break;
+            }
+            center = Some(hz);
+            self.center_trail.pop_front();
+        }
+        if let Some(hz) = center {
+            self.stream_center_hz = hz;
+        }
+        self.stream_center_hz
+    }
+
     fn make_spectrum_frame(&mut self) -> SpectrumFrame {
         if self.tx_active {
             return self.make_tx_frame();
@@ -5916,8 +6025,9 @@ impl Engine {
                 self.cfg.viewport,
             );
         }
+        let center = self.display_center_hz();
         self.analyzer.make_frame(
-            self.state.center_hz,
+            center,
             self.state.sample_rate,
             self.cfg.db_floor,
             self.cfg.db_ceil,
@@ -10639,6 +10749,9 @@ impl Engine {
             let _ = self.source.tx_end();
         }
         self.source = source;
+        // The old front end's pipeline went with it.
+        self.center_trail.clear();
+        self.stream_center_hz = self.source.center_hz();
         self.caps = caps;
         self.caps.center_is_dial = self.source.center_is_dial();
         self.caps.cw_audio_keyed = self.source.cw_audio_keyed();
@@ -12436,6 +12549,7 @@ impl Engine {
         match self.source.set_center_hz(center_hz) {
             Ok(()) => {
                 self.state.center_hz = center_hz;
+                self.note_center_change(center_hz);
                 // Re-place the skim window inside the span that has just moved;
                 // one that really moves re-labels its spots and clears its
                 // tracks, so none straddles the old and new axis.

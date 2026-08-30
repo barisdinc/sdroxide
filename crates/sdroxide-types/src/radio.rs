@@ -1419,17 +1419,46 @@ pub struct TciConfig {
     /// belongs to receiver 0's radio. `#[serde(default)]` on the struct keeps
     /// every existing `radio.json` on receiver 0, exactly as before.
     pub rx: u32,
+    /// How long after a `dds:` command the IQ actually arrives on the new
+    /// centre, in milliseconds — what the panadapter's axis has to be held back
+    /// by so a pan draws the band where it really is. See
+    /// `IqSource::stream_delay_s` for what goes wrong without it.
+    ///
+    /// Configurable because it belongs to the rig and the link rather than to
+    /// this protocol: nothing in TCI reports it (the `dds:` echo is a command
+    /// acknowledgement, returning in 0.4 ms), so it can only be declared. The
+    /// default is [`TciConfig::DEFAULT_STREAM_DELAY_MS`]; set it to 0 to switch
+    /// the compensation off entirely.
+    pub stream_delay_ms: f64,
 }
 
 impl Default for TciConfig {
     fn default() -> Self {
-        TciConfig { address: "127.0.0.1:50001".into(), iq_sample_rate_hz: 192_000.0, rx: 0 }
+        TciConfig {
+            address: "127.0.0.1:50001".into(),
+            iq_sample_rate_hz: 192_000.0,
+            rx: 0,
+            stream_delay_ms: TciConfig::DEFAULT_STREAM_DELAY_MS,
+        }
     }
 }
 
 impl TciConfig {
     /// IQ sample rates offered in the UI.
     pub const IQ_RATES: [f64; 3] = [48_000.0, 96_000.0, 192_000.0];
+
+    /// Measured on a SunSDR2DX through ExpertSDR3 over the loopback interface:
+    /// a `dds:` step took 109–131 ms to reach the samples at 192 kHz, 129 ms at
+    /// 96 kHz and 169 ms at 48 kHz — near enough one number rather than a fixed
+    /// count of samples, which is what a rig-side pipeline measured in
+    /// milliseconds looks like. Only 21 ms of it was sdroxide's own ring.
+    ///
+    /// One rig on one host, so it is a starting point and not a constant of
+    /// nature; a TCI server across a network will be slower. The cost of having
+    /// it wrong is bounded either way — the axis is off by the drag rate times
+    /// the *error*, where before it was off by the drag rate times the whole
+    /// delay.
+    pub const DEFAULT_STREAM_DELAY_MS: f64 = 130.0;
 }
 
 /// What the Icom's LAN audio stream is carrying.
