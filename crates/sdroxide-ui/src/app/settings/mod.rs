@@ -37,9 +37,9 @@ use self::net::{
 use self::radio::{
     settings_airspy_tab, settings_airspyhf_tab, settings_cat_tab, settings_elad_tab,
     settings_hackrf_tab, settings_hpsdr_tab, settings_hydrasdr_tab, settings_icomnet_tab,
-    settings_lime_tab, settings_pluto_tab, settings_rtlsdr_tab, settings_rtltcp_tab,
-    settings_rx888_tab, settings_sdrplay_tab, settings_smartsdr_tab, settings_soapy_devices,
-    settings_soapy_tab, settings_spyserver_tab, settings_tci_tab,
+    settings_kiwisdr_tab, settings_lime_tab, settings_pluto_tab, settings_rtlsdr_tab,
+    settings_rtltcp_tab, settings_rx888_tab, settings_sdrplay_tab, settings_smartsdr_tab,
+    settings_soapy_devices, settings_soapy_tab, settings_spyserver_tab, settings_tci_tab,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use self::remote::settings_remote_tab;
@@ -189,6 +189,7 @@ pub(in crate::app) struct SettingsIo<'a> {
     /// Connect to the Icom, report what it is, and disconnect (blocking).
     icomnet_test: &'a mut bool,
     spyserver_test: &'a mut bool,
+    kiwi_test: &'a mut bool,
     /// Copy the last Icom LAN session's trace to the clipboard.
     icomnet_copy_report: &'a mut bool,
     /// Listen for FlexRadio discovery broadcasts (a couple of seconds, blocking).
@@ -464,6 +465,11 @@ impl SdroxideApp {
             A::Hpsdr(d) => self.hpsdr_devices = d,
             A::SmartSdr(d) => self.smartsdr_devices = d,
             A::Pluto(d) => self.pluto_devices = d,
+            // Not a device on this machine but a list from the internet,
+            // fetched by it — see `DeviceProbe::PublicSdrs`. Kept whole rather
+            // than merged so a refresh that came back short replaces the list
+            // instead of leaving stale receivers in it.
+            A::PublicSdrs(d) => self.public_sdrs = Some(*d),
             A::Test(kind, result) => self.set_test_outcome(kind, TestOutcome::Done(result)),
             // Straight to the clipboard, which is what the button that asked
             // for it promised — from here it goes into a bug report.
@@ -486,6 +492,7 @@ impl SdroxideApp {
             K::IcomNet => &mut self.icomnet_test_result,
             K::SmartSdr => &mut self.smartsdr_test_result,
             K::Pluto => &mut self.pluto_test_result,
+            K::Kiwi => &mut self.kiwi_test_result,
         };
         *slot = Some(outcome);
     }
@@ -606,6 +613,7 @@ impl SdroxideApp {
         let mut tci_test = false;
         let mut icomnet_test = false;
         let mut spyserver_test = false;
+        let mut kiwi_test = false;
         let mut icomnet_copy_report = false;
         let mut smartsdr_discover = false;
         let mut smartsdr_test = false;
@@ -684,6 +692,10 @@ impl SdroxideApp {
         // with spyserver, in either of the two shapes it can send.
         iface_opts.push(sdroxide_types::Backend::SpyServer);
         iface_opts.push(sdroxide_types::Backend::SpyServerVfo);
+        // Pure Rust over `ws://`, no TLS and no system library: the ~900
+        // public KiwiSDRs and Web-888s, and any private one on the same
+        // firmware.
+        iface_opts.push(sdroxide_types::Backend::KiwiSdr);
         // Same reasoning as the RTL-SDR: pure Rust over `nusb`, no system
         // library, so it is in every build variant.
         iface_opts.push(sdroxide_types::Backend::Rx888);
@@ -827,6 +839,7 @@ impl SdroxideApp {
                             smartsdr_test: &mut smartsdr_test,
                             icomnet_test: &mut icomnet_test,
                             spyserver_test: &mut spyserver_test,
+                            kiwi_test: &mut kiwi_test,
                             icomnet_copy_report: &mut icomnet_copy_report,
                             smartsdr_copy_report: &mut smartsdr_copy_report,
                             pluto_discover: &mut pluto_discover,
@@ -1078,6 +1091,24 @@ impl SdroxideApp {
             } else {
                 let endpoint = block.endpoint();
                 self.ask_device(ctx, P::Test(T::SpyServer(endpoint)));
+            }
+        }
+        // The address typed in the dialog, like every other test here. A
+        // receiver behind the project's proxy answers on port 80 rather than
+        // 8073, so the endpoint is built from the config's own rule rather than
+        // by appending a default here.
+        if let (true, Some(cfg)) = (kiwi_test, &radio_edit) {
+            if cfg.kiwi.address.trim().is_empty() {
+                self.set_test_outcome(
+                    sdroxide_types::TestKind::Kiwi,
+                    TestOutcome::Done(Err(
+                        "enter the receiver's address first, or pick one from Public SDRs"
+                            .to_string(),
+                    )),
+                );
+            } else {
+                let endpoint = cfg.kiwi.endpoint();
+                self.ask_device(ctx, P::Test(T::Kiwi(endpoint)));
             }
         }
         if smartsdr_discover {
@@ -1921,6 +1952,14 @@ impl SdroxideApp {
                         backend == Backend::SpyServerVfo,
                         io.spyserver_test,
                         &self.spyserver_test_result,
+                        io.can_probe,
+                        cmds,
+                    ),
+                    Backend::KiwiSdr => settings_kiwisdr_tab(
+                        ui,
+                        io.radio_edit,
+                        io.kiwi_test,
+                        &self.kiwi_test_result,
                         io.can_probe,
                         cmds,
                     ),
@@ -3306,8 +3345,10 @@ impl SdroxideApp {
                         .on_hover_text(only.hint())
                         .clicked()
                     {
-                        requests
-                            .push(crate::app::RadioTabRequest::Add { station: only.key.clone() });
+                        requests.push(crate::app::RadioTabRequest::Add {
+                            station: only.key.clone(),
+                            preset: None,
+                        });
                     }
                 }
                 // One destination, and it is somebody else's station — which is
@@ -3333,6 +3374,7 @@ impl SdroxideApp {
                             if ui.button(t.label()).on_hover_text(t.hint()).clicked() {
                                 requests.push(crate::app::RadioTabRequest::Add {
                                     station: t.key.clone(),
+                                    preset: None,
                                 });
                                 ui.close();
                             }

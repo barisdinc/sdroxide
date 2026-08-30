@@ -5047,6 +5047,12 @@ radio. Everything below the selector changes to match the choice:
   that fits down a WiFi or cellular link: a narrow I/Q stream that follows the
   dial, plus the server's own FFT of the whole band for the full-band strip.
   See [6.2.14](#6214-spyserver-network-receivers).
+- **KiwiSDR / Web-888 (network)** — one of the ~870 receivers published on
+  `rx.kiwisdr.com`, or a private one on the same firmware. A ~12 kHz I/Q window
+  that follows the dial, plus the receiver's own 0–30 MHz waterfall for the
+  full-band strip. Receive only. Browse the public ones with **WEB SDR** and
+  open one as a radio: see
+  [15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver).
 - **RX-888 (USB)** — an RX-888 / RX-888 Mk2 direct-sampling receiver, likewise
   driven directly over USB, with its firmware bundled and uploaded for it. On a
   Mk2 the built-in R828D tuner is driven too, so the receiver covers VHF and UHF
@@ -8525,6 +8531,38 @@ the spur goes when you do.
 > raw 12-bit values and decoded as I/Q pairs.
 > `cargo run -p sdroxide-hydrasdr --example probe` does the same from a terminal.
 
+#### 6.2.19 KiwiSDR / Web-888 (network receivers)
+
+A **KiwiSDR**, or the Web-888 board its listing calls a KiwiSDR 2 — the ~870
+0–30 MHz receivers published on `rx.kiwisdr.com`, and any private one running
+the same firmware. Receive only.
+
+Give it an address and press **Apply / reconnect**. The port defaults to 8073,
+but a receiver reached through the project's own proxy — at a
+`something.proxy.kiwisdr.com` address, which is nearly half the public ones —
+answers on **80** instead, so give the port explicitly.
+
+- **Password** is the receiver's *user* password where its operator set one.
+  Blank on almost every public receiver, and not the admin password.
+- **Announce as** is the name the receiver's owner and its other listeners see.
+  Blank means your station callsign; identifying is what the network expects.
+- **Band view** asks for the receiver's own waterfall as well as its I/Q, for
+  the full-band strip. Worth having — without it the only band view is the
+  ~12 kHz the I/Q covers, which is not enough to tune by — and it costs about
+  20 kB/s against the I/Q's 44.
+- **Receiver AGC** is the receiver's own, on the far side of the link and ahead
+  of the I/Q. On by default, which is unlike every other interface here; see
+  [15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver) for the
+  measurement behind that and for what it means for the S-meter.
+
+**Test connection** reads the receiver's status page over HTTP — it does not
+open a session, so it takes none of the receiver's channels — and says what it
+is, what it covers, how many channels are free, and whether its operator allows
+connections from apps other than a browser at all.
+
+To find a receiver rather than type one in, use **WEB SDR** in the System box:
+[15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver).
+
 ### 6.3 UI: display preferences and voice announcements
 
 ![The UI tab: frame rate, scroll/spectrum speed, palette, and spectrum background](images/settings-ui.jpg)
@@ -10357,6 +10395,13 @@ typed and said no.
 The same server serves a browser client, so you can operate from any device with
 a web browser.
 
+Browsing the public SDRs
+([15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver)) works
+here too, and works the same way: the lists are fetched by the station, not by
+the browser, and the station is what holds the connection to the receiver. So a
+browser tab can find a receiver on the other side of the world and add it to the
+station's roster, where every other client sees it as one more radio.
+
 ![The web client in a browser](images/13-web-client.png)
 
 ### 9.1 Serve the web client
@@ -12142,6 +12187,122 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
   longer centre itself on the IF — the window parks as close as it can and
   the tuned frequency simply rides off-centre in it, the same way it does at
   the edges of HF. Every width keeps the full VHF/UHF range.
+
+### 15.21 Public SDRs on the internet (KiwiSDR / Web-888, SpyServer)
+
+About eleven hundred receivers are published for anyone to listen on, and
+sdroxide can open one as an ordinary radio — same panadapter, same
+demodulators, same digital modes, same logbook. Two networks are covered.
+
+**KiwiSDR and Web-888** (the board its own listing calls "KiwiSDR 2") are the
+0–30 MHz receivers, about 870 of them online. **SpyServer** is Airspy's own
+server and the several that speak its protocol, about 230 online, mostly
+VHF/UHF dongles.
+
+Everything here is **receive only**, and not because of a missing feature.
+These are other people's antennas.
+
+#### Browsing
+
+**WEB SDR** in the System box opens the list. The buttons across the top filter
+it by network, by whether a receiver can actually be used right now, and by
+whether it covers the frequency you are on; the search box matches on the
+name, the place, the antenna and the band, so `40m denmark` or `7000` both
+work. Hovering a row shows its address, its hardware and its antenna.
+
+Each row offers two things. **USE** points the radio you are on at that
+receiver, keeping everything else about it — converter offset, audio devices,
+the lot. **+ TAB** opens it as another radio in a tab of its own, leaving the
+one you were on alone.
+
+The lists are fetched by the machine the radio is attached to, not by the
+screen you are sitting at — so this works the same in the browser client, and
+a receiver is judged reachable from where it will actually be connected to.
+They are cached for a quarter of an hour; **⟳ REFRESH** goes to the network.
+
+#### Being a guest
+
+Every one of these receivers has a hard limit on how many people can listen at
+once, and somebody pays for its antenna, its power and its uplink.
+
+- A receiver that is **full** is shown greyed with the reason rather than
+  hidden, so you can see there is one where you wanted one and come back.
+- A KiwiSDR whose operator has **not opened any channels to non-browser apps**
+  is greyed too. sdroxide is a non-browser app, so such a receiver will refuse
+  it however many channels are free — this is the one refusal you cannot see
+  coming from the outside, which is why it is called out.
+- sdroxide **identifies itself**, as the network expects: your station
+  callsign, or plain `sdroxide` where none is set. Settings → Radio can
+  override it.
+- When a receiver ends the session itself — its inactivity timeout, its
+  24-hour per-address limit, a wrong password, or its operator pressing the
+  kick button — sdroxide reports what it said and **stops**. It does not
+  reconnect. A dropped network link still reconnects normally.
+- Closing the radio frees the channel at once rather than at the receiver's
+  own timeout.
+
+#### What a KiwiSDR actually gives you
+
+A KiwiSDR has no wideband I/Q and never has. It has eight (or four) *user
+channels*, each about 12 kHz wide, which it normally demodulates for you — and
+one of its modes hands the channel over as complex baseband instead. That is
+what sdroxide opens.
+
+So the panadapter is about 12 kHz, and honest about it. Alongside it, on a
+second connection, the receiver sends the waterfall its own web page draws:
+1024 finished bins across the whole 0–30 MHz, in the strip above the
+panadapter. Tuning across that strip retunes the receiver. It is the same
+shape as the SpyServer VFO+FFT interface, and for the same reason — it is what
+a receiver at the far end of a network link can actually deliver.
+
+That is enough for everything sdroxide decodes: SSB, AM and the synchronous
+detectors, CW, RTTY, NAVTEX, WSPR, FT8 and FT4, and the rest. It is not enough
+for anything wider than the window, and there is no way to ask for more.
+
+The link costs about 64 kB/s: 44 for the I/Q and 20 for the waterfall. Turn
+the band view off, or slow it down, in Settings → Radio if that matters.
+
+#### Gain and the S-meter
+
+Unusually for a receiver here, the **AGC is left on at the far end** by
+default. It sits ahead of the I/Q, so it acts before anything sdroxide does —
+but the alternative measured worse: on a live receiver the manual gain was not
+monotonic across its range and its top end clipped the I/Q at full scale,
+while the AGC held about −24 dBFS with 7 dB of headroom.
+
+The consequence is that the sample amplitude is not a signal level, so the
+S-meter is read from the figure the receiver puts in every audio frame
+instead. That reading is already in dBm on its own operator's calibration —
+which is worth rather more than sdroxide's own uncalibrated scale, and comes
+with one caveat: it is for the receiver's ±6 kHz channel, not for whatever
+filter you have in front of the demodulator. A narrow CW filter here still
+reads the wideband level.
+
+#### SpyServer, and which shape to take
+
+A SpyServer will send either a wideband stream — an ordinary SDR, as much of
+the band as its ladder offers — or a narrow window that follows the dial plus
+its own band view. The browse window's **LOW BW** button picks the second, which
+is the one for a link that cannot carry megabits. It makes no difference to a
+KiwiSDR, which has only the one shape.
+
+A server whose receiver another client already owns still works; tuning is
+then limited to the slice that client is receiving, and the gain is theirs.
+
+#### Adding one by hand
+
+A receiver that is not listed — your own, or one behind a name you were given
+— goes in under Settings → Radio, interface **KiwiSDR / Web-888 (network)** or
+**SpyServer (network)**, as an address. **Test connection** reads the
+receiver's status page without taking one of its channels and says what it is,
+what it covers, how many channels are free and whether non-browser apps are
+allowed at all.
+
+One trap worth knowing: nearly half the public KiwiSDRs are reached through
+the project's own reverse proxy, at a `something.proxy.kiwisdr.com` address,
+and those answer on **port 80** rather than on a Kiwi's usual 8073. Give the
+port explicitly. Picking a receiver from the browse window always gets this
+right.
 
 ---
 

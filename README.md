@@ -415,6 +415,18 @@ starting sdroxide before the rig is fine:
   kilobytes a frame. Roughly a hundredth of the link a wideband Airspy stream
   needs.
 
+- **KiwiSDR / Web-888 (network)** — one of the ~900 receivers published on
+  `rx.kiwisdr.com`, or a private one on the same firmware. Receive only: these
+  are other people's antennas. A KiwiSDR has no wideband I/Q to give — what it
+  has is user channels about 12 kHz wide, one of which it will send as complex
+  baseband instead of as audio — so the panadapter is that window and the strip
+  above it is the receiver's own 0–30 MHz waterfall. Tuning across the strip
+  retunes the receiver. About 64 kB/s while connected.
+
+  Browse the public ones with **WEB SDR** in the System box; picking one there
+  fills the address in and opens it, either in this radio or in a tab of its
+  own.
+
 - **RX-888 (USB)** — an RX-888 or RX-888 Mk2 direct-sampling HF receiver
   (LTC2208 16-bit ADC, Cypress FX3), driven directly over USB by a native
   pure-Rust driver. **No SoapySDR, no libusb, and no vendor driver package.**

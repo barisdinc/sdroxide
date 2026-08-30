@@ -158,6 +158,10 @@ pub struct MultiApp {
     /// settings page. Cleared as soon as one arrives — see
     /// [`MultiApp::open_peer_radios`].
     pending_add: Option<String>,
+    /// A configuration to hand the radio `pending_add` is waiting for, from
+    /// "Public SDRs". Separate from `pending_add` because the plain "+" has
+    /// none and must still open the settings page.
+    pending_preset: Option<Box<sdroxide_types::RadioConfig>>,
     /// Addresses of a station's further radios that have already been opened
     /// beside the one that was dialled. Kept for the whole session and never
     /// cleared on close: a tab the operator shut is one they did not want, and
@@ -241,6 +245,7 @@ impl MultiApp {
             remote,
             wgpu: cc.wgpu_render_state.clone(),
             pending_add: None,
+            pending_preset: None,
             peers_opened: std::collections::HashSet::new(),
             station_radio,
         }
@@ -491,7 +496,7 @@ impl MultiApp {
                         self.tabs[i].app.open_radio_settings();
                     }
                 }
-                RadioTabRequest::Add { station } => self.add_radio(&station, ctx),
+                RadioTabRequest::Add { station, preset } => self.add_radio(&station, preset, ctx),
                 #[cfg(not(target_arch = "wasm32"))]
                 RadioTabRequest::Connect { url, name } => self.connect_tab(&url, name, ctx),
                 RadioTabRequest::Close(id) => {
@@ -562,7 +567,7 @@ impl MultiApp {
                 // in the way. Adding a radio at a station is one screen away,
                 // in Settings → Radio, where the two rosters are already side
                 // by side.
-                StripAction::Add => self.add_radio("", ctx),
+                StripAction::Add => self.add_radio("", None, ctx),
             }
         }
     }
@@ -782,9 +787,14 @@ impl MultiApp {
     /// starts its engine and announces its roster again, and the new radio
     /// arrives as one more of that station's, through the same path the rest of
     /// them did.
-    fn add_radio(&mut self, station: &str, ctx: &egui::Context) {
+    fn add_radio(
+        &mut self,
+        station: &str,
+        preset: Option<Box<sdroxide_types::RadioConfig>>,
+        ctx: &egui::Context,
+    ) {
         if station.is_empty() {
-            self.add_tab(ctx);
+            self.add_tab(preset, ctx);
             return;
         }
         let Some(t) = self.tabs.iter_mut().find(|t| t.remote && t.app.station_key() == station)
@@ -796,6 +806,10 @@ impl MultiApp {
         // says otherwise.
         t.app.add_station_radio("");
         self.pending_add = Some(station.to_string());
+        // Held until the station announces the radio and `open_peer_radios`
+        // opens it: the radio does not exist yet, so there is nothing to
+        // configure until then.
+        self.pending_preset = preset;
         // Nothing else happens here. The station answers with its roster, and
         // `open_peer_radios` opens what is new in it — including, for a radio
         // this screen asked for, putting it in front of the operator.
@@ -819,14 +833,20 @@ impl MultiApp {
         t.app.remove_station_radio(station_id);
     }
 
-    fn add_tab(&mut self, ctx: &egui::Context) {
+    fn add_tab(&mut self, preset: Option<Box<sdroxide_types::RadioConfig>>, ctx: &egui::Context) {
         let Some(factory) = self.factory.as_mut() else { return };
         match factory() {
             Ok(r) => {
                 let i = self.install_tab(r, ctx);
-                // The new tab has no interface yet; the operator's next stop
-                // is Settings → Radio, so open it for them.
-                self.tabs[i].app.open_radio_settings();
+                match preset {
+                    // Already configured — it came from "Public SDRs", which
+                    // knows the whole answer. Opening the settings page over it
+                    // would be asking a question that has been answered.
+                    Some(cfg) => self.tabs[i].app.apply_radio_config(*cfg),
+                    // The new tab has no interface yet; the operator's next
+                    // stop is Settings → Radio, so open it for them.
+                    None => self.tabs[i].app.open_radio_settings(),
+                }
             }
             // Into the focused tab's dismissable banner — the main window's
             // strip may not be on screen to carry a message.
@@ -944,7 +964,10 @@ impl MultiApp {
                     let i = if asked_for {
                         self.pending_add = None;
                         let i = self.install_tab(r, ctx);
-                        self.tabs[i].app.open_radio_settings();
+                        match self.pending_preset.take() {
+                            Some(cfg) => self.tabs[i].app.apply_radio_config(*cfg),
+                            None => self.tabs[i].app.open_radio_settings(),
+                        }
                         i
                     } else {
                         self.append_tab(r, ctx)

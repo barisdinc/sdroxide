@@ -11,6 +11,7 @@ mod hackrf_source;
 mod hpsdr_source;
 mod hydrasdr_source;
 mod icomnet_source;
+mod kiwisdr_source;
 mod lime_source;
 mod local_controller;
 mod null_source;
@@ -1389,6 +1390,7 @@ fn open_configured_source(
         Backend::RtlTcp => open_rtltcp_source(radio, cli.center_hz()),
         Backend::SpyServer => open_spyserver_source(radio, cli.center_hz()),
         Backend::SpyServerVfo => open_spyserver_vfo_source(radio, cli.center_hz()),
+        Backend::KiwiSdr => open_kiwisdr_source(radio, cli.center_hz()),
         Backend::Rx888 => open_rx888_source(radio, cli.center_hz()),
         Backend::AirspyHf => open_airspyhf_source(radio, cli.center_hz()),
         Backend::Airspy => open_airspy_source(radio, cli.center_hz()),
@@ -2404,6 +2406,70 @@ fn spyserver_caps(src: &spyserver_source::SpyServerSource, driver: &str) -> Devi
         // the engine has to adopt such moves rather than answer them — which is
         // exactly what this flag means.
         shared_lo_rx: !src.can_control(),
+        ..DeviceCaps::default()
+    }
+}
+
+/// Build the KiwiSDR source: a ~12 kHz I/Q window that follows the dial, plus
+/// the receiver's own 0-30 MHz waterfall for the full-band strip.
+fn open_kiwisdr_source(
+    radio: &RadioConfig,
+    center_hz: f64,
+) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
+    // Who to announce ourselves as. Resolved here rather than in the driver
+    // crate, which has no business reading the station configuration — and it
+    // is the station callsign rather than the radio's, because it is the
+    // operator the receiver's owner sees.
+    let ident = radio.kiwi.ident_or(&sdroxide_config::load_digi_config().my_call);
+    let src = kiwisdr_source::KiwiSdrSource::connect(&radio.kiwi, &ident, center_hz)
+        .with_context(|| format!("connecting to the KiwiSDR at {}", radio.kiwi.endpoint()))?;
+    let caps = kiwisdr_caps(&src);
+    Ok((Box::new(src), caps))
+}
+
+/// Capabilities for a KiwiSDR: one narrow I/Q channel, receive only.
+///
+/// The tuning range comes from the receiver's own opening burst rather than
+/// from the directory listing, because a privately-run Kiwi is in no listing —
+/// and because the two disagree often enough to matter: the listing carries
+/// what its operator typed, the receiver carries what it is actually set to.
+///
+/// One sample rate, and it is not a round number. The receiver states its own
+/// (11998.876765 Hz on the one this was measured against) and there is nothing
+/// to choose: a Kiwi's user channel is the width it is.
+///
+/// The gain elements are the receiver's AGC and its manual gain. Both are on
+/// the far side of the link and ahead of the I/Q, which is why the S-meter is
+/// read from the frames instead — see `kiwisdr_source`.
+fn kiwisdr_caps(src: &kiwisdr_source::KiwiSdrSource) -> DeviceCaps {
+    let (lo, hi) = src.tuning_range();
+    DeviceCaps {
+        driver: "kiwisdr".into(),
+        label: src.describe(),
+        rx_channels: 1,
+        tx_channels: 0,
+        audio_mode: false,
+        freq_ranges_rx: vec![(lo, hi)],
+        sample_rates: vec![src.sample_rate()],
+        gains: vec![
+            sdroxide_types::GainElement {
+                name: sdroxide_types::KiwiConfig::AGC_ELEMENT.into(),
+                direction: sdroxide_types::Direction::Rx,
+                min_db: 0.0,
+                max_db: 1.0,
+                step_db: 1.0,
+            },
+            sdroxide_types::GainElement {
+                name: sdroxide_types::KiwiConfig::MAN_GAIN_ELEMENT.into(),
+                direction: sdroxide_types::Direction::Rx,
+                // The receiver's own scale, carried in a field named for
+                // decibels because `GainElement` has no other - the same thing
+                // the SpyServer's gain index and the SDRplay's LNA state do.
+                min_db: 0.0,
+                max_db: 90.0,
+                step_db: 1.0,
+            },
+        ],
         ..DeviceCaps::default()
     }
 }

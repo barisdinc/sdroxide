@@ -435,6 +435,9 @@ pub fn save_remote_login(login: Option<&sdroxide_types::RemoteAccess>) -> Result
     }
 }
 
+mod publicsdr;
+pub use publicsdr::public_sdr_directory;
+
 pub fn config_dir() -> Result<PathBuf, ConfigError> {
     // The override exists for the integration tests, which must not write the
     // operator's real configuration, and works as a profile switch for anyone

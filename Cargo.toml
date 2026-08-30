@@ -26,7 +26,7 @@ ewebsock = { path = "vendor/ewebsock" }
 soapysdr = { path = "vendor/soapysdr" }
 
 [workspace.package]
-version = "1.6.0"
+version = "1.6.1"
 edition = "2024"
 # The native binary links mfsk-core (GPL-3.0-or-later) for FT8/FT4 and the
 # DeepCW model (AGPL-3.0-only) for CW, so the built binary carries both. AGPL is
@@ -111,6 +111,7 @@ sdroxide-elad = { path = "crates/sdroxide-elad" }
 sdroxide-lime = { path = "crates/sdroxide-lime" }
 sdroxide-limerfe = { path = "crates/sdroxide-limerfe" }
 sdroxide-spyserver = { path = "crates/sdroxide-spyserver" }
+sdroxide-kiwisdr = { path = "crates/sdroxide-kiwisdr" }
 sdroxide-net = { path = "crates/sdroxide-net" }
 sdroxide-winlink = { path = "crates/sdroxide-winlink" }
 sdroxide-ax25 = { path = "crates/sdroxide-ax25" }
@@ -172,6 +173,7 @@ sdroxide-elad.workspace = true
 sdroxide-lime.workspace = true
 sdroxide-limerfe.workspace = true
 sdroxide-spyserver.workspace = true
+sdroxide-kiwisdr.workspace = true
 sdroxide-ui = { workspace = true, features = ["remote"] }
 # `accesskit` is one of eframe's defaults, and turning the defaults off
 # silently switched it back off: without it the whole widget tree is

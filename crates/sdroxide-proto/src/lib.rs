@@ -905,7 +905,26 @@ use sdroxide_types::{
 /// The `i3 = 5` message layout the mode transmits is not on this wire at all:
 /// it is packed and unpacked inside the engine, and what crosses the link is
 /// the decoded text, exactly as for every other 77-bit layout.
-pub const PROTO_VERSION: u16 = 105;
+/// **106** — browsing the public-SDR directories.
+///
+/// [`sdroxide_types::DeviceProbe`] gains `PublicSdrs { refresh }` and
+/// [`sdroxide_types::ProbeAnswer`] gains `PublicSdrs`, carrying a
+/// [`sdroxide_types::PublicSdrDirectory`] — the KiwiSDR and SpyServer listings,
+/// fetched by the machine the radio is attached to.
+///
+/// The probe lane rather than a route of its own, and for one reason: a browser
+/// client has no HTTP client and could not reach either directory across
+/// origins if it had. Asking the station is the only way the web UI gets this
+/// feature at all, and the station is also the end that will hold the
+/// connection, so it is the end that should be reading the list.
+///
+/// [`sdroxide_types::Backend`] gains `KiwiSdr` and [`sdroxide_types::RadioConfig`]
+/// gains `kiwi` ([`sdroxide_types::KiwiConfig`]) at its tail. Both are appended,
+/// so every variant and field already on the wire keeps its number — but a v105
+/// peer has no `KiwiSdr` variant to decode into and desynchronises on the rest
+/// of any `RadioConfig`, which is what the handshake's equality test prevents.
+/// Same shape of bump as v81's HydraSDR and v64/v65's ELAD and Lime.
+pub const PROTO_VERSION: u16 = 106;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

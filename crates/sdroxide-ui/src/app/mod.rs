@@ -28,6 +28,7 @@ pub(in crate::app) mod logbook;
 pub(in crate::app) mod net;
 pub(in crate::app) mod panels;
 pub(crate) mod persist;
+pub(in crate::app) mod publicsdr;
 pub(in crate::app) mod qo100;
 pub(in crate::app) mod rds;
 pub(in crate::app) mod sat;
@@ -314,6 +315,24 @@ pub struct SdroxideApp {
     tci_test_result: Option<TestOutcome>,
     icomnet_test_result: Option<TestOutcome>,
     spyserver_test_result: Option<TestOutcome>,
+    kiwi_test_result: Option<TestOutcome>,
+    /// The public-SDR directories, once the machine with the radio on it has
+    /// answered. `None` until then, which is what the browse window shows a
+    /// "fetching" line for; `Some` but empty means the fetch really did come
+    /// back with nothing.
+    public_sdrs: Option<sdroxide_types::PublicSdrDirectory>,
+    show_public_sdrs: bool,
+    /// Asked once per opening of the window, so reopening it after an hour does
+    /// not go on showing an hour-old list.
+    public_sdrs_asked: bool,
+    public_sdr_search: String,
+    /// Indexed by `PublicSdrNetwork::ALL`, positionally.
+    public_sdr_nets_shown: [bool; 2],
+    public_sdr_free_only: bool,
+    public_sdr_in_band: bool,
+    /// Take a SpyServer in its VFO+FFT shape rather than wideband. No effect on
+    /// a KiwiSDR, which has only one shape.
+    public_sdr_low_bw: bool,
     /// FlexRadios found by the last SmartSDR "Discover" listen.
     smartsdr_devices: Vec<sdroxide_types::SmartSdrDevice>,
     /// Result of the last SmartSDR "Test connection".
@@ -896,8 +915,14 @@ pub(crate) enum RadioTabRequest {
     /// its own dongle and a remote station has two rosters in one tab strip,
     /// and "add a radio" means nothing until it says which. A browser has only
     /// the station's.
+    ///
+    /// `preset` is what "Public SDRs" uses: the new radio comes up already
+    /// pointed at the receiver that was picked, rather than arriving blank with
+    /// its settings page open for an address to be typed into. `None` is the
+    /// plain "+" chip, which does exactly that.
     Add {
         station: String,
+        preset: Option<Box<sdroxide_types::RadioConfig>>,
     },
     /// Open somebody else's station as a tab of its own: dial this WebSocket
     /// URL and, if it answers, show it under `name`. Queued by the **Remote**
@@ -1096,6 +1121,18 @@ impl SdroxideApp {
             tci_test_result: None,
             icomnet_test_result: None,
             spyserver_test_result: None,
+            kiwi_test_result: None,
+            public_sdrs: None,
+            show_public_sdrs: false,
+            public_sdrs_asked: false,
+            public_sdr_search: String::new(),
+            // Both on: the point of the window is to show what is out there.
+            public_sdr_nets_shown: [true, true],
+            // On, because a full receiver is not a receiver an operator can
+            // use, and the reason is still shown for the ones this hides.
+            public_sdr_free_only: true,
+            public_sdr_in_band: false,
+            public_sdr_low_bw: false,
             smartsdr_devices: Vec::new(),
             smartsdr_test_result: None,
             pluto_devices: Vec::new(),
@@ -1616,6 +1653,18 @@ impl SdroxideApp {
 
     /// Open the Settings dialog on the Radio tab — where a freshly added
     /// radio, which has no interface yet, is configured.
+    /// Point this radio at a configuration and reopen its interface.
+    ///
+    /// The same two calls Settings → Radio's "Apply / reconnect" makes, and for
+    /// the same reason they are two: the configuration is what gets persisted,
+    /// and the reopen is what makes it take effect without a restart. Works
+    /// unchanged over a connection — the remote controller sends the whole
+    /// block and asks for the reopen with it.
+    pub(crate) fn apply_radio_config(&mut self, cfg: sdroxide_types::RadioConfig) {
+        self.ctrl.set_radio_config(cfg);
+        self.ctrl.reopen_source();
+    }
+
     pub(crate) fn open_radio_settings(&mut self) {
         self.show_settings = true;
         self.settings_tab = SettingsTab::Radio;
