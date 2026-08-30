@@ -924,7 +924,21 @@ use sdroxide_types::{
 /// peer has no `KiwiSdr` variant to decode into and desynchronises on the rest
 /// of any `RadioConfig`, which is what the handshake's equality test prevents.
 /// Same shape of bump as v81's HydraSDR and v64/v65's ELAD and Lime.
-pub const PROTO_VERSION: u16 = 106;
+/// **107** — zooming the panadapter out past the I/Q.
+///
+/// [`sdroxide_types::DeviceCaps`] gains `wide_span_hz` at its tail: how wide the
+/// front end's full-band lane is, or zero where it has none.
+///
+/// On the capabilities rather than on the frame because it is what bounds the
+/// client's zoom-out, and a client that had to wait for a picture to learn it
+/// would spend the first frames of every session believing the passband was the
+/// limit — long enough to shrink a restored window to it. The *position* of the
+/// lane still rides each frame, where it belongs: that moves with the receiver.
+///
+/// Appended, so every field already on the wire keeps its number; `DeviceCaps`
+/// is sent whole, so a v106 peer desynchronises on the tail of it regardless,
+/// which is what the handshake's equality test prevents.
+pub const PROTO_VERSION: u16 = 107;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

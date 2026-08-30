@@ -2675,6 +2675,7 @@ fn engine_thread(
     caps.center_is_dial = source.center_is_dial();
     caps.cw_audio_keyed = source.cw_audio_keyed();
     caps.commands_squelch = source.commands_squelch();
+    caps.wide_span_hz = source.wide_span_hz();
     let audio_mode = caps.audio_mode;
     let radio_fs = source.sample_rate();
     let audio_bw = source.display_bandwidth().unwrap_or(radio_fs / 2.0);
@@ -5912,6 +5913,41 @@ impl Engine {
         self.wide_window
     }
 
+    /// The full-band window, when the viewport has been zoomed out past what
+    /// the I/Q covers and that spectrum is the only thing that reaches it.
+    ///
+    /// [`Engine::scope_main_window`] is the same idea for a front end with no
+    /// I/Q at all; this is for one that has some, but not as much as the
+    /// operator is asking to see. The test is containment rather than width: a
+    /// viewport that has been *panned* off the edge of the passband is as far
+    /// outside it as one that is simply wider, and neither has anything for the
+    /// device analyser to draw.
+    ///
+    /// `None` in audio mode — the branch above owns that case — and while the
+    /// front end has published nothing wide lately, so a lane that stops
+    /// arriving hands the picture back rather than freezing it.
+    fn wide_main_window(&self) -> Option<(f64, f64)> {
+        if self.audio_mode || self.wide_at.elapsed() >= SCOPE_MAIN_STALE {
+            return None;
+        }
+        let (wide_center, wide_span) = self.wide_window?;
+        let (vp_lo, vp_hi) = self.cfg.viewport?;
+        if !(wide_span > 0.0 && vp_hi > vp_lo) {
+            return None;
+        }
+        // What the device analyser can actually draw. Its centre is the one the
+        // samples in hand were taken at, not the one most recently commanded —
+        // on a laggy front end those differ, and the wrong one here would flip
+        // the panadapter between the two sources every time the dial moved.
+        wide_covers_viewport(
+            (vp_lo, vp_hi),
+            self.stream_center_hz,
+            self.state.sample_rate,
+            (wide_center, wide_span),
+        )
+        .then_some((wide_center, wide_span))
+    }
+
     /// The RF window the rig's demodulated audio covers: its passband, on the
     /// side of the dial the mode puts it.
     fn audio_band(&self) -> (f64, f64) {
@@ -6117,6 +6153,25 @@ impl Engine {
                     Some((vp_lo, vp_hi)),
                 );
             }
+        }
+        // Zoomed out past what the I/Q covers, onto a front end that also
+        // publishes a wider spectrum: draw the main panadapter from *that*.
+        //
+        // The same fallback the channel analyser makes to the device analyser
+        // one step up, for the same reason — coarser, but it actually contains
+        // the window being asked for. Without it the zoom-out stops at the I/Q
+        // span, which on a receiver whose I/Q is a narrow window onto a wide
+        // band is a hard floor a long way in: a KiwiSDR sends 12 kHz of I/Q and
+        // a picture of the whole 0-30 MHz, and the panadapter could only ever
+        // show the 12 kHz.
+        //
+        // Deliberately all-or-nothing rather than a composite of the two: the
+        // I/Q's own bins are finer in the middle, but splicing two spectra with
+        // different noise floors and different analysers leaves a visible seam
+        // at the join that reads as a signal. The whole window comes from one
+        // source, and which one is decided by whether the I/Q still covers it.
+        if let Some((wide_center, wide_span)) = self.wide_main_window() {
+            return self.make_scope_frame(wide_center, wide_span);
         }
         // The zoomed window at its own resolution, where the device-wide
         // analyser has run out of bins to give it.
@@ -10878,6 +10933,7 @@ impl Engine {
         self.caps.center_is_dial = self.source.center_is_dial();
         self.caps.cw_audio_keyed = self.source.cw_audio_keyed();
         self.caps.commands_squelch = self.source.commands_squelch();
+        self.caps.wide_span_hz = self.source.wide_span_hz();
         self.audio_mode = self.caps.audio_mode;
         self.radio_fs = self.source.sample_rate();
         self.audio_bw = self.source.display_bandwidth().unwrap_or(self.radio_fs / 2.0);
@@ -13633,6 +13689,118 @@ mod zoom_lane_fft_tests {
             assert!((4096..=32_768).contains(&n), "{w} gave {n}");
             assert!(n.is_power_of_two(), "{w} gave {n}");
         }
+    }
+}
+
+/// Whether the full-band lane, rather than the device analyser, is what covers
+/// `viewport`.
+///
+/// True once the viewport reaches outside the passband — by being wider than
+/// it, or by having been panned off its edge; the device analyser has nothing
+/// to draw there either way — and only while the wide lane really is the wider
+/// of the two.
+///
+/// `dev_center` is the centre the samples in hand were taken at rather than the
+/// one most recently commanded. On a front end whose stream lags its tuning the
+/// two differ, and the commanded one would flip the panadapter between the two
+/// sources on every dial move.
+fn wide_covers_viewport(
+    (vp_lo, vp_hi): (f64, f64),
+    dev_center: f64,
+    dev_span: f64,
+    (_wide_center, wide_span): (f64, f64),
+) -> bool {
+    if !(dev_span > 0.0 && wide_span > dev_span) {
+        return false;
+    }
+    let (dev_lo, dev_hi) = (dev_center - dev_span / 2.0, dev_center + dev_span / 2.0);
+    // A hair of tolerance: a viewport fitted to the passband is built as
+    // `centre ± span/2` in one place and clamped in another, and the two round
+    // differently — which would otherwise put a fully-zoomed-out view
+    // permanently on the coarser lane.
+    let eps = dev_span * 1e-6;
+    vp_lo < dev_lo - eps || vp_hi > dev_hi + eps
+}
+
+#[cfg(test)]
+mod wide_main_window_tests {
+    use super::wide_covers_viewport;
+
+    /// A KiwiSDR: 12 kHz of I/Q at 10 MHz, and a picture of the whole 0-30 MHz.
+    const KIWI_DEV: (f64, f64) = (10_000_000.0, 12_000.0);
+    const KIWI_WIDE: (f64, f64) = (15_000_000.0, 30_000_000.0);
+
+    /// Zoomed in, or fitted to the passband: the I/Q is finer and covers it.
+    #[test]
+    fn the_passband_keeps_its_own_picture() {
+        let (c, span) = KIWI_DEV;
+        assert!(!wide_covers_viewport((c - 1_000.0, c + 1_000.0), c, span, KIWI_WIDE));
+        assert!(
+            !wide_covers_viewport((c - span / 2.0, c + span / 2.0), c, span, KIWI_WIDE),
+            "a view fitted exactly to the passband must not fall to the coarser lane"
+        );
+    }
+
+    /// The rounding this tolerance exists for: `centre ± span/2` computed in
+    /// two places, differing in the last bit.
+    #[test]
+    fn a_viewport_a_whisker_outside_still_counts_as_inside() {
+        let (c, span) = KIWI_DEV;
+        let nudge = span * 1e-9;
+        assert!(!wide_covers_viewport(
+            (c - span / 2.0 - nudge, c + span / 2.0 + nudge),
+            c,
+            span,
+            KIWI_WIDE
+        ));
+    }
+
+    /// Zoomed out past the I/Q — the case the whole thing exists for.
+    #[test]
+    fn zooming_out_past_the_iq_reaches_the_wide_lane() {
+        let (c, span) = KIWI_DEV;
+        assert!(wide_covers_viewport((c - 500_000.0, c + 500_000.0), c, span, KIWI_WIDE));
+        assert!(wide_covers_viewport((0.0, 30_000_000.0), c, span, KIWI_WIDE));
+    }
+
+    /// Panned off the edge without being any wider: the device analyser has
+    /// nothing there either, so the test is containment and not width.
+    #[test]
+    fn a_viewport_panned_off_the_edge_reaches_it_too() {
+        let (c, span) = KIWI_DEV;
+        let lo = c + span; // a whole passband to the right of it
+        assert!(wide_covers_viewport((lo, lo + span), c, span, KIWI_WIDE));
+    }
+
+    /// A front end whose "wide" lane is no bigger than its I/Q has nothing to
+    /// add, and switching to it would cost resolution for no reach.
+    #[test]
+    fn a_wide_lane_no_wider_than_the_iq_is_never_used() {
+        let (c, span) = (10_000_000.0, 2_000_000.0);
+        assert!(!wide_covers_viewport((c - 5e6, c + 5e6), c, span, (c, 100_000.0)));
+        assert!(!wide_covers_viewport((c - 5e6, c + 5e6), c, span, (c, span)));
+    }
+
+    /// A front end still coming up, before it has said what it streams.
+    #[test]
+    fn nothing_happens_before_the_passband_is_known() {
+        assert!(!wide_covers_viewport((0.0, 1e6), 0.0, 0.0, KIWI_WIDE));
+    }
+
+    /// The lag case: the centre the samples were taken at is the one that
+    /// decides, so a dial that has moved ahead of the stream does not flip the
+    /// panadapter between the two sources.
+    #[test]
+    fn the_stream_centre_decides_not_the_commanded_one() {
+        let span = 12_000.0;
+        let stream_center = 10_000_000.0;
+        // A viewport still sitting on the samples in hand.
+        assert!(!wide_covers_viewport(
+            (stream_center - 4_000.0, stream_center + 4_000.0),
+            stream_center,
+            span,
+            KIWI_WIDE
+        ));
     }
 }
 

@@ -113,6 +113,10 @@ or connects to a remote sdroxide server.
 - **ISM band decoder** — reads the unattended 868 MHz traffic around you and
   lists each device with its readings in real units. See
   [ISM band decoder](#5-ism-band-decoder).
+- **Zoom out past the I/Q** — on a receiver that publishes a full-band
+  spectrum as well as its I/Q (a KiwiSDR, a SpyServer, an RX-888), the main
+  panadapter keeps widening past the streamed passband and draws those spans
+  from the full-band bins. See [§2.8](#28-the-display-and-fft-controls).
 - **QO-100 beacon calibration** — decodes the 10489.750 MHz narrowband beacon,
   measures how far your LNB has drifted, and writes the converter offset for
   you. In the **SAT** window's QO-100 tab; see [§2.21](#221-qo-100-beacon-calibration).
@@ -697,8 +701,19 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
   crosshair and the frequency under the cursor, and **shift+drag** measures a
   span across it, both exactly as on the main waterfall. The button appears
   only on receivers that produce a full-band view — a direct-sampling front end
-  such as the RX-888; on an RTL-SDR, HPSDR or TCI radio the panadapter span is
-  all the hardware delivers — and the setting is remembered between sessions.
+  such as the RX-888, a KiwiSDR, a SpyServer; on an RTL-SDR, HPSDR or TCI radio
+  the panadapter span is all the hardware delivers — and the setting is
+  remembered between sessions.
+
+  On such a receiver the **main panadapter can be zoomed out into the strip's
+  window too**, past the I/Q the front end is streaming: keep zooming and it
+  goes on widening until it covers everything the strip does, drawing those
+  spans from the same full-band bins. That matters most where the I/Q is a
+  narrow window onto a wide band — a KiwiSDR sends about 12 kHz of I/Q and a
+  picture of the whole 0–30 MHz, and without this the panadapter could only ever
+  show the 12 kHz. The picture coarsens at the moment it crosses over, because
+  the full-band bins are all there is out there; zoom back in and the I/Q's own
+  resolution returns.
   The strip is not shown in the digital modes, whose layout gives the height to
   the operating panel instead.
 - **FIT** — keep the waterfall floor and ceiling set for the best contrast.
@@ -12273,6 +12288,12 @@ for anything wider than the window, and there is no way to ask for more.
 The link costs about 64 kB/s: 44 for the I/Q and 20 for the waterfall. Turn
 the band view off, or slow it down, in Settings → Radio if that matters.
 
+The main panadapter is not stuck at those 12 kHz, though: keep zooming out and
+it widens past them and goes on to cover the whole 0–30 MHz, drawn from the same
+waterfall bins the strip uses ([§2.8](#28-the-display-and-fft-controls)). It
+coarsens where it crosses over — those bins are all there is out there — and
+zooming back in returns the I/Q's own resolution.
+
 #### Gain and the S-meter
 
 Unusually for a receiver here, the **AGC is left on at the far end** by
@@ -12298,7 +12319,17 @@ is the one for a link that cannot carry megabits. It makes no difference to a
 KiwiSDR, which has only the one shape.
 
 A server whose receiver another client already owns still works; tuning is
-then limited to the slice that client is receiving, and the gain is theirs.
+then limited to the slice that client is receiving, and the gain is theirs. That
+is the usual reason a SpyServer's band view looks stuck on a stretch of
+spectrum you did not choose — the notice at the top of the window names the
+range you are held to. Nothing this end can do will move it until that client
+does; pick another server, or come back later.
+
+Its **width** is your choice, though: the band view is one stage of the server's
+own decimation ladder, and **I/Q bandwidth**'s neighbour in Settings → Radio
+picks which. Stage 0 is the widest the server offers, and is the default. As
+with a KiwiSDR, the main panadapter can be zoomed out to cover the whole of it
+([§2.8](#28-the-display-and-fft-controls)).
 
 #### Adding one by hand
 

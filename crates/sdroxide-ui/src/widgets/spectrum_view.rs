@@ -106,6 +106,26 @@ pub struct WindowPan {
     /// the gap between them is a refusal the engine would answer sixty times a
     /// second.
     pub limits: (f64, f64),
+    /// The widest window the view may be zoomed out to, `(centre, span)`, when
+    /// that is wider than the I/Q the front end is streaming.
+    ///
+    /// Set from the full-band lane, where there is one: a KiwiSDR sends 12 kHz
+    /// of I/Q and a picture of the whole 0-30 MHz, a SpyServer a decimated
+    /// stream and an FFT of the band around it. Zooming out past the I/Q is
+    /// then a real question with a real answer, and the engine draws those
+    /// spans from the wide bins.
+    ///
+    /// `None` on a front end whose I/Q is all there is, where the passband is
+    /// the end of the zoom and always was.
+    pub outer: Option<(f64, f64)>,
+    /// Whether the front end has described itself yet.
+    ///
+    /// False in the gap between the first `State` and the first
+    /// `Capabilities` — a couple of frames, and long enough to do damage: the
+    /// passband is known there but the full-band lane is not, so bounding the
+    /// view would shrink a restored window to the I/Q and the operator's zoom
+    /// would be gone before the answer arrived.
+    pub known: bool,
 }
 
 impl WindowPan {
@@ -122,7 +142,22 @@ impl WindowPan {
             .find(|&&(lo, hi)| (lo..=hi).contains(&center_hz))
             .copied()
             .unwrap_or((f64::MIN, f64::MAX));
-        Self { movable: !caps.audio_mode && !caps.center_is_dial, limits }
+        Self { movable: !caps.audio_mode && !caps.center_is_dial, limits, outer: None, known: true }
+    }
+
+    /// Add the full-band window the view may zoom out into — see
+    /// [`WindowPan::outer`]. Ignored unless it is genuinely wider than the I/Q,
+    /// so a front end whose "wide" lane is no bigger than its passband (an
+    /// Icom's scope at a narrow span) is left exactly as it was.
+    pub fn with_outer(mut self, wide: Option<(f64, f64)>, iq_span: f64) -> Self {
+        self.outer = wide.filter(|&(_, span)| span > iq_span && iq_span > 0.0);
+        self
+    }
+
+    /// The window the view may be zoomed and panned inside: the full-band lane
+    /// where there is one, else the I/Q passband.
+    fn view_bounds(&self, dev_center: f64, dev_span: f64) -> (f64, f64) {
+        self.outer.unwrap_or((dev_center, dev_span))
     }
 }
 
@@ -1105,6 +1140,11 @@ pub fn show_ext(
     // one being asked for, not the one being left.
     let mut dev_center = state.center_hz;
     let dev_span = state.sample_rate;
+    // How far the view may zoom and pan: the full-band lane where the front end
+    // has one, else the passband. Distinct from `dev_*` above, which stays the
+    // I/Q and goes on bounding the things that really are limited by it — the
+    // sub receiver's DDC, and the zoom-in resolution floor.
+    let (zoom_center, zoom_span) = pan.view_bounds(dev_center, dev_span);
     // Both receivers are DDCs on this one IQ stream, so nothing outside these
     // edges can be tuned — the sub gets clamped to them.
     let dev_lo = dev_center - dev_span / 2.0;
@@ -1456,7 +1496,7 @@ pub fn show_ext(
             // can keep going once the view is the whole window.
             Some(true) => {
                 let dhz = -resp.drag_delta().x as f64 * view.span() / rect.width() as f64;
-                let over = pan_view(view, dhz, dev_center, dev_span);
+                let over = pan_view(view, dhz, zoom_center, zoom_span);
                 pan_center(&mut dev_center, state, over, pan, cmds);
             }
             // Spectrum/waterfall resize — set the spectrum height from the
@@ -1515,7 +1555,7 @@ pub fn show_ext(
         // is what this gesture exists to promise it will not do; at the edge it
         // stops.
         let dhz = -pointer_delta.x as f64 * view.span() / rect.width() as f64;
-        pan_view(view, dhz, dev_center, dev_span);
+        pan_view(view, dhz, zoom_center, zoom_span);
     } else if resp.dragged_by(egui::PointerButton::Primary) {
         // Left-drag: grab the spectrum and slide it — content follows the
         // mouse, and the tuning follows the content (dragging right tunes
@@ -1527,7 +1567,7 @@ pub fn show_ext(
         // already turning the dial, because a window that moves takes the dial
         // with it whether anyone asked or not (issue #133).
         let dhz = -resp.drag_delta().x as f64 * view.span() / rect.width() as f64;
-        let over = pan_view(view, dhz, dev_center, dev_span);
+        let over = pan_view(view, dhz, zoom_center, zoom_span);
         if wheel.drag_tunes {
             // Ahead of the dial: the two move by the same amount, so a window
             // moved first leaves the dial exactly where it was inside it and
@@ -1766,7 +1806,7 @@ pub fn show_ext(
                 // Grab-the-content sense, matching the left-drag: the view slides
                 // with the dial so the VFO marker keeps its place on screen, and
                 // the window follows once the view has run out of room.
-                let over = pan_view(view, -dhz, dev_center, dev_span);
+                let over = pan_view(view, -dhz, zoom_center, zoom_span);
                 pan_center(&mut dev_center, state, over, pan, cmds);
                 let hz = gesture_step(gesture_dial, state.active_freq_hz(), -dhz).max(0.0);
                 gesture_dial = Some(hz);
@@ -1822,7 +1862,7 @@ pub fn show_ext(
     if view.center_on_vfo {
         let vfo = state.active_freq_hz();
         if centred_at.is_none_or(|was| (was - vfo).abs() > 0.5) {
-            let over = center_on_dial(view, vfo, dev_center, dev_span, rect.width());
+            let over = center_on_dial(view, vfo, zoom_center, zoom_span, rect.width());
             pan_center(&mut dev_center, state, over, pan, cmds);
         }
         ui.data_mut(|d| d.insert_temp(centring_id, Some(vfo)));
@@ -1839,7 +1879,10 @@ pub fn show_ext(
     // (`span_after` < `span_before`), and a view that moved freely while the
     // picture did not follow (span changes here, waterfall does not).
     let span_before = view.span();
-    view.clamp_to(dev_center, dev_span);
+    // Not before the front end has said what it is: see [`WindowPan::known`].
+    if pan.known {
+        view.clamp_to(zoom_center, zoom_span);
+    }
     let (lo_now, hi_now, span_now) = (view.view_lo_hz, view.view_hi_hz, view.span());
     if ui.data(|d| d.get_temp::<(f64, f64)>(view_log_id)) != Some((lo_now, hi_now)) {
         ui.data_mut(|d| d.insert_temp(view_log_id, (lo_now, hi_now)));
@@ -3526,5 +3569,52 @@ mod tests {
         for pair in sent.chunks(2) {
             assert_eq!(pair[0], pair[1]);
         }
+    }
+
+    /// A front end whose full-band lane is wider than its I/Q may be zoomed out
+    /// into it — a KiwiSDR sends 12 kHz of I/Q and a picture of the whole
+    /// 0-30 MHz, and before this the panadapter could only ever show the 12 kHz.
+    #[test]
+    fn a_wide_lane_lets_the_view_zoom_out_past_the_iq() {
+        const DEV_C: f64 = 10_000_000.0;
+        const DEV_SPAN: f64 = 12_000.0;
+        let wide = (15_000_000.0, 30_000_000.0);
+
+        // Without one, the passband is the end of the zoom, as it always was.
+        let plain = WindowPan::default();
+        assert_eq!(plain.view_bounds(DEV_C, DEV_SPAN), (DEV_C, DEV_SPAN));
+        let mut view =
+            ViewState { view_lo_hz: 0.0, view_hi_hz: 30_000_000.0, ..Default::default() };
+        let (c, span) = plain.view_bounds(DEV_C, DEV_SPAN);
+        view.clamp_to(c, span);
+        assert!(view.span() <= DEV_SPAN, "clamped back to the passband");
+
+        // With one, the whole band is reachable.
+        let wide_pan = WindowPan::default().with_outer(Some(wide), DEV_SPAN);
+        assert_eq!(wide_pan.view_bounds(DEV_C, DEV_SPAN), wide);
+        let mut view =
+            ViewState { view_lo_hz: 0.0, view_hi_hz: 30_000_000.0, ..Default::default() };
+        let (c, span) = wide_pan.view_bounds(DEV_C, DEV_SPAN);
+        view.clamp_to(c, span);
+        assert_eq!((view.view_lo_hz, view.view_hi_hz), (0.0, 30_000_000.0));
+    }
+
+    /// A "wide" lane no wider than the I/Q — an Icom's scope at a narrow span —
+    /// is ignored, so nothing about that front end changes.
+    #[test]
+    fn a_wide_lane_no_wider_than_the_iq_is_ignored() {
+        const DEV_C: f64 = 10_000_000.0;
+        const DEV_SPAN: f64 = 2_000_000.0;
+        let pan = WindowPan::default().with_outer(Some((DEV_C, 100_000.0)), DEV_SPAN);
+        assert_eq!(pan.outer, None);
+        assert_eq!(pan.view_bounds(DEV_C, DEV_SPAN), (DEV_C, DEV_SPAN));
+    }
+
+    /// Before the front end has said what it streams there is nothing to
+    /// compare against, so the lane is not adopted on a zero span.
+    #[test]
+    fn no_outer_window_before_the_passband_is_known() {
+        let pan = WindowPan::default().with_outer(Some((1e6, 30e6)), 0.0);
+        assert_eq!(pan.outer, None);
     }
 }

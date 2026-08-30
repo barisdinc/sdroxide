@@ -390,6 +390,19 @@ pub trait IqSource: Send {
         None
     }
 
+    /// How wide [`IqSource::wide_spectrum_db`]'s window is, in Hz — `0.0` for a
+    /// source that publishes none.
+    ///
+    /// Answered at open, before any frame has been built, because it is what
+    /// the client's zoom-out is bounded by: see `DeviceCaps::wide_span_hz`. A
+    /// source whose lane is a fixed width knows this from its handshake; one
+    /// whose width moves should report the widest it will send.
+    ///
+    /// Default: no lane.
+    fn wide_span_hz(&self) -> f64 {
+        0.0
+    }
+
     /// Whether this front end's centre *is* the rig's dial — one synthesiser
     /// doing both jobs.
     ///
@@ -847,6 +860,11 @@ impl IqSource for ConvertedSource {
     fn wide_spectrum_db(&mut self, out: &mut Vec<f32>) -> Option<(f64, f64)> {
         let (center, span) = self.inner.wide_spectrum_db(out)?;
         Some((self.down(center), span))
+    }
+
+    /// A converter shifts where the lane sits, never how wide it is.
+    fn wide_span_hz(&self) -> f64 {
+        self.inner.wide_span_hz()
     }
 
     fn poll_control(&mut self) -> Vec<ControlUpdate> {

@@ -169,6 +169,12 @@ impl IqSource for KiwiSdrSource {
         Some((frame.center_hz, frame.span_hz))
     }
 
+    /// The receiver's whole band — what the waterfall covers at zoom 0, and so
+    /// how far the panadapter may be zoomed out.
+    fn wide_span_hz(&self) -> f64 {
+        if self.wide_lane { self.handle.info.bandwidth_hz } else { 0.0 }
+    }
+
     /// The receiver's own S-meter. See the module note for why not the samples.
     fn rx_signal_dbm(&mut self) -> Option<f32> {
         Some(self.handle.smeter_dbm())
