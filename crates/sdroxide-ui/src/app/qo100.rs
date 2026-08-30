@@ -26,11 +26,15 @@
 //! than doing it silently on every lock, so a bad reading never yanks a
 //! running receiver.
 //!
-//! The mini waterfall is visual context only now, not a measurement: it reads
-//! the same [`sdroxide_types::SpectrumFrame`] everything else on screen
+//! The mini waterfall is visual context, not an automatic measurement: it
+//! reads the same [`sdroxide_types::SpectrumFrame`] everything else on screen
 //! already gets, cropped to a window around the beacon, so the operator can
 //! see the Manchester null (and the search width buttons' effect) even
-//! though nothing here measures anything off it.
+//! though nothing here hunts a peak in it. It does take one deliberate read
+//! back, though — a double-click on the strip plants a "the beacon is here"
+//! mark ([`Qo100WinState::manual_hz`]) that drives DRIFT and APPLY exactly as
+//! a decoder lock would, for the case the null is plainly visible but the
+//! demodulator will not lock.
 
 use std::collections::VecDeque;
 
@@ -78,6 +82,13 @@ pub(in crate::app) struct Qo100WinState {
     /// wall-clock second it was applied, so the operator sees what happened
     /// even after the numbers above have moved on.
     applied: Option<(f64, f64, i64)>,
+    /// A dial-domain frequency the operator double-clicked on the strip to
+    /// say "the beacon is *here*" — for when its Manchester null is plainly
+    /// visible but the decoder will not lock or decode. Drives DRIFT and
+    /// APPLY exactly as a real lock would (see [`effective_measurement`]);
+    /// cleared by the button that appears while it is set, by a real decoder
+    /// lock superseding it, or once APPLY has written it.
+    manual_hz: Option<f64>,
 }
 
 fn fmt_hz_signed(hz: f64) -> String {
@@ -182,10 +193,12 @@ fn texture<'a>(
     win.tex.as_ref()
 }
 
-/// Draw the strip: the target line, and — while the decoder has a lock —
-/// where it actually found the beacon. Purely visual; nothing here is read
-/// back, unlike the version of this window that used to hunt a magnitude
-/// peak in it (see the module doc for why that never worked on this signal).
+/// Draw the strip: the target line, where the decoder locked (if it has),
+/// and any frequency the operator double-clicked to mark the beacon by hand.
+/// The magnitude picture is visual only — nothing is read back off it (see
+/// the module doc for why a peak search never worked on this signal) — but a
+/// double-click *is* read back, in [`Qo100WinState::manual_hz`], as a
+/// deliberate "the beacon is here" for DRIFT and APPLY to act on.
 fn paint_strip(
     ui: &mut egui::Ui,
     win: &mut Qo100WinState,
@@ -196,9 +209,20 @@ fn paint_strip(
     measured_hz: Option<f64>,
 ) {
     let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), STRIP_H), Sense::hover());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), STRIP_H), Sense::click());
     if !ui.is_rect_visible(rect) {
         return;
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    // A double-click plants the hand-placed beacon mark at the frequency
+    // under the pointer — the strip's x axis is a straight `lo..hi` ramp.
+    if resp.double_clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+        win.manual_hz = Some(lo + t * (hi - lo));
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, Color32::BLACK);
@@ -235,6 +259,23 @@ fn paint_strip(
             Stroke::new(1.6, theme::GREEN()),
         );
     }
+    // The hand-placed mark, if the operator has double-clicked one in.
+    if let Some(m) = win.manual_hz
+        && (lo..=hi).contains(&m)
+    {
+        let mx = x_of(m);
+        painter.line_segment(
+            [Pos2::new(mx, rect.top()), Pos2::new(mx, rect.bottom())],
+            Stroke::new(1.4, theme::PINK()),
+        );
+        painter.text(
+            Pos2::new((mx + 3.0).min(rect.right() - 2.0), rect.bottom() - 11.0),
+            egui::Align2::LEFT_BOTTOM,
+            "clicked",
+            egui::FontId::monospace(8.0),
+            theme::PINK(),
+        );
+    }
 
     let font = egui::FontId::monospace(9.0);
     let dim = Color32::from_white_alpha(200);
@@ -253,7 +294,6 @@ fn paint_strip(
         dim,
     );
     crate::chrome::paint_cut_border(&painter, rect, theme::LINE_LIT(), theme::PANEL());
-    let _ = resp; // hover-only; kept so `ui.allocate_exact_size` reserves layout the usual way
 }
 
 impl SdroxideApp {
@@ -340,6 +380,19 @@ impl SdroxideApp {
                 cfg.search_half_width_hz =
                     (cfg.search_half_width_hz + WIDTH_STEP_HZ).min(MAX_HALF_WIDTH_HZ);
             }
+
+            if win.manual_hz.is_some() {
+                ui.add_space(8.0);
+                if ui
+                    .small_button("clear mark")
+                    .on_hover_text(
+                        "Drop the hand-placed beacon mark and go back to the decoder's own reading",
+                    )
+                    .clicked()
+                {
+                    win.manual_hz = None;
+                }
+            }
         });
 
         // Unmissable, not just a hover: a fresh station has no converter set
@@ -413,12 +466,31 @@ impl SdroxideApp {
             measured_hz,
         );
 
+        // `paint_strip` may have just planted or cleared the hand-placed
+        // mark; from here on DRIFT and APPLY act on whichever of the two
+        // readings [`effective_measurement`] picks.
+        let confirmed = apply_is_confirmed(status.as_ref());
+        let effective = effective_measurement(measured_hz, confirmed, win.manual_hz);
+
         ui.add_space(6.0);
         ui.label(
             RichText::new(status_line(cfg.enabled, status.as_ref(), self.ctrl.engine_is_remote()))
                 .size(9.5)
                 .color(theme::CYAN_DIM()),
         );
+        // Discoverability: a stalled search or a lock that never decodes is
+        // exactly when double-click matters, so say so — but only while it
+        // would actually do something new (no confirmed decode, no mark yet).
+        if cfg.enabled && !confirmed && win.manual_hz.is_none() {
+            ui.label(
+                RichText::new(
+                    "tip: if you can see the beacon in the strip but it won't lock, double-click \
+                     it — that marks it as 10489.750 MHz and lets APPLY correct to it",
+                )
+                .size(9.0)
+                .color(theme::CYAN_DIM()),
+            );
+        }
 
         let radio_cfg = self.ctrl.radio_config();
         let old_offset = radio_cfg.as_ref().map(|c| c.converter_offset_hz).unwrap_or(0.0);
@@ -444,10 +516,18 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(dim("MEASURED"));
-            match measured_hz {
-                Some(hz) => ui.label(
-                    RichText::new(format!("{:.6} MHz", hz / 1e6)).size(12.0).monospace().strong(),
-                ),
+            match effective {
+                Some((hz, from_manual)) => {
+                    let mut t = RichText::new(format!(
+                        "{:.6} MHz{}",
+                        hz / 1e6,
+                        if from_manual { "  (clicked)" } else { "" }
+                    ))
+                    .size(12.0)
+                    .monospace();
+                    t = if from_manual { t.color(theme::PINK()) } else { t.strong() };
+                    ui.label(t)
+                }
                 None => ui.label(
                     RichText::new(if cfg.enabled { "not locked yet" } else { "—" })
                         .size(11.0)
@@ -457,8 +537,8 @@ impl SdroxideApp {
             ui.end_row();
 
             ui.label(dim("DRIFT"));
-            match measured_hz {
-                Some(hz) => {
+            match effective {
+                Some((hz, _)) => {
                     let err = hz - QO100_BEACON_HZ;
                     let colour = if err.abs() < 200.0 {
                         theme::GREEN()
@@ -497,21 +577,36 @@ impl SdroxideApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let confirmed = apply_is_confirmed(status.as_ref());
-            let can_apply = measured_hz.is_some() && radio_cfg.is_some() && confirmed;
+            // A hand-placed mark is a deliberate operator action, so it needs
+            // no second-frame confirmation; a decoder lock still does (see
+            // `apply_is_confirmed`).
+            let can_apply = radio_cfg.is_some()
+                && match effective {
+                    Some((_, true)) => true,
+                    Some((_, false)) => confirmed,
+                    None => false,
+                };
             let apply = ui.add_enabled(
                 can_apply,
                 egui::Button::new(RichText::new(" APPLY CORRECTION ").strong()),
             );
-            let apply = apply.on_hover_text(if measured_hz.is_some() && !confirmed {
-                "Waiting for a second CRC-valid frame before offering to write this — one lock \
-                 alone could be a chance match"
-            } else {
-                "Write the corrected converter/LNB offset and reopen the receiver — a brief \
-                 interruption, the same one Settings ▸ Radio ▸ Apply makes"
+            let apply = apply.on_hover_text(match effective {
+                Some((_, true)) => {
+                    "Write the converter/LNB offset that puts the beacon where you clicked onto \
+                     10489.750 MHz, and reopen the receiver — the same brief interruption \
+                     Settings ▸ Radio ▸ Apply makes"
+                }
+                Some((_, false)) if !confirmed => {
+                    "Waiting for a second CRC-valid frame before offering to write this — one lock \
+                     alone could be a chance match"
+                }
+                _ => {
+                    "Write the corrected converter/LNB offset and reopen the receiver — a brief \
+                     interruption, the same one Settings ▸ Radio ▸ Apply makes"
+                }
             });
             if apply.clicked()
-                && let (Some(mut c), Some(measured)) = (radio_cfg.clone(), measured_hz)
+                && let (Some(mut c), Some((measured, _))) = (radio_cfg.clone(), effective)
             {
                 let new_offset =
                     corrected_offset_hz(c.converter_offset_hz, measured, QO100_BEACON_HZ);
@@ -520,6 +615,9 @@ impl SdroxideApp {
                 self.ctrl.reopen_source();
                 self.radio_cfg = Some(c);
                 win.applied = Some((old_offset, new_offset, crate::time::now_unix()));
+                // The correction now lives in the offset and the beacon should
+                // land near centre next sweep; a stale mark would only mislead.
+                win.manual_hz = None;
             }
             if let Some((old, new, at)) = win.applied {
                 let ago = crate::time::now_unix() - at;
@@ -546,6 +644,29 @@ impl SdroxideApp {
 /// period is) or if the decoder has never locked at all.
 fn locked_freq(status: Option<&Qo100Status>) -> Option<f64> {
     status.filter(|s| s.locked).map(|s| QO100_BEACON_HZ + s.offset_hz)
+}
+
+/// The frequency DRIFT and APPLY act on, and whether it is the operator's
+/// hand-placed mark rather than a decoder lock.
+///
+/// A *confirmed* decoder lock always wins — it is a phase measurement off the
+/// raw IQ, not an eyeballed line on a magnitude strip. But the case this mark
+/// exists for is the decoder reporting a lock it cannot turn into telemetry
+/// ("locks but won't decode"): that is `locked_hz` set with `confirmed`
+/// false, and there the operator's double-click takes precedence so APPLY has
+/// something to act on. An unconfirmed lock with no mark still shows in
+/// DRIFT, it just cannot be applied (see `apply_is_confirmed`).
+fn effective_measurement(
+    locked_hz: Option<f64>,
+    confirmed: bool,
+    manual_hz: Option<f64>,
+) -> Option<(f64, bool)> {
+    match (locked_hz, manual_hz) {
+        (Some(hz), _) if confirmed => Some((hz, false)),
+        (_, Some(hz)) => Some((hz, true)),
+        (Some(hz), None) => Some((hz, false)),
+        (None, None) => None,
+    }
 }
 
 /// Whether a measured offset is safe to offer for `APPLY CORRECTION`, which
@@ -669,6 +790,57 @@ mod tests {
     fn locked_freq_is_none_when_not_locked_or_absent() {
         assert_eq!(locked_freq(None), None);
         assert_eq!(locked_freq(Some(&status(false, 0.0))), None);
+    }
+
+    #[test]
+    fn effective_measurement_prefers_a_confirmed_lock_over_a_hand_placed_mark() {
+        let m = effective_measurement(
+            Some(QO100_BEACON_HZ + 100.0),
+            true,
+            Some(QO100_BEACON_HZ + 9_000.0),
+        );
+        assert_eq!(m, Some((QO100_BEACON_HZ + 100.0, false)));
+    }
+
+    #[test]
+    fn effective_measurement_lets_the_mark_win_over_a_lock_that_will_not_decode() {
+        // "Locks but won't decode": locked_hz set, but not confirmed — the
+        // operator's click is what APPLY should act on.
+        let m = effective_measurement(
+            Some(QO100_BEACON_HZ + 100.0),
+            false,
+            Some(QO100_BEACON_HZ + 9_000.0),
+        );
+        assert_eq!(m, Some((QO100_BEACON_HZ + 9_000.0, true)));
+    }
+
+    #[test]
+    fn effective_measurement_falls_back_to_the_mark_when_the_decoder_has_not_locked() {
+        let m = effective_measurement(None, false, Some(QO100_BEACON_HZ + 9_000.0));
+        assert_eq!(m, Some((QO100_BEACON_HZ + 9_000.0, true)));
+    }
+
+    #[test]
+    fn effective_measurement_shows_an_unconfirmed_lock_when_there_is_no_mark() {
+        let m = effective_measurement(Some(QO100_BEACON_HZ + 100.0), false, None);
+        assert_eq!(m, Some((QO100_BEACON_HZ + 100.0, false)));
+    }
+
+    #[test]
+    fn effective_measurement_is_none_with_neither_a_lock_nor_a_mark() {
+        assert_eq!(effective_measurement(None, false, None), None);
+    }
+
+    #[test]
+    fn a_hand_placed_mark_feeds_the_same_offset_maths_as_a_lock() {
+        // Operator clicks the beacon 9 kHz above target: APPLY must raise the
+        // converter offset by exactly that, the same as if the decoder had
+        // measured it.
+        let old = -9_750_000_000.0;
+        let (clicked, from_manual) =
+            effective_measurement(None, false, Some(QO100_BEACON_HZ + 9_000.0)).unwrap();
+        assert!(from_manual);
+        assert_eq!(corrected_offset_hz(old, clicked, QO100_BEACON_HZ), old + 9_000.0);
     }
 
     #[test]
