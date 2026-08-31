@@ -388,26 +388,38 @@ fn welch_psd(iq: &[Complex32], nfft: usize) -> Vec<f32> {
     acc
 }
 
-/// A coarse estimate of where the beacon's carrier sits, in Hz relative to
-/// the assumed centre (DC) — or `None` when the spectrum holds nothing shaped
-/// like the beacon.
+/// Where the beacon's carrier sits and how convincingly the spectrum said so.
+/// `hz` is relative to the assumed centre (DC).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CarrierEstimate {
+    pub hz: f64,
+    /// Depth of the central null between the two lobes, dB.
+    pub null_depth_db: f32,
+    /// Left/right evenness of the two lobes, 0..1.
+    pub symmetry: f32,
+    /// Lobe level over the scanned band's noise floor, dB.
+    pub snr_db: f32,
+}
+
+/// Scan `[lo_hz, hi_hz]` of `iq`'s power spectrum for the beacon's give-away
+/// shape and return the best match, or `None` when nothing in the band looks
+/// like it.
 ///
-/// The beacon is DBPSK + Manchester at 400 baud, so it shows in a spectrum
-/// not as a carrier peak but as a *pair* of lobes with a null between them at
-/// the carrier and another null near ±[`CHIP_RATE`] Hz further out (see the
-/// module doc). This scores every candidate centre across the whole captured
-/// span by exactly that shape — two shoulders up, a notch in the middle,
-/// quiet past the outer nulls, left/right symmetric — and returns the best
-/// only if it clears every part of that test by a margin. A bare carrier, an
-/// SSB signal or noise all fail it, so a `Some` here is worth seeding
-/// [`acquire`] with; being wrong could at worst reorder candidates it would
-/// have tried anyway.
-pub(crate) fn coarse_carrier_hz(
+/// The beacon is DBPSK + Manchester at 400 baud, so it shows not as a carrier
+/// peak but as a *pair* of lobes with a null between them at the carrier and
+/// another null near ±[`CHIP_RATE`] Hz further out (see the module doc). Every
+/// candidate centre is scored by exactly that shape — two shoulders up, a
+/// notch in the middle, quiet past the outer nulls, left/right symmetric — and
+/// the best is returned only if it clears every part of that test by a margin.
+/// A bare carrier, an SSB signal or noise all fail it. Anything in the band
+/// that is *not* two symmetric lobes is simply not what wins.
+pub(crate) fn estimate_carrier(
     iq: &[Complex32],
     rate_hz: f64,
-    search_half_width_hz: f64,
-) -> Option<f64> {
-    if rate_hz <= 0.0 || search_half_width_hz <= 0.0 {
+    lo_hz: f64,
+    hi_hz: f64,
+) -> Option<CarrierEstimate> {
+    if rate_hz <= 0.0 || hi_hz - lo_hz < 1_500.0 {
         return None;
     }
     // ~15–25 Hz bins: fine enough to resolve the ±CHIP_RATE null structure,
@@ -418,6 +430,8 @@ pub(crate) fn coarse_carrier_hz(
     }
     let psd = welch_psd(iq, nfft);
     let bin_hz = rate_hz / nfft as f64;
+    let edge = rate_hz * 0.47;
+    let (lo, hi) = (lo_hz.max(-edge), hi_hz.min(edge));
 
     // Linear PSD at a signed frequency, nearest bin, wrapping natural FFT
     // order; `None` past the transform's own edge.
@@ -427,10 +441,10 @@ pub(crate) fn coarse_carrier_hz(
         (0..nfft as i64).contains(&k).then(|| psd[k as usize])
     };
     // Mean linear PSD over `c ± [lo, hi]`, both sides together.
-    let band_mean = |c: f64, lo: f64, hi: f64| -> Option<f32> {
+    let band_mean = |c: f64, blo: f64, bhi: f64| -> Option<f32> {
         let (mut sum, mut n) = (0.0f32, 0u32);
-        let mut d = lo;
-        while d <= hi {
+        let mut d = blo;
+        while d <= bhi {
             if let (Some(a), Some(b)) = (at(c + d), at(c - d)) {
                 sum += a + b;
                 n += 2;
@@ -440,15 +454,11 @@ pub(crate) fn coarse_carrier_hz(
         (n > 0).then(|| sum / n as f32)
     };
 
-    // Scan the whole captured span, not just ±search_half_width_hz — finding
-    // a beacon the configured width does not cover is half the point.
-    let reach = (search_half_width_hz + 1_500.0).min(rate_hz * 0.47);
-
-    // A robust noise floor for the SNR gate: the median across the span, which
-    // the beacon's own two lobes cannot lift far.
+    // A robust noise floor for the SNR gate: the median across the scanned
+    // band, which the beacon's own two lobes cannot lift far.
     let mut span: Vec<f32> = Vec::new();
-    let mut f = -reach;
-    while f <= reach {
+    let mut f = lo;
+    while f <= hi {
         if let Some(p) = at(f) {
             span.push(p);
         }
@@ -461,9 +471,9 @@ pub(crate) fn coarse_carrier_hz(
     let floor = span[span.len() / 2].max(1e-20);
     let db = |x: f32| 10.0 * (x.max(1e-20) as f64).log10();
 
-    let mut best: Option<(f64, f64)> = None; // (score, fc)
-    let mut fc = -reach;
-    while fc <= reach {
+    let mut best: Option<(f64, CarrierEstimate)> = None; // (score, est)
+    let mut fc = lo;
+    while fc <= hi {
         if let (Some(lobe), Some(notch), Some(outer)) = (
             band_mean(fc, 200.0, 600.0),
             band_mean(fc, 0.0, 60.0),
@@ -492,13 +502,36 @@ pub(crate) fn coarse_carrier_hz(
                 let score =
                     null_depth.min(12.0) + lobe_excess.min(12.0) + snr.min(12.0) + 8.0 * sym;
                 if best.is_none_or(|(s, _)| score > s) {
-                    best = Some((score, fc));
+                    best = Some((
+                        score,
+                        CarrierEstimate {
+                            hz: fc,
+                            null_depth_db: null_depth as f32,
+                            symmetry: sym as f32,
+                            snr_db: snr as f32,
+                        },
+                    ));
                 }
             }
         }
         fc += bin_hz;
     }
-    best.map(|(_, fc)| fc)
+    best.map(|(_, e)| e)
+}
+
+/// A coarse carrier estimate across `±search_half_width_hz` (plus a little), in
+/// Hz relative to the assumed centre — the seed [`acquire`] starts its CRC
+/// sweep from. `None` when nothing beacon-shaped is in range.
+pub(crate) fn coarse_carrier_hz(
+    iq: &[Complex32],
+    rate_hz: f64,
+    search_half_width_hz: f64,
+) -> Option<f64> {
+    if search_half_width_hz <= 0.0 {
+        return None;
+    }
+    let reach = (search_half_width_hz + 1_500.0).min(rate_hz * 0.47);
+    estimate_carrier(iq, rate_hz, -reach, reach).map(|e| e.hz)
 }
 
 /// Search `iq` (complex baseband, `rate_hz` samples/s, the beacon assumed to
@@ -577,6 +610,108 @@ pub fn acquire(
         }
     }
     None
+}
+
+/// How far the last [`acquire_debug`] pass got, for the operator's
+/// step-by-step decoder readout. None of it gates anything — pure
+/// instrumentation, so a missing stage points straight at where the chain
+/// breaks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DecodeProgress {
+    /// The pass had chip-rate structure to work on — a twin-lobe estimate
+    /// landed, or the sync correlator found something close.
+    pub carrier: bool,
+    /// The 32-bit AO-40 sync word matched within [`SYNC_MAX_ERRORS`] somewhere.
+    pub sync: bool,
+    /// Fewest sync-word bit errors found, 0..=32; [`u8::MAX`] if no bitstream
+    /// was run at all.
+    pub sync_bit_errors: u8,
+    /// A CRC-valid frame was decoded.
+    pub crc_ok: bool,
+}
+
+impl Default for DecodeProgress {
+    fn default() -> Self {
+        Self { carrier: false, sync: false, sync_bit_errors: u8::MAX, crc_ok: false }
+    }
+}
+
+/// Fewest bit errors between [`SYNC_WORD`] and any 32-bit window of `bits`.
+fn min_sync_distance(bits: &[bool]) -> Option<u8> {
+    if bits.len() < SYNC_LEN as usize {
+        return None;
+    }
+    let mut window: u32 = 0;
+    let mut best = SYNC_LEN;
+    for (i, &b) in bits.iter().enumerate() {
+        window = (window << 1) | b as u32;
+        if i + 1 >= SYNC_LEN as usize {
+            best = best.min((window ^ SYNC_WORD).count_ones());
+        }
+    }
+    Some(best as u8)
+}
+
+/// The fewest sync-word bit errors any chip-timing/parity combination of
+/// `iq` (already mixed to one candidate) gets down to — a "how close was
+/// this" that does not need a CRC pass to mean something.
+fn sync_probe(iq: &[Complex32], rate_hz: f64) -> Option<u8> {
+    let samples_per_chip = rate_hz / CHIP_RATE;
+    if samples_per_chip < 2.0 {
+        return None;
+    }
+    let phase_step = (samples_per_chip / TIMING_PHASES as f64).max(1.0);
+    let mut best: Option<u8> = None;
+    for p in 0..TIMING_PHASES {
+        let phase = (p as f64 * phase_step) as usize;
+        let chips = chip_samples(iq, samples_per_chip, phase);
+        if chips.len() < 3 {
+            continue;
+        }
+        let flips = chip_flips(&chips);
+        for parity in 0..2 {
+            if let Some(d) = min_sync_distance(&data_bits(&flips, parity)) {
+                best = Some(best.map_or(d, |b| b.min(d)));
+            }
+        }
+    }
+    best
+}
+
+/// [`acquire`], plus a [`DecodeProgress`] snapshot of how far the pass got.
+/// The lock result and every frequency it searches are identical to
+/// `acquire`; the only extra work is one sync probe on the seed candidate
+/// when nothing locked.
+pub(crate) fn acquire_debug(
+    iq: &[Complex32],
+    rate_hz: f64,
+    search_half_width_hz: f64,
+    freq_step_hz: f64,
+    demod_rate_hz: f64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> (Option<Qo100Lock>, DecodeProgress) {
+    let lock = acquire(iq, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel);
+    if lock.is_some() {
+        return (
+            lock,
+            DecodeProgress { carrier: true, sync: true, sync_bit_errors: 0, crc_ok: true },
+        );
+    }
+    let mut progress = DecodeProgress::default();
+    if rate_hz > 0.0 && demod_rate_hz > 0.0 {
+        let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
+        let dr = rate_hz / deci as f64;
+        let seed = coarse_carrier_hz(iq, rate_hz, search_half_width_hz);
+        let mixed = mix_decimate(iq, rate_hz, seed.unwrap_or(0.0), deci);
+        let dist = sync_probe(&mixed, dr);
+        if let Some(d) = dist {
+            progress.sync_bit_errors = d;
+            progress.sync = u32::from(d) <= SYNC_MAX_ERRORS;
+        }
+        progress.carrier =
+            seed.is_some() || progress.sync || dist.is_some_and(|d| u32::from(d) <= 10);
+    }
+    (lock, progress)
 }
 
 // `pub(crate)` so `controller`'s own test module can build a real on-air frame
@@ -932,5 +1067,59 @@ pub(crate) mod tests {
         let lock = acq(&iq, TEST_RATE, 150.0).expect("still locks");
         assert!((lock.offset_hz - 91.0).abs() <= 1.0, "found {}", lock.offset_hz);
         assert!(lock.text.starts_with("SEEDED NARROW"));
+    }
+
+    #[test]
+    fn estimate_carrier_finds_a_beacon_parked_in_a_positive_window() {
+        // Beacon parked at +12 kHz; a +5..+20 kHz window must find it and
+        // report a healthy null and symmetry.
+        let iq = stacked("PARKED", 60_000.0, 12_000.0, 0.05, 3, 3);
+        let e =
+            estimate_carrier(&iq, 60_000.0, 5_000.0, 20_000.0).expect("twin lobes in the window");
+        assert!((e.hz - 12_000.0).abs() <= 250.0, "hz {}", e.hz);
+        assert!(e.null_depth_db >= 2.5 && e.symmetry >= 0.55 && e.snr_db >= 3.0, "{e:?}");
+    }
+
+    #[test]
+    fn estimate_carrier_ignores_a_beacon_outside_the_window() {
+        // A real beacon at +2 kHz, but the window starts at +6 kHz.
+        let iq = stacked("OUTSIDE", 60_000.0, 2_000.0, 0.02, 4, 3);
+        assert!(estimate_carrier(&iq, 60_000.0, 6_000.0, 20_000.0).is_none());
+    }
+
+    #[test]
+    fn acquire_debug_lights_every_stage_on_a_clean_frame() {
+        let iq = synth_signal("PROGRESS", TEST_RATE, 40.0, 0.0, 1);
+        let (lock, p) = acquire_debug(
+            &iq,
+            TEST_RATE,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(lock.is_some());
+        assert!(p.carrier && p.sync && p.crc_ok, "{p:?}");
+        assert_eq!(p.sync_bit_errors, 0);
+    }
+
+    #[test]
+    fn acquire_debug_on_noise_reports_no_crc_and_ran_a_probe() {
+        let mut rng = TestRng::new(9);
+        let n = (TEST_RATE * 12.0) as usize;
+        let noise: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+        let (lock, p) = acquire_debug(
+            &noise,
+            TEST_RATE,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(lock.is_none());
+        assert!(!p.crc_ok);
+        assert_ne!(p.sync_bit_errors, u8::MAX, "the sync probe should still have run");
     }
 }

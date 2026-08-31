@@ -2727,6 +2727,18 @@ fn qo100_capture_rate_for(half_width_hz: f64) -> f64 {
     (half_width_hz * 2.5).max(16_000.0)
 }
 
+/// [`qo100_capture_rate_for`] folded together with the spectral tracker's
+/// parking window: while the tracker is on, the beacon the operator parked
+/// near `park_hi_hz` has to be inside what the receiver hands over too, not
+/// just whatever the telemetry search width asks for.
+fn qo100_rate_for_cfg(cfg: &sdroxide_types::Qo100Settings) -> f64 {
+    let mut w = cfg.search_half_width_hz;
+    if cfg.enabled {
+        w = w.max(cfg.park_hi_hz.max(cfg.park_lo_hz).max(0.0));
+    }
+    qo100_capture_rate_for(w)
+}
+
 /// How soon after noticing a disconnected front-end the first reconnect attempt
 /// runs, and the ceiling the spacing doubles up to while attempts keep failing.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -8592,7 +8604,13 @@ impl Engine {
     /// the skimmer ask for, so it costs the engine almost nothing at the
     /// default width.
     fn qo100_target_rate_hz(&self) -> f64 {
-        qo100_capture_rate_for(self.state.qo100.search_half_width_hz)
+        qo100_rate_for_cfg(&self.state.qo100)
+    }
+
+    /// Whether the QO-100 worker should be running at all: the spectral
+    /// tracker or the telemetry decoder (or both) is switched on.
+    fn qo100_wanted(&self) -> bool {
+        self.state.qo100.enabled || self.state.qo100.decode_telemetry
     }
 
     /// Construct or tear down the QO-100 beacon decoder, mirroring
@@ -8607,8 +8625,9 @@ impl Engine {
         // downconverter from.
         if self.audio_mode {
             self.state.qo100.enabled = false;
+            self.state.qo100.decode_telemetry = false;
         }
-        match (self.state.qo100.enabled, self.qo100.is_some()) {
+        match (self.qo100_wanted(), self.qo100.is_some()) {
             (true, false) => {
                 let mut ddc = Ddc::new(self.state.sample_rate, self.qo100_target_rate_hz());
                 ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
@@ -15244,7 +15263,25 @@ mod skim_window_tests {
 
 #[cfg(test)]
 mod qo100_rate_tests {
-    use super::qo100_capture_rate_for;
+    use super::{qo100_capture_rate_for, qo100_rate_for_cfg};
+    use sdroxide_types::Qo100Settings;
+
+    #[test]
+    fn the_tracker_parking_window_widens_the_capture_but_only_while_enabled() {
+        // Telemetry-only: capture follows the search width alone.
+        let decode_only = Qo100Settings {
+            enabled: false,
+            decode_telemetry: true,
+            search_half_width_hz: 5_000.0,
+            park_hi_hz: 25_000.0,
+            ..Default::default()
+        };
+        assert_eq!(qo100_rate_for_cfg(&decode_only), 16_000.0);
+
+        // Tracker on: the beacon parked at +25 kHz has to fit under Nyquist.
+        let tracking = Qo100Settings { enabled: true, ..decode_only };
+        assert_eq!(qo100_rate_for_cfg(&tracking), qo100_capture_rate_for(25_000.0));
+    }
 
     /// The narrowest width (±5 kHz) and anything down to it sit on the 16 kHz
     /// floor — ×2.5 does not reach it until ±6.4 kHz.
