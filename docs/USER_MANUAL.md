@@ -1249,6 +1249,16 @@ frequency. The filter follows the mode: change the mode and the channel takes
 the new mode's default passband, leave the mode alone and a filter you chose
 yourself is kept.
 
+On a receiver with more than one antenna port the editor has an **antenna**
+drop-down as well: which socket this channel is listened to on. Storing a memory
+captures whichever socket the radio was on at the time, and this is where you
+say it should have been another — the wire for a 40 m net, the beam for a 2 m
+repeater. The dash (**—**) is not the first port: it means *leave the antenna
+alone*, and it is what every channel stored on a single-socket receiver holds,
+so working down a list that never mentioned antennas never moves a relay. The
+socket is shown in square brackets at the end of the row. A receiver with one
+antenna has nothing to choose and gets no drop-down.
+
 The editor also carries a **RPT** button, which folds out the repeater set-up
 stored with the channel: the shift and its offset, the CTCSS tone or DCS code
 to transmit, and whether every over opens on the 1750 Hz burst. A channel that
@@ -5360,9 +5370,11 @@ exposes, and nothing it does not:
 > LNA ports — the socket you pick is remembered against the band you picked it
 > on, and put back the next time the dial crosses into that band. It survives a
 > restart, and a memory channel stored while the radio is on a socket carries
-> that socket with it and selects it again on recall. A band you have never
-> chosen a socket on is left exactly where the radio already is, so nothing
-> moves a relay for you until you have said what belongs on that band.
+> that socket with it and selects it again on recall — and **EDT** on the
+> channel is where you change your mind about which one that should be
+> ([2.12](#212-memory-channels)). A band you have never chosen a socket on is
+> left exactly where the radio already is, so nothing moves a relay for you
+> until you have said what belongs on that band.
 - **Stream** — **Sample rate** and **Baseband filter**, listing the values this
   device says it accepts. Both default to leaving things as they were: the rate
   falls back to the app-wide `sample_rate`, and the filter to whatever the

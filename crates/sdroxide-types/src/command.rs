@@ -643,6 +643,17 @@ pub enum Command {
         /// which is what a memory written before the field existed already
         /// means: recall onto whatever the repeater controls are set to.
         repeater: Option<crate::RepeaterState>,
+        /// The antenna socket to store with the channel, by the name the front
+        /// end gives the port. `None` clears it, which means "recall this
+        /// channel without moving the antenna" — see
+        /// [`crate::MemoryChannel::antenna`], which reads an absent field the
+        /// same way.
+        ///
+        /// A name the front end does not have is dropped rather than stored: a
+        /// channel may perfectly well have been captured on another radio's
+        /// socket, and remembering a port this receiver has never had would
+        /// leave a memory that can only ever be recalled onto nothing.
+        antenna: Option<String>,
     },
 
     /// Working a repeater: the transmit shift, the sub-audible tone under the

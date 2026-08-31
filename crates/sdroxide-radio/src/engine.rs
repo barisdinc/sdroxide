@@ -6828,7 +6828,7 @@ impl Engine {
                 self.memories.retain(|m| m.id != id);
                 self.save_memories();
             }
-            EditMemory { id, name, freq_hz, mode, repeater } => {
+            EditMemory { id, name, freq_hz, mode, repeater, antenna } => {
                 // A dial that is not a number would be stored, scanned and
                 // tuned to; refuse it here rather than in each of those.
                 let name = name.trim().to_string();
@@ -6867,6 +6867,13 @@ impl Engine {
                     // command is a door a remote client can push anything
                     // through.
                     m.repeater = repeater.map(|r| r.clamped());
+                    // Only a socket this front end actually has. The editor
+                    // offers nothing else, but the command is a door a remote
+                    // client can push anything through, and a name no antenna
+                    // answers to is a channel that recalls onto nothing — so it
+                    // reads as "leave the antenna alone", which is what an
+                    // absent field means anyway.
+                    m.antenna = antenna.filter(|n| self.caps.antennas_rx.contains(n));
                     self.save_memories();
                 }
             }

@@ -966,7 +966,17 @@ use sdroxide_types::{
 /// repeater directory or a channel table read from a CHIRP CSV file, appended
 /// to the station's memories (issue #234). Appended, so every variant already
 /// on the wire keeps its number.
-pub const PROTO_VERSION: u16 = 110;
+/// **111** — the antenna a memory is stored on becomes a field the operator can
+/// set, rather than only whatever the radio happened to be on when the channel
+/// was stored (issue #246).
+///
+/// [`sdroxide_types::Command`]'s `EditMemory` gains `antenna`, beside the
+/// `repeater` setup it already carried, and reads an absent one the same way
+/// [`sdroxide_types::MemoryChannel::antenna`] does: recall this channel without
+/// moving the antenna. A field added to an existing variant rather than a new
+/// variant, so a v110 peer would decode the tail of one as garbage — which the
+/// handshake's equality test catches before a frame is exchanged.
+pub const PROTO_VERSION: u16 = 111;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
