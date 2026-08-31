@@ -3543,6 +3543,62 @@ impl LimeConfig {
         Some(format!("RX{}_{suffix}", channel + 1))
     }
 
+    /// The band each transmit port is matched for, straight out of LimeSuite's
+    /// own `LMS7_Device::GetTxPathBand` (23.11):
+    ///
+    /// ```text
+    /// case LMS_PATH_TX1: return Range(30e6, 1.9e9);
+    /// case LMS_PATH_TX2: return Range(2e9, 2.6e9);
+    /// ```
+    ///
+    /// These are not alternatives. They are two different matching networks on
+    /// the board, and BAND2 — the microwave one — passes essentially nothing on
+    /// any band this program is normally used for. A LimeSDR keyed on 145 MHz
+    /// out of BAND2 answers every command with `ok`, reports full drive,
+    /// streams its samples, and puts nothing on a power meter (issue #94).
+    ///
+    /// `None` for a name this table does not describe, so a board reporting
+    /// something unexpected is never second-guessed on figures that do not
+    /// describe it. Deliberately not mirrored for receive either: LimeSuite's
+    /// receive table stops LNAW at 700 MHz and LNAL at 900, and the boards
+    /// plainly do better than that — 2 m and even 20 m are received on `RX1_W`
+    /// — so vetting a receive port against it would refuse the cabling that
+    /// works.
+    pub fn tx_port_band(port: &str) -> Option<(f64, f64)> {
+        match port.trim().to_ascii_uppercase().as_str() {
+            "BAND1" => Some((30.0e6, 1.9e9)),
+            "BAND2" => Some((2.0e9, 2.6e9)),
+            _ => None,
+        }
+    }
+
+    /// Whether `port` is matched for `hz`. A port [`Self::tx_port_band`] does
+    /// not know gets the benefit of the doubt.
+    pub fn tx_port_covers(port: &str, hz: f64) -> bool {
+        Self::tx_port_band(port).is_none_or(|(lo, hi)| hz >= lo && hz <= hi)
+    }
+
+    /// A transmit port with its socket *and* the band it is matched for:
+    /// `BAND1 — TX1_1, 30 MHz–1.9 GHz`. The band is the part that matters —
+    /// see [`Self::tx_port_band`] — and leaving it off a picker is how an
+    /// operator ends up transmitting 2 m into a 13 cm matching network.
+    pub fn tx_port_label(channel: u8, port: &str) -> String {
+        let label = Self::port_label(channel, port, true);
+        match Self::tx_port_band(port) {
+            Some((lo, hi)) => format!("{label}, {} – {}", Self::mhz(lo), Self::mhz(hi)),
+            None => label,
+        }
+    }
+
+    /// A frequency in whichever of MHz or GHz reads better.
+    fn mhz(hz: f64) -> String {
+        if hz >= 1.0e9 {
+            format!("{:.1} GHz", hz / 1.0e9)
+        } else {
+            format!("{:.0} MHz", hz / 1.0e6)
+        }
+    }
+
     /// The same for a transmit port: `BAND1` on chain 0 is `TX1_1`.
     pub fn tx_socket(channel: u8, port: &str) -> Option<String> {
         let suffix = match port.trim().to_ascii_uppercase().as_str() {

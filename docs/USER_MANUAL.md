@@ -8505,10 +8505,24 @@ and the log says so at every key-down. Raise it into a dummy load first and
 measure; the useful setting is a property of your board, your band and whatever
 is in front of it, not a number this program can pick.
 
+**Transmit port** — `BAND1`, `BAND2`, or **Automatic**. The two are **different
+matching networks on the board, not two jacks onto the same one**: LimeSuite's
+own table gives `BAND1` (`TX1_1`) as 30 MHz–1.9 GHz and `BAND2` (`TX1_2`) as
+2–2.6 GHz. So every band below 23 cm goes out of `BAND1`, and keying one of them
+out of `BAND2` puts the over into a 13 cm filter that passes almost none of it —
+the synthesiser is on frequency, the drive is at whatever you set, the stream
+runs, every setting reads correct, and the power meter reads zero. Leave this on
+*Automatic*, which follows the dial and moves the port when you cross into 13 cm.
+If you do pick one by hand and it does not cover the band you are on, the panel
+says so under the interface and the log says so at every key-down.
+
 Every over prints one line naming what it went out through — the frequency, the
 socket, the drive and the analog filter — and prints it again whenever any of
-those changes. That line, and the LimeRFE's own beside it, is what to read
-first when a transmission does not appear where it should.
+those changes; at unkey it prints what the transmitter was actually given, so a
+key-down that put nothing on the air says whether the modulator sent no samples,
+sent nothing but silence, or sent samples the board would not take. That line,
+and the LimeRFE's own beside it, is what to read first when a transmission does
+not appear where it should.
 
 ##### The LimeRFE
 
@@ -12388,8 +12402,13 @@ All in [§6.2.17](#6217-limesdr-family--limerfe-limesuite):
     interface publishes no transmit channel at all, and the refusal appears
     wherever you keyed from rather than on the meter.
   - **The transmit port on the board itself**, `BAND1` or `BAND2` — the SMA the
-    LimeRFE's transmit input is cabled to. *Automatic* picks `BAND1`, which is
-    `TX1_1`.
+    LimeRFE's transmit input is cabled to. These are **two different matching
+    networks, not two jacks onto the same one**: `BAND1` (`TX1_1`) carries
+    30 MHz to 1.9 GHz and `BAND2` (`TX1_2`) is the 13 cm port. Transmitting an
+    amateur band below 23 cm out of `BAND2` puts the over into a microwave
+    filter that passes almost none of it — every setting reads correct, the
+    drive is whatever you set, and the meter stays at zero. *Automatic* follows
+    the dial and is what you want.
 - **A LimeRFE that answers but passes nothing** has two usual causes, and the
   log line the board's every accepted command produces tells them apart — it
   names the channel, both connectors and the relay state the board agreed to.

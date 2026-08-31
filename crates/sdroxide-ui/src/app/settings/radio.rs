@@ -6909,11 +6909,18 @@ pub(in crate::app) fn settings_lime_tab(
             }
             ui.end_row();
 
-            ui.label("Transmit port");
+            ui.label("Transmit port").on_hover_text(
+                "The board's two transmit sockets are two different matching networks, not \
+                 two jacks onto the same one: BAND1 (TX_1) carries 30 MHz to 1.9 GHz and \
+                 BAND2 (TX_2) is the 13 cm port. Keying an amateur band below 23 cm out of \
+                 BAND2 puts the over into a matching network that passes almost none of it — \
+                 every setting reads correct, the drive is whatever you set, and the power \
+                 meter stays at zero. Leave this on Automatic and it follows the dial.",
+            );
             let text = if cfg.lime.antenna_tx.is_empty() {
                 "Automatic".to_string()
             } else {
-                LimeConfig::port_label(cfg.lime.channel, &cfg.lime.antenna_tx, true)
+                LimeConfig::tx_port_label(cfg.lime.channel, &cfg.lime.antenna_tx)
             };
             let before_tx = cfg.lime.antenna_tx.clone();
             let chan = cfg.lime.channel;
@@ -6923,7 +6930,7 @@ pub(in crate::app) fn settings_lime_tab(
                     ui.selectable_value(
                         &mut cfg.lime.antenna_tx,
                         a.to_string(),
-                        LimeConfig::port_label(chan, a, true),
+                        LimeConfig::tx_port_label(chan, a),
                     );
                 }
             });
