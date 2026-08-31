@@ -6896,6 +6896,12 @@ impl Engine {
                     m.folder = None;
                 }
                 self.save_mem_folders();
+                // …and out of the scanner's selection with it: its channels are
+                // back at the top level, and a scan still naming the folder
+                // would be looking for them where they are not.
+                if self.scan_cfg.forget_folder(id) {
+                    self.save_scanner_config();
+                }
                 self.save_memories();
             }
             MoveMemoryToFolder { id, folder } => {
@@ -9885,6 +9891,22 @@ impl Engine {
         self.scan_level_dbfs().is_some_and(|level| level >= self.scan_threshold_db())
     }
 
+    /// The stored channels a memory scan would visit, in the order the store
+    /// holds them: not skipped, and filed under a folder the operator has the
+    /// scan set to (issue #236).
+    ///
+    /// A channel whose folder has gone from under it counts as unfiled — the
+    /// same reading the memory list draws it with, so what the scan runs over
+    /// is what the operator can see.
+    fn scannable_memories(&self) -> impl Iterator<Item = &sdroxide_types::MemoryChannel> {
+        let cfg = &self.scan_cfg;
+        let folders = &self.mem_folders;
+        self.memories.iter().filter(move |m| {
+            let filed = m.folder.filter(|id| folders.iter().any(|f| f.id == *id));
+            !cfg.skip.contains(&m.id) && cfg.scans_folder(filed)
+        })
+    }
+
     /// Whether this front end can search a whole span at once. A demod-audio
     /// source has no span to search, so it walks channels instead.
     fn scan_can_sweep(&self) -> bool {
@@ -9913,9 +9935,12 @@ impl Engine {
         }
         let usable = match self.scan_cfg.kind {
             ScanKind::Memories => {
-                let any = self.memories.iter().any(|m| !self.scan_cfg.skip.contains(&m.id));
+                let any = self.scannable_memories().next().is_some();
                 if !any {
-                    self.notice("nothing to scan: no memory channels, or all of them skipped");
+                    self.notice(
+                        "nothing to scan: no memory channels in the chosen folders, or all of \
+                         them skipped",
+                    );
                 }
                 any
             }
@@ -10139,14 +10164,12 @@ impl Engine {
     fn scan_refill(&mut self, now: Instant) -> Refill {
         match self.scan_cfg.kind {
             ScanKind::Memories => {
-                let targets: Vec<ScanTarget> = self
-                    .memories
-                    .iter()
-                    .filter(|m| !self.scan_cfg.skip.contains(&m.id))
-                    .map(|m| ScanTarget::Memory(m.id))
-                    .collect();
+                let targets: Vec<ScanTarget> =
+                    self.scannable_memories().map(|m| ScanTarget::Memory(m.id)).collect();
                 if targets.is_empty() {
-                    self.stop_scan(Some("scan stopped: every memory channel is skipped"));
+                    self.stop_scan(Some(
+                        "scan stopped: every memory channel in the chosen folders is skipped",
+                    ));
                     return Refill::Stopped;
                 }
                 if let Some(sc) = self.scan.as_mut() {

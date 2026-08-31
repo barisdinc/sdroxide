@@ -141,6 +141,8 @@ struct Watch {
     /// said anything at all, which is how "no memories" is told apart from
     /// "not asked yet".
     memories: Option<Vec<MemoryChannel>>,
+    /// The folders, announced the same way and read the same way.
+    folders: Vec<sdroxide_types::MemoryFolder>,
 }
 
 struct Rig {
@@ -192,6 +194,7 @@ impl Rig {
                 RadioEvent::Notice(Some(n)) => self.w.notices.push(n),
                 RadioEvent::Scanner(c) => self.w.scanner = Some(c),
                 RadioEvent::Memories(m) => self.w.memories = Some(m),
+                RadioEvent::MemoryFolders(f) => self.w.folders = f,
                 _ => {}
             }
         }
@@ -237,6 +240,20 @@ impl Rig {
                 }
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
+        }
+    }
+
+    /// The folders, once the engine has at least `want` of them. Same bargain
+    /// as [`Rig::memories`]: making one is a command, and the answer is only
+    /// right once it has been acted on.
+    fn folders(&mut self, want: usize) -> Vec<sdroxide_types::MemoryFolder> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            self.drain();
+            if self.w.folders.len() >= want || Instant::now() >= deadline {
+                return self.w.folders.clone();
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -411,6 +428,77 @@ fn a_memory_scan_passes_over_skipped_channels() {
     rig.forget_seen();
     rig.send(Command::SetScanning(true));
     assert_eq!(rig.pump(2.5, true).held_at, None, "it stopped on a channel it was told to skip");
+}
+
+/// A memory scan can be pointed at chosen folders (issue #236). A station's
+/// memories are filed by service — marine, airband, the local repeaters — and a
+/// scan of all of them at once spends most of its time somewhere nobody is
+/// listening.
+///
+/// No selection is still every folder, which is what every setting written
+/// before this existed means and what a folder made tomorrow falls into.
+#[test]
+fn a_memory_scan_runs_over_the_folders_it_was_given() {
+    const SIGNAL: f64 = 145_700_000.0;
+    let mut rig = Rig::new(Some(SIGNAL));
+    rig.clear_memories();
+    // Two channels in two folders: the carrier is on the one in "busy folder".
+    rig.send(Command::CreateMemoryFolder { name: "quiet folder".into() });
+    rig.send(Command::CreateMemoryFolder { name: "busy folder".into() });
+    let folders = rig.folders(2);
+    let folder = |name: &str| folders.iter().find(|f| f.name == name).expect(name).id;
+
+    rig.send(Command::SetVfo { vfo: Vfo::A, hz: 145_250_000.0 });
+    rig.send(Command::StoreMemory { name: "quiet".into() });
+    rig.send(Command::SetVfo { vfo: Vfo::A, hz: SIGNAL });
+    rig.send(Command::StoreMemory { name: "busy".into() });
+    let mems = rig.memories(2);
+    let id = |name: &str| mems.iter().find(|m| m.name == name).expect(name).id;
+    rig.send(Command::MoveMemoryToFolder { id: id("quiet"), folder: Some(folder("quiet folder")) });
+    rig.send(Command::MoveMemoryToFolder { id: id("busy"), folder: Some(folder("busy folder")) });
+
+    let base = ScannerConfig {
+        kind: ScanKind::Memories,
+        threshold_db: -60.0,
+        dwell_ms: 60,
+        resume: ScanResume::Manual,
+        ..range_cfg()
+    };
+
+    // The quiet folder alone: the carrier is in the other one, so nothing to
+    // stop on — even though the scan can plainly hear it, which is the whole
+    // assertion.
+    rig.send(Command::SetScannerConfig(ScannerConfig {
+        folders: vec![Some(folder("quiet folder"))],
+        ..base.clone()
+    }));
+    rig.forget_seen();
+    rig.send(Command::SetScanning(true));
+    assert_eq!(
+        rig.pump(2.5, true).held_at,
+        None,
+        "it stopped on a channel filed under a folder it was not given"
+    );
+
+    // The busy one, and it finds it.
+    rig.send(Command::SetScanning(false));
+    rig.send(Command::SetScannerConfig(ScannerConfig {
+        folders: vec![Some(folder("busy folder"))],
+        ..base.clone()
+    }));
+    rig.forget_seen();
+    rig.send(Command::SetScanning(true));
+    let held = rig.pump(5.0, true).held_at.expect("the chosen folder's busy channel");
+    assert!((held - SIGNAL).abs() < 1.0, "stopped on {held} rather than {SIGNAL}");
+
+    // And an empty selection is every folder, as it always was.
+    rig.send(Command::SetScanning(false));
+    rig.send(Command::SetScannerConfig(base));
+    rig.forget_seen();
+    rig.send(Command::SetScanning(true));
+    let held = rig.pump(5.0, true).held_at.expect("no selection should scan everything");
+    assert!((held - SIGNAL).abs() < 1.0, "stopped on {held} rather than {SIGNAL}");
+    rig.send(Command::SetScanning(false));
 }
 
 /// SKIP on a range scan means the same as SKIP on a memory scan: not this one,

@@ -1347,6 +1347,19 @@ in that span together — the whole of 2 m in well under a second. A CAT rig
 feeding demodulated audio has no such span, so it falls back to visiting
 channels one at a time, and behaves like the handheld.
 
+**A memory scan can be pointed at chosen folders.** With folders in use
+([2.12](#212-memory-channels)) a **Folders** row appears above the channel list:
+**ALL**, then one button per folder with the number of channels in it, and
+**Unfiled** for the top level. Pick one or several and the scan runs over those
+alone — the marine channels while you are on the water, the local repeaters
+while you are not — and the list below narrows to the channels it will actually
+visit, so what you are looking at is what the scan will do. **ALL** is not every
+button lit: it means *no selection*, which is also where a folder you make
+tomorrow lands, so a new folder is scanned rather than silently left out. A
+folder you delete drops out of the selection with it, since its channels are
+back at the top level by then. The row is not drawn at all until there is a
+folder to choose.
+
 **Stops at** is how loud a channel has to be. Either give a level directly, or
 press **SQL** to use the receiver's own squelch, which makes the scan stop
 exactly where the audio would have opened — one control instead of two. Note

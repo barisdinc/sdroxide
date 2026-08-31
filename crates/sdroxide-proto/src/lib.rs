@@ -976,7 +976,15 @@ use sdroxide_types::{
 /// moving the antenna. A field added to an existing variant rather than a new
 /// variant, so a v110 peer would decode the tail of one as garbage — which the
 /// handshake's equality test catches before a frame is exchanged.
-pub const PROTO_VERSION: u16 = 111;
+/// **112** — a memory scan can be pointed at chosen folders (issue #236).
+///
+/// [`sdroxide_types::ScannerConfig`] gains `folders`, the folders a
+/// [`sdroxide_types::ScanKind::Memories`] scan runs over — empty for all of
+/// them, which is what every existing setting means. The config rides both ways
+/// (`Command::SetScannerConfig`, `RadioEvent::Scanner`), so a v111 peer would
+/// read the tail of it as garbage; the handshake's equality test is what stops
+/// one ever seeing it.
+pub const PROTO_VERSION: u16 = 112;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

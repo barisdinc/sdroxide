@@ -193,10 +193,15 @@ impl SdroxideApp {
             );
             return;
         }
+        self.scanner_folders(ui, cfg);
         ui.label(RichText::new("SKIP a channel to pass over it").size(10.0).weak());
+        // Resolved before the loop: the rows borrow `cfg` mutably to toggle a
+        // skip, so the filter cannot still be holding it.
+        let listed: Vec<&sdroxide_types::MemoryChannel> =
+            self.memories.iter().filter(|m| cfg.scans_folder(self.filed_under(m))).collect();
         egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
             egui::Grid::new("scan-mems").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-                for m in &self.memories {
+                for m in listed {
                     let skipped = cfg.skip.contains(&m.id);
                     if crate::chrome::chip(ui, skipped, "SKIP").clicked() {
                         if skipped {
@@ -217,6 +222,73 @@ impl SdroxideApp {
                 }
             });
         });
+    }
+
+    /// Which folder a memory reads as being in — `None` for the top level, and
+    /// for one whose folder has gone from under it, exactly as the memory
+    /// window lists it and as the engine's own scan filter resolves it.
+    fn filed_under(&self, m: &sdroxide_types::MemoryChannel) -> Option<u32> {
+        m.folder.filter(|id| self.mem_folders.iter().any(|f| f.id == *id))
+    }
+
+    /// Which folders the memory scan runs over: **ALL**, then one chip per
+    /// folder, then the unfiled channels (issue #236).
+    ///
+    /// Drawn only where there is a folder to choose — with everything at the
+    /// top level there is one place for a channel to be, and a row offering it
+    /// is a control that can only be set wrong.
+    ///
+    /// ALL is not "every chip lit": it is an empty selection, which is also
+    /// what a folder made tomorrow falls into. Lighting every folder instead
+    /// would quietly leave the next one out of the scan.
+    fn scanner_folders(&self, ui: &mut egui::Ui, cfg: &mut ScannerConfig) {
+        if self.mem_folders.is_empty() {
+            return;
+        }
+        // The counts are what makes the row readable: a folder with nothing in
+        // it, or one whose every channel is skipped, is worth seeing before the
+        // scan says it has nothing to visit.
+        let count = |folder: Option<u32>| {
+            self.memories.iter().filter(|m| self.filed_under(m) == folder).count()
+        };
+        let unfiled = count(None);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Folders").size(10.5).weak());
+            if crate::chrome::chip(ui, cfg.folders.is_empty(), "ALL")
+                .on_hover_text(
+                    "Scan every folder, and every folder made from now on. Pick folders \
+                     instead to scan only those.",
+                )
+                .clicked()
+            {
+                cfg.folders.clear();
+            }
+            let mut toggle = |ui: &mut egui::Ui, which: Option<u32>, label: String, n: usize| {
+                let on = cfg.folders.contains(&which);
+                let text = RichText::new(format!("{label} ({n})")).size(11.0);
+                if crate::chrome::chip(ui, on, text).clicked() {
+                    if on {
+                        cfg.folders.retain(|f| *f != which);
+                    } else {
+                        cfg.folders.push(which);
+                    }
+                }
+            };
+            for f in &self.mem_folders {
+                toggle(ui, Some(f.id), f.name.clone(), count(Some(f.id)));
+            }
+            if unfiled > 0 {
+                toggle(ui, None, "Unfiled".to_string(), unfiled);
+            }
+        });
+        if !cfg.folders.is_empty()
+            && !self.memories.iter().any(|m| cfg.scans_folder(self.filed_under(m)))
+        {
+            ui.label(
+                RichText::new("Nothing is filed under the folders you picked.")
+                    .color(crate::theme::ALERT()),
+            );
+        }
     }
 
     fn scanner_thresholds(&self, ui: &mut egui::Ui, cfg: &mut ScannerConfig) {
