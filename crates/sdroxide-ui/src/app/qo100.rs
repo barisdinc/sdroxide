@@ -21,7 +21,11 @@
 //!   strip) for the beacon's two symmetric lobes with the null between them,
 //!   and reports where the carrier sits — `null`, `sym` and `snr` say how
 //!   convincing the shape was. It reads the beacon's *shape*, never its bits,
-//!   so it works where the decoder cannot lock.
+//!   so it works where the decoder cannot lock. **auto-correct** then closes
+//!   the loop engine-side: on a clean, steady estimate it nudges
+//!   `converter_offset_hz` so the beacon lands back on 10489.750 MHz and
+//!   holds it there as the LNB drifts, deadbanded and rate-limited so a bad
+//!   reading never yanks the receiver.
 //! * **decode AO-40 telemetry** additionally runs the sync-word + CRC frame
 //!   decoder, with a step-by-step readout (`carrier` → `sync` → `CRC`) of how
 //!   far each pass got and how full the frame buffer is.
@@ -448,6 +452,20 @@ impl SdroxideApp {
                  text — with a step-by-step readout of how far each pass gets",
             );
 
+            ui.add_space(6.0);
+            let auto = ui.add_enabled_ui(reachable && cfg.enabled, |ui| {
+                ui.selectable_label(cfg.auto_apply, "auto-correct")
+            });
+            let auto = auto.inner;
+            if auto.clicked() {
+                cfg.auto_apply = !cfg.auto_apply;
+            }
+            auto.on_hover_text(
+                "Let the tracker correct the converter/LNB offset by itself: a slow closed loop \
+                 that, on a clean and steady estimate, nudges the beacon back onto 10489.750 MHz \
+                 and holds it there as the LNB drifts. Reopens the front end each time it acts.",
+            );
+
             ui.add_space(8.0);
             ui.label(RichText::new("width").size(10.0).color(theme::CYAN_DIM()));
             if ui.small_button("−").on_hover_text("Narrower — search a smaller slice").clicked()
@@ -680,6 +698,31 @@ impl SdroxideApp {
                         .monospace(),
                 );
                 ui.end_row();
+
+                if s.auto_applying {
+                    ui.label(dim("AUTO"));
+                    let last = if s.auto_last_unix > 0 {
+                        format!(
+                            "   last {} ({}s ago)",
+                            fmt_hz_signed(s.auto_last_hz),
+                            (crate::time::now_unix() - s.auto_last_unix).max(0)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{} over {} correction{}{last}",
+                            fmt_hz_signed(s.auto_total_hz),
+                            s.auto_applies,
+                            if s.auto_applies == 1 { "" } else { "s" },
+                        ))
+                        .size(10.0)
+                        .monospace()
+                        .color(theme::GREEN()),
+                    );
+                    ui.end_row();
+                }
             });
         }
 

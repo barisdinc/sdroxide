@@ -91,6 +91,11 @@ fn track_hop_seconds() -> f64 {
 /// dropped to `None` — a couple of tracker windows.
 const EST_FRESH_SECS: i64 = 12;
 
+/// Half-width of the band the tracker scans once it has the beacon and it is
+/// no longer out in the parking window — wide enough to hold both lobes plus
+/// context and to not lose a beacon drifting a few hundred Hz between passes.
+const TRACK_BAND_HZ: f64 = 3_000.0;
+
 /// Coarse frequency-grid step the search tries, in Hz. The delay-and-multiply
 /// chip detector `bpsk::acquire` runs at each candidate tolerates a residual
 /// carrier error of well over 100 Hz (its own tests decode an uncorrected
@@ -187,23 +192,36 @@ impl Qo100Controller {
                                     let now = now_unix();
 
                                     // Fast tracker: the newest `track_len`
-                                    // samples, about once a second, scanning
-                                    // only the parking window for the beacon's
-                                    // twin-lobe shape. Anything in that window
-                                    // that is not two symmetric lobes simply
-                                    // does not win.
+                                    // samples, about once a second.
+                                    //
+                                    // Band: a narrow window around the last
+                                    // fresh estimate when there is one, so the
+                                    // tracker follows the beacon wherever it
+                                    // last sat — including down toward centre
+                                    // after the closed loop has corrected. On
+                                    // a cold start or after losing it: the
+                                    // operator's parking window, unless
+                                    // auto-correct is armed, in which case the
+                                    // loop's target is 0 so the sweep has to
+                                    // reach down there too. Anything that is
+                                    // not two symmetric lobes still does not
+                                    // win.
                                     if cfg.enabled
                                         && since_track >= track_hop
                                         && buf.len() >= track_len
                                     {
                                         since_track = 0;
                                         let tail = &buf[buf.len() - track_len..];
-                                        match bpsk::estimate_carrier(
-                                            tail,
-                                            rate_hz,
-                                            cfg.park_lo_hz,
-                                            cfg.park_hi_hz,
-                                        ) {
+                                        let (lo, hi) = match last_est {
+                                            Some((e, t)) if now - t <= EST_FRESH_SECS => {
+                                                (e.hz - TRACK_BAND_HZ, e.hz + TRACK_BAND_HZ)
+                                            }
+                                            _ if cfg.auto_apply => {
+                                                (-TRACK_BAND_HZ, cfg.park_hi_hz)
+                                            }
+                                            _ => (cfg.park_lo_hz, cfg.park_hi_hz),
+                                        };
+                                        match bpsk::estimate_carrier(tail, rate_hz, lo, hi) {
                                             Some(e) => {
                                                 est_updates += 1;
                                                 last_est = Some((e, now));
@@ -346,6 +364,9 @@ fn status_snapshot(
         sync_bit_errors: progress.sync_bit_errors,
         frame_fill: if frame_len > 0 { (buf_len as f32 / frame_len as f32).min(1.0) } else { 0.0 },
         crc_ok: progress.crc_ok,
+        // The closed-loop fields are the engine's to fill in — the worker
+        // only measures, it does not touch the converter offset.
+        ..Default::default()
     }
 }
 

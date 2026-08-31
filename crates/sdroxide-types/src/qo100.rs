@@ -40,6 +40,13 @@ pub struct Qo100Settings {
     /// telemetry itself is a heavier, once-in-a-while thing the operator asks
     /// for explicitly.
     pub decode_telemetry: bool,
+    /// Whether the tracker corrects `RadioConfig::converter_offset_hz` by
+    /// itself: a slow closed loop that, on a clean and steady estimate,
+    /// nudges the offset so the beacon (and the receiver behind it) lands
+    /// back on [`QO100_BEACON_HZ`], then holds it there as the LNB drifts
+    /// with temperature. Off by default — it reopens the front end each time
+    /// it acts.
+    pub auto_apply: bool,
 }
 
 impl Default for Qo100Settings {
@@ -50,6 +57,7 @@ impl Default for Qo100Settings {
             park_lo_hz: 5_000.0,
             park_hi_hz: 25_000.0,
             decode_telemetry: false,
+            auto_apply: false,
         }
     }
 }
@@ -122,4 +130,16 @@ pub struct Qo100Status {
     pub frame_fill: f32,
     /// The last decode pass's CRC check result.
     pub crc_ok: bool,
+
+    // --- closed loop (only while `Qo100Settings::auto_apply`) ---
+    /// The tracker's closed loop is armed and watching the estimate.
+    pub auto_applying: bool,
+    /// Signed Hz the loop has written into the converter offset since the
+    /// tracker came on, and how many separate corrections that took.
+    pub auto_total_hz: f64,
+    pub auto_applies: u64,
+    /// The most recent single correction, and the unix second it was made
+    /// (0 if the loop has not acted yet).
+    pub auto_last_hz: f64,
+    pub auto_last_unix: i64,
 }
