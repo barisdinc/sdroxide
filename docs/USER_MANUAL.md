@@ -6779,7 +6779,12 @@ radio modulates.
   or a VPN never broadcast to you, so those have to be entered by hand.
 - **IQ sample rate** — 24, 48, 96 or 192 kHz. **192 kHz is the radio's maximum
   for a DAX IQ stream**, and therefore the widest span this interface can show;
-  it is not a limit sdroxide imposes.
+  it is not a limit sdroxide imposes. Nor is there a setting that gets round it:
+  binding a DAX IQ channel to a panadapter makes the radio set that panadapter's
+  span *to the DAX IQ rate*, so the two are one number. A wider view of the band
+  has to come from the radio's own panadapter picture, which is what SmartSDR
+  draws — run it alongside if you want one; the two clients coexist (see **Two
+  clients, one identity** below).
 - **DAX IQ channel** — the radio has four. Change this only if something else on
   the network already holds channel 1; the radio refuses the same channel twice.
 - **Station name** — shown against this session in the radio's client list. The

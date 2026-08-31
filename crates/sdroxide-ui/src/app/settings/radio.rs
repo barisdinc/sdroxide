@@ -2957,6 +2957,21 @@ pub(in crate::app) fn settings_smartsdr_tab(
         });
         ui.end_row();
 
+        // Said out loud rather than left in the tooltip above: "why is the band
+        // only 192 kHz wide?" is the question this interface gets asked (issue
+        // #184), and an operator wondering that is looking at this row, not
+        // hovering it.
+        ui.label("");
+        ui.label(
+            RichText::new(
+                "192 kHz is the widest DAX IQ stream a FLEX will send, and the radio ties \
+                 the panadapter's span to it — so that is the whole span, and no setting \
+                 here widens it.",
+            )
+            .weak(),
+        );
+        ui.end_row();
+
         ui.label("DAX IQ channel").on_hover_text(
             "The radio has four. Change this only if something else on the network \
              is already using channel 1 — the radio refuses a channel twice over.",
