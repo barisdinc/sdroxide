@@ -360,6 +360,13 @@ const ACQ_RANGE_MAX_HZ: f64 = 60_000.0;
 /// Margin kept either side of a seed when it decides how far the sweep reaches.
 const SEED_MARGIN_HZ: f64 = 2_000.0;
 
+/// The dense sub-grid tried right on the spectral seed before the coarse
+/// sweep: `±FINE_SPAN_HZ` in `FINE_STEP_HZ` steps. Fine enough that the
+/// residual carrier error is small next to what the payload CRC can survive,
+/// narrow enough to add only a dozen-odd candidates.
+const FINE_STEP_HZ: f64 = 25.0;
+const FINE_SPAN_HZ: f64 = 250.0;
+
 /// Welch power spectrum of `iq`: a Blackman–Harris window, 50 % overlap, the
 /// mean of every whole segment's periodogram, left in natural FFT order.
 fn welch_psd(iq: &[Complex32], nfft: usize) -> Vec<f32> {
@@ -593,16 +600,33 @@ pub fn acquire(
     let steps = (reach_hz / freq_step_hz).round().max(0.0) as i64;
     let seed_step = seed_hz.map(|s| (s / freq_step_hz).round() as i64).unwrap_or(0);
 
-    // Every grid point in range, ordered by distance from the seed step (ties
+    // The candidate mix-down frequencies, in order.
+    //
+    // First — when the spectrum gave a confident seed — a *dense* sweep right
+    // on it: the coarse `freq_step_hz` grid leaves a residual carrier error of
+    // up to half a step, which the chip detector tolerates for the sync word
+    // but which lifts the payload bit-error rate enough that the CRC over 514
+    // bytes almost never checks out. A few Hz of residual instead of ~75 is
+    // what turns "carrier + sync, no CRC" into a decode.
+    let mut freqs: Vec<f64> = Vec::new();
+    if let Some(s) = seed_hz {
+        let fine = (FINE_SPAN_HZ / FINE_STEP_HZ).round() as i64;
+        for k in 0..=2 * fine {
+            let d = if k % 2 == 0 { k / 2 } else { -(k / 2 + 1) };
+            freqs.push(s + d as f64 * FINE_STEP_HZ);
+        }
+    }
+    // Then the full coarse grid, ordered by distance from the seed step (ties
     // to the high side, as the plain centre-out sweep did). With no seed this
     // is exactly `0, +1, -1, +2, -2, …` from DC.
-    let mut cands: Vec<i64> = (-steps..=steps).collect();
-    cands.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
-    for step in cands {
+    let mut coarse: Vec<i64> = (-steps..=steps).collect();
+    coarse.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
+    freqs.extend(coarse.iter().map(|&s| s as f64 * freq_step_hz));
+
+    for coarse_hz in freqs {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let coarse_hz = step as f64 * freq_step_hz;
         let mixed = mix_decimate(iq, rate_hz, coarse_hz, deci);
         if let Some(cm) = try_frequency(&mixed, dr) {
             let offset_hz = coarse_hz + refine_offset_hz(&mixed, dr, &cm);
