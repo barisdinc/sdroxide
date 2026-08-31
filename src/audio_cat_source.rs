@@ -949,16 +949,22 @@ impl IqSource for AudioCatSource {
     }
 
     fn tx_write_audio(&mut self, audio: &[f32]) -> Result<()> {
-        let Some((out, producer)) = self.out.as_mut() else {
+        let Some((_, producer)) = self.out.as_mut() else {
             return Ok(()); // no TX audio device — PTT still keyed the rig
         };
-        // How many copies of each sample the stream expects. Read from the
-        // stream rather than assumed to be two: `start_output` falls back
-        // through its candidate configurations, and on a card that opened mono
-        // a hardcoded pair wrote every sample twice — which is not a louder
-        // over, it is one transmitted at half speed.
-        let channels = usize::from(out.channels.max(1));
-        // Resample 48 kHz → card rate, then write one sample per channel.
+        // Resample 48 kHz → card rate, then interleave to stereo.
+        //
+        // A *pair* per sample, whatever the card's own channel count is: the
+        // ring `start_output` hands back is interleaved stereo by definition,
+        // and the playback callback takes two out of it for every frame it
+        // fills and mixes them down itself where the device opened mono. One
+        // per sample on such a card is therefore not a quieter over — the
+        // callback consumes the ring twice as fast as it is filled, so the
+        // audio goes out at double speed with every pair averaged together and
+        // silence spliced in wherever it ran dry. On a virtual cable, which is
+        // where a mono output turns up (VB-Audio's CABLE-B opens as one
+        // channel), that is an FT8 burst arriving as a smear across the whole
+        // passband (issue #247).
         self.tx_scratch.clear();
         match self.tx_resampler.as_mut() {
             Some(rs) => rs.push(audio, &mut self.tx_scratch),
@@ -969,7 +975,7 @@ impl IqSource for AudioCatSource {
         // (e.g. a 110 s SSTV image) is generated at CPU speed and mostly dropped
         // on a full ring, so the radio only transmits the first buffer-full.
         for &s in &self.tx_scratch {
-            for _ in 0..channels {
+            for _ in 0..2 {
                 let mut v = s;
                 let mut tries = 0u32;
                 while let Err(rtrb::PushError::Full(x)) = producer.push(v) {

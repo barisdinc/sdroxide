@@ -1008,6 +1008,13 @@ the receiver measures the signal in its own passband, calibrated to dBm by
 > then on. It is one number for the station, so where two radios differ, set it
 > for the one you judge signals on. Changing the front end's gain moves the
 > reading with it, exactly as an attenuator ahead of a real receiver would.
+>
+> The same applies with a knob more in the way when the I/Q arrives over a
+> virtual audio cable from another program (PowerSDR, HDSDR): what the meter
+> measures is the level that program is writing into the cable, which it has
+> already put through its own gain and AGC. A reading tens of dB above the S
+> meter in the program feeding it is that offset and not a fault — set
+> `cal_offset_db` to the difference and the two agree.
 
 A **CAT rig on a sound card** sends audio it
 has already demodulated and levelled, so there is nothing left on this side to
