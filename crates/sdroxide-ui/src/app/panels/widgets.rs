@@ -235,6 +235,52 @@ pub(in crate::app) fn sort_head_row<K: Copy + PartialEq>(
     }
 }
 
+/// [`row_cell`] for a heading that sorts the table when it is clicked.
+///
+/// The [`sort_head_row`] of the tables that lay their columns out as widgets
+/// rather than painting them at fixed offsets. Same rule on the click: the
+/// active column reverses, any other becomes the new one, descending.
+pub(in crate::app) fn sort_head_cell<K: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    w: f32,
+    align_right: bool,
+    text: &str,
+    key: Option<K>,
+    sort: &mut K,
+    desc: &mut bool,
+) {
+    const H: f32 = 14.0;
+    let on = key.is_some_and(|k| k == *sort);
+    let label = if on { format!("{text}{}", sort_arrow(*desc)) } else { text.to_string() };
+    let sense = if key.is_some() { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, H), sense);
+    let ink = if on {
+        crate::theme::CYAN()
+    } else if resp.hovered() {
+        crate::theme::gray(180)
+    } else {
+        crate::theme::CYAN_DIM()
+    };
+    let layout = if align_right {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+        .add(egui::Label::new(RichText::new(label).size(9.5).color(ink).monospace()).truncate());
+    if key.is_some() && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if let Some(key) = key.filter(|_| resp.clicked()) {
+        if key == *sort {
+            *desc = !*desc;
+        } else {
+            *sort = key;
+            *desc = true;
+        }
+    }
+}
+
 /// [`row_cell`] for a column that draws something other than a label — the
 /// flag image, which is a texture rather than text but has to reserve its
 /// width the same way or the columns after it walk about between rows.

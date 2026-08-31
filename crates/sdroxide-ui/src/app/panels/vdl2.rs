@@ -41,20 +41,6 @@ pub(in crate::app) enum Vdl2Sort {
     Signal,
 }
 
-impl Vdl2Sort {
-    const ALL: [Vdl2Sort; 5] =
-        [Vdl2Sort::Heard, Vdl2Sort::Name, Vdl2Sort::Address, Vdl2Sort::Messages, Vdl2Sort::Signal];
-    fn label(self) -> &'static str {
-        match self {
-            Vdl2Sort::Heard => "HEARD",
-            Vdl2Sort::Name => "NAME",
-            Vdl2Sort::Address => "ADDR",
-            Vdl2Sort::Messages => "MSGS",
-            Vdl2Sort::Signal => "SIG",
-        }
-    }
-}
-
 impl SdroxideApp {
     pub(in crate::app) fn vdl2_panel(
         &mut self,
@@ -297,17 +283,6 @@ impl SdroxideApp {
         ui.horizontal_wrapped(|ui| {
             ui.set_min_height(20.0);
             ui.label(RichText::new("STATIONS").strong().size(10.5).color(theme::CYAN()));
-            for s in Vdl2Sort::ALL {
-                let on = self.vdl2_sort == s;
-                if crate::chrome::chip(ui, on, RichText::new(s.label()).size(10.0)).clicked() {
-                    if on {
-                        self.vdl2_sort_desc = !self.vdl2_sort_desc;
-                    } else {
-                        self.vdl2_sort = s;
-                        self.vdl2_sort_desc = true;
-                    }
-                }
-            }
         });
 
         let filter = self.vdl2_filter.trim().to_ascii_uppercase();
@@ -323,7 +298,7 @@ impl SdroxideApp {
             .collect();
         sort_stations(&mut rows, self.vdl2_sort, self.vdl2_sort_desc);
 
-        station_head_row(ui);
+        station_head_row(ui, &mut self.vdl2_sort, &mut self.vdl2_sort_desc);
         egui::ScrollArea::vertical()
             .id_salt("vdl2-stations")
             .max_height((avail_h - 40.0).max(48.0))
@@ -696,30 +671,27 @@ fn one_line(s: &str, budget: usize) -> String {
     }
 }
 
-/// The station table's column headings, at the same offsets the rows use.
-fn station_head_row(ui: &mut egui::Ui) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let p = ui.painter_at(rect);
-    let font = egui::FontId::monospace(8.5);
-    let ink = theme::gray(110);
-    let cols = station_columns(w);
-    for (x, align, text) in [
-        (cols.name, egui::Align2::LEFT_CENTER, "NAME"),
-        (cols.addr, egui::Align2::LEFT_CENTER, "ADDR"),
-        (cols.kind, egui::Align2::LEFT_CENTER, "TYPE"),
-        (cols.msgs, egui::Align2::RIGHT_CENTER, "MSGS"),
-        (cols.sig, egui::Align2::RIGHT_CENTER, "SIG"),
-        (cols.age, egui::Align2::RIGHT_CENTER, "AGE"),
-    ] {
-        if x.is_nan() {
-            continue;
-        }
-        p.text(egui::pos2(rect.left() + x, rect.center().y), align, text, font.clone(), ink);
-    }
+/// The station table's column headings, at the same offsets the rows use — and
+/// what re-orders it.
+fn station_head_row(ui: &mut egui::Ui, sort: &mut Vdl2Sort, desc: &mut bool) {
+    const L: egui::Align2 = egui::Align2::LEFT_CENTER;
+    const R: egui::Align2 = egui::Align2::RIGHT_CENTER;
+    let cols = station_columns(ui.available_width());
+    crate::app::panels::widgets::sort_head_row(
+        ui,
+        &[
+            (cols.name, L, "NAME", Some(Vdl2Sort::Name)),
+            (cols.addr, L, "ADDR", Some(Vdl2Sort::Address)),
+            // Ground station or aircraft, which is two values: an order on it
+            // would be a grouping, and the address column already gives one.
+            (cols.kind, L, "TYPE", None),
+            (cols.msgs, R, "MSGS", Some(Vdl2Sort::Messages)),
+            (cols.sig, R, "SIG", Some(Vdl2Sort::Signal)),
+            (cols.age, R, "AGE", Some(Vdl2Sort::Heard)),
+        ],
+        sort,
+        desc,
+    );
 }
 
 struct StationCols {
