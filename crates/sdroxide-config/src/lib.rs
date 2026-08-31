@@ -1326,6 +1326,20 @@ pub fn save_adsb_config(cfg: &sdroxide_types::AdsbSettings) -> Result<(), Config
     save_json("adsb.json", cfg)
 }
 
+/// VDL Mode 2 decoder preferences.
+///
+/// Kept apart from the live `RadioState.vdl2` for the same reason the ADS-B and
+/// ISM decoders' are: a front end that hands over demodulated audio, or one too
+/// narrow to reach any of the channel plan, forces the decoder off, and that
+/// must not overwrite what the operator chose for a receiver that can run it.
+pub fn load_vdl2_config() -> sdroxide_types::Vdl2Settings {
+    load_json::<sdroxide_types::Vdl2Settings>("vdl2.json").sane()
+}
+
+pub fn save_vdl2_config(cfg: &sdroxide_types::Vdl2Settings) -> Result<(), ConfigError> {
+    save_json("vdl2.json", cfg)
+}
+
 /// Scanner settings: what to scan, how hard a signal has to be to stop it, and
 /// which memories to pass over. Restored at startup so a scan set up once is
 /// one keypress away afterwards.

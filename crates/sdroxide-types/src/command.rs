@@ -870,4 +870,15 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     ImportMemories(Vec<crate::MemoryChannel>),
+
+    /// Set how the VDL Mode 2 decoder behaves: which of the seven channels to
+    /// listen on, how hard a burst has to be, and how much log to keep.
+    ///
+    /// The engine persists it to `vdl2.json` and echoes it back in
+    /// [`crate::RadioState::vdl2`], so there is no apply step and no way for
+    /// the panel's copy and the engine's to drift apart — the same bargain
+    /// [`Command::SetAdsbConfig`] strikes.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetVdl2Config(crate::Vdl2Settings),
 }

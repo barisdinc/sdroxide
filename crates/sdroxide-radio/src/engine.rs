@@ -39,6 +39,7 @@ use sdroxide_types::{
     RepeaterState, RigctldConfig, RxId, RxState, ScanKind, ScanResume, SpectrumConfig,
     SpectrumFrame, TciServerConfig, TxEqState, TxMeters, Vfo,
 };
+use sdroxide_vdl2::{Vdl2Action, Vdl2Controller};
 
 use crate::recorder::{Recorder, RecordingChannels};
 use crate::voice::VoiceKeyer;
@@ -2178,6 +2179,30 @@ struct Engine {
     /// panel that connected while the lane was down would sit on "starting the
     /// decoder" forever.
     adsb_idle_sent: Option<Option<String>>,
+
+    /// The VDL Mode 2 lane: a fourth window, on the 136.7-137.0 MHz datalink
+    /// channels.
+    ///
+    /// Its own for the same reason ADS-B's is — it is somewhere else entirely —
+    /// but shaped like the ISM decoder's inside, because VDL2 is a plan of seven
+    /// channels rather than one frequency. It only runs in `Mode::Vdl2`: the
+    /// window is a third of a megahertz wide and nothing else can be listened to
+    /// through a receiver parked on it.
+    vdl2_ddc: Option<Ddc>,
+    vdl2: Option<Vdl2Controller>,
+    vdl2_buf: Vec<Complex32>,
+    /// Absolute frequency the window is centred on.
+    vdl2_center_hz: f64,
+    /// The stream rate `vdl2_ddc` was built to decimate, so a retune can tell a
+    /// window that merely moved from one that has to be rebuilt.
+    vdl2_in_rate: f64,
+    /// The operator's persisted preference, kept apart from `state.vdl2` for the
+    /// same reason `adsb_cfg` is.
+    vdl2_cfg: sdroxide_types::Vdl2Settings,
+    /// The last "cannot run" sentence sent to the panel, so it is sent once
+    /// rather than on every block. The outer `None` means nothing has been said
+    /// yet, which is different from having said "there is nothing wrong".
+    vdl2_idle_sent: Option<Option<String>>,
     /// QO-100 beacon decoder: a fixed downconversion onto
     /// [`sdroxide_types::QO100_BEACON_HZ`] plus a worker-thread demodulator,
     /// present only while the decoder is enabled. Simpler than the ISM
@@ -2770,6 +2795,22 @@ fn engine_thread(
             }
             state.band = Band::containing(hz);
         }
+        // ...and VDL2, which is a plan of seven channels rather than one, so the
+        // dial goes to the middle of the group and the lane's own window slides
+        // from there to take in as much of it as the front end can reach.
+        if mode.is_vdl2() {
+            let hz = sdroxide_types::VDL2_PLAN_CENTER_HZ;
+            info!(
+                from = state.active_freq_hz(),
+                to = hz,
+                "VDL2 lives around 136.8 MHz; tuning there"
+            );
+            match state.active_vfo {
+                Vfo::A => state.vfo_a_hz = hz,
+                Vfo::B => state.vfo_b_hz = hz,
+            }
+            state.band = Band::containing(hz);
+        }
     }
     let skim_cfg = sdroxide_config::load_skimmer_config();
     state.skimmer = if audio_mode {
@@ -2797,6 +2838,12 @@ fn engine_thread(
         sdroxide_types::IsmSettings::OFF // wideband-only, like the skimmers
     } else {
         ism_cfg
+    };
+    let vdl2_cfg = sdroxide_config::load_vdl2_config();
+    state.vdl2 = if audio_mode {
+        sdroxide_types::Vdl2Settings::OFF // wideband-only, like the rest of the lanes
+    } else {
+        vdl2_cfg
     };
     let adsb_cfg = sdroxide_config::load_adsb_config();
     state.adsb = if audio_mode {
@@ -3052,6 +3099,13 @@ fn engine_thread(
         adsb_cfg,
         adsb_home: None,
         adsb_idle_sent: None,
+        vdl2_ddc: None,
+        vdl2: None,
+        vdl2_buf: Vec::new(),
+        vdl2_center_hz: 0.0,
+        vdl2_in_rate: 0.0,
+        vdl2_cfg,
+        vdl2_idle_sent: None,
         qo100_ddc: None,
         qo100: None,
         qo100_buf: Vec::new(),
@@ -3170,6 +3224,7 @@ fn engine_thread(
         engine.sync_ism(); // likewise, from ism.json
         engine.sync_adsb_home();
         engine.sync_adsb(); // and the aircraft lane, if the mode is already ADS-B
+        engine.sync_vdl2(); // ...and the datalink lane, likewise
         engine.sync_qo100(); // a no-op today: `qo100_cfg` starts disabled and is never loaded
     }
     // Start any enabled network spot feeds from the persisted config. The
@@ -3357,6 +3412,7 @@ fn engine_thread(
         engine.poll_skimmer();
         engine.poll_ism();
         engine.poll_adsb();
+        engine.poll_vdl2();
         engine.poll_qo100();
         engine.poll_scanner();
         engine.poll_tci_server();
@@ -4141,6 +4197,17 @@ impl Engine {
                 d.on_rx_iq(&self.adsb_buf);
             }
         }
+        // ...and the VDL2 lane, from a third of a megahertz around 136.8 MHz.
+        // The seven channels are split out inside the worker rather than here:
+        // one downconverter per channel is the worker's business, and the engine
+        // only has to place the window they all come off.
+        if let Some(ddc) = self.vdl2_ddc.as_mut() {
+            self.vdl2_buf.clear();
+            ddc.process(iq, &mut self.vdl2_buf);
+            if let Some(d) = self.vdl2.as_ref() {
+                d.on_rx_iq(&self.vdl2_buf);
+            }
+        }
         // ...and the QO-100 beacon decoder from its own fixed downconversion
         // onto the beacon frequency.
         if let Some(ddc) = self.qo100_ddc.as_mut() {
@@ -4601,6 +4668,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_vdl2_window();
                 self.sync_qo100_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
@@ -4816,6 +4884,11 @@ impl Engine {
         // target rather than a plan of them: 1090 MHz is where it has to be, and
         // the only question is whether the new span still reaches it.
         self.sync_adsb_window();
+        // The VDL2 window is a plan of channels like the ISM one, but unlike it
+        // the whole plan fits in a single window, so there is nothing to choose
+        // between — it goes where the span can reach the group and follows the
+        // hardware centre when it has to.
+        self.sync_vdl2_window();
         // The QO-100 window, unlike the ISM one, *does* follow the hardware
         // centre — its one target frequency never moves, so re-seating the
         // mixer is all a retune ever needs.
@@ -7276,6 +7349,22 @@ impl Engine {
                 }
             }
 
+            // VDL Mode 2 decoder.
+            SetVdl2Config(cfg) => {
+                let cfg = cfg.sane();
+                self.state.vdl2 = cfg;
+                // Remembered before `sync_vdl2` may force the live state off, so
+                // a source swap back restores what was chosen.
+                self.vdl2_cfg = cfg;
+                if let Err(e) = sdroxide_config::save_vdl2_config(&cfg) {
+                    warn!("saving VDL2 config: {e}");
+                }
+                self.sync_vdl2();
+                if let Some(d) = self.vdl2.as_ref() {
+                    d.set_config(cfg);
+                }
+            }
+
             SetQo100Config(cfg) => {
                 self.state.qo100 = cfg;
                 // Held in step with the live setting for symmetry with the
@@ -8477,6 +8566,216 @@ impl Engine {
             st.degraded = degraded.clone();
             st.suggest_center_hz = unavailable.is_some().then_some(sdroxide_types::ADSB_FREQ_HZ);
             let _ = self.event_tx.send(RadioEvent::AdsbStatus(st));
+        }
+    }
+
+    /// The rate the VDL2 window asks its down-converter for.
+    ///
+    /// Capped at what the front end delivers, because a window is a decimation
+    /// of that stream and not a second tuner. A receiver too narrow to hold even
+    /// one channel therefore lands on its own rate, `sync_vdl2` refuses to
+    /// start, and the panel says why.
+    fn vdl2_target_rate_hz(&self) -> f64 {
+        sdroxide_vdl2::plan::WINDOW_TARGET_RATE_HZ.min(self.state.sample_rate)
+    }
+
+    /// Where the window sits: over the channel plan where the span reaches it,
+    /// and as close as the span allows otherwise.
+    fn vdl2_window_center_hz(&self, rate: f64) -> f64 {
+        sdroxide_vdl2::plan::window_center_for(self.state.center_hz, self.state.sample_rate, rate)
+    }
+
+    /// Why the decoder cannot run here, if it cannot. `None` means it can.
+    ///
+    /// Every sentence names the number it is talking about. "Nothing on the air"
+    /// and "this receiver was never going to hear any of it" produce the same
+    /// empty log, and only this tells them apart.
+    fn vdl2_unavailable(&self) -> Option<String> {
+        if self.audio_mode {
+            return Some(
+                "this front end hands over demodulated audio; VDL2 needs the raw I/Q stream"
+                    .to_string(),
+            );
+        }
+        if self.state.sample_rate < sdroxide_types::VDL2_MIN_RATE_HZ {
+            return Some(format!(
+                "VDL2 needs at least {:.0} kHz of stream and this one is {:.1} kHz — \
+                 lower the front-end decimation, or raise the device sample rate",
+                sdroxide_types::VDL2_MIN_RATE_HZ / 1e3,
+                self.state.sample_rate / 1e3
+            ));
+        }
+        if !self.caps.can_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ) {
+            return Some("this receiver does not tune to 136.8 MHz".to_string());
+        }
+        let rate = Ddc::rate_for(self.state.sample_rate, self.vdl2_target_rate_hz());
+        let center = self.vdl2_window_center_hz(rate);
+        if !sdroxide_vdl2::window_covers(center, rate) {
+            return Some(format!(
+                "no VDL2 channel is inside the receiver's window, which is {:.3} MHz wide \
+                 about {:.3} MHz",
+                rate / 1e6,
+                center / 1e6
+            ));
+        }
+        None
+    }
+
+    /// Why the decoder will do less than it could here, even though it runs.
+    ///
+    /// A different kind of statement from [`Self::vdl2_unavailable`]: the lane is
+    /// working, and an operator who sees three channels lit out of seven would
+    /// otherwise have to guess whether the other four are quiet or out of reach.
+    fn vdl2_degraded(&self) -> Option<String> {
+        if self.vdl2_unavailable().is_some() {
+            return None;
+        }
+        let rate = Ddc::rate_for(self.state.sample_rate, self.vdl2_target_rate_hz());
+        let center = self.vdl2_window_center_hz(rate);
+        let reached = sdroxide_vdl2::plan::channels_in_window(center, rate);
+        let total = sdroxide_vdl2::plan::CHANNELS.len();
+        if reached.len() < total {
+            let missing: Vec<String> = (0..total)
+                .filter(|i| !reached.contains(i))
+                .map(|i| format!("{:.3}", sdroxide_vdl2::plan::CHANNELS[i].center_hz / 1e6))
+                .collect();
+            return Some(format!(
+                "this window is {:.0} kHz wide and reaches {} of the {total} channels — \
+                 {} MHz {} outside it",
+                rate / 1e3,
+                reached.len(),
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        let sps = Ddc::rate_for(rate, sdroxide_vdl2::plan::CHANNEL_TARGET_RATE_HZ)
+            / sdroxide_types::VDL2_SYMBOL_RATE;
+        if sps < sdroxide_types::VDL2_GOOD_SPS {
+            return Some(format!(
+                "this window leaves only {sps:.1} samples per symbol; below \
+                 {:.0} the symbol timing has too little to work with",
+                sdroxide_types::VDL2_GOOD_SPS
+            ));
+        }
+        None
+    }
+
+    /// A down-converter for the VDL2 window, already mixed onto it, and the
+    /// absolute frequency it is centred on.
+    fn build_vdl2_window(&mut self) -> (Ddc, f64) {
+        let target = self.vdl2_target_rate_hz();
+        let mut ddc = Ddc::new(self.state.sample_rate, target);
+        let center = self.vdl2_window_center_hz(ddc.out_rate());
+        ddc.set_offset_hz(center - self.state.center_hz);
+        self.vdl2_in_rate = self.state.sample_rate;
+        (ddc, center)
+    }
+
+    /// Start or stop the VDL2 lane to match the mode and the front end.
+    ///
+    /// Follows the *mode*, like the ADS-B lane and unlike the ISM decoder: it
+    /// needs the receiver parked on the datalink group, and nothing else can be
+    /// listened to through that.
+    fn sync_vdl2(&mut self) {
+        let want = self.state.rx[0].mode.is_vdl2() && self.vdl2_unavailable().is_none();
+        // The operator's own preference survives being overruled: `state.vdl2`
+        // is what the panel reads, `vdl2_cfg` is what they chose.
+        if self.audio_mode {
+            self.state.vdl2 = sdroxide_types::Vdl2Settings::OFF;
+        } else {
+            self.state.vdl2 = self.vdl2_cfg;
+        }
+        match (want, self.vdl2.is_some()) {
+            (true, false) => {
+                let (ddc, center) = self.build_vdl2_window();
+                let out_rate = ddc.out_rate();
+                self.vdl2 = Some(Vdl2Controller::new(center, out_rate, self.state.vdl2));
+                self.vdl2_ddc = Some(ddc);
+                self.vdl2_center_hz = center;
+                info!(rate = out_rate, center, "VDL2 decoder started");
+            }
+            (false, true) => {
+                self.vdl2 = None;
+                self.vdl2_ddc = None;
+                self.vdl2_buf.clear();
+                info!("VDL2 decoder stopped");
+            }
+            (true, true) => self.sync_vdl2_window(),
+            _ => {}
+        }
+    }
+
+    /// Re-place the window after a retune or a rate change.
+    ///
+    /// The log and the station table survive: a receiver nudged a hundred
+    /// kilohertz is still listening to the same aeroplanes. The chain that feeds
+    /// them is another matter — a `Ddc` bakes in both its input rate and its
+    /// decimation, so a change in either is a rebuild rather than a retune.
+    fn sync_vdl2_window(&mut self) {
+        let Some(ddc) = self.vdl2_ddc.as_ref() else { return };
+        let want_rate = Ddc::rate_for(self.state.sample_rate, self.vdl2_target_rate_hz());
+        if (want_rate - ddc.out_rate()).abs() >= 1.0
+            || (self.state.sample_rate - self.vdl2_in_rate).abs() >= 1.0
+        {
+            let (ddc, center) = self.build_vdl2_window();
+            let rate = ddc.out_rate();
+            self.vdl2_ddc = Some(ddc);
+            self.vdl2_center_hz = center;
+            if let Some(d) = self.vdl2.as_ref() {
+                d.set_window(center, rate);
+            }
+            info!(rate, center, "VDL2 window rebuilt");
+            return;
+        }
+
+        let center = self.vdl2_window_center_hz(want_rate);
+        let Some(ddc) = self.vdl2_ddc.as_mut() else { return };
+        // Re-seated even when the window has not moved in absolute terms: the
+        // offset is measured from the *hardware* centre, and a retune is exactly
+        // what moves that.
+        ddc.set_offset_hz(center - self.state.center_hz);
+        if (center - self.vdl2_center_hz).abs() < 1.0 {
+            return;
+        }
+        self.vdl2_center_hz = center;
+        if let Some(d) = self.vdl2.as_ref() {
+            d.set_window(center, want_rate);
+        }
+    }
+
+    /// Drain the VDL2 decoder's log and station table and forward them.
+    ///
+    /// The worker knows what it is decoding but not what the receiver could have
+    /// been decoding, so the "why is this empty" fields are filled in here,
+    /// where the front end's capabilities are.
+    fn poll_vdl2(&mut self) {
+        let unavailable = self.vdl2_unavailable();
+        let Some(d) = self.vdl2.as_ref() else {
+            // Nothing running. On the VDL2 mode that is a fact worth sending —
+            // it is the only way the panel can say what is wrong — but off it
+            // there is nobody listening. Once, not per block.
+            if self.state.rx[0].mode.is_vdl2() && self.vdl2_idle_sent.as_ref() != Some(&unavailable)
+            {
+                self.vdl2_idle_sent = Some(unavailable.clone());
+                let st = sdroxide_types::Vdl2Status {
+                    unavailable,
+                    suggest_center_hz: Some(sdroxide_types::VDL2_PLAN_CENTER_HZ),
+                    ..Default::default()
+                };
+                let _ = self.event_tx.send(RadioEvent::Vdl2Status(Box::new(st)));
+            }
+            return;
+        };
+        // Running again: whatever was last said about it being down is stale.
+        self.vdl2_idle_sent = None;
+        let degraded = self.vdl2_degraded();
+        for action in d.poll() {
+            let Vdl2Action::Status(mut st) = action;
+            st.unavailable = unavailable.clone();
+            st.degraded = degraded.clone();
+            st.suggest_center_hz = (unavailable.is_some() || degraded.is_some())
+                .then_some(sdroxide_types::VDL2_PLAN_CENTER_HZ);
+            let _ = self.event_tx.send(RadioEvent::Vdl2Status(st));
         }
     }
 
@@ -9706,6 +10005,24 @@ impl Engine {
             self.state.band = Band::containing(hz);
             self.follow_dial();
         }
+        // VDL2 is the same argument with one difference: the channels are a
+        // group rather than a point, so "already inside the window" is asked of
+        // the whole plan, and a receiver that reaches only part of it is left
+        // where it is and told so rather than dragged across the band.
+        if rx == RxId::Main
+            && mode.is_vdl2()
+            && !self.state.rx[0].mode.is_vdl2()
+            && self.caps.can_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ)
+            && !sdroxide_vdl2::window_covers(self.state.center_hz, self.state.sample_rate)
+        {
+            let hz = sdroxide_types::VDL2_PLAN_CENTER_HZ;
+            match self.state.active_vfo {
+                Vfo::A => self.state.vfo_a_hz = hz,
+                Vfo::B => self.state.vfo_b_hz = hz,
+            }
+            self.state.band = Band::containing(hz);
+            self.follow_dial();
+        }
         // Changing modes under a running keyer message would leave it playing
         // into a transmit chain that has just been rebuilt (or into a digital
         // mode that has no use for it).
@@ -9758,6 +10075,7 @@ impl Engine {
             // ...and the ADS-B lane, which unlike the other wideband decoders
             // runs only while its mode is selected.
             self.sync_adsb();
+            self.sync_vdl2();
             self.emit_digi_status();
             // A wider channel needs a wider berth from the LO: switching a
             // narrow mode that was happily sitting 30 kHz off the LO into WFM
@@ -11054,6 +11372,13 @@ impl Engine {
         self.adsb_ddc = None;
         self.adsb = None;
         self.adsb_buf.clear();
+        // The VDL2 lane goes the same way. Decimating the front end below about
+        // 440 kHz is what takes the plan's outer channels out of reach, and
+        // `sync_vdl2` says which ones are left rather than restarting a decoder
+        // that will quietly hear a third of the traffic.
+        self.vdl2_ddc = None;
+        self.vdl2 = None;
+        self.vdl2_buf.clear();
         // Dropped outright rather than left to `sync_tci_iq`'s own comparison:
         // two device rates can snap to the same client rate, and it would then
         // keep a decimation chain built for the rate we have just left.
@@ -11064,6 +11389,7 @@ impl Engine {
         self.sync_skimmer();
         self.sync_ism();
         self.sync_adsb();
+        self.sync_vdl2();
         self.sync_qo100();
         self.sync_audio_tap();
         self.sync_tci_iq();
@@ -11432,6 +11758,7 @@ impl Engine {
             self.sync_skimmer();
             self.sync_ism();
             self.sync_adsb();
+            self.sync_vdl2();
             self.sync_qo100();
         }
         // Re-derive the TCI streams at the new device rate and push a fresh
@@ -13107,6 +13434,7 @@ impl Engine {
                 self.sync_skim_window();
                 self.sync_ism_window();
                 self.sync_adsb_window();
+                self.sync_vdl2_window();
                 self.sync_qo100_window();
                 true
             }
@@ -13212,7 +13540,8 @@ fn rig_mode_class(m: Mode) -> u8 {
         // ADS-B is not a mode any rig has, and no rig will ever be in it: the
         // dial is at 1090 MHz. Grouped with FM so an echo is never read as the
         // operator having left the mode.
-        | Mode::Adsb => 5,
+        | Mode::Adsb
+        | Mode::Vdl2 => 5,
     }
 }
 

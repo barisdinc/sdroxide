@@ -65,6 +65,13 @@ opt-level = 2
 [profile.dev.package.sdroxide-adsb]
 opt-level = 2
 
+# Seven VDL2 channels each get a downconverter and a burst gate over the same
+# window, and every one of them measures the power of every sample; unoptimized
+# that alone outweighs the rest of the receive chain, exactly as the ISM gate
+# does.
+[profile.dev.package.sdroxide-vdl2]
+opt-level = 2
+
 # RADE's per-frame buffer shuffling sits between two C libraries that are
 # always built optimized; leaving the Rust glue slow would stall the worker.
 [profile.dev.package.sdroxide-rade]
@@ -120,6 +127,7 @@ sdroxide-deepcw = { path = "crates/sdroxide-deepcw" }
 sdroxide-ism = { path = "crates/sdroxide-ism" }
 sdroxide-aprs = { path = "crates/sdroxide-aprs" }
 sdroxide-adsb = { path = "crates/sdroxide-adsb" }
+sdroxide-vdl2 = { path = "crates/sdroxide-vdl2" }
 
 serde = { version = "1", features = ["derive"] }
 num-complex = "0.4"

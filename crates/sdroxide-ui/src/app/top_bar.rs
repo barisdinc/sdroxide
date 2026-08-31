@@ -5155,12 +5155,12 @@ fn band_mode_menu(
     ui.add_space(6.0);
     crate::chrome::menu_caption(ui, "Digital");
     ui.horizontal_wrapped(|ui| {
-        // ADS-B rides along at the end of this row rather than in
+        // ADS-B and VDL2 ride along at the end of this row rather than in
         // [`Mode::DIGITAL`] itself: that list is what the digi engine decodes
-        // and transmits, and ADS-B is neither — its own lane, no QSO, no TX.
-        // It is a digital signal all the same, and this is where an operator
-        // looks for one.
-        for m in Mode::DIGITAL.into_iter().chain([Mode::Adsb]) {
+        // and transmits, and neither of these is — each has its own lane, no
+        // QSO and no transmitter. They are digital signals all the same, and
+        // this is where an operator looks for one.
+        for m in Mode::DIGITAL.into_iter().chain([Mode::Adsb, Mode::Vdl2]) {
             if crate::chrome::chip(ui, mode == m, m.label()).clicked() {
                 cmds.push(Command::SetMode { rx: RxId::Main, mode: m });
             }

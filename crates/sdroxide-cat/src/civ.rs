@@ -82,7 +82,8 @@ pub fn mode_to_civ(m: Mode) -> u8 {
         | Mode::Aprs
         | Mode::SstvFm
         | Mode::RttyFm
-        | Mode::Adsb => 0x05,
+        | Mode::Adsb
+        | Mode::Vdl2 => 0x05,
         Mode::Spec => 0x01,
     }
 }

@@ -535,6 +535,19 @@ pub struct SdroxideApp {
     show_adsb_setup: bool,
     adsb_sort: panels::adsb::AdsbSort,
     adsb_sort_desc: bool,
+    /// VDL2: everything the decoder has, as the engine last sent it. Boxed
+    /// because it carries a whole message log and is far larger than anything
+    /// else held here.
+    vdl2_status: Option<Box<sdroxide_types::Vdl2Status>>,
+    /// VDL2: filter for both panes at once — an address typed in one is the
+    /// same question asked of the other.
+    vdl2_filter: String,
+    /// VDL2: index into the log of the message whose card is open.
+    vdl2_selected: Option<usize>,
+    /// VDL2: the decoder's own settings window is open.
+    show_vdl2_setup: bool,
+    vdl2_sort: panels::vdl2::Vdl2Sort,
+    vdl2_sort_desc: bool,
     /// APRS: who the message box is addressed to.
     aprs_target: String,
     /// APRS: what is typed in the message box but not yet sent.
@@ -1217,6 +1230,12 @@ impl SdroxideApp {
             show_adsb_setup: false,
             adsb_sort: panels::adsb::AdsbSort::default(),
             adsb_sort_desc: true,
+            vdl2_status: None,
+            vdl2_filter: String::new(),
+            vdl2_selected: None,
+            show_vdl2_setup: false,
+            vdl2_sort: panels::vdl2::Vdl2Sort::default(),
+            vdl2_sort_desc: true,
             aprs_target: String::new(),
             aprs_draft: String::new(),
             packet_target: String::new(),

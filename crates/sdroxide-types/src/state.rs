@@ -471,6 +471,16 @@ pub struct RadioState {
     /// change like [`Self::ism`].
     #[serde(default)]
     pub qo100: crate::Qo100Settings,
+    /// How the VDL Mode 2 decoder behaves, and whether it can run at all.
+    ///
+    /// Here rather than only in `vdl2.json` for the reason [`Self::adsb`] is:
+    /// a remote client edits it, and the engine's reply is this field coming
+    /// back changed. It is also where the engine says no — a front end handing
+    /// over demodulated audio cannot feed a D8PSK demodulator, and
+    /// [`crate::Vdl2Settings::OFF`] arriving back is how the panel learns that.
+    /// Appended last: postcard numbers fields by position.
+    #[serde(default)]
+    pub vdl2: crate::Vdl2Settings,
 }
 
 impl Default for RadioState {
@@ -514,6 +524,7 @@ impl Default for RadioState {
             // the rig, and until one has answered there is nothing to claim.
             rig_squelch: 0.0,
             qo100: crate::Qo100Settings::default(),
+            vdl2: crate::Vdl2Settings::default(),
         }
     }
 }

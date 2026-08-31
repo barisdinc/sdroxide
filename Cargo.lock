@@ -5224,6 +5224,7 @@ dependencies = [
  "sdroxide-solar",
  "sdroxide-tci",
  "sdroxide-types",
+ "sdroxide-vdl2",
  "sdroxide-winlink",
  "sdroxide-wsjtx",
  "shine-rs",
@@ -5443,6 +5444,18 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "sdroxide-vdl2"
+version = "1.6.2"
+dependencies = [
+ "crossbeam-channel",
+ "num-complex",
+ "sdroxide-ax25",
+ "sdroxide-dsp",
+ "sdroxide-types",
+ "tracing",
 ]
 
 [[package]]

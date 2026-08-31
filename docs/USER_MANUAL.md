@@ -16,7 +16,7 @@ or connects to a remote sdroxide server.
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
     - [2.21 QO-100 beacon calibration](#221-qo-100-beacon-calibration)
-3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX)](#3-digital-modes)
+3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX, VDL2)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
@@ -4325,6 +4325,208 @@ than hidden, because half a gale warning has to look like half a gale warning.
 **REV** swaps the mark and space tones, for a signal received on the other
 sideband. Off is upper sideband on the channel, which is what every published
 tuning instruction for the service says.
+
+---
+
+### 3.15 VDL2 (what the aircraft are saying)
+
+Choose **VDL2** from the end of the **DIGITAL** row. [ADS-B](#313-ads-b-aircraft-on-1090-mhz)
+is what an aeroplane *is*; this is what it *says*. VHF Data Link Mode 2 is the
+datalink airliners and ground stations exchange ACARS over — company messages,
+position reports, weather requests, fuel and arrival figures, and the link
+management that carries them — on seven 25 kHz channels around 136.8 MHz.
+
+**Receive only.** These are commercial aeronautical channels. There is no
+transmit half of this panel and no callsign to set.
+
+**The frequency is chosen for you.** Selecting the mode tunes to 136.825 MHz,
+the middle of the group, and the decoder places its own window from there to
+take in as many of the seven channels as your receiver can reach. The
+**136.825** button in the panel header puts it back if you wander off.
+
+![SDRoxide in VDL2: the whole datalink group on the waterfall, the message log and the stations sending it](images/vdl2-panel.jpg)
+
+The waterfall above the panel is the whole group at once, so the transmissions
+are visible as short bright dashes on whichever channel carried them — which is
+worth a glance before reading a single counter, because a band with no dashes in
+it has nothing for any decoder to find.
+
+#### What you need
+
+**An antenna for the air band, outdoors and with a view.** This matters more
+than anything else on this page. VDL2 is line-of-sight VHF: an aircraft at
+cruise is receivable a couple of hundred kilometres away, and a ground station
+only as far as the horizon. An indoor wire will hear the FM broadcast band
+perfectly well and nothing at all up here — the two facts are not related, and
+the first is not evidence for the second. A quarter wave at 136.8 MHz is 55 cm.
+
+Turn any input attenuation **off**, and be careful with gain: the FM broadcast
+band 40 MHz below is enormous by comparison, and a tuner wound up to its limit
+will be overloaded by it rather than made more sensitive. If the whole air band
+rises together as you add gain, that is what has happened.
+
+**A stream of at least about 440 kHz.** The plan is 325 kHz wide, and a
+receiver's outer edges are where its own filter is rolling off, so a window has
+to be about a third wider than the plan to hold all of it:
+
+| Stream | What happens |
+| --- | --- |
+| below 34 kHz | Refused. There is not room for one channel. |
+| 34 – 440 kHz | Runs, and says which channels it cannot reach. The window slides to take in as many as it can. |
+| 440 kHz and up | All seven channels. |
+
+Almost any receiver clears the last row: an RTL-SDR at its default 2.4 Msps, an
+Airspy, a HackRF, an RX-888, a Pluto, an SDRplay. What matters far more is the
+aerial.
+
+#### The message log
+
+One line per frame decoded, newest at the bottom, the way a conversation is
+read.
+
+| Column | What it is |
+| --- | --- |
+| Time | When the frame was decoded, UTC. |
+| MHz | Which of the seven channels it arrived on. |
+| From → To | The two 24-bit addresses. For an aircraft this is its ICAO address — the same number its ADS-B squitters carry, so an aeroplane heard on both bands is recognisably one aeroplane. |
+| Type | The link control field: `I` for information (with its sequence numbers), `RR`/`REJ` and friends for flow control, `UI` for a broadcast, `XID` for link management. |
+| Message | The ACARS label and text, the kind of XID exchange, or — for a payload SDRoxide does not read — what it appears to be and how long. |
+
+Click a line to open the full card below it: every field, the signal figures,
+and the frame as hex. The filter box searches an address, a registration, a
+flight identification, an ACARS label or the message text, and it filters the
+station list beside it at the same time.
+
+**Colour says what kind of traffic it is.** Yellow is ACARS — the messages with
+words in them. Cyan is XID, which is aircraft and ground stations arranging
+links. Grey is a frame this pass does not read, or a supervisory frame with no
+payload at all.
+
+#### The station list
+
+One row per address heard, which is who is out there — a scrolling log makes
+that surprisingly hard to see on a busy channel.
+
+| Column | What it is |
+| --- | --- |
+| NAME | The flight identification, or the registration, or the address. The first two arrive only when the station sends an ACARS block, so a row showing an address is normal rather than broken. |
+| ADDR | The 24-bit address in hex. |
+| TYPE | `AIR` for an aircraft, `GND` for a ground station, `ALL` for a broadcast address. |
+| MSGS | Frames from this station this session. |
+| SIG | Signal-to-noise of the last one, dB. |
+| AGE | How long since anything was heard from it. |
+
+Clicking a row filters the log to that station.
+
+#### The channel strip and the counters
+
+The row under the header is the seven channels. Green means frames have come out
+of it, yellow means transmissions have been detected and none has decoded, and
+grey means it is not being listened to — hovering says which of the two reasons
+that is. The counters beside them are arranged in the order the decoder fails
+in, and the first one that stops counting names the problem:
+
+| Reading | What it means |
+| --- | --- |
+| no **bursts** | Nothing is rising above the noise. The aerial, or a receiver that is not looking here. |
+| bursts but no **sync** | Something is on these channels and it is not VDL2. |
+| sync but no frames, with **bad FCS** low | Real VDL2 arriving too damaged to repair — a weak signal or the wrong aerial. |
+| **bad FCS** climbing with frames | The error correction is working and something above it is not. That is SDRoxide's fault rather than the band's, and worth reporting. |
+| **RS fix** climbing | How many symbols the error correction is having to repair. A handful is healthy; a channel repairing several per frame is at the edge. |
+
+#### Setup
+
+**SETUP** in the panel header opens the decoder's own settings.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Channels | all seven | One downconverter each. Switching one off saves a little processor time; it does not make the others more sensitive. |
+| Burst threshold | 9 dB | How far above each channel's own learned noise floor a transmission has to rise before the decoder looks at it. Lower catches weaker signals and costs time spent on noise. |
+| Keep in the log | 500 messages | The oldest go first. |
+| Track at most | 300 stations | Likewise, longest-silent first. |
+| Forget a station after | 30 min | Aircraft can be quiet for a long cruise, so this is deliberately generous. |
+| Show unread payloads | on | See below. |
+
+#### What is decoded, and what is not
+
+**The link layer, in full.** Every AVLC frame that arrives is checked, repaired
+where the Reed-Solomon coding can, and shown with its addresses and type.
+
+**ACARS, in full.** The registration, flight identification, label, block,
+sequence number and text. This is where nearly all the readable content is.
+
+**XID, in summary.** What kind of exchange it is — a ground station's beacon, a
+link establishment, a handoff — and the parameters SDRoxide knows: connection
+management, sequencing, modulation support, alternate ground stations, aircraft
+and ground-station positions, and the frequency lists a station advertises.
+Parameters it does not know are shown with their identifier and their bytes and
+counted, so you can see how much of an exchange is going unread rather than
+being told a comfortable half-truth.
+
+**Not decoded: X.25, CLNP, and the applications above them** — including CPDLC
+(controller-pilot datalink) and ADS-C. Those are ISO network layers carrying
+ASN.1 message sets, and reading them is a larger job than everything else on
+this page put together. Frames carrying them are listed with their addresses,
+named as far as their first bytes allow (`CLNP, 84 octets`), and shown as hex.
+That is the honest picture: turning them off would hide how much of the traffic
+they are.
+
+#### Trying it without an aerial
+
+There is a signal generator in the source tree that synthesises a band:
+
+```
+cargo run --release -p sdroxide-vdl2 --example vdl2_iq -- /tmp/vdl2.iq
+sdroxide --file /tmp/vdl2.iq --rate 2400000 --freq 136825000 --mode VDL2
+```
+
+Ground stations beaconing, aircraft exchanging ACARS on four channels at
+descending signal levels, a link being established, two stations colliding, and
+one message long enough to need more than one block of error correction. Each
+station is given a carrier offset, a symbol clock error and a fractional arrival
+time of its own, because a transmitter that is exactly right is the one case
+that proves nothing.
+
+It proves the whole chain works. It does not prove the decoder works on the air,
+because the transmitter and the receiver were written by the same hand.
+
+#### If nothing is decoding
+
+Record a minute and look at what the receiver actually heard:
+
+```
+sdroxide --server --freq 136825000 --mode VDL2 --record-iq /var/tmp/air.iq
+cargo run --release -p sdroxide-vdl2 --example vdl2_replay -- /var/tmp/air.iq <rate> 136825000
+```
+
+The replay prints the counters per channel and one sentence saying what to do
+next. **The channel to watch is 136.975**, the Common Signalling Channel: every
+ground station beacons on it and every link starts there, so if that one is
+silent while the others show bursts, what the others are showing is not VDL2.
+
+#### What has not been verified
+
+**This decoder has never decoded a real VDL2 transmission.** It is written from
+ETSI EN 301 841-1 (the VDL Mode 2 standard, published by ICAO as Annex 10
+Volume III Part I Chapter 6) and ARINC 618, its error-correcting code and its
+scrambler are checked against properties of the published constants rather than
+against itself, and it decodes everything the built-in generator can throw at
+it. But the only receiver it has been run against on the air heard no aircraft
+datalink at all, so the last link in the chain — real signals, from real
+avionics — is untested.
+
+Two parts of it are more likely than the rest to be wrong, and both are
+instrumented rather than assumed. The **interleaving across error-correction
+blocks** only applies to frames over 249 octets, which real traffic almost never
+is; multi-block frames are counted separately from multi-block successes, so if
+that reading is wrong the panel says how much it is costing instead of leaving a
+mystery. And the **ACARS block check sequence** is reported and never used to
+throw a message away, so if that variant is wrong the cost is a column reading
+"not checked" rather than a message you never see.
+
+If you have an aerial that hears VDL2, a recording made with `--record-iq` is
+the most useful thing anybody could send.
+
 
 ## 4. Skimmers
 
@@ -11421,7 +11623,7 @@ sends them.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left, or 14,200,000 on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC or a moderate value). |
-| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B). Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B, VDL2). Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (LNAH, TX/RX — `--probe` lists them). Default: the port the last session was left on, and failing that whatever the driver selects. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (BAND1, BAND2). |
 | `--server` | Run as a server (web client + WebSocket streaming backend). |
@@ -11509,6 +11711,7 @@ sdroxide stores its settings under the per-user config directory:
 | `renderer-fallback.txt` | text | Written only when a panic came from the graphics driver: the next start renders through OpenGL and says so. Delete it to go back to the default renderer ([14](#14-troubleshooting)). |
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
 | `adsb.json` | JSON | ADS-B decoder ([§3.13](#313-ads-b-aircraft-on-1090-mhz)): the two timeouts, how many history dots to keep, how far ahead the speed vectors reach, and the ceiling on the aircraft table. Restored at startup, and — like `ism.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
+| `vdl2.json` | JSON | VDL2 decoder ([§3.15](#315-vdl2-what-the-aircraft-are-saying)): which of the seven channels to listen on, the burst threshold in dB, how much log and how many stations to keep, and how long a silent station stays on the list. Restored at startup, and — like `adsb.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
 | `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on, which band they watch and how wide a window they get. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
 | `rtl433_flex.conf` | text | Your own ISM decoders, in rtl_433's "flex" syntax ([§5.5](#55-adding-your-own-decoders-flex-specs)). Written with a commented example the first time the ISM decoder runs, and never rewritten afterwards — like `bandplan.json`, it is yours to edit. A specification that does not pass its check is listed in the ISM window and skipped; the rest still load. **RELOAD DECODERS** in the ISM window applies an edit without a restart. |
 | `input.json` | JSON | Control inputs: keyboard bindings, panadapter mouse behaviour, mouse-button bindings, and the MIDI controller mapping. Belongs to the machine running the user interface, not the engine. |
@@ -12721,6 +12924,7 @@ using. Bind them under **Speech** on the Controls tab:
 | PACKET / PACKET-HF | AX.25 packet radio: 1200 baud Bell 202 or 9600 baud G3RUH on VHF/UHF FM, 300 baud AFSK on HF sideband. Carries Winlink sessions and offers the modem as a KISS TNC. See [11](#11-winlink-radio-email). |
 | APRS | Automatic Packet Reporting System — 1200 baud AX.25 on the region's shared channel, with a live map of every station heard, its own symbol per station, and messages you can send and answer. See [3.12](#312-aprs). |
 | ADS-B | Aircraft surveillance on 1090 MHz: a target list and a radar picture with history dots, speed vectors and data blocks. Receive only, and needs a receiver streaming at least 2 Msps. See [3.13](#313-ads-b-aircraft-on-1090-mhz). |
+| VDL2 | The VHF datalink aircraft exchange ACARS over, on seven channels around 136.8 MHz at once: a message log and the stations sending them. Receive only. See [3.15](#315-vdl2-what-the-aircraft-are-saying). |
 
 ### Bands
 

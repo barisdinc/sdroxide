@@ -992,7 +992,25 @@ use sdroxide_types::{
 /// as 112's `folders`, and with the same consequence: it rides both ways, so
 /// the handshake's equality test is what keeps a v112 peer from reading the
 /// tail of it as garbage.
-pub const PROTO_VERSION: u16 = 113;
+/// **114** — VDL Mode 2 (the datalink half of what an aeroplane broadcasts).
+///
+/// `Mode::Vdl2` is appended to [`sdroxide_types::Mode`], which on its own is
+/// enough to force this bump for the reason v99's `Mode::Adsb` and v104's
+/// `Mode::Navtex` were: a v113 peer handed the new one has no variant to decode
+/// it into and desynchronises on the rest of the message.
+///
+/// With it: `ServerMsg::Vdl2Status` carrying the message log, the station table
+/// and what each of the seven channels is doing, `Command::SetVdl2Config` to
+/// change how the decoder behaves, and [`sdroxide_types::RadioState::vdl2`]
+/// holding what it was set to — all appended, all at the end of their respective
+/// enums and structs.
+///
+/// The log and the table are re-sent whole a couple of times a second rather
+/// than incrementally, like the ADS-B aircraft table and for the same reasons; a
+/// dropped snapshot costs nothing because the next carries the same
+/// information, and a client that connects mid-session gets the whole log
+/// rather than whatever happens to arrive next.
+pub const PROTO_VERSION: u16 = 114;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1388,6 +1406,11 @@ pub enum ServerMsg {
     /// is seeing and why it is not running when it is not. A whole snapshot,
     /// twice a second — see [`sdroxide_types::AdsbStatus`].
     AdsbStatus(Box<sdroxide_types::AdsbStatus>),
+    /// Everything the VDL Mode 2 decoder has: the message log, the station
+    /// table, what each channel of the plan is doing, and why it is not running
+    /// when it is not. A whole snapshot, twice a second — see
+    /// [`sdroxide_types::Vdl2Status`].
+    Vdl2Status(Box<sdroxide_types::Vdl2Status>),
 }
 
 /// One radio in a station's roster, as a client sees it.

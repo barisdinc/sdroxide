@@ -179,6 +179,7 @@ async fn run_session(
         ism_reports,
         ism_status,
         adsb_status,
+        vdl2_status,
         drm,
     ) = {
         let latest = shared.latest.lock().unwrap();
@@ -200,6 +201,7 @@ async fn run_session(
             latest.ism_reports.clone(),
             latest.ism_status.clone(),
             latest.adsb_status.clone(),
+            latest.vdl2_status.clone(),
             latest.drm.clone(),
         )
     };
@@ -252,6 +254,11 @@ async fn run_session(
     // The aircraft table, for the same reason: what is overhead is a condition.
     if let Some(st) = adsb_status {
         let _ = socket.send(msg(&ServerMsg::AdsbStatus(st))).await;
+    }
+    // ...and the VDL2 log, for the same reason: what has been said is a record,
+    // not an event that has already happened to somebody else.
+    if let Some(st) = vdl2_status {
+        let _ = socket.send(msg(&ServerMsg::Vdl2Status(st))).await;
     }
     // And the transmit-image presets, for the same reason. The received
     // galleries are not replayed: a panel lists its store when it opens, which
