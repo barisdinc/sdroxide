@@ -2143,6 +2143,27 @@ pub(in crate::app) fn settings_tci_tab(
             );
         ui.end_row();
 
+        // How far the rig's IQ runs behind the `dds:` that moved it. The
+        // panadapter labels each frame with the centre its *samples* were taken
+        // at, and this is the only number that says which centre that was — so
+        // it belongs to the rig, not to sdroxide, and the default is a
+        // measurement of one particular rig rather than a constant.
+        ui.label("Stream delay");
+        crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.tci.stream_delay_ms, 0.0..=400.0).suffix(" ms").step_by(1.0),
+        )
+        .on_hover_text(
+            "How long the rig's IQ takes to arrive on a new centre after sdroxide moves it. \
+             It is the rig's own DSP pipeline, not the network — a server on this machine \
+             has one too — and while the panadapter is dragged fully zoomed out, being wrong \
+             by this much moves the newest waterfall rows sideways of the history by the \
+             error times the speed of the drag. Too high displaces them exactly as far as \
+             too low, the other way. Measure it with `cargo run --release -p sdroxide-tci \
+             --example retune_latency`; the default is a SunSDR2DX on ExpertSDR3 at 192 kHz.",
+        );
+        ui.end_row();
+
         ui.label("");
         // The test opens its own socket from wherever it is pressed, so a
         // green answer here would only say this screen can reach the rig — a
