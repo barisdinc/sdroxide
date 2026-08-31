@@ -702,25 +702,76 @@ fn sync_probe(iq: &[Complex32], rate_hz: f64) -> Option<u8> {
     best
 }
 
-/// [`acquire`], plus a [`DecodeProgress`] snapshot of how far the pass got.
-/// The lock result and every frequency it searches are identical to
-/// `acquire`; the only extra work is one sync probe on the seed candidate
-/// when nothing locked.
+/// De-rotate a linear frequency drift of `hz_per_s` out of `iq` (sample rate
+/// `rate_hz`), pivoting on the centre sample so only the *slope* is removed —
+/// the mean offset is left for [`acquire`]'s own grid to find. This is what
+/// lets a frame decode on a station whose LNB (or SDR clock) is still walking
+/// a few Hz a second while it warms up: without it the carrier smears across
+/// the 10.36 s frame and the payload CRC never checks out even though the
+/// sync word matches.
+fn dechirp(iq: &[Complex32], rate_hz: f64, hz_per_s: f64) -> Vec<Complex32> {
+    if hz_per_s == 0.0 || rate_hz <= 0.0 {
+        return iq.to_vec();
+    }
+    // Instantaneous frequency `hz_per_s * t` integrates to phase
+    // `PI * hz_per_s * t^2`; `t = (n - n0) / rate`. Multiply by its conjugate.
+    let n0 = iq.len() as f64 / 2.0;
+    let k = -std::f64::consts::PI * hz_per_s / (rate_hz * rate_hz);
+    iq.iter()
+        .enumerate()
+        .map(|(n, &z)| {
+            let d = n as f64 - n0;
+            let ph = k * d * d;
+            z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
+        })
+        .collect()
+}
+
+/// Half-width and step, in Hz/s, of the drift grid [`acquire_debug`] tries
+/// around the caller's estimate. Wide enough to bracket a warming LNB, fine
+/// enough that the residual chirp across a frame is a fraction of a bit.
+const DRIFT_GRID_HALF_HZ_S: f64 = 6.0;
+const DRIFT_GRID_STEP_HZ_S: f64 = 1.5;
+
+/// [`acquire`], plus a [`DecodeProgress`] snapshot of how far the pass got and
+/// a small **drift** search around `drift_hz_per_s`: the frame decoder needs
+/// the carrier coherent across a whole 10.36 s frame, which a drifting LNB
+/// breaks, so each drift candidate is de-rotated ([`dechirp`]) before the
+/// ordinary frequency sweep runs on it. `drift_hz_per_s` is the caller's own
+/// estimate (0.0 = "no idea"); the grid is centred on it so a good estimate
+/// keeps the search short.
 pub(crate) fn acquire_debug(
     iq: &[Complex32],
     rate_hz: f64,
     search_half_width_hz: f64,
     freq_step_hz: f64,
     demod_rate_hz: f64,
+    drift_hz_per_s: f64,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> (Option<Qo100Lock>, DecodeProgress) {
-    let lock = acquire(iq, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel);
-    if lock.is_some() {
-        return (
-            lock,
-            DecodeProgress { carrier: true, sync: true, sync_bit_errors: 0, crc_ok: true },
-        );
+    use std::sync::atomic::Ordering;
+
+    // Drift candidates, centre outward from the estimate.
+    let steps = (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64;
+    for k in 0..=2 * steps {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let d = if k % 2 == 0 { k / 2 } else { -(k / 2 + 1) };
+        let slope = drift_hz_per_s + d as f64 * DRIFT_GRID_STEP_HZ_S;
+        let buf = dechirp(iq, rate_hz, slope);
+        let lock =
+            acquire(&buf, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel);
+        if lock.is_some() {
+            return (
+                lock,
+                DecodeProgress { carrier: true, sync: true, sync_bit_errors: 0, crc_ok: true },
+            );
+        }
     }
+
+    // Nothing decoded at any drift — probe the un-dechirped buffer for how far
+    // it got, so the readout still says something.
     let mut progress = DecodeProgress::default();
     if rate_hz > 0.0 && demod_rate_hz > 0.0 {
         let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
@@ -735,7 +786,7 @@ pub(crate) fn acquire_debug(
         progress.carrier =
             seed.is_some() || progress.sync || dist.is_some_and(|d| u32::from(d) <= 10);
     }
-    (lock, progress)
+    (None, progress)
 }
 
 // `pub(crate)` so `controller`'s own test module can build a real on-air frame
@@ -1120,11 +1171,68 @@ pub(crate) mod tests {
             300.0,
             TEST_STEP,
             crate::controller::DEMOD_RATE_HZ,
+            0.0,
             &std::sync::atomic::AtomicBool::new(false),
         );
         assert!(lock.is_some());
         assert!(p.carrier && p.sync && p.crc_ok, "{p:?}");
         assert_eq!(p.sync_bit_errors, 0);
+    }
+
+    /// Apply a linear chirp of `hz_per_s` to `iq` (the inverse of [`dechirp`]).
+    fn add_chirp(iq: &[Complex32], rate_hz: f64, hz_per_s: f64) -> Vec<Complex32> {
+        let n0 = iq.len() as f64 / 2.0;
+        let k = std::f64::consts::PI * hz_per_s / (rate_hz * rate_hz);
+        iq.iter()
+            .enumerate()
+            .map(|(n, &z)| {
+                let d = n as f64 - n0;
+                let ph = k * d * d;
+                z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chirped_frame_decodes_once_the_drift_is_de_rotated() {
+        // A carrier walking 60 Hz/s across the frame — a warming LNB. Far past
+        // what the straight chip detector tolerates, but with the tracker's
+        // drift estimate as the grid centre acquire_debug recovers it.
+        let rate = TEST_RATE;
+        let clean = synth_signal("CHIRP CASE", rate, 0.0, 0.0, 5);
+        let chirped = add_chirp(&clean, rate, 60.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(
+            acquire(&chirped, rate, 300.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .is_none(),
+            "a straight sweep cannot follow a 60 Hz/s chirp"
+        );
+
+        let (lock, p) = acquire_debug(
+            &chirped,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            60.0, // the tracker's drift estimate
+            &cancel,
+        );
+        assert!(lock.is_some() && p.crc_ok, "the drift grid should recover it: {p:?}");
+        assert!(lock.unwrap().text.starts_with("CHIRP CASE"));
+    }
+
+    #[test]
+    fn dechirp_is_the_inverse_of_a_chirp() {
+        let rate = TEST_RATE;
+        let clean = synth_signal("INVERSE", rate, 30.0, 0.0, 2);
+        let round_trip = dechirp(&add_chirp(&clean, rate, 12.0), rate, 12.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // The de-chirped copy decodes exactly like the original.
+        let lock =
+            acquire(&round_trip, rate, 300.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .expect("round-tripped frame still decodes");
+        assert!((lock.offset_hz - 30.0).abs() <= 1.0, "offset {}", lock.offset_hz);
     }
 
     #[test]
@@ -1140,6 +1248,7 @@ pub(crate) mod tests {
             300.0,
             TEST_STEP,
             crate::controller::DEMOD_RATE_HZ,
+            0.0,
             &std::sync::atomic::AtomicBool::new(false),
         );
         assert!(lock.is_none());
