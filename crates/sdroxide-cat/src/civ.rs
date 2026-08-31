@@ -723,6 +723,21 @@ pub fn read_menu_frame(radio: u8, item: u16) -> Vec<u8> {
     frame(radio, 0x1A, &[0x05, (item >> 8) as u8, item as u8])
 }
 
+/// The item number and value in a `1A` reply — what the radio answers a
+/// [`read_menu_frame`] with.
+///
+/// The length is what tells an answer from a question: a read carries
+/// `05 <hi> <lo>` and nothing more, which is exactly what our own frame looks
+/// like on its way out, and an answer appends the value to it. `None` for the
+/// other `1A` sub-commands (`00`-`04` are the memory-keyer and band-edge
+/// blocks) and for a reply too short to hold a value.
+pub fn parse_menu_reply(data: &[u8]) -> Option<(u16, &[u8])> {
+    if data.first() != Some(&0x05) || data.len() < 4 {
+        return None;
+    }
+    Some(((u16::from(data[1]) << 8) | u16::from(data[2]), &data[3..]))
+}
+
 // ---------------------------------------------------------------------------
 // Spectrum scope
 // ---------------------------------------------------------------------------
@@ -1614,5 +1629,16 @@ mod tests {
             read_menu_frame(0xB6, 0x0079),
             vec![0xFE, 0xFE, 0xB6, 0xE0, 0x1A, 0x05, 0x00, 0x79, 0xFD]
         );
+    }
+
+    #[test]
+    fn a_menu_answer_is_told_from_the_question_by_its_length() {
+        // The answer to "what is in 0084?" — MIC, on an IC-7300MK2.
+        assert_eq!(parse_menu_reply(&[0x05, 0x00, 0x84, 0x00]), Some((0x0084, &[0x00][..])));
+        // The question itself, which is what our own frame looks like coming
+        // back off the bus: no value, so nothing to record.
+        assert_eq!(parse_menu_reply(&[0x05, 0x00, 0x84]), None);
+        // And another `1A` sub-command is not a menu item at all.
+        assert_eq!(parse_menu_reply(&[0x06, 0x01, 0x01, 0x00]), None);
     }
 }

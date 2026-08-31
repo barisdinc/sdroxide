@@ -7252,6 +7252,17 @@ Three settings, all under **MENU » SET**:
    on a receiver: an **IC-R8600** has no modulation input to set, so neither the
    write nor the warning appears.
 
+   It is a loan, not a keep: sdroxide reads what these items hold before it
+   writes anything, and puts them back the way it found them when the session
+   ends — the radio switched off in sdroxide, its tab closed, the interface
+   changed, or the program quit. A rig left on LAN is deaf to its own
+   microphone and its own key the next time it is used on its own in the shack,
+   with nothing on the radio saying why (issue #252). The same goes for the
+   **LAN AF/IF Output > Output Select** item sdroxide sets for the 12 kHz IF.
+   Two things it cannot put back: an item the radio never answered a read for,
+   and a session that ends because the link *died* — a radio unplugged or a
+   WiFi that went away keeps whatever it had at that moment.
+
    On an **IC-7851/IC-7850** the first two live under **SET » OTHERS** rather
    than a **Network** submenu, and the third is **CONNECTORS » DATA OFF MOD**
    with `LAN` at the end of a nine-entry list. Same three settings, different
@@ -7439,7 +7450,7 @@ sdroxide follows it back after about a second.
   waterfall.
 - **Scope span** — how wide to sweep it; see above.
 - **Switch modulation input to LAN** — do step 3 above automatically, where the
-  model is known.
+  model is known, and put the radio's own setting back when the session ends.
 - **Test connection** — connect, report what the radio said it is, and
   disconnect.
 - **Copy diagnostic report** — the last session's handshake and CI-V trace, as
@@ -12037,7 +12048,9 @@ All in [§6.2.10](#6210-icom-lan-network-radios):
   sdroxide), and **Connectors > MOD Input**: `DATA OFF MOD` and `DATA MOD` =
   `LAN` (`WLAN` on an IC-705). sdroxide writes the third one for you on every
   transceiver named above; on a model whose menu numbering it does not know it
-  says so and leaves the menu alone.
+  says so and leaves the menu alone. What it writes there it puts back when the
+  session ends, so a rig used standalone afterwards still hears its own
+  microphone (issue #252).
 - No discovery — read the IP off the radio's **Network** screen. Port 50001
   unless changed there.
 - **No Icom outputs I/Q over the network.** The full-band view is the radio's

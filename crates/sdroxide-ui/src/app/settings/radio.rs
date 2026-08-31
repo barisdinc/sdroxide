@@ -2376,7 +2376,9 @@ pub(in crate::app) fn settings_icomnet_tab(
         .on_hover_text(
             "Transmit audio is only heard when the radio's MOD input is set to LAN. \
                  sdroxide can write that on a model whose menu numbering it knows; on any \
-                 other it says so and leaves the menu alone.",
+                 other it says so and leaves the menu alone. It is a loan: whatever the \
+                 radio held there is read first and put back when the session ends, so a \
+                 rig used on its own afterwards still hears its own microphone.",
         );
         ui.end_row();
 
