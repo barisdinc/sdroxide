@@ -11734,8 +11734,25 @@ WGPU_BACKEND=vulkan sdroxide
 ```
 
 `WGPU_BACKEND` (`vulkan`, `gl`, `metal`, `dx12`) pins the renderer on any
-machine, and pinning it also turns the check above off — so `WGPU_BACKEND=gl`
-is how to force the steady path on a GPU sdroxide does not know about.
+machine, and pinning it also turns the check above off — and the Windows one
+below with it — so `WGPU_BACKEND=gl` is how to force the steady path on a GPU
+sdroxide does not know about.
+
+**On Windows, sdroxide closes the moment it starts, and Event Viewer names
+`igvk64.dll` with exception code `0xc0000005`.**
+That module is Intel's Vulkan driver, and the exception is an access violation
+inside it — a crash in the graphics driver, before sdroxide has drawn anything.
+Nothing on this side can catch it. From 1.6.2 sdroxide does not load Vulkan on
+Windows at all: the window opens on **Direct3D 12**, with OpenGL behind it,
+which between them cover every Windows machine going back further than Vulkan
+does and are what a Windows driver is written against first. If your Vulkan
+driver is sound and you would rather use it, say
+
+```
+WGPU_BACKEND=vulkan
+```
+
+before starting sdroxide — in PowerShell, `$Env:WGPU_BACKEND = "vulkan"`.
 
 **TUNE makes full power and FT8 makes full power, but speaking into the
 microphone makes milliwatts.**
