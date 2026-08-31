@@ -10618,8 +10618,10 @@ Then open a browser at:
 http://HOST:4950/
 ```
 
-The page connects back to the server over a WebSocket at `/ws` automatically —
-the station's first radio. To open one of its other radios, add the roster id
+The page connects back to the server over a WebSocket at `ws` beside itself —
+the station's first radio, at `/ws` when the page is served from the root and
+under the same prefix when it is not
+([9.4](#94-behind-a-reverse-proxy-on-a-subpath)). To open one of its other radios, add the roster id
 to the page address:
 
 ```
@@ -10694,7 +10696,41 @@ The native remote client (`sdroxide --connect`) has no such restriction — it
 uses your local sound devices directly and carries audio over the same
 WebSocket.
 
-### 9.4 Phones and tablets
+### 9.4 Behind a reverse proxy on a subpath
+
+The web client works from any path, not only the root. Behind a reverse proxy
+that gives it a prefix — `https://shack.example/sdroxide/` — everything hangs
+off the page's own address rather than the top of the host: the WebSocket, the
+radio listing, the wasm bundle and the scripts beside it. So the two ways a
+proxy can be configured both work, and neither needs anything from you:
+
+- **The prefix is stripped before forwarding** (Caddy's `handle_path
+  /sdroxide/*`, nginx's `proxy_pass` with a trailing slash). The server sees
+  ordinary root-level requests; the page's own links are relative, so the
+  browser puts the prefix back on its own.
+- **The prefix is forwarded intact** (Caddy's plain `reverse_proxy`, nginx
+  without the trailing slash). The server takes it off itself — every endpoint
+  it serves is recognised at the end of a longer path, and the client's files
+  are a flat directory, so anything above the file name can only be somebody's
+  routing.
+
+A Caddyfile for the second, which is the shorter one to write:
+
+```
+shack.example {
+    reverse_proxy /sdroxide/* localhost:4950
+}
+```
+
+The address works with or without the trailing slash. Sockets have to be
+allowed through — most proxies do that by default, and Caddy needs nothing
+said; anything that filters `Upgrade` and `Connection` headers has to pass them
+or the page will load and then fail to connect.
+
+Serving through HTTPS this way is also what gets the browser to hand over audio
+and the microphone ([9.3](#93-audio-needs-a-secure-context)).
+
+### 9.5 Phones and tablets
 
 The control strip is eight boxes of a fixed width. On a desktop they sit in a
 row; on a narrow screen they cannot shrink, only wrap, so the strip would eat
