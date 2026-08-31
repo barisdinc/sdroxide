@@ -101,6 +101,18 @@ pub struct ViewState {
     /// history flows up and off the top, the way several other SDR programs
     /// draw it. Affects the time gridlines and the spot lanes too.
     pub waterfall_flip: bool,
+    /// Label decoded stations on the waterfall: one box per callsign at the
+    /// frequency it was heard on, in the slotted modes (FT8, FT4, FT2, JS8, the
+    /// contest ones).
+    ///
+    /// On by default — putting a decode where it came from is most of the
+    /// reason the waterfall is worth looking at in those modes. It is also the
+    /// busiest overlay there is: a good opening puts thirty boxes across the
+    /// span, twice a minute, over exactly the traces the operator is reading. A
+    /// list of every one of them is already down the side of the same screen,
+    /// so switching the labels off loses nothing but the crowding (issue #248).
+    #[serde(default = "decode_labels_default")]
+    pub decode_labels: bool,
     /// Show the full-band strip above the panadapter, where the front end
     /// supplies one. Purely a display switch: the source keeps producing the
     /// frames while it is off, which is what keeps the chip that controls it on
@@ -516,6 +528,7 @@ impl Default for ViewState {
             spectrum_collapsed: false,
             waterfall_collapsed: false,
             waterfall_flip: false,
+            decode_labels: decode_labels_default(),
             wide_waterfall: wide_waterfall_default(),
             prop_on_map: false,
             prop_map_mode: prop_map_mode_default(),
@@ -638,6 +651,13 @@ impl ViewState {
         let frac = ((x - rect.left()) / rect.width()) as f64;
         self.view_lo_hz + frac * self.span()
     }
+}
+
+/// Default for [`ViewState::decode_labels`] — on: the callsign boxes are what
+/// makes a slotted mode's waterfall readable, and an operator who finds them
+/// busy switches them off.
+fn decode_labels_default() -> bool {
+    true
 }
 
 /// Default for [`ViewState::wide_waterfall`] — on, so a receiver that has a

@@ -3954,6 +3954,18 @@ impl SdroxideApp {
                  since the waterfall keeps a fixed number of lines — 73 seconds at Medium, 9 \
                  at Fastest.",
             );
+            if crate::chrome::chip(ui, self.view.decode_labels, "DECODE LABELS")
+                .on_hover_text(
+                    "Mark every decoded station on the waterfall with its callsign, at the \
+                     frequency it was heard on — FT8, FT4 and the other slotted modes. A \
+                     good opening puts thirty of them across the span twice a minute, over \
+                     the traces you are reading; switch them off and the waterfall is just \
+                     the band. The decode list beside it still has every callsign.",
+                )
+                .clicked()
+            {
+                self.view.decode_labels = !self.view.decode_labels;
+            }
             if !picks_layers {
                 self.detail_row(ui, &mut cfg);
             }

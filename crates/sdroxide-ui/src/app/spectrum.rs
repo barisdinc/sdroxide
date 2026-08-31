@@ -588,9 +588,17 @@ impl SdroxideApp {
     /// Reuse the skimmer overlay to mark FT8/FT4 stations: one box per decoded
     /// callsign at its audio frequency (`dial + audio_hz`). The newest slot is
     /// solid; the previous slot is dimmed. Clicking a box sets the audio offset.
+    ///
+    /// Nothing at all with the labels switched off in the SPEC popup: the
+    /// decode list beside the waterfall says the same callsigns, so an operator
+    /// who finds a busy band unreadable through thirty boxes loses nothing by
+    /// clearing them (issue #248).
     pub(in crate::app) fn ft8_overlay(&self) -> (Vec<SkimmerSpot>, Vec<f32>) {
         let mut spots = Vec::new();
         let mut alpha = Vec::new();
+        if !self.view.decode_labels {
+            return (spots, alpha);
+        }
         let Some(latest) = self.digi_decodes.first().map(|d| d.slot_utc) else {
             return (spots, alpha);
         };

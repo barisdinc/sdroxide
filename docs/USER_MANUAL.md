@@ -673,6 +673,13 @@ sdroxide brings the receiver back up where you left it rather than on defaults.
     the spectrum line.
   - **scroll** — how fast it scrolls. See
     [Waterfall scroll speed](#waterfall-scroll-speed) below.
+  - **DECODE LABELS** — mark every decoded station on the waterfall with its
+    callsign, at the frequency it was heard on, in FT8, FT4 and the other
+    slotted modes. On by default. A good opening puts thirty boxes across the
+    span twice a minute, over the very traces you are reading; switching them
+    off leaves the waterfall as the band alone, and the decode list beside it
+    still has every callsign. The CW skimmer's own boxes are separate — they
+    are switched under **SKIM**.
 
   The two SHOW switches are independent, so all four displays are available —
   spectrum only, waterfall only, both, or neither.
