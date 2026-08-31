@@ -984,7 +984,15 @@ use sdroxide_types::{
 /// (`Command::SetScannerConfig`, `RadioEvent::Scanner`), so a v111 peer would
 /// read the tail of it as garbage; the handshake's equality test is what stops
 /// one ever seeing it.
-pub const PROTO_VERSION: u16 = 112;
+/// **113** — a memory scan can read its channels off the spectrum (issue #228).
+///
+/// [`sdroxide_types::ScannerConfig`] gains `mem_fast`, which puts every channel
+/// inside one receiver window on the transform the panadapter is already made
+/// from and visits only the ones something is on. Appended to the same struct
+/// as 112's `folders`, and with the same consequence: it rides both ways, so
+/// the handshake's equality test is what keeps a v112 peer from reading the
+/// tail of it as garbage.
+pub const PROTO_VERSION: u16 = 113;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

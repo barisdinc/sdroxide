@@ -106,6 +106,25 @@ pub struct ScannerConfig {
     /// of its time somewhere the operator is not listening (issue #236).
     #[serde(default)]
     pub folders: Vec<Option<u32>>,
+    /// Read a memory scan's channels off the wideband spectrum instead of
+    /// visiting each one (issue #228).
+    ///
+    /// A memory scan tunes to every channel in turn and listens, which is what a
+    /// handheld scanner has to do and costs a settling time each — a hundred
+    /// channels at the default dwell is fifteen seconds a lap. A receiver with
+    /// I/Q of its own can instead put every channel that falls inside one window
+    /// on the same transform the panadapter is already made from, and only visit
+    /// the ones something is on. A list on one band then costs a single tune a
+    /// lap however long it is.
+    ///
+    /// Off by default, and an opt-in rather than the new behaviour: the sweep
+    /// measures a channel through the FFT rather than through the receiver's own
+    /// filter and AGC, so a threshold that was right for one is not always right
+    /// for the other, and an operator with a list short enough not to care
+    /// should not have to work that out. Ignored on a front end with no span to
+    /// search — a CAT rig on a sound card — which visits channels either way.
+    #[serde(default)]
+    pub mem_fast: bool,
     /// Frequencies (Hz, on the channel grid) a range scan passes over.
     ///
     /// The range-scan twin of [`Self::skip`], and it has to be a frequency
@@ -140,6 +159,7 @@ impl Default for ScannerConfig {
             resume_ms: 2_000,
             skip: Vec::new(),
             folders: Vec::new(),
+            mem_fast: false,
             skip_freq_hz: Vec::new(),
             skip_freq_for: (0.0, 0.0, 0.0),
         }

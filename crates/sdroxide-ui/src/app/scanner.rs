@@ -194,6 +194,7 @@ impl SdroxideApp {
             return;
         }
         self.scanner_folders(ui, cfg);
+        self.scanner_fast(ui, cfg);
         ui.label(RichText::new("SKIP a channel to pass over it").size(10.0).weak());
         // Resolved before the loop: the rows borrow `cfg` mutably to toggle a
         // skip, so the filter cannot still be holding it.
@@ -221,6 +222,44 @@ impl SdroxideApp {
                     ui.end_row();
                 }
             });
+        });
+    }
+
+    /// The FAST switch: read the channels off the wideband spectrum instead of
+    /// visiting each one (issue #228).
+    ///
+    /// Greyed rather than hidden on a front end that has no span to search — a
+    /// CAT rig on a sound card — for the reason every greyed control here is:
+    /// a row that comes and goes with the radio is a row nobody can find
+    /// twice, and what it says is still true, it just cannot be had *here*.
+    fn scanner_fast(&self, ui: &mut egui::Ui, cfg: &mut ScannerConfig) {
+        // The same test the engine makes: a demod-audio front end delivers no
+        // spectrum to read the channels off.
+        let can_sweep = !self.caps.as_ref().is_some_and(|c| c.audio_mode);
+        ui.horizontal_wrapped(|ui| {
+            let hint = if can_sweep {
+                "Look for all the channels that fall inside one receiver window on the same \
+                 transform the panadapter is made from, and only tune to the ones something is \
+                 on. A list on one band then costs one tune a lap however long it is, instead \
+                 of a settling time per channel. The scan still listens on each candidate \
+                 before stopping, so what stops it is unchanged — but the sweep measures \
+                 through the FFT rather than through the receiver's filter, so check the \
+                 threshold if it starts stopping on nothing."
+            } else {
+                "This radio hands over demodulated audio and has no spectrum of its own to \
+                 search, so its memory scan visits every channel either way."
+            };
+            let resp = ui.add_enabled_ui(can_sweep, |ui| {
+                crate::chrome::chip(ui, cfg.mem_fast && can_sweep, "FAST")
+            });
+            if resp.inner.on_hover_text(hint).clicked() {
+                cfg.mem_fast = !cfg.mem_fast;
+            }
+            ui.label(
+                RichText::new("read the list off the spectrum instead of visiting every channel")
+                    .size(10.0)
+                    .weak(),
+            );
         });
     }
 

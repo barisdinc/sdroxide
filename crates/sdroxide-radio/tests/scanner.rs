@@ -143,6 +143,9 @@ struct Watch {
     memories: Option<Vec<MemoryChannel>>,
     /// The folders, announced the same way and read the same way.
     folders: Vec<sdroxide_types::MemoryFolder>,
+    /// Every dial the engine has announced since the last `forget_seen`. What a
+    /// scan *did not* tune to is only checkable against the whole trail.
+    dials: Vec<f64>,
 }
 
 struct Rig {
@@ -184,6 +187,9 @@ impl Rig {
         while let Ok(ev) = self.h.event_rx.try_recv() {
             match ev {
                 RadioEvent::State(s) => {
+                    if self.w.dials.last() != Some(&s.active_freq_hz()) {
+                        self.w.dials.push(s.active_freq_hz());
+                    }
                     self.w.dial = s.active_freq_hz();
                     self.w.running = s.scan.running;
                     self.w.holding = s.scan.holding;
@@ -223,6 +229,7 @@ impl Rig {
     fn forget_seen(&mut self) {
         self.w.held_at = None;
         self.w.notices.clear();
+        self.w.dials.clear();
     }
 
     /// The stored channels, once the engine has at least `want` of them.
@@ -241,6 +248,12 @@ impl Rig {
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
         }
+    }
+
+    /// Every dial the engine has been on since the last `forget_seen`.
+    fn dials(&mut self) -> Vec<f64> {
+        self.drain();
+        self.w.dials.clone()
     }
 
     /// The folders, once the engine has at least `want` of them. Same bargain
@@ -428,6 +441,60 @@ fn a_memory_scan_passes_over_skipped_channels() {
     rig.forget_seen();
     rig.send(Command::SetScanning(true));
     assert_eq!(rig.pump(2.5, true).held_at, None, "it stopped on a channel it was told to skip");
+}
+
+/// A fast memory scan reads its channels off the wideband spectrum instead of
+/// visiting each one (issue #228): a whole band's worth of memories is one tune
+/// a lap, and only the channel something is on is ever listened to.
+///
+/// What is asserted is both halves — that it still finds the carrier, and that
+/// it got there without visiting the quiet channels, which is the entire point.
+#[test]
+fn a_fast_memory_scan_finds_the_carrier_without_visiting_the_rest() {
+    const SIGNAL: f64 = 145_400_000.0;
+    let mut rig = Rig::new(Some(SIGNAL));
+    rig.clear_memories();
+    // Twenty channels 25 kHz apart, all inside one 1.536 MHz window, with the
+    // carrier on one of them.
+    let base = 145_000_000.0;
+    let busy_at = ((SIGNAL - base) / 25_000.0).round() as usize;
+    for i in 0..20 {
+        rig.send(Command::SetVfo { vfo: Vfo::A, hz: base + i as f64 * 25_000.0 });
+        rig.send(Command::StoreMemory { name: format!("ch{i}") });
+    }
+    assert_eq!(rig.memories(20).len(), 20, "all twenty should have been stored");
+
+    let cfg = ScannerConfig {
+        kind: ScanKind::Memories,
+        mem_fast: true,
+        threshold_db: -60.0,
+        dwell_ms: 60,
+        resume: ScanResume::Manual,
+        ..range_cfg()
+    };
+    rig.send(Command::SetScannerConfig(cfg.clone()));
+    // Off the list before the trail starts, so the dial the scan *inherits* —
+    // the last channel stored — is not mistaken for one it went to.
+    rig.send(Command::SetVfo { vfo: Vfo::A, hz: 144_500_000.0 });
+    // Drained before the trail is cleared: the announcements of the stores
+    // above are still in the channel, and they name the channels they stored.
+    rig.pump(0.5, false);
+    rig.forget_seen();
+    rig.send(Command::SetScanning(true));
+    let held = rig.pump(5.0, true).held_at.expect("should have stopped on the busy channel");
+    assert!((held - SIGNAL).abs() < 1.0, "stopped on {held} rather than {SIGNAL}");
+    rig.send(Command::SetScanning(false));
+
+    // …and the nineteen quiet ones were never tuned to. The dial visits the
+    // window's centre and then the one channel worth listening to; a scan that
+    // walked the list would have been on every one of them.
+    let dials = rig.dials();
+    let quiet: Vec<f64> = (0..20)
+        .filter(|&i| i != busy_at)
+        .map(|i| base + i as f64 * 25_000.0)
+        .filter(|hz| dials.iter().any(|d| (d - hz).abs() < 1.0))
+        .collect();
+    assert!(quiet.is_empty(), "the sweep tuned to quiet channels: {quiet:?}");
 }
 
 /// A memory scan can be pointed at chosen folders (issue #236). A station's

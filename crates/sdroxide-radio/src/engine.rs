@@ -1021,6 +1021,17 @@ struct Scan {
     /// Channels a stepped range scan walks, and how far along it is.
     stepped: Vec<f64>,
     step_at: usize,
+    /// A fast memory scan's plan: each hardware centre to look from, with the
+    /// memory ids it can see from there — and which one is up.
+    ///
+    /// Ids rather than indices into the store: the store is republished
+    /// whenever anything edits it, and a plan holding positions in a list that
+    /// has since been re-ordered would scan the wrong channels. Emptied at the
+    /// end of every lap, so a channel stored, skipped or re-filed mid-scan is
+    /// picked up on the next one — the same bargain the plain memory scan
+    /// strikes by rebuilding its queue each lap.
+    mem_slices: Vec<(f64, Vec<u32>)>,
+    mem_slice: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -6432,7 +6443,11 @@ impl Engine {
             }
             SetToneSquelch { rx, tone } => self.state.rx[rx.index()].tone_sql = tone,
             SetScannerConfig(mut cfg) => {
-                let restart = self.state.scan.running && cfg.kind != self.scan_cfg.kind;
+                // A different kind of scan, or the same kind gathering its
+                // candidates a different way, is a different scan: the plan in
+                // flight belongs to the old setting.
+                let restart = self.state.scan.running
+                    && (cfg.kind != self.scan_cfg.kind || cfg.mem_fast != self.scan_cfg.mem_fast);
                 // Retuning the range (or changing the grid under it) retires the
                 // channels skipped in the old one — they described *that* band.
                 cfg.forget_stale_skips();
@@ -9963,6 +9978,8 @@ impl Engine {
             slice: usize::MAX, // rolls over to 0 on the first refill
             stepped: Vec::new(),
             step_at: 0,
+            mem_slices: Vec::new(),
+            mem_slice: usize::MAX, // as `slice` above
         });
         self.state.scan = sdroxide_types::ScanState { running: true, holding: false };
         // Pick the first target now rather than waiting a poll for it, so
@@ -10081,6 +10098,9 @@ impl Engine {
     /// and queue everything busy in it.
     fn scan_read_slice(&mut self, now: Instant) {
         self.analyzer.spectrum_db(&mut self.scan_db);
+        if self.scan_cfg.kind == ScanKind::Memories {
+            return self.scan_read_mem_slice(now);
+        }
         let (lo, hi) = self.scan_cfg.range();
         let (flo, fhi) = self.scan_cfg.mode.default_filter();
         let found = crate::scanner::busy_channels(
@@ -10163,6 +10183,9 @@ impl Engine {
     /// moving towards them.
     fn scan_refill(&mut self, now: Instant) -> Refill {
         match self.scan_cfg.kind {
+            ScanKind::Memories if self.scan_cfg.mem_fast && self.scan_can_sweep() => {
+                self.scan_next_mem_slice(now)
+            }
             ScanKind::Memories => {
                 let targets: Vec<ScanTarget> =
                     self.scannable_memories().map(|m| ScanTarget::Memory(m.id)).collect();
@@ -10222,6 +10245,111 @@ impl Engine {
         self.update_tuning();
         self.emit_state();
         Refill::Waiting
+    }
+
+    /// Move the front end to the next window of a fast memory scan's plan,
+    /// building the plan first if there is none.
+    ///
+    /// The memory twin of [`Engine::scan_next_slice`], and the same shape: the
+    /// spectrum is read once the front end has settled, a poll or two later.
+    /// What differs is what the windows are for. A range sweep tiles a band it
+    /// has to search; this one covers a *list*, so its windows are placed on
+    /// where the channels are and nowhere else, and a whole band's worth of
+    /// them is one tune (issue #228).
+    fn scan_next_mem_slice(&mut self, now: Instant) -> Refill {
+        let span = self.state.sample_rate;
+        let settle = self.scan_settle();
+        if self.scan.as_ref().is_some_and(|sc| sc.mem_slices.is_empty()) {
+            let chans: Vec<(u32, f64)> =
+                self.scannable_memories().map(|m| (m.id, m.freq_hz)).collect();
+            let freqs: Vec<f64> = chans.iter().map(|(_, hz)| *hz).collect();
+            let plan: Vec<(f64, Vec<u32>)> = crate::scanner::memory_slices(&freqs, span)
+                .into_iter()
+                .map(|(c, group)| (c, group.into_iter().map(|i| chans[i].0).collect()))
+                .collect();
+            if plan.is_empty() {
+                self.stop_scan(Some(
+                    "scan stopped: every memory channel in the chosen folders is skipped",
+                ));
+                return Refill::Stopped;
+            }
+            if let Some(sc) = self.scan.as_mut() {
+                sc.mem_slices = plan;
+            }
+        }
+        let Some(sc) = self.scan.as_mut() else { return Refill::Stopped };
+        sc.mem_slice = sc.mem_slice.wrapping_add(1);
+        if sc.mem_slice >= sc.mem_slices.len() {
+            // Round again on a plan built from the store as it stands now: a
+            // channel stored, deleted or re-filed during the last lap belongs
+            // in this one. Back to `usize::MAX` rather than to 0, because the
+            // rebuild below goes through the same `wrapping_add` and 0 would
+            // start the new lap on the second window.
+            sc.mem_slice = usize::MAX;
+            sc.mem_slices.clear();
+            return Refill::Queued;
+        }
+        let center = sc.mem_slices[sc.mem_slice].0;
+        sc.phase = ScanPhase::Settling(now + settle);
+
+        // The dial goes with it, as it does on a range sweep: the operator
+        // should see where the scan is looking rather than a readout left
+        // behind on the last channel it stopped at.
+        match self.state.active_vfo {
+            Vfo::A => self.state.vfo_a_hz = center,
+            Vfo::B => self.state.vfo_b_hz = center,
+        }
+        self.state.band = Band::containing(center);
+        if !self.retune(center) {
+            // Out of the front end's range — `tune_refused` has put the dial
+            // back and said so, and the next window may still be reachable.
+            return Refill::Waiting;
+        }
+        // The running average is still holding the last window's samples, and
+        // they are from another part of the band entirely.
+        self.analyzer.reset();
+        self.zoom = None;
+        self.update_tuning();
+        self.emit_state();
+        Refill::Waiting
+    }
+
+    /// The front end has settled on a fast memory scan's window: measure every
+    /// channel it can see, and queue the ones something is on.
+    ///
+    /// The dwell still confirms each of them through the receiver itself, so
+    /// this decides only what is worth a visit — which is why a channel the
+    /// transform cannot honestly answer for is queued rather than dropped (see
+    /// [`crate::scanner::busy_memories`]).
+    fn scan_read_mem_slice(&mut self, now: Instant) {
+        let ids = self
+            .scan
+            .as_ref()
+            .and_then(|sc| sc.mem_slices.get(sc.mem_slice))
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default();
+        // Resolved against the store rather than remembered with the plan: a
+        // channel edited or deleted between the tune and this read is one this
+        // window no longer knows anything about.
+        let here: Vec<(u32, f64, f64)> = ids
+            .iter()
+            .filter_map(|id| self.memories.iter().find(|m| m.id == *id))
+            .map(|m| (m.id, m.freq_hz, (m.filter_hi - m.filter_lo).abs() as f64))
+            .collect();
+        let freqs: Vec<f64> = here.iter().map(|(_, hz, _)| *hz).collect();
+        let widths: Vec<f64> = here.iter().map(|(_, _, bw)| *bw).collect();
+        let busy = crate::scanner::busy_memories(
+            &self.scan_db,
+            self.state.center_hz,
+            self.state.sample_rate,
+            &freqs,
+            &widths,
+            self.scan_threshold_db(),
+        );
+        if let Some(sc) = self.scan.as_mut() {
+            sc.queue.extend(busy.into_iter().map(|i| ScanTarget::Memory(here[i].0)));
+        }
+        self.scan_advance(now);
     }
 
     /// One channel at a time along the range's grid — for a front end with no

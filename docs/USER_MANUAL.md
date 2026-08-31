@@ -1360,6 +1360,27 @@ folder you delete drops out of the selection with it, since its channels are
 back at the top level by then. The row is not drawn at all until there is a
 folder to choose.
 
+**FAST reads the list off the spectrum.** A memory scan normally does what a
+handheld does: tune to each channel, listen, move on — a settling time apiece,
+so a hundred channels is fifteen seconds a lap. Press **FAST** and a receiver
+with I/Q of its own instead puts every channel that falls inside one window on
+the same transform the panadapter is already made from, and only tunes to the
+ones something is on. A list that fits in one window then costs *one* tune a
+lap however long it is, and a list spread over four bands costs four. The scan
+still listens on each candidate before it stops, so what makes it stop is
+unchanged.
+
+It is off by default and worth knowing why. The sweep measures a channel
+through the FFT rather than through the receiver's own filter and AGC, so a
+**Stops at** level that was right for the slow scan is not automatically right
+for this one — if a fast scan stops on nothing, raise it; if it stops
+everywhere, lower it. Two kinds of channel are never judged from the sweep at
+all and always get a listen: one out at the edge of the window, where the
+anti-alias filter makes everything read low, and one sitting exactly on the
+receiver's centre, where a zero-IF front end's own local oscillator is. A CAT
+rig feeding demodulated audio has no spectrum to read, so the button is greyed
+there and its memory scan visits every channel as before.
+
 **Stops at** is how loud a channel has to be. Either give a level directly, or
 press **SQL** to use the receiver's own squelch, which makes the scan stop
 exactly where the audio would have opened — one control instead of two. Note
