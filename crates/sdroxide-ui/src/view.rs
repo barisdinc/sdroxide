@@ -159,6 +159,15 @@ pub struct ViewState {
     /// chat log, FT8's is a map and a station card.
     #[serde(default = "js8_split_default")]
     pub js8_split_fraction: f32,
+    /// Fraction of the ADS-B panel's width given to the aircraft list; the rest
+    /// is the map. User-draggable.
+    #[serde(default = "adsb_split_default")]
+    pub adsb_split_fraction: f32,
+    /// Fraction of the aircraft column's height given to the detail card of the
+    /// selected target; the rest is the list. User-draggable, and only divides
+    /// anything while a target is selected.
+    #[serde(default = "adsb_card_default")]
+    pub adsb_card_fraction: f32,
     /// Fraction of the QSO area's height given to the world map; the rest is the
     /// station card + transcript + buttons. User-draggable.
     ///
@@ -537,6 +546,8 @@ impl Default for ViewState {
             digi_panel_fraction: 0.46,
             digi_split_fraction: 0.52,
             js8_split_fraction: js8_split_default(),
+            adsb_split_fraction: adsb_split_default(),
+            adsb_card_fraction: adsb_card_default(),
             digi_map_fraction: 0.6,
             digi_pane: 0,
             sstv_tx_fraction: 0.38,
@@ -700,6 +711,18 @@ fn prop_map_mode_default() -> u8 {
 fn prop_map_band_default() -> u8 {
     sdroxide_types::Band::ALL.iter().position(|b| *b == sdroxide_types::Band::M20).unwrap_or(0)
         as u8
+}
+
+/// Default for [`ViewState::adsb_split_fraction`]. Enough for the aircraft
+/// table's full set of columns, the signal one included, and the rest to the
+/// map — which is the pane that gains most from whatever is left.
+fn adsb_split_default() -> f32 {
+    0.42
+}
+
+/// Default for [`ViewState::adsb_card_fraction`].
+fn adsb_card_default() -> f32 {
+    0.40
 }
 
 /// Default for [`ViewState::js8_split_fraction`].

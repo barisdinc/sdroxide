@@ -79,19 +79,27 @@ impl SdroxideApp {
         let pane = self.phone_pane(ui, self.state.rx[0].mode);
         let full_w = ui.available_width();
 
+        // The list keeps a draggable share of the width. The floor is the
+        // narrow table (callsign, altitude and age); the ceiling leaves the map
+        // enough to still be a radar picture rather than a strip.
+        const HANDLE_W: f32 = 7.0;
+        let list_w = (full_w * self.view.adsb_split_fraction)
+            .clamp(240.0, (full_w - HANDLE_W - 200.0).max(240.0));
+
         ui.horizontal_top(|ui| {
             if pane.is_none_or(|p| p == 0) {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(
-                        if pane.is_some() { full_w } else { (full_w * 0.42).clamp(240.0, 460.0) },
-                        avail_h,
-                    ),
+                    egui::vec2(if pane.is_some() { full_w } else { list_w }, avail_h),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| self.adsb_list(ui, &st, now, avail_h),
                 );
             }
             if pane.is_none() {
-                ui.separator();
+                let h = crate::chrome::split_handle(ui, egui::vec2(HANDLE_W, avail_h), None);
+                if h.dragged() {
+                    self.view.adsb_split_fraction =
+                        ((list_w + h.drag_delta().x) / full_w.max(1.0)).clamp(0.15, 0.85);
+                }
             }
             if pane.is_none_or(|p| p == 1) {
                 ui.vertical(|ui| self.adsb_map_pane(ui, &st, now, avail_h));
@@ -214,8 +222,17 @@ impl SdroxideApp {
 
         let selected = self.adsb_map.selected;
         let card = selected.and_then(|i| st.aircraft.iter().find(|a| a.icao == i));
-        let card_h = if card.is_some() { (avail_h * 0.40).clamp(120.0, 250.0) } else { 0.0 };
-        let list_h = (avail_h - card_h - 46.0).max(48.0);
+        // The card takes a draggable share of the column, but only while there
+        // is one: with nothing selected the list has the lot and there is no
+        // divider to grab.
+        const HANDLE_H: f32 = 7.0;
+        let card_h = if card.is_some() {
+            (avail_h * self.view.adsb_card_fraction).clamp(90.0, (avail_h - 120.0).max(90.0))
+        } else {
+            0.0
+        };
+        let list_h =
+            (avail_h - card_h - 46.0 - if card.is_some() { HANDLE_H } else { 0.0 }).max(48.0);
 
         let drop_map_s = self.state.adsb.drop_map_s;
         // Outside the scroll area, so a busy sector does not scroll the column
@@ -243,7 +260,14 @@ impl SdroxideApp {
         }
 
         if let Some(a) = card {
-            ui.separator();
+            let w = ui.available_width();
+            let h = crate::chrome::split_handle(ui, egui::vec2(w, HANDLE_H), None);
+            if h.dragged() {
+                // Drag up grows the card, which is the half the pointer is
+                // heading for.
+                self.view.adsb_card_fraction =
+                    ((card_h - h.drag_delta().y) / avail_h.max(1.0)).clamp(0.12, 0.8);
+            }
             self.adsb_card(ui, a, now, card_h, home);
         }
     }
