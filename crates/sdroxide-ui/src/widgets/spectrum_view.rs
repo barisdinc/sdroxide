@@ -1573,7 +1573,14 @@ pub fn show_ext(
             let r = &mut state.rx[rx.index()];
             let max_hz = r.mode.max_filter_hz() as f64;
             let (mut lo, mut hi) = (r.filter_lo as f64, r.filter_hi as f64);
-            if is_hi {
+            if r.mode.filter_symmetric() {
+                // AM and FM carve a channel out about the carrier, so the grip
+                // being dragged sets the *half* width and the other edge
+                // follows it (issue #256). Read from whichever grip was
+                // grabbed, so either one widens and narrows the passband.
+                let half = rel.abs().clamp(25.0, max_hz);
+                (lo, hi) = (-half, half);
+            } else if is_hi {
                 hi = rel.clamp(lo + 50.0, max_hz);
             } else {
                 lo = rel.clamp(-max_hz, hi - 50.0);

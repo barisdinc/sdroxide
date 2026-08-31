@@ -628,6 +628,15 @@ panadapter: two vertical grip lines mark the filter's low and high edges (they
 brighten to orange when you can grab them). Drag an edge to widen or narrow the
 passband. The grips work on both the spectrum and the waterfall.
 
+In **AM, SAM, DSB and the FM modes** the two edges move together: the passband
+is a channel carved out about the carrier, both halves carry the same signal,
+and narrowing one alone would throw away half the audio while letting the
+interference on the other side straight through. So whichever grip you take
+sets the half width and the other edge mirrors it — which is also why every
+filter preset these modes offer is symmetric. In SSB, CW and the data modes the
+passband sits to one side of the carrier by definition and each edge stays
+yours to place on its own.
+
 The volume, AGC mode and manual gain, the squelch, the noise reduction and the
 decimation are remembered in `session.json` and restored the next time you
 start, along with the front end's own gain stages

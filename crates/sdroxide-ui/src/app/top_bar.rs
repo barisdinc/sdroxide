@@ -3428,18 +3428,24 @@ impl SdroxideApp {
             ui.label("Filter").on_hover_text("Sub receiver passband edges, in Hz");
             let mut lo = rx1.filter_lo;
             let mut hi = rx1.filter_hi;
-            let changed = ui
+            let lo_changed = ui
                 .add_sized([70.0, field_h], DragValue::new(&mut lo).speed(10).range(-max..=max))
-                .changed()
-                | ui.add_sized(
-                    [70.0, field_h],
-                    DragValue::new(&mut hi).speed(10).range(-max..=max),
-                )
                 .changed();
-            if changed {
-                // Same 50 Hz floor the waterfall grips enforce, so the
-                // passband can't be dragged shut from either route.
-                let (lo, hi) = (lo.min(hi - 50.0), hi.max(lo + 50.0));
+            let hi_changed = ui
+                .add_sized([70.0, field_h], DragValue::new(&mut hi).speed(10).range(-max..=max))
+                .changed();
+            if lo_changed || hi_changed {
+                let (lo, hi) = if rx1.mode.filter_symmetric() {
+                    // A channel about the carrier: whichever edge was typed
+                    // sets the half width and the other follows (issue #256),
+                    // the same rule the panadapter grips follow.
+                    let half = if hi_changed { hi.abs() } else { lo.abs() }.clamp(25.0, max);
+                    (-half, half)
+                } else {
+                    // Same 50 Hz floor the waterfall grips enforce, so the
+                    // passband can't be dragged shut from either route.
+                    (lo.min(hi - 50.0), hi.max(lo + 50.0))
+                };
                 (self.state.rx[1].filter_lo, self.state.rx[1].filter_hi) = (lo, hi);
                 cmds.push(Command::SetFilter { rx: RxId::Sub, lo, hi });
             }

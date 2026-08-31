@@ -900,6 +900,39 @@ impl Mode {
         }
     }
 
+    /// Whether the passband is a channel *centred* on the carrier, so that
+    /// dragging one edge has to carry the other with it.
+    ///
+    /// AM and its relatives detect both sidebands together and FM detects a
+    /// channel about the carrier: in either the two halves of the passband
+    /// carry the same signal, and narrowing one alone throws away half of it
+    /// while letting the interference on the other side straight through.
+    /// Every preset these modes have is symmetric for that reason, and a hand
+    /// drag ought not to be able to reach a shape the presets deliberately
+    /// cannot (issue #256).
+    ///
+    /// SSB, CW and the data modes are the other case and keep both edges to
+    /// themselves: their passband sits to one side of the carrier by
+    /// definition, and its two edges do different jobs.
+    ///
+    /// ADS-B and VDL2 are left out on purpose: their edges shade what the
+    /// decoder is reading rather than filter anything, so there is no signal
+    /// to lose by moving one.
+    pub fn filter_symmetric(self) -> bool {
+        matches!(
+            self,
+            Mode::Am
+                | Mode::Sam
+                | Mode::Dsb
+                | Mode::Nfm
+                | Mode::Wfm
+                | Mode::SstvFm
+                | Mode::RttyFm
+                | Mode::Packet
+                | Mode::Aprs
+        )
+    }
+
     /// Filter width presets: (label, lo, hi) relative to the carrier.
     pub fn filter_presets(self) -> &'static [(&'static str, f32, f32)] {
         match self {
@@ -1386,6 +1419,26 @@ impl AgcMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mode whose passband is a channel about the carrier must have nothing
+    /// but symmetric presets, and a mode with an asymmetric preset must not
+    /// claim to be one: the drag rule and the preset buttons are two routes to
+    /// the same passband, and an operator who reaches one shape by clicking
+    /// and cannot reach it by dragging has found a bug, not a policy.
+    #[test]
+    fn symmetric_modes_have_symmetric_presets() {
+        for m in Mode::ALL {
+            let all_symmetric = m.filter_presets().iter().all(|(_, lo, hi)| lo == &-hi);
+            if m.filter_symmetric() {
+                assert!(all_symmetric, "{m:?} mirrors its edges but has an off-centre preset");
+            } else if !m.filter_presets().is_empty() {
+                assert!(
+                    !all_symmetric || m == Mode::Adsb || m == Mode::Vdl2,
+                    "{m:?} has only symmetric presets — should its edges mirror?"
+                );
+            }
+        }
+    }
 
     /// `Mode` carries the same postcard-by-declaration-index contract as
     /// [`NrLevel`] below, and is serialised into far more: every stored config,

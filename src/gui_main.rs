@@ -177,8 +177,10 @@ pub fn run_multi(
         // right-hand edge, and the Setup gear on it, off the display. Centred,
         // the window is on the screen from the first frame;
         // `MultiApp::fit_window` then deals with one that is bigger than the
-        // screen altogether (issue #234). Ignored once a size and position have
-        // been remembered.
+        // screen altogether (issue #234). Dropped once a position has been
+        // remembered — eframe applies this *after* restoring one, so
+        // `sdroxide_ui::event_loop::run` is what makes "first start" mean it
+        // (issue #256).
         centered: true,
         ..Default::default()
     };
@@ -393,7 +395,7 @@ pub fn run_remote(url: &str) -> Result<()> {
             .with_icon(sdroxide_ui::app_icon())
             .with_title(format!("sdroxide — remote {url}")),
         // Centred on a first start, for the reason the local window is — see
-        // `run` above (issue #234).
+        // `run` above (issues #234 and #256).
         centered: true,
         ..Default::default()
     };
