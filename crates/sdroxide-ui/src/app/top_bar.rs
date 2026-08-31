@@ -3121,9 +3121,8 @@ impl SdroxideApp {
             // The chip wears whichever socket the radio is on, so the box has
             // to be as wide as the longest of them or it would resize as the
             // operator switched.
-            let widest = ants.iter().fold(0.0f32, |a, n| {
-                a.max(crate::chrome::chip_width(ui, &rig_antenna_label(n), None))
-            });
+            let widest =
+                ants.iter().fold(0.0f32, |a, n| a.max(crate::chrome::chip_width(ui, n, None)));
             crate::chrome::text_width(ui, "ANT", body.clone()) + gap + widest
         };
         let bottom = if self.rig_power() {
@@ -3172,8 +3171,13 @@ impl SdroxideApp {
                      dial crosses into that band.",
                 );
                 let here = ants.iter().position(|a| *a == self.state.antenna_rx);
+                // The socket's own name, whole: a front end that spells its
+                // ports out is entitled to be quoted — an RSPduo's "50 Ohm
+                // port" and "Hi-Z port" abbreviate to the same word, and a
+                // chip that cannot tell two sockets apart is worse than a wide
+                // one. The box was measured against the longest of them.
                 let label = match here {
-                    Some(i) => rig_antenna_label(&ants[i]),
+                    Some(i) => ants[i].clone(),
                     // Before the radio has said, and after a switch to a socket
                     // this list does not name.
                     None => "—".to_string(),
@@ -4909,19 +4913,6 @@ fn div_rows_w(ui: &egui::Ui) -> f32 {
         + gap
         + STRIP_RAIL_W;
     top.max(bottom) + 2.0 * crate::chrome::MODULE_MARGIN_X
-}
-
-/// A socket's name as the ANT chip wears it. Icom's own "ANT1"/"ANT2" are
-/// already chip-sized; a front end that spells its ports out ("Antenna B") is
-/// abbreviated to its last word, which is the part that tells them apart.
-fn rig_antenna_label(name: &str) -> String {
-    if name.len() <= 5 {
-        return name.to_string();
-    }
-    match name.rsplit(' ').next() {
-        Some(tail) if !tail.is_empty() && tail.len() <= 5 => tail.to_string(),
-        _ => name.to_string(),
-    }
 }
 
 /// The RX box's chip run in a mode: the six every mode carries, then whatever
