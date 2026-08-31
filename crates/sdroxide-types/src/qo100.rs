@@ -31,7 +31,10 @@ pub struct Qo100Settings {
     /// positive lane clear of the DC spike and of most transponder activity:
     /// the operator nudges the dial until the beacon's two lobes sit inside
     /// it, so the tracker is confirming a shape already on screen rather than
-    /// hunting blind. Default +5 kHz..+25 kHz.
+    /// hunting blind. Default +5 kHz..+12 kHz — kept modest because the
+    /// receiver has to sample fast enough to see the top of it, and a wider
+    /// window is real load. Raise it only if the LNB is far enough off that
+    /// the beacon will not sit inside the default.
     pub park_lo_hz: f64,
     pub park_hi_hz: f64,
     /// Whether to also run the AO-40 uncoded frame decoder (sync word + CRC +
@@ -55,7 +58,7 @@ impl Default for Qo100Settings {
             enabled: false,
             search_half_width_hz: 25_000.0,
             park_lo_hz: 5_000.0,
-            park_hi_hz: 25_000.0,
+            park_hi_hz: 12_000.0,
             decode_telemetry: false,
             auto_apply: false,
         }

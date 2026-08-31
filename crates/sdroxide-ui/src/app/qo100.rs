@@ -804,11 +804,18 @@ impl SdroxideApp {
                 led(ui, "carrier", s.carrier_seen);
                 led(ui, "sync", s.sync_seen);
                 led(ui, "CRC", s.crc_ok);
-                if s.sync_bit_errors != u8::MAX && !s.sync_seen {
+                if s.sync_bit_errors != u8::MAX {
+                    // Always shown: sync passing (≤3) but CRC never lighting
+                    // means the demod is marginal — the closer this is to 0,
+                    // the more of the payload is decoding right.
                     ui.label(
-                        RichText::new(format!("closest sync: {} bit errors", s.sync_bit_errors))
+                        RichText::new(format!("sync {} / 32 err", s.sync_bit_errors))
                             .size(9.0)
-                            .color(theme::CYAN_DIM()),
+                            .color(if s.sync_bit_errors <= 3 {
+                                theme::CYAN_DIM()
+                            } else {
+                                theme::YELLOW()
+                            }),
                     );
                 }
             });
