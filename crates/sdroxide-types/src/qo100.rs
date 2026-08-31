@@ -15,22 +15,42 @@ pub const QO100_BEACON_HZ: f64 = 10_489_750_000.0;
 /// What the operator asks the beacon decoder to do.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Qo100Settings {
-    /// Whether the decoder runs at all. Off by default: it is a calibration
-    /// tool reached for occasionally, not something every station pays a
-    /// downconverter and a worker thread for by default.
+    /// Whether the spectral tracker runs at all. Off by default: it is a
+    /// calibration tool reached for occasionally, not something every station
+    /// pays a downconverter and a worker thread for by default. When on, the
+    /// engine watches the parking window ([`Self::park_lo_hz`]..
+    /// [`Self::park_hi_hz`]) for the beacon's twin-lobe shape and reports
+    /// where it sits, cycle after cycle.
     pub enabled: bool,
-    /// Half the width, in Hz, of the frequency range searched around
-    /// [`QO100_BEACON_HZ`] — set from the QO-100 window's own width buttons.
-    /// Starts at 25 kHz: this is a first-run calibration tool, and an
-    /// uncalibrated LNB's LO can sit tens of kHz off, so the opening search is
-    /// wide enough to catch that in one pass. Once a correction has been
-    /// applied the operator can narrow it right down.
+    /// Half the width, in Hz, of the frequency range the *telemetry* decoder
+    /// ([`Self::decode_telemetry`]) sweeps around [`QO100_BEACON_HZ`]. The
+    /// tracker does not use this — it searches the parking window instead.
     pub search_half_width_hz: f64,
+    /// The low and high edge, in Hz above [`QO100_BEACON_HZ`], of the window
+    /// the operator parks the beacon in before switching the tracker on. A
+    /// positive lane clear of the DC spike and of most transponder activity:
+    /// the operator nudges the dial until the beacon's two lobes sit inside
+    /// it, so the tracker is confirming a shape already on screen rather than
+    /// hunting blind. Default +5 kHz..+25 kHz.
+    pub park_lo_hz: f64,
+    pub park_hi_hz: f64,
+    /// Whether to also run the AO-40 uncoded frame decoder (sync word + CRC +
+    /// telemetry text). Separate from [`Self::enabled`]: the tracker keeps the
+    /// dial honest continuously off the beacon's *shape*, while decoding the
+    /// telemetry itself is a heavier, once-in-a-while thing the operator asks
+    /// for explicitly.
+    pub decode_telemetry: bool,
 }
 
 impl Default for Qo100Settings {
     fn default() -> Self {
-        Self { enabled: false, search_half_width_hz: 25_000.0 }
+        Self {
+            enabled: false,
+            search_half_width_hz: 25_000.0,
+            park_lo_hz: 5_000.0,
+            park_hi_hz: 25_000.0,
+            decode_telemetry: false,
+        }
     }
 }
 
@@ -63,4 +83,43 @@ pub struct Qo100Status {
     /// been found yet, rather than looking merely idle.
     pub blocks_tried: u64,
     pub blocks_locked: u64,
+
+    // --- spectral tracker (fast loop, off the beacon's twin-lobe shape) ---
+    /// Whether the tracker loop is running its short-window spectrum checks.
+    pub tracking: bool,
+    /// The tracker's current estimate of how far the beacon sits from
+    /// [`QO100_BEACON_HZ`], in Hz — `None` when the last cycle saw nothing
+    /// twin-lobe-shaped in the parking window.
+    pub est_offset_hz: Option<f64>,
+    /// Depth of the central null between the two lobes, in dB — how
+    /// convincingly the last estimate looked like the beacon rather than a
+    /// plain carrier.
+    pub est_null_depth_db: f32,
+    /// Left/right evenness of the two lobes, 0..1 (1 = perfectly symmetric).
+    pub est_symmetry: f32,
+    /// Lobe level over the parking-window noise floor, in dB.
+    pub est_snr_db: f32,
+    /// Tracker cycles that produced an estimate, and cycles that found
+    /// nothing, since the tracker was switched on.
+    pub est_updates: u64,
+    pub est_misses: u64,
+
+    // --- AO-40 uncoded decoder progress (only while `decoding`) ---
+    /// Whether [`Qo100Settings::decode_telemetry`] is on and the decoder is
+    /// actually being run.
+    pub decoding: bool,
+    /// The last decode pass found chip-rate energy to work on.
+    pub carrier_seen: bool,
+    /// The last decode pass matched the 32-bit AO-40 sync word somewhere
+    /// (within the error threshold).
+    pub sync_seen: bool,
+    /// Fewest sync-word bit errors seen in the last decode pass, 0..=32;
+    /// [`u8::MAX`] when the pass ran no bit stream at all.
+    pub sync_bit_errors: u8,
+    /// How much of one whole AO-40 frame the rolling buffer currently spans,
+    /// 0..1 — the decoder needs a full frame inside one window to have any
+    /// chance, and this says how close it is.
+    pub frame_fill: f32,
+    /// The last decode pass's CRC check result.
+    pub crc_ok: bool,
 }

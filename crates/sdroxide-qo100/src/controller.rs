@@ -73,6 +73,24 @@ fn keep_seconds() -> f64 {
     FRAME_SECONDS * 1.15
 }
 
+/// The spectral tracker's own short window — long enough for a stable Welch
+/// average of the beacon's twin-lobe shape, short enough to follow an LNB
+/// still drifting as it warms up. Independent of the frame decoder's much
+/// longer window: the tracker reads the beacon's *shape*, not its bits.
+fn track_seconds() -> f64 {
+    3.0
+}
+
+/// How much fresh IQ to gather between tracker passes — a new estimate on the
+/// screen about once a second.
+fn track_hop_seconds() -> f64 {
+    1.0
+}
+
+/// How long a tracker estimate stays on the status as current before it is
+/// dropped to `None` — a couple of tracker windows.
+const EST_FRESH_SECS: i64 = 12;
+
 /// Coarse frequency-grid step the search tries, in Hz. The delay-and-multiply
 /// chip detector `bpsk::acquire` runs at each candidate tolerates a residual
 /// carrier error of well over 100 Hz (its own tests decode an uncorrected
@@ -130,6 +148,9 @@ impl Qo100Controller {
         let cancel = Arc::new(AtomicBool::new(false));
         let window_len = (rate_hz * window_seconds()).round() as usize;
         let keep_len = (rate_hz * keep_seconds()).round() as usize;
+        let track_len = (rate_hz * track_seconds()).round().max(1.0) as usize;
+        let track_hop = (rate_hz * track_hop_seconds()).round().max(1.0) as usize;
+        let frame_len = (rate_hz * FRAME_SECONDS).round().max(1.0) as usize;
         let worker = std::thread::Builder::new()
             .name("sdroxide-qo100".into())
             .spawn({
@@ -139,6 +160,12 @@ impl Qo100Controller {
                     let mut buf: Vec<Complex32> = Vec::with_capacity(window_len);
                     let (mut tried, mut locked) = (0u64, 0u64);
                     let mut last: Option<(f64, String, i64)> = None; // offset, text, unix
+                    let (mut est_updates, mut est_misses) = (0u64, 0u64);
+                    // Newest tracker estimate and the unix second it landed.
+                    let mut last_est: Option<(bpsk::CarrierEstimate, i64)> = None;
+                    let mut progress = bpsk::DecodeProgress::default();
+                    // Samples gathered since the last tracker pass.
+                    let mut since_track = 0usize;
                     // The `seq` the next contiguous block would carry; `None`
                     // before the first one has arrived.
                     let mut want_seq: Option<u64> = None;
@@ -152,29 +179,69 @@ impl Qo100Controller {
                                 Ok(Iq { seq, samples }) => {
                                     if !continues_run(want_seq, seq) {
                                         buf.clear();
+                                        since_track = 0;
                                     }
                                     want_seq = Some(seq.wrapping_add(1));
                                     buf.extend_from_slice(&samples);
+                                    since_track += samples.len();
+                                    let now = now_unix();
+
+                                    // Fast tracker: the newest `track_len`
+                                    // samples, about once a second, scanning
+                                    // only the parking window for the beacon's
+                                    // twin-lobe shape. Anything in that window
+                                    // that is not two symmetric lobes simply
+                                    // does not win.
+                                    if cfg.enabled
+                                        && since_track >= track_hop
+                                        && buf.len() >= track_len
+                                    {
+                                        since_track = 0;
+                                        let tail = &buf[buf.len() - track_len..];
+                                        match bpsk::estimate_carrier(
+                                            tail,
+                                            rate_hz,
+                                            cfg.park_lo_hz,
+                                            cfg.park_hi_hz,
+                                        ) {
+                                            Some(e) => {
+                                                est_updates += 1;
+                                                last_est = Some((e, now));
+                                            }
+                                            None => est_misses += 1,
+                                        }
+                                        let _ = res_tx.send(status_snapshot(
+                                            &cfg, tried, locked, est_updates, est_misses,
+                                            &last, &last_est, &progress, buf.len(), frame_len,
+                                            now,
+                                        ));
+                                    }
+
                                     if buf.len() < window_len {
                                         continue;
                                     }
-                                    tried += 1;
-                                    let lock = bpsk::acquire(
-                                        &buf,
-                                        rate_hz,
-                                        cfg.search_half_width_hz,
-                                        FREQ_STEP_HZ,
-                                        DEMOD_RATE_HZ,
-                                        &cancel,
-                                    );
-                                    if let Some(l) = lock {
-                                        locked += 1;
-                                        let unix = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs() as i64)
-                                            .unwrap_or(0);
-                                        last = Some((l.offset_hz, l.text, unix));
+
+                                    // Frame decoder: a whole window, only when
+                                    // the operator asked for the telemetry.
+                                    if cfg.decode_telemetry {
+                                        tried += 1;
+                                        let (lock, prog) = bpsk::acquire_debug(
+                                            &buf,
+                                            rate_hz,
+                                            cfg.search_half_width_hz,
+                                            FREQ_STEP_HZ,
+                                            DEMOD_RATE_HZ,
+                                            &cancel,
+                                        );
+                                        progress = prog;
+                                        if let Some(l) = lock {
+                                            locked += 1;
+                                            last = Some((l.offset_hz, l.text, now));
+                                        }
+                                    } else {
+                                        progress = bpsk::DecodeProgress::default();
                                     }
+
                                     // Keep the newest slice — enough overlap
                                     // that no frame can fall in the gap —
                                     // rather than clearing outright, so a
@@ -183,17 +250,10 @@ impl Qo100Controller {
                                     // being thrown away twice.
                                     let start = buf.len().saturating_sub(keep_len);
                                     buf.drain(..start);
-                                    let (offset_hz, text, locked_unix) =
-                                        last.clone().unwrap_or_default();
-                                    let _ = res_tx.send(sdroxide_types::Qo100Status {
-                                        running: true,
-                                        locked: lock_is_fresh(locked_unix),
-                                        offset_hz,
-                                        text,
-                                        locked_unix,
-                                        blocks_tried: tried,
-                                        blocks_locked: locked,
-                                    });
+                                    let _ = res_tx.send(status_snapshot(
+                                        &cfg, tried, locked, est_updates, est_misses,
+                                        &last, &last_est, &progress, buf.len(), frame_len, now,
+                                    ));
                                 }
                                 Err(_) => break,
                             },
@@ -236,6 +296,56 @@ impl Qo100Controller {
             out = Some(s);
         }
         out
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Build a full status snapshot from the worker's running counters — the one
+/// place the wire type is assembled, so the tracker pass and the decode pass
+/// cannot drift apart in what they report.
+#[allow(clippy::too_many_arguments)]
+fn status_snapshot(
+    cfg: &Qo100Settings,
+    tried: u64,
+    locked: u64,
+    est_updates: u64,
+    est_misses: u64,
+    last: &Option<(f64, String, i64)>,
+    last_est: &Option<(bpsk::CarrierEstimate, i64)>,
+    progress: &bpsk::DecodeProgress,
+    buf_len: usize,
+    frame_len: usize,
+    now: i64,
+) -> sdroxide_types::Qo100Status {
+    let (offset_hz, text, locked_unix) = last.clone().unwrap_or_default();
+    let fresh = last_est.as_ref().filter(|(_, t)| now - t <= EST_FRESH_SECS);
+    sdroxide_types::Qo100Status {
+        running: cfg.enabled || cfg.decode_telemetry,
+        locked: lock_is_fresh(locked_unix),
+        offset_hz,
+        text,
+        locked_unix,
+        blocks_tried: tried,
+        blocks_locked: locked,
+        tracking: cfg.enabled,
+        est_offset_hz: fresh.map(|(e, _)| e.hz),
+        est_null_depth_db: fresh.map(|(e, _)| e.null_depth_db).unwrap_or(0.0),
+        est_symmetry: fresh.map(|(e, _)| e.symmetry).unwrap_or(0.0),
+        est_snr_db: fresh.map(|(e, _)| e.snr_db).unwrap_or(0.0),
+        est_updates,
+        est_misses,
+        decoding: cfg.decode_telemetry,
+        carrier_seen: progress.carrier,
+        sync_seen: progress.sync,
+        sync_bit_errors: progress.sync_bit_errors,
+        frame_fill: if frame_len > 0 { (buf_len as f32 / frame_len as f32).min(1.0) } else { 0.0 },
+        crc_ok: progress.crc_ok,
     }
 }
 
@@ -347,7 +457,12 @@ mod tests {
         let rate = 16_000.0;
         let c = Qo100Controller::new(
             rate,
-            Qo100Settings { enabled: true, search_half_width_hz: 300.0 },
+            Qo100Settings {
+                enabled: true,
+                decode_telemetry: true,
+                search_half_width_hz: 300.0,
+                ..Default::default()
+            },
         );
         let n = (rate * FRAME_SECONDS * 2.4) as usize; // a hair over one window
         let noise: Vec<Complex32> = (0..n)
@@ -372,7 +487,12 @@ mod tests {
         let rate = 16_000.0;
         let c = Qo100Controller::new(
             rate,
-            Qo100Settings { enabled: true, search_half_width_hz: 300.0 },
+            Qo100Settings {
+                enabled: true,
+                decode_telemetry: true,
+                search_half_width_hz: 300.0,
+                ..Default::default()
+            },
         );
         // One synth frame is ~10 s of signal and a window is ~24 s, so stack
         // three; the frame in the first copy lands wholly inside the buffer.
@@ -383,5 +503,33 @@ mod tests {
         assert!(s.locked);
         assert!((s.offset_hz - 150.0).abs() <= 3.0, "offset {}", s.offset_hz);
         assert!(s.text.starts_with("CONTROLLER E2E"), "{:?}", s.text);
+    }
+
+    /// The fast tracker reports where the beacon sits from its spectral shape
+    /// alone, with the telemetry decoder switched off — the split the QO-100
+    /// page is built around.
+    #[test]
+    fn the_tracker_places_the_beacon_without_decoding_telemetry() {
+        let rate = 60_000.0;
+        let c = Qo100Controller::new(
+            rate,
+            Qo100Settings {
+                enabled: true,
+                decode_telemetry: false,
+                park_lo_hz: 5_000.0,
+                park_hi_hz: 20_000.0,
+                ..Default::default()
+            },
+        );
+        // A few seconds of the beacon parked at +12 kHz.
+        let one = crate::bpsk::tests::synth_signal("TRACKED", rate, 12_000.0, 0.05, 3);
+        c.on_rx_iq(&one);
+        let s = wait_for(&c, |s| s.est_offset_hz.is_some())
+            .expect("the tracker should place the beacon");
+        assert!(s.tracking);
+        assert_eq!(s.blocks_locked, 0, "the telemetry decoder was off");
+        let est = s.est_offset_hz.unwrap();
+        assert!((est - 12_000.0).abs() <= 350.0, "est {est}");
+        assert!(s.est_updates >= 1 && s.est_null_depth_db >= 2.5, "{s:?}");
     }
 }
