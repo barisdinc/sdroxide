@@ -1783,19 +1783,20 @@ scanning. Besides its name, each tab carries:
   background radio still fills its FT8 list and still spots.
 - **⊞** — open this radio in a split view of its own, or close the one it
   has (see below).
-- **ON / OFF** — switch the radio itself on or off (see below).
+- **ON / OFF** — switch the radio itself on or off (see below). The chip is lit
+  while the radio is on, like every other chip in the program.
 
 Closing a radio is deliberately *not* on the strip — that lives in
 **Settings → Radio**, behind a dialog rather than one stray click away.
 
 **Switching a radio off.** A station does not always have every radio it is set
 up for plugged in. Each tab carries a switch that says which state its radio is
-in — **ON** or **OFF** — and pressing it changes that state. Switched off, the
-radio's interface is closed: no device claimed, no CAT port held, no network rig
-dialled, and no reconnecting in the background. Everything it is configured as
-stays exactly where it is. The tab stays too, with its name greyed, and its
-whole Settings → Radio page is still there to be read and edited. Press the
-switch again and the radio opens where it left off.
+in — **ON**, lit, or **OFF**, dark — and pressing it changes that state.
+Switched off, the radio's interface is closed: no device claimed, no CAT port
+held, no network rig dialled, and no reconnecting in the background. Everything
+it is configured as stays exactly where it is. The tab stays too, with its name
+greyed, and its whole Settings → Radio page is still there to be read and
+edited. Press the switch again and the radio opens where it left off.
 
 It is *sdroxide's* switch rather than the radio's, and the difference matters
 on a station with more than one rig on it. What it lets go of is this end of

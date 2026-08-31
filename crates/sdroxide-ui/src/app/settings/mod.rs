@@ -3276,12 +3276,16 @@ impl SdroxideApp {
                 // its station to do that. Not offered for a radio lent out as
                 // somebody's panadapter, whose front end is the borrower's to
                 // hold — nor by a station that does not take the request.
+                //
+                // Lit while the radio is on, as the strip's copy of the switch
+                // is: the chip says which state the radio is in, and a chip
+                // wears the accent when what it says is in force (issue #253).
                 if chip.switchable
                     && chip.attached_to.is_none()
                     && self.radio_roster.len() > 1
                     && crate::chrome::chip(
                         ui,
-                        !chip.enabled,
+                        chip.enabled,
                         RichText::new(if chip.enabled { "ON" } else { "OFF" }).size(11.0),
                     )
                     .on_hover_text(if chip.enabled {

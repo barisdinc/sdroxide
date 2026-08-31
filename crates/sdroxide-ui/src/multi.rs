@@ -682,10 +682,15 @@ impl MultiApp {
                     // The switch. A radio at the far end of a connection has
                     // one too — the request goes to the station, which is where
                     // such a radio has always been switched on and off.
+                    //
+                    // Lit while the radio is on, like every other chip in the
+                    // program: a chip wears the accent when what it says is the
+                    // state in force, and this one says which state its radio is
+                    // in. Lighting it for OFF read as the opposite (issue #253).
                     if Self::switchable(tab) && tab.attached_to.is_none() {
                         let power = crate::chrome::chip(
                             ui,
-                            !tab.enabled,
+                            tab.enabled,
                             RichText::new(if tab.enabled { "ON" } else { "OFF" }).size(11.0),
                         );
                         let tip = if tab.enabled {
