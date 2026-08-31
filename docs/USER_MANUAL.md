@@ -4365,8 +4365,7 @@ tuning instruction for the service says.
 
 ### 3.15 VDL2 (what the aircraft are saying)
 
-Choose **VDL2** from the end of the **DIGITAL** row. [ADS-B](#313-ads-b-aircraft-on-1090-mhz)
-is what an aeroplane *is*; this is what it *says*. VHF Data Link Mode 2 is the
+Choose **VDL2** from the end of the **DIGITAL** row. VHF Data Link Mode 2 is the
 datalink airliners and ground stations exchange ACARS over — company messages,
 position reports, weather requests, fuel and arrival figures, and the link
 management that carries them — on seven 25 kHz channels around 136.8 MHz.
@@ -4538,30 +4537,6 @@ The replay prints the counters per channel and one sentence saying what to do
 next. **The channel to watch is 136.975**, the Common Signalling Channel: every
 ground station beacons on it and every link starts there, so if that one is
 silent while the others show bursts, what the others are showing is not VDL2.
-
-#### What has not been verified
-
-**This decoder has never decoded a real VDL2 transmission.** It is written from
-ETSI EN 301 841-1 (the VDL Mode 2 standard, published by ICAO as Annex 10
-Volume III Part I Chapter 6) and ARINC 618, its error-correcting code and its
-scrambler are checked against properties of the published constants rather than
-against itself, and it decodes everything the built-in generator can throw at
-it. But the only receiver it has been run against on the air heard no aircraft
-datalink at all, so the last link in the chain — real signals, from real
-avionics — is untested.
-
-Two parts of it are more likely than the rest to be wrong, and both are
-instrumented rather than assumed. The **interleaving across error-correction
-blocks** only applies to frames over 249 octets, which real traffic almost never
-is; multi-block frames are counted separately from multi-block successes, so if
-that reading is wrong the panel says how much it is costing instead of leaving a
-mystery. And the **ACARS block check sequence** is reported and never used to
-throw a message away, so if that variant is wrong the cost is a column reading
-"not checked" rather than a message you never see.
-
-If you have an aerial that hears VDL2, a recording made with `--record-iq` is
-the most useful thing anybody could send.
-
 
 ## 4. Skimmers
 
