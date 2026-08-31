@@ -114,6 +114,10 @@ pub struct Qo100Status {
     /// nothing, since the tracker was switched on.
     pub est_updates: u64,
     pub est_misses: u64,
+    /// Least-squares drift rate of the last stretch of estimates, in Hz/s —
+    /// what the frame decoder de-rotates before looking for a frame. 0 until
+    /// there is a long enough run of estimates to fit.
+    pub est_drift_hz_s: f32,
 
     // --- AO-40 uncoded decoder progress (only while `decoding`) ---
     /// Whether [`Qo100Settings::decode_telemetry`] is on and the decoder is

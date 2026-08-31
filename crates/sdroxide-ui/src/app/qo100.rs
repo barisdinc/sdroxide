@@ -439,31 +439,28 @@ impl SdroxideApp {
                 );
             }
 
-            ui.add_space(6.0);
-            let tel = ui.add_enabled_ui(reachable, |ui| {
-                ui.selectable_label(cfg.decode_telemetry, "decode AO-40 telemetry")
-            });
-            let tel = tel.inner;
+            ui.add_space(8.0);
+            let tel = crate::chrome::chip_enabled(ui, reachable, cfg.decode_telemetry, "TELEMETRY");
             if tel.clicked() {
                 cfg.decode_telemetry = !cfg.decode_telemetry;
             }
             tel.on_hover_text(
                 "Also run the AO-40 uncoded frame decoder — sync word, CRC and the telemetry \
-                 text — with a step-by-step readout of how far each pass gets",
+                 text — with a step-by-step readout (carrier → sync → CRC) of how far each pass \
+                 gets",
             );
 
-            ui.add_space(6.0);
-            let auto = ui.add_enabled_ui(reachable && cfg.enabled, |ui| {
-                ui.selectable_label(cfg.auto_apply, "auto-correct")
-            });
-            let auto = auto.inner;
+            ui.add_space(4.0);
+            let auto =
+                crate::chrome::chip_enabled(ui, reachable && cfg.enabled, cfg.auto_apply, "AUTO");
             if auto.clicked() {
                 cfg.auto_apply = !cfg.auto_apply;
             }
             auto.on_hover_text(
-                "Let the tracker correct the converter/LNB offset by itself: a slow closed loop \
-                 that, on a clean and steady estimate, nudges the beacon back onto 10489.750 MHz \
-                 and holds it there as the LNB drifts. Reopens the front end each time it acts.",
+                "Auto-correct: let the tracker adjust the converter/LNB offset by itself — a slow \
+                 closed loop that, on a clean and steady estimate, nudges the beacon back onto \
+                 10489.750 MHz and holds it there as the LNB drifts. Reopens the front end each \
+                 time it acts.",
             );
 
             ui.add_space(8.0);
@@ -691,6 +688,23 @@ impl SdroxideApp {
                 );
                 ui.end_row();
 
+                ui.label(dim("DRIFT"));
+                ui.label(
+                    RichText::new(if s.est_drift_hz_s.abs() >= 0.05 {
+                        format!("{:+.1} Hz/s  (de-rotated before decode)", s.est_drift_hz_s)
+                    } else {
+                        "— (need a longer run of estimates)".to_string()
+                    })
+                    .size(10.0)
+                    .monospace()
+                    .color(if s.est_drift_hz_s.abs() > 15.0 {
+                        theme::YELLOW()
+                    } else {
+                        theme::TEXT()
+                    }),
+                );
+                ui.end_row();
+
                 ui.label(dim("CYCLES"));
                 ui.label(
                     RichText::new(format!("{} found, {} empty", s.est_updates, s.est_misses))
@@ -827,6 +841,24 @@ impl SdroxideApp {
                     "{} blocks tried, {} decoded",
                     s.blocks_tried, s.blocks_locked
                 ))
+                .size(9.0)
+                .color(theme::CYAN_DIM()),
+            );
+        } else if cfg.decode_telemetry {
+            // Toggled on but no status back yet — the first ~24 s window.
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("DECODE — filling the first frame buffer…")
+                    .size(9.5)
+                    .color(theme::CYAN_DIM()),
+            );
+        } else {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "DECODE — off. Turn on the TELEMETRY chip (top row) for the \
+                              carrier → sync → CRC readout.",
+                )
                 .size(9.0)
                 .color(theme::CYAN_DIM()),
             );

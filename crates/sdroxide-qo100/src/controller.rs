@@ -31,6 +31,7 @@
 //! Settings ride a separate unbounded channel: rare, and must never be
 //! dropped even while the IQ queue is backed up.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -161,6 +162,7 @@ impl Qo100Controller {
             .spawn({
                 let cancel = Arc::clone(&cancel);
                 move || {
+                    let started = std::time::Instant::now();
                     let mut cfg = cfg;
                     let mut buf: Vec<Complex32> = Vec::with_capacity(window_len);
                     let (mut tried, mut locked) = (0u64, 0u64);
@@ -168,6 +170,10 @@ impl Qo100Controller {
                     let (mut est_updates, mut est_misses) = (0u64, 0u64);
                     // Newest tracker estimate and the unix second it landed.
                     let mut last_est: Option<(bpsk::CarrierEstimate, i64)> = None;
+                    // Recent (elapsed_secs, offset_hz) estimates, for the
+                    // drift-rate fit the frame decoder is handed.
+                    let mut est_hist: VecDeque<(f64, f64)> = VecDeque::new();
+                    let mut drift_hz_s = 0.0f64;
                     let mut progress = bpsk::DecodeProgress::default();
                     // Samples gathered since the last tracker pass.
                     let mut since_track = 0usize;
@@ -225,13 +231,26 @@ impl Qo100Controller {
                                             Some(e) => {
                                                 est_updates += 1;
                                                 last_est = Some((e, now));
+                                                let t = started.elapsed().as_secs_f64();
+                                                est_hist.push_back((t, e.hz));
+                                                while est_hist
+                                                    .front()
+                                                    .is_some_and(|&(t0, _)| t - t0 > DRIFT_FIT_SECS)
+                                                {
+                                                    est_hist.pop_front();
+                                                }
+                                                drift_hz_s = drift_slope(&est_hist);
                                             }
-                                            None => est_misses += 1,
+                                            None => {
+                                                est_misses += 1;
+                                                est_hist.clear();
+                                                drift_hz_s = 0.0;
+                                            }
                                         }
                                         let _ = res_tx.send(status_snapshot(
                                             &cfg, tried, locked, est_updates, est_misses,
-                                            &last, &last_est, &progress, buf.len(), frame_len,
-                                            now,
+                                            &last, &last_est, drift_hz_s, &progress, buf.len(),
+                                            frame_len, now,
                                         ));
                                     }
 
@@ -249,6 +268,7 @@ impl Qo100Controller {
                                             cfg.search_half_width_hz,
                                             FREQ_STEP_HZ,
                                             DEMOD_RATE_HZ,
+                                            drift_hz_s,
                                             &cancel,
                                         );
                                         progress = prog;
@@ -270,7 +290,8 @@ impl Qo100Controller {
                                     buf.drain(..start);
                                     let _ = res_tx.send(status_snapshot(
                                         &cfg, tried, locked, est_updates, est_misses,
-                                        &last, &last_est, &progress, buf.len(), frame_len, now,
+                                        &last, &last_est, drift_hz_s, &progress, buf.len(),
+                                        frame_len, now,
                                     ));
                                 }
                                 Err(_) => break,
@@ -324,6 +345,39 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long a stretch of tracker estimates the drift-rate fit uses.
+const DRIFT_FIT_SECS: f64 = 12.0;
+
+/// Least-squares slope, in Hz/s, of `(t, hz)` samples — the beacon's drift
+/// rate the frame decoder is handed. `0.0` until there are enough points over
+/// a long enough span for the fit to mean anything, and clamped to a sane
+/// range so one wild estimate cannot send the decoder chasing a huge chirp.
+fn drift_slope(hist: &VecDeque<(f64, f64)>) -> f64 {
+    if hist.len() < 4 {
+        return 0.0;
+    }
+    let n = hist.len() as f64;
+    let (mut st, mut sh) = (0.0, 0.0);
+    for &(t, h) in hist {
+        st += t;
+        sh += h;
+    }
+    let (tm, hm) = (st / n, sh / n);
+    let span = hist.back().unwrap().0 - hist.front().unwrap().0;
+    if span < 0.5 * DRIFT_FIT_SECS {
+        return 0.0;
+    }
+    let (mut num, mut den) = (0.0, 0.0);
+    for &(t, h) in hist {
+        num += (t - tm) * (h - hm);
+        den += (t - tm) * (t - tm);
+    }
+    if den <= 0.0 {
+        return 0.0;
+    }
+    (num / den).clamp(-40.0, 40.0)
+}
+
 /// Build a full status snapshot from the worker's running counters — the one
 /// place the wire type is assembled, so the tracker pass and the decode pass
 /// cannot drift apart in what they report.
@@ -336,6 +390,7 @@ fn status_snapshot(
     est_misses: u64,
     last: &Option<(f64, String, i64)>,
     last_est: &Option<(bpsk::CarrierEstimate, i64)>,
+    drift_hz_s: f64,
     progress: &bpsk::DecodeProgress,
     buf_len: usize,
     frame_len: usize,
@@ -358,6 +413,7 @@ fn status_snapshot(
         est_snr_db: fresh.map(|(e, _)| e.snr_db).unwrap_or(0.0),
         est_updates,
         est_misses,
+        est_drift_hz_s: if fresh.is_some() { drift_hz_s as f32 } else { 0.0 },
         decoding: cfg.decode_telemetry,
         carrier_seen: progress.carrier,
         sync_seen: progress.sync,
@@ -408,6 +464,26 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn drift_slope_fits_a_steady_walk_and_ignores_a_short_or_flat_run() {
+        // Too few points, or too short a span: no fit.
+        let mut h: VecDeque<(f64, f64)> = [(0.0, 100.0), (1.0, 106.0), (2.0, 112.0)].into();
+        assert_eq!(drift_slope(&h), 0.0, "three points is not enough");
+
+        // A clean 6 Hz/s walk over a full fit window.
+        h = (0..=12).map(|i| (i as f64, 100.0 + 6.0 * i as f64)).collect();
+        assert!((drift_slope(&h) - 6.0).abs() < 0.01, "got {}", drift_slope(&h));
+
+        // Flat: near zero.
+        h = (0..=12).map(|i| (i as f64, 200.0)).collect();
+        assert!(drift_slope(&h).abs() < 0.01);
+
+        // A single wild estimate cannot drag the fit past the clamp.
+        h = (0..=12).map(|i| (i as f64, 0.0)).collect();
+        h.push_back((12.5, 1_000_000.0));
+        assert!(drift_slope(&h).abs() <= 40.0);
     }
 
     #[test]
