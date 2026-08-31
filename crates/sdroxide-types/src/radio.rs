@@ -1485,6 +1485,15 @@ impl TciConfig {
     /// it wrong is bounded either way — the axis is off by the drag rate times
     /// the *error*, where before it was off by the drag rate times the whole
     /// delay.
+    ///
+    /// A second ExpertSDR3 setup on another SunSDR2DX, also on loopback,
+    /// measured **159 ms** at 192 kHz (2026-08-31) — 47 ms to first movement
+    /// and 159 ms to settle, so the retune is a ramp rather than a step and no
+    /// single delay is exact across it. That is a 50 ms spread on the same rig
+    /// *model*, which is why this is a slider on the settings tab and not a
+    /// constant: it has to be calibrated per setup with
+    /// `cargo run --release -p sdroxide-tci --example retune_latency`, and
+    /// confirmed by eye on a drag.
     pub const DEFAULT_STREAM_DELAY_MS: f64 = 130.0;
 }
 
