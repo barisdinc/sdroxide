@@ -1825,6 +1825,11 @@ struct Engine {
     /// The centre the samples now arriving were taken at: the last entry of
     /// [`Engine::center_trail`] to have aged in. Seeded from the front end's
     /// own centre at open, and re-seeded whenever the source is replaced.
+    ///
+    /// Only meaningful on a front end that *declares* a stream delay — the
+    /// others have no trail to age anything in, and this stays on its seed
+    /// however far the dial travels. Read it through
+    /// [`Engine::stream_center_now`], never directly.
     stream_center_hz: f64,
     /// Device-rate samples this engine has taken from the front end, ever.
     ///
@@ -6041,7 +6046,7 @@ impl Engine {
         // the panadapter between the two sources every time the dial moved.
         wide_covers_viewport(
             (vp_lo, vp_hi),
-            self.stream_center_hz,
+            self.stream_center_now(),
             self.state.sample_rate,
             (wide_center, wide_span),
             self.wide_bins.len(),
@@ -6138,6 +6143,30 @@ impl Engine {
             return;
         }
         self.center_trail.push_back((self.samples_read, center_hz));
+    }
+
+    /// Where the samples in hand were taken, for a decision that has to be made
+    /// against the stream rather than against the dial.
+    ///
+    /// [`Engine::display_center_hz`] walks [`Engine::center_trail`] to work
+    /// this out, but only a front end that declares a stream delay ever builds
+    /// a trail: with no delay the samples in hand *are* at the commanded
+    /// centre, that function short-circuits, and
+    /// [`Engine::stream_center_hz`] is never written after its seed.
+    ///
+    /// Reading the field regardless is how the main panadapter came to compare
+    /// its viewport against wherever the receiver happened to be when the
+    /// engine opened. Every tune after that looked, to
+    /// [`Engine::wide_main_window`], like a viewport panned clean off the
+    /// passband — so an RX-888 drew the whole of HF from its 64.8 MHz overview
+    /// lane at 16 kHz a bin, everywhere except the one window the engine had
+    /// started in.
+    fn stream_center_now(&self) -> f64 {
+        if self.source.stream_delay_s() > 0.0 {
+            self.stream_center_hz
+        } else {
+            self.state.center_hz
+        }
     }
 
     /// The centre the samples now being drawn were actually taken at.
