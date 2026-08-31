@@ -3004,7 +3004,9 @@ impl SdroxideApp {
             crate::chrome::checkbox(ui, &mut pan.mute_on_tx, "").on_hover_text(
                 "Silence receive audio while this radio is transmitting. On by default: with \
                  the receiver on the same antenna, or on this radio's I.F., what it hears \
-                 during an over is your own transmitter.",
+                 during an over is your own transmitter. Overs keyed at the radio itself — \
+                 the microphone's PTT, a foot switch, MOX — count too, as soon as the CAT \
+                 link says the rig has gone to transmit.",
             );
             ui.end_row();
 
@@ -3013,7 +3015,9 @@ impl SdroxideApp {
                 "Stop the panadapter and waterfall while this radio is transmitting. On by \
                  default: a transmitter painted across the whole span erases the band behind \
                  it. Turn it off to watch the band — or your own signal — through an over, \
-                 which is worth having with the receiver on a separate antenna.",
+                 which is worth having with the receiver on a separate antenna. Applies to \
+                 overs sdroxide keys: one keyed at the radio is received right through, so \
+                 the picture keeps running whatever this says.",
             );
             ui.end_row();
         });

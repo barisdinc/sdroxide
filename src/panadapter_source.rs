@@ -440,6 +440,15 @@ impl IqSource for PanadapterSource {
         self.cfg.mute_on_tx && !self.cfg.blank_on_tx
     }
 
+    /// The operator's own setting, with no `blank_on_tx` in it: the blanking is
+    /// the engine declining to read through an over *it* keyed, and it has
+    /// nothing to say about one the transceiver keyed itself — that one is
+    /// received right through, so the mute is the only thing that can silence
+    /// it (issue #244).
+    fn mutes_rx_audio_on_rig_tx(&self) -> bool {
+        self.cfg.mute_on_tx
+    }
+
     // ── Control: the transceiver ────────────────────────────────────────────
 
     /// The engine pushes `vfo - center` here on every retune. It is the only
@@ -923,6 +932,22 @@ mod tests {
         assert!(src.mutes_rx_audio_on_tx());
         let (src, _, _) = pair(cfg());
         assert!(!src.mutes_rx_audio_on_tx(), "a blanked receiver has nothing to mute");
+    }
+
+    /// An over the operator keys at the radio is received right through —
+    /// nothing here drives it, so the engine never stops reading for it — and
+    /// the mute is then the only thing that can silence a receiver listening to
+    /// its own station's transmitter. So it follows the operator's own MUTE ON
+    /// TRANSMIT and nothing else: the blanking above says what happens to an
+    /// over *sdroxide* keys and has no bearing on this one (issue #244).
+    #[test]
+    fn a_rig_driven_over_is_muted_by_the_mute_alone() {
+        for blank in [true, false] {
+            let on = PanadapterConfig { mute_on_tx: true, blank_on_tx: blank, ..cfg() };
+            assert!(pair(on).0.mutes_rx_audio_on_rig_tx(), "blank_on_tx {blank}");
+            let off = PanadapterConfig { mute_on_tx: false, blank_on_tx: blank, ..cfg() };
+            assert!(!pair(off).0.mutes_rx_audio_on_rig_tx(), "blank_on_tx {blank}");
+        }
     }
 
     /// An I.F. tap's receiver is tuned `offset_hz` away from the dial, so the

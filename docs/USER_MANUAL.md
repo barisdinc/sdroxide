@@ -7986,6 +7986,15 @@ waterfall pauses and picks up on unkey. Turn *both* off only with the receiver
 on a separate antenna, where watching the band through an over is worth having;
 turn off blanking alone to watch your own signal while still not hearing it.
 
+Mute on transmit also covers an over you key **at the radio** — the microphone's
+own PTT, a foot switch, or MOX — as long as the CAT link reports the rig's
+transmit state, which every dialect here does (including flrig and Hamlib's
+`rigctld`). Blanking does not: nothing on this side is driving that over, so the
+receiver is read right through it, and the picture goes on showing the band —
+which is the panadapter doing what it was paired for while you talk. So an over
+from the microphone sounds like one keyed on screen and looks like one you asked
+to watch.
+
 **Things worth knowing.**
 
 - The receiver must be a radio on this machine — the transceiver's engine opens

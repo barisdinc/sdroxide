@@ -595,6 +595,27 @@ pub trait IqSource: Send {
     fn mutes_rx_audio_on_tx(&self) -> bool {
         false
     }
+
+    /// Whether receive audio must be silenced while the transceiver in front of
+    /// us transmits **under its own control** — someone with their hand on its
+    /// microphone ([`ControlUpdate::RigTx`]).
+    ///
+    /// Separate from [`Self::mutes_rx_audio_on_tx`], and not a spelling of it.
+    /// That one answers only for the arrangement where the receiver is read
+    /// through an over sdroxide keyed, and is false wherever the engine stops
+    /// reading instead — which is how a half-duplex front end goes quiet
+    /// without anyone muting anything. Nothing here drives a rig-keyed over, so
+    /// the receiver is read right through *every* one of them, and a front end
+    /// that would have been stopped for an over of ours has to ask for the
+    /// silence explicitly.
+    ///
+    /// Default: true. An over is an over, and a receiver on the station's own
+    /// antenna — or on the rig's I.F. — hears its own transmitter whoever
+    /// keyed it. A source with a setting for it says so instead (issue #244).
+    fn mutes_rx_audio_on_rig_tx(&self) -> bool {
+        true
+    }
+
     /// Write real TX audio to the rig's sound card (used instead of `tx_write`
     /// in demod-audio mode, where the rig does its own modulation).
     fn tx_write_audio(&mut self, _audio: &[f32]) -> Result<()> {
@@ -1123,6 +1144,10 @@ impl IqSource for ConvertedSource {
 
     fn mutes_rx_audio_on_tx(&self) -> bool {
         self.inner.mutes_rx_audio_on_tx()
+    }
+
+    fn mutes_rx_audio_on_rig_tx(&self) -> bool {
+        self.inner.mutes_rx_audio_on_rig_tx()
     }
 
     fn tx_write_audio(&mut self, audio: &[f32]) -> Result<()> {

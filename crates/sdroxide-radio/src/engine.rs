@@ -4664,6 +4664,7 @@ impl Engine {
                             false => "receiving",
                         }
                     );
+                    self.follow_rig_tx(on);
                 }
             }
             ControlUpdate::Mode(m) => {
@@ -11550,6 +11551,51 @@ impl Engine {
         }
         self.state.tx.ptt = on;
         self.sync_tx_state();
+    }
+
+    /// The transceiver has keyed or unkeyed itself, and the receiver on this
+    /// side is still running: give the loudspeaker the same treatment an over
+    /// of our own would.
+    ///
+    /// Nothing here drives that over — see [`ControlUpdate::RigTx`] — so the
+    /// engine never enters the transmit path for it, and the receive read at
+    /// the top of the engine loop keeps going. On an arrangement where the
+    /// receiver is a different device from the transmitter, that means it is
+    /// listening to the station's own transmitter for the length of the over:
+    /// an RTL-SDR watching the antenna a KX3 is transmitting into (issue #244),
+    /// or a dongle on the rig's I.F. output. "Mute on transmit" was already
+    /// answered for overs sdroxide keys; an over the operator keys with the
+    /// microphone in their hand is the one they are most likely to be holding
+    /// a headphone to their ear through.
+    ///
+    /// Whether to do it at all is the front end's to say
+    /// ([`IqSource::mutes_rx_audio_on_rig_tx`]) — for a paired receiver it is
+    /// the operator's own **Mute on transmit**, and everywhere else an over is
+    /// an over.
+    ///
+    /// The picture is deliberately left running. A receiver that is still
+    /// receiving has something to show, and an operator on the microphone
+    /// watching their own signal go out is a reason to have paired one at all;
+    /// **Blank on transmit** answers for the overs sdroxide keys, where there
+    /// is nothing coming in to draw.
+    ///
+    /// The recording tap goes quiet with the speaker, as it does on our own
+    /// overs: what it would capture is not a band.
+    fn follow_rig_tx(&mut self, on: bool) {
+        // Our own over owns the mixer while it lasts, and its unkey is what
+        // clears these. A rig report must never be the thing that un-mutes one.
+        // (The CAT thread already drops the rig's transmit reads across our own
+        // PTT edges, so this is the belt to those braces.)
+        if self.tx_active {
+            return;
+        }
+        if !self.source.mutes_rx_audio_on_rig_tx() {
+            return;
+        }
+        if let Some(mixer) = self.mixer.as_mut() {
+            mixer.tx_muted = on;
+            mixer.rx_rec_enabled = !on;
+        }
     }
 
     /// The radio's own PTT line changed state — a foot switch, a mic button, or
