@@ -31,6 +31,9 @@ pub struct TciSource {
     /// connection run on undisturbed.
     dev: Option<std::sync::Arc<TciDevice>>,
     rx: Option<TciRx>,
+    /// The connection's negotiated IQ rate, kept here so a released source
+    /// still answers `IqSource::sample_rate` — see that method.
+    rate: f64,
     center: f64,
     scratch: Vec<f32>,
     label: String,
@@ -77,6 +80,7 @@ impl TciSource {
             )
         };
         Ok(TciSource {
+            rate: dev.sample_rate_hz(),
             center: center_hz,
             scratch: Vec::new(),
             label,
@@ -90,8 +94,11 @@ impl TciSource {
         })
     }
 
+    /// The connection's negotiated IQ rate, remembered rather than asked for:
+    /// it is fixed at connect, and [`IqSource::release`] lets the connection go
+    /// while the engine is still running on this source.
     pub fn sample_rate_hz(&self) -> f64 {
-        self.dev.as_ref().map_or(0.0, |d| d.sample_rate_hz())
+        self.rate
     }
 }
 
@@ -239,16 +246,19 @@ impl IqSource for TciSource {
         self.rx.as_ref().is_none_or(|rx| !rx.is_alive())
     }
 
-    /// Give this receiver's stream back ahead of a rebuild — and only the
-    /// stream. The connection is deliberately kept: another radio may be
-    /// streaming its own receiver over it, and even alone, an Apply with the
-    /// address unchanged should re-attach to the live WebSocket (the registry
-    /// will find it through this very `Arc`) rather than redial the rig. The
-    /// connection closes when the last source holding it is dropped, which
-    /// for a genuine backend switch happens right after the replacement is
-    /// adopted.
+    /// Give this receiver's stream back ahead of a rebuild — **and the
+    /// connection with it, unless another radio is still streaming its own
+    /// receiver over it.**
+    ///
+    /// The WebSocket used to be kept deliberately, so that an Apply with the
+    /// address unchanged re-attached to the live one rather than redialling
+    /// the rig. But the IQ rate is negotiated once, at connect, and never
+    /// again: a connection outliving its last radio made an Apply that changed
+    /// it do nothing at all. Same rule as the Pluto and HPSDR backends next
+    /// door (issue #135) and as the RSP.
     fn release(&mut self) {
         self.rx = None;
+        self.dev = None;
     }
 
     fn set_if_offset(&mut self, hz: f64) {

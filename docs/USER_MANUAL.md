@@ -6813,9 +6813,17 @@ pins** setting does:
   key line directly unless its datasheet says that level is enough.
 - Nothing else changes: PTT, VOX, the digital modes and the tune button all key
   the radio the way they always did, and the pins follow. sdroxide moves the
-  state machine to transmit a couple of milliseconds *before* the signal starts
-  and back to receive *after* the last sample has gone out, so the amplifier is
+  state machine to transmit a few milliseconds *before* the signal starts and
+  back to receive *after* the last sample has gone out, so the amplifier is
   switched in ahead of the RF and out behind it rather than hot-switched.
+- **The pins switch within milliseconds of the key, not seconds.** The one thing
+  that used to sit in front of them was the transmit oscillator: writing it makes
+  the AD9361 force its state machine to ALERT, retune and calibrate, which is the
+  better part of a second, and it was being paid on every over even when the dial
+  had not moved. sdroxide now reads where the synthesiser actually is and only
+  writes it when this over needs it somewhere else, so an over on the same
+  frequency as the last one throws the relay straight away. The first over after
+  a band change still pays for the retune once.
 - On the way out sdroxide puts the state machine back to receive, so closing it
   does not leave your amplifier keyed. If the radio is pulled off the network
   mid-over that cannot be delivered — the pin stays high until the Pluto is
@@ -6828,7 +6836,10 @@ The settings are written as the AD9361 driver's device-tree properties
 sequence the Analog Devices note gives for `iio_attr`. They **persist in the
 radio** until it is rebooted or something writes them again, so sdroxide both
 writes and unwrites them: it rewrites the whole set every time it connects with
-a pair selected, and setting **PTT pins** back to *Off* puts the radio back into
+a pair selected — including on **Apply / reconnect**, which really does redial
+the board now rather than re-attaching to the connection that was already open,
+so a changed pair (or sample rate, or duplex) takes effect without restarting
+sdroxide — and setting **PTT pins** back to *Off* puts the radio back into
 FDD and un-slaves all four pins on the next connect. A radio that has never had
 these settings touched is left exactly as it booted, and so is one you have put
 in TDD yourself with no pin slaved to it — sdroxide undoes its own arrangement,
