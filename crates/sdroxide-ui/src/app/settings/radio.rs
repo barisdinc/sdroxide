@@ -3527,6 +3527,9 @@ pub(in crate::app) fn settings_rx888_tab(
     rescan: &mut bool,
     apply: &mut bool,
     can_probe: bool,
+    // Where the dial is, so a width the tuner's IF cannot fill can say so while
+    // the receiver is actually up there rather than only in the abstract.
+    dial_hz: f64,
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::Rx888Config;
@@ -3663,20 +3666,32 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.label("Panadapter width");
         ui.horizontal(|ui| {
             let rate = cfg.rx888.adc_rate_hz;
+            // A width the tuner's IF cannot fill is marked rather than hidden:
+            // it is a perfectly good HF setting, and on a receiver that spends
+            // its life below 65 MHz there is nothing wrong with it at all.
             let width_label = |bins: u32| {
                 format!(
-                    "{} — 1/{}",
+                    "{} — 1/{}{}",
                     bw_label(Rx888Config::ddc_out_rate_hz(rate, bins)),
                     Rx888Config::DDC_BLOCK / bins.max(1),
+                    if Rx888Config::width_works_on_vhf(rate, bins) { "" } else { "  · HF only" },
                 )
             };
             let bins = cfg.rx888.ddc_bins;
             ComboBox::from_id_salt("rx888_width")
-                .width(180.0)
+                .width(210.0)
                 .selected_text(width_label(if bins == 0 { 256 } else { bins }))
                 .show_styled(ui, |ui| {
                     for b in Rx888Config::DDC_BIN_CHOICES {
-                        ui.selectable_value(&mut cfg.rx888.ddc_bins, b, width_label(b));
+                        ui.selectable_value(&mut cfg.rx888.ddc_bins, b, width_label(b))
+                            .on_hover_text(if Rx888Config::width_works_on_vhf(rate, b) {
+                                "Usable on both front ends."
+                            } else {
+                                "Below the VHF crossover this is an ordinary width. Above it \
+                                 the tuner's 8 MHz IF cannot be centred in a window this \
+                                 wide, so the live spectrum sits off to one side of the \
+                                 panadapter with nothing beside it."
+                            });
                     }
                 });
             ui.add(
@@ -3688,22 +3703,47 @@ pub(in crate::app) fn settings_rx888_tab(
         });
         ui.end_row();
         ui.label("");
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(
-                    "How much of the digitised spectrum the panadapter shows at once. \
-                     The whole DSP chain runs at this width, so wider costs \
-                     proportionally more CPU — 1/2 is the entire band in the \
-                     waterfall, and a serious amount of arithmetic. Above the \
-                     VHF crossover the tuner's IF filter is 8 MHz wide: wider \
-                     settings show its skirts, and on ones too wide to centre \
-                     on the IF the tuned signal simply rides off-centre in \
-                     the panadapter.",
+        let rate = cfg.rx888.adc_rate_hz;
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "How much of the digitised spectrum the panadapter shows at once. \
+                         The whole DSP chain runs at this width, so wider costs \
+                         proportionally more CPU — 1/2 is the entire band in the \
+                         waterfall, and a serious amount of arithmetic. Above the VHF \
+                         crossover ({:.1} MHz) the panadapter is not looking at the \
+                         antenna but at the tuner's IF, which is 8 MHz wide and parked \
+                         at {:.2} MHz — so anything wider than {} cannot be centred on \
+                         it, and the extra width is dead spectrum beside the signal \
+                         rather than more of it.",
+                        Rx888Config::vhf_crossover_hz(rate) / 1e6,
+                        Rx888Config::VHF_IF_CENTER_HZ / 1e6,
+                        bw_label(2.0 * Rx888Config::VHF_IF_CENTER_HZ),
+                    ))
+                    .weak(),
                 )
-                .weak(),
-            )
-            .wrap(),
-        );
+                .wrap(),
+            );
+            // Said out loud while it is actually happening: the symptom — every
+            // signal crowded onto the right-hand half — looks like a broken
+            // receiver rather than a setting.
+            if dial_hz >= Rx888Config::vhf_crossover_hz(rate)
+                && !Rx888Config::width_works_on_vhf(rate, cfg.rx888.ddc_bins)
+            {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The dial is above the crossover now, so this width is showing \
+                             the tuner's 8 MHz off-centre with dead spectrum beside it. \
+                             Narrow the width to fill the panadapter.",
+                        )
+                        .color(crate::theme::YELLOW()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
         ui.end_row();
 
         ui.label("VGA gain");

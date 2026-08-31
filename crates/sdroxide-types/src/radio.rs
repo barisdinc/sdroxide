@@ -2689,6 +2689,38 @@ impl Rx888Config {
         let bins = if ddc_bins == 0 { 256 } else { ddc_bins };
         adc_rate_hz * f64::from(bins) / f64::from(Self::DDC_BLOCK)
     }
+
+    /// The R828D's IF carrier with its 8 MHz filter selected
+    /// (`sdroxide_rx888::band::IF_CENTER_HZ`), repeated here for the reason
+    /// [`Self::DDC_BLOCK`] is: the settings UI has to be able to label a width
+    /// without linking the driver.
+    pub const VHF_IF_CENTER_HZ: f64 = 4_570_000.0;
+
+    /// Where the receiver hands over to its tuner
+    /// (`sdroxide_rx888::band::crossover_hz`): the ADC's own Nyquist limit,
+    /// unless that lands below the tuner's floor.
+    pub fn vhf_crossover_hz(adc_rate_hz: f64) -> f64 {
+        (adc_rate_hz / 2.0).max(24_000_000.0)
+    }
+
+    /// Whether a panadapter width is usable *above* that crossover.
+    ///
+    /// The downconverter reads a **real** spectrum, so its window must lie
+    /// inside DC..Nyquist and its centre clamps up to `out/2` at the bottom.
+    /// Above the crossover the wanted signal is no longer the antenna — it is
+    /// the tuner's IF, parked at [`Self::VHF_IF_CENTER_HZ`] — so a window wider
+    /// than twice that cannot be centred on the IF at all. It pins at `out/2`,
+    /// the tuner's 8 MHz of IF fills only the low part of it, and the VHF
+    /// path's spectrum inversion then puts that on the *right* of the
+    /// panadapter with dead spectrum to its left.
+    ///
+    /// Nothing is broken when this is false — every width is delivered, and the
+    /// tuned signal is received and reported off-centre. There is simply no
+    /// more signal to show: the tuner has 8 MHz and no more, however wide the
+    /// window asking for it.
+    pub fn width_works_on_vhf(adc_rate_hz: f64, ddc_bins: u32) -> bool {
+        Self::ddc_out_rate_hz(adc_rate_hz, ddc_bins) <= 2.0 * Self::VHF_IF_CENTER_HZ
+    }
 }
 
 /// Which Airspy HF+ is on the other end.
@@ -6915,5 +6947,33 @@ mod tests {
         assert_eq!(chains("LimeSDR-PCIe, media=PCIe"), 2);
         assert_eq!(chains("LimeSDR-Mini_v2, media=USB 3.0"), 1);
         assert_eq!(chains("LimeNET-Micro, media=USB 2.0"), 1);
+    }
+
+    /// Which RX-888 panadapter widths the tuner's IF can actually fill.
+    ///
+    /// The reported case, at the 129.6 MHz clock: 1/32 and 1/16 look right and
+    /// everything above them puts the whole of the live spectrum on the right
+    /// of the waterfall. That is not a width the receiver failed to deliver —
+    /// it is the R828D's 8 MHz IF, parked at 4.57 MHz, in a window too wide to
+    /// centre on it, mirrored by the VHF path's high-side injection.
+    #[test]
+    fn a_vhf_width_has_to_fit_around_the_tuners_if() {
+        const CLOCK: f64 = 129_600_000.0;
+        let ok = |bins| Rx888Config::width_works_on_vhf(CLOCK, bins);
+        assert!(ok(256), "1/32 — 4.05 MHz, centred on the IF with room to spare");
+        assert!(ok(512), "1/16 — 8.1 MHz, the widest that still centres");
+        assert!(!ok(1024), "1/8 — 16.2 MHz, the width in the report");
+        assert!(!ok(2048));
+        assert!(!ok(4096));
+
+        // The boundary is twice the IF carrier, whatever the clock: at half
+        // this one the same 8.1 MHz is 1/8 rather than 1/16, and still fits.
+        assert!(Rx888Config::width_works_on_vhf(64_800_000.0, 1024));
+        assert!(!Rx888Config::width_works_on_vhf(64_800_000.0, 2048));
+
+        // And the crossover the warning is keyed on: Nyquist, until that falls
+        // below the tuner's own floor.
+        assert_eq!(Rx888Config::vhf_crossover_hz(CLOCK), 64_800_000.0);
+        assert_eq!(Rx888Config::vhf_crossover_hz(32_400_000.0), 24_000_000.0);
     }
 }

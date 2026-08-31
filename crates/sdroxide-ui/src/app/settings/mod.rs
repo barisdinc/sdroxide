@@ -1994,6 +1994,7 @@ impl SdroxideApp {
                         io.rx888_rescan,
                         io.apply_iface,
                         io.can_probe,
+                        self.state.rx_freq_hz(),
                         cmds,
                     ),
                     Backend::Elad => settings_elad_tab(
