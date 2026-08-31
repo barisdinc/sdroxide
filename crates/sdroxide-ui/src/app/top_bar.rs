@@ -337,6 +337,7 @@ enum MenuChip {
     Vfo,
     Div,
     Sub,
+    Rig,
     Tx,
     Disp,
     Sys,
@@ -349,6 +350,7 @@ impl MenuChip {
             Self::Vfo => "VFO",
             Self::Div => "DIV",
             Self::Sub => "SUB",
+            Self::Rig => "RIG",
             Self::Tx => "TX",
             Self::Disp => "DISP",
             Self::Sys => "SYS",
@@ -709,6 +711,7 @@ impl SdroxideApp {
             RxFilter,
             Div,
             Sub,
+            Rig,
             Tx,
             Display,
             System,
@@ -741,6 +744,14 @@ impl SdroxideApp {
                 Kind::Sub,
                 StripBox { w: SUB_W, flex: 1.0, max_w: SUB_W + RAIL_STRETCH_MAX },
             ));
+        }
+        // The transceiver's own switches — the aerial socket and the mains
+        // switch — for a radio that has either. On the strip because an
+        // operator changes bands and reaches for the other aerial in the same
+        // breath, and both were reachable only through Settings (issue #258).
+        if self.rig_box_shown() {
+            let w = self.rig_rows_w(ui);
+            boxes.push((Kind::Rig, StripBox { w, flex: 1.0, max_w: w * CHIP_STRETCH_FACTOR }));
         }
         if self.tx_capable() {
             let w = self.tx_rows_w(ui);
@@ -779,6 +790,7 @@ impl SdroxideApp {
                         Kind::RxFilter => self.rx_filter_module(ui, cmds, w),
                         Kind::Div => self.div_module(ui, cmds, w),
                         Kind::Sub => self.sub_rx_module(ui, cmds, w),
+                        Kind::Rig => self.rig_module(ui, cmds, w),
                         Kind::Tx => self.tx_condensed(ui, cmds, w),
                         Kind::Display => self.display_condensed(ui, cmds, w),
                         Kind::System => self.windows_condensed(ui, w),
@@ -801,6 +813,11 @@ impl SdroxideApp {
         if self.state.sub_rx_enabled {
             chips.push(MenuChip::Sub);
         }
+        // Same rule again: only a radio that has an aerial selector or a
+        // control-link power switch carries the chip for them.
+        if self.rig_box_shown() {
+            chips.push(MenuChip::Rig);
+        }
         if tx_capable {
             chips.push(MenuChip::Tx);
         }
@@ -822,7 +839,9 @@ impl SdroxideApp {
             }),
             MenuChip::Sub => true,
             MenuChip::Tx => self.state.tx.tune,
-            MenuChip::Rx | MenuChip::Disp | MenuChip::Sys => false,
+            // Nothing here reads back: the socket is a name rather than an
+            // on/off, and a radio that is switched off answers nothing at all.
+            MenuChip::Rig | MenuChip::Rx | MenuChip::Disp | MenuChip::Sys => false,
         }
     }
 
@@ -875,6 +894,7 @@ impl SdroxideApp {
         let tx_capable = self.tx_capable();
         let sub = self.state.sub_rx_enabled;
         let div = self.has_diversity();
+        let rig = self.rig_box_shown();
         let gap = ui.spacing().item_spacing.x;
         let chip_h = crate::chrome::chip_height(ui, None);
         let fit = ReadoutFit::measure(ui, self.readout_digits());
@@ -909,6 +929,9 @@ impl SdroxideApp {
                 }
                 if sub {
                     r1.push("SUB");
+                }
+                if rig {
+                    r1.push("RIG");
                 }
                 (r1.len(), widest(&r1))
             },
@@ -1002,6 +1025,10 @@ impl SdroxideApp {
                     if sub {
                         let btn = crate::chrome::chip_sized(ui, true, "SUB", cell1);
                         self.sub_menu(ui, btn, cmds);
+                    }
+                    if rig {
+                        let btn = crate::chrome::chip_sized(ui, false, "RIG", cell1);
+                        self.rig_menu(ui, btn, cmds);
                     }
                 });
                 let cell2 = egui::vec2(plan.cell2_w, chip_h);
@@ -1097,6 +1124,7 @@ impl SdroxideApp {
                 MenuChip::Vfo => self.vfo_menu(ui, btn, cmds, tier == crate::layout::Tier::Phone),
                 MenuChip::Div => self.div_menu(ui, btn, cmds),
                 MenuChip::Sub => self.sub_menu(ui, btn, cmds),
+                MenuChip::Rig => self.rig_menu(ui, btn, cmds),
                 MenuChip::Tx => self.tx_menu(ui, btn, cmds),
                 MenuChip::Disp => self.disp_menu(ui, btn, cmds),
                 MenuChip::Sys => self.sys_menu(ui, btn, cmds),
@@ -1170,6 +1198,16 @@ impl SdroxideApp {
         crate::chrome::menu_popup(ui, &btn, |ui| {
             crate::chrome::menu_caption(ui, "Sub receiver");
             self.sub_controls(ui, cmds, true, 0.0);
+        });
+    }
+
+    /// The RIG menu, shown only on a radio with an aerial selector or a power
+    /// switch this end can reach.
+    fn rig_menu(&mut self, ui: &mut egui::Ui, btn: egui::Response, cmds: &mut Vec<Command>) {
+        let btn = btn.on_hover_text("The transceiver's own aerial socket, and its power switch");
+        crate::chrome::menu_popup(ui, &btn, |ui| {
+            crate::chrome::menu_caption(ui, "Radio");
+            self.rig_controls(ui, cmds, true);
         });
     }
 
@@ -3051,6 +3089,131 @@ impl SdroxideApp {
         });
     }
 
+    /// The sockets the radio will put its receiver on, or empty where it has
+    /// no selector to offer. Only worth a control where there is a choice.
+    fn rig_antennas(&self) -> &[String] {
+        match &self.caps {
+            Some(c) if c.antennas_rx.len() > 1 => &c.antennas_rx,
+            _ => &[],
+        }
+    }
+
+    /// Whether the radio's own power switch can be reached from here.
+    fn rig_power(&self) -> bool {
+        self.caps.as_ref().is_some_and(|c| c.commands_rig_power)
+    }
+
+    /// Whether the RIG box has anything to carry. Like DIV and SUB, it appears
+    /// only for hardware that has what it drives — a strip is too narrow to
+    /// hold controls for a radio that would ignore them.
+    fn rig_box_shown(&self) -> bool {
+        !self.rig_antennas().is_empty() || self.rig_power()
+    }
+
+    /// The RIG box's natural width: the wider of its two rows.
+    fn rig_rows_w(&self, ui: &egui::Ui) -> f32 {
+        let gap = MODULE_ROW_SPACING;
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let ants = self.rig_antennas();
+        let top = if ants.is_empty() {
+            0.0
+        } else {
+            // The chip wears whichever socket the radio is on, so the box has
+            // to be as wide as the longest of them or it would resize as the
+            // operator switched.
+            let widest = ants.iter().fold(0.0f32, |a, n| {
+                a.max(crate::chrome::chip_width(ui, &rig_antenna_label(n), None))
+            });
+            crate::chrome::text_width(ui, "ANT", body.clone()) + gap + widest
+        };
+        let bottom = if self.rig_power() {
+            crate::chrome::text_width(ui, "PWR", body)
+                + gap
+                + crate::chrome::chip_width(ui, "ON", None)
+                + gap
+                + crate::chrome::chip_width(ui, "OFF", None)
+        } else {
+            0.0
+        };
+        top.max(bottom) + 2.0 * crate::chrome::MODULE_MARGIN_X
+    }
+
+    /// The RIG box: the radio's aerial socket and its power switch.
+    fn rig_module(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
+        crate::chrome::module_bare_h(ui, w, crate::chrome::MODULE_TALL_H, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(MODULE_ROW_SPACING, MODULE_ROW_SPACING);
+                self.rig_controls(ui, cmds, false);
+            });
+        });
+    }
+
+    /// The radio's own switches — the body of the RIG box, and of the RIG
+    /// menu. See [`crate::chrome::control_row`] for `narrow`.
+    ///
+    /// The socket is a cycling chip rather than a combo, for the same reason
+    /// the AGC and DIV chips are: a combo inside a menu opens a second popup
+    /// layer, and clicking it counts as "outside" and closes the menu it was
+    /// opened from. Two or three sockets is hardly a walk.
+    ///
+    /// The power switch is two buttons rather than a toggle, because nothing
+    /// here *reads* it: a radio that is off answers nothing, so the only thing
+    /// a toggle could show is the last thing it was told. Same reasoning as the
+    /// pair in Settings → Radio, which these do not replace.
+    fn rig_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, narrow: bool) {
+        let ants: Vec<String> = self.rig_antennas().to_vec();
+        if !ants.is_empty() {
+            crate::chrome::control_row(ui, narrow, |ui| {
+                ui.label("ANT").on_hover_text(
+                    "Which socket on the back the radio is receiving on — its own ANT \
+                     command, the same setting as the ANT button on the front panel. \
+                     Click to step to the next one.\n\n\
+                     The choice is remembered per band, and put back the next time the \
+                     dial crosses into that band.",
+                );
+                let here = ants.iter().position(|a| *a == self.state.antenna_rx);
+                let label = match here {
+                    Some(i) => rig_antenna_label(&ants[i]),
+                    // Before the radio has said, and after a switch to a socket
+                    // this list does not name.
+                    None => "—".to_string(),
+                };
+                if crate::chrome::chip(ui, true, label)
+                    .on_hover_text(format!("Sockets: {}", ants.join(", ")))
+                    .clicked()
+                {
+                    let next = ants[here.map_or(0, |i| (i + 1) % ants.len())].clone();
+                    self.state.antenna_rx = next.clone(); // optimistic echo
+                    cmds.push(Command::SetAntenna { dir: Direction::Rx, name: next });
+                }
+            });
+        }
+        if self.rig_power() {
+            crate::chrome::control_row(ui, narrow, |ui| {
+                ui.label("PWR").on_hover_text(
+                    "The radio's own power switch, over the control link — not \
+                     sdroxide's on/off, which closes the interface and leaves the radio \
+                     running.\n\n\
+                     For ON to reach anything the radio's control end has to stay awake \
+                     while it is off: Network Control over the LAN, or a CI-V port still \
+                     fed from the mains on a set switched off at the front.",
+                );
+                if crate::chrome::chip(ui, false, "ON")
+                    .on_hover_text("Switch the radio on")
+                    .clicked()
+                {
+                    cmds.push(Command::SetRigPower(true));
+                }
+                if crate::chrome::chip(ui, false, "OFF")
+                    .on_hover_text("Switch the radio off. The audio and the meters stop with it.")
+                    .clicked()
+                {
+                    cmds.push(Command::SetRigPower(false));
+                }
+            });
+        }
+    }
+
     /// Whether two coherent aerials are being combined into the span on
     /// screen — a LimeSDR's two chains, an RSPduo's two tuners. The source
     /// says so; nothing here has to know which board it is.
@@ -4740,6 +4903,19 @@ fn div_rows_w(ui: &egui::Ui) -> f32 {
         + gap
         + STRIP_RAIL_W;
     top.max(bottom) + 2.0 * crate::chrome::MODULE_MARGIN_X
+}
+
+/// A socket's name as the ANT chip wears it. Icom's own "ANT1"/"ANT2" are
+/// already chip-sized; a front end that spells its ports out ("Antenna B") is
+/// abbreviated to its last word, which is the part that tells them apart.
+fn rig_antenna_label(name: &str) -> String {
+    if name.len() <= 5 {
+        return name.to_string();
+    }
+    match name.rsplit(' ').next() {
+        Some(tail) if !tail.is_empty() && tail.len() <= 5 => tail.to_string(),
+        _ => name.to_string(),
+    }
 }
 
 /// The RX box's chip run in a mode: the six every mode carries, then whatever

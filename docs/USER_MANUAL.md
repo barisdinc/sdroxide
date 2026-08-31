@@ -188,7 +188,8 @@ window is shared with the digital operating panel.
 ![The top control bar modules](images/02-top-bar.jpg)
 
 The control-bar modules, left to right, are: Frequency, S-meter, Band/Mode,
-VFO, RIT/XIT, Receiver + Filter/Noise, Transmit (TX-capable rigs only), Display,
+VFO, RIT/XIT, Receiver + Filter/Noise, Rig (only on a radio with an aerial
+selector or a remote power switch), Transmit (TX-capable rigs only), Display,
 FFT, and System.
 
 ### 2.3 Tuning
@@ -633,6 +634,31 @@ start, along with the front end's own gain stages
 ([§6.2.1](#621-soapysdr-devices)). They are
 settings you arrive at by ear against your own antenna and noise floor, so
 sdroxide brings the receiver back up where you left it rather than on defaults.
+
+#### The RIG box: the radio's own aerial and power switches
+
+A transceiver with an aerial selector, or with a power switch sdroxide can
+reach over the control link, gets a **RIG** box of its own on the control bar —
+next to the receive controls on a desktop layout, and behind a **RIG** button in
+the menu strip on a narrow window. Like **DIV** and **SUB**, it appears only for
+hardware that has what it drives; a radio with one socket and no remote power
+never sees it.
+
+- **ANT** — the socket the radio is receiving on, as a button you click to step
+  to the next one: `ANT1` → `ANT2` → `ANT1` on an Icom, and round the ports of
+  an RSPdx or a LimeSDR in the same way. It is the radio's own setting, the same
+  one as the **ANT** button on its front panel, and it is remembered per band
+  like every other antenna choice in sdroxide — so this is the control for
+  *changing your mind*, and the band memory is what saves you from having to.
+- **PWR** — **ON** and **OFF** switch the radio itself, over the control link.
+  Not sdroxide's own on/off in the tab strip, which closes the interface and
+  leaves the radio running. Two buttons rather than a switch, because a radio
+  that is off answers nothing and there is no position to read back.
+
+Both are the same controls that live under **Settings → Radio**
+([§6.2.2](#622-cat-radios-serial-control--usb-audio)), where the longer explanation of
+what each one needs from the radio is; they are here so that changing bands and
+reaching for the other aerial do not mean opening a dialog.
 
 ### 2.8 The display and FFT controls
 
@@ -6083,6 +6109,9 @@ only.
   A radio with four sockets (the IC-785x line) is offered the first two; select
   ANT3 or ANT4 at the radio, and sdroxide shows no socket rather than claiming
   the wrong one.
+
+  The same control is on the main window's **RIG** box, as **ANT** — see
+  [2.7](#27-receiver-controls). You do not have to come here to change socket.
 - **Radio power** (Icom only) — **On** and **Off** switch *the radio* over the
   CI-V link, the way RS-BA1 and wfview do. This is not sdroxide's own on/off in
   the tab strip, which closes the interface and leaves the radio running: this
@@ -6098,6 +6127,9 @@ only.
   Two buttons rather than a switch, deliberately: a radio that is off answers
   nothing, so there is no position to read back, and a toggle could only ever
   show you your own last click.
+
+  These two are on the main window's **RIG** box as well, as **PWR ON** / **OFF**
+  — see [2.7](#27-receiver-controls).
 - **Radio ID (hex)** — the CI-V address, for Icom and Xiegu radios.
 - **Show the radio's spectrum scope** (Icom only) — stream the radio's own
   scope sweep over the CI-V link and draw it as the panadapter, the same way

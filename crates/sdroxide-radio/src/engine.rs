@@ -10931,35 +10931,38 @@ impl Engine {
     /// never worked leaves the front end exactly where it was — the same
     /// "no preference means no assertion" rule [`Engine::restore_antennas`]
     /// follows, and for the same reason.
+    ///
+    /// The socket is *asserted*, not compared: on a band change the radio may
+    /// already have moved it under us. An Icom's band stacking register carries
+    /// a socket of its own, so crossing into 40 m puts the rig on whatever was
+    /// last used there — and if that happens to match what sdroxide last read,
+    /// a comparison against the cached socket sends nothing and the wrong
+    /// aerial stays connected. That is why 30 m → 40 m left an IC-7610 on ANT1
+    /// while 20 m → 40 m switched it correctly: the same preference, and only
+    /// the *cached* value differed (issue #258).
     fn follow_band_antenna(&mut self, band: Band) {
         // Not where the source owns the receive port: a LimeRFE listens on the
         // socket it is cabled to whatever the band. Same exemption as
         // `restore_antennas`.
         let Some((rx, tx)) = self.band_antenna.get(&band).cloned() else { return };
-        let mut moved = false;
-        if let Some(name) = rx.filter(|n| {
-            !self.source.owns_rx_antenna()
-                && self.caps.antennas_rx.contains(n)
-                && self.state.antenna_rx != *n
-        }) {
+        let before = (self.state.antenna_rx.clone(), self.state.antenna_tx.clone());
+        if let Some(name) =
+            rx.filter(|n| !self.source.owns_rx_antenna() && self.caps.antennas_rx.contains(n))
+        {
             if let Err(e) = self.source.set_antenna(&name) {
                 warn!("switching to RX antenna {name} for {band:?}: {e}");
             }
             self.state.antenna_rx = self.source.current_antenna();
             self.want_antenna.0 = Some(name);
-            moved = true;
         }
-        if let Some(name) =
-            tx.filter(|n| self.caps.antennas_tx.contains(n) && self.state.antenna_tx != *n)
-        {
+        if let Some(name) = tx.filter(|n| self.caps.antennas_tx.contains(n)) {
             if let Err(e) = self.source.set_tx_antenna(&name) {
                 warn!("switching to TX antenna {name} for {band:?}: {e}");
             }
             self.state.antenna_tx = self.source.current_tx_antenna();
             self.want_antenna.1 = Some(name);
-            moved = true;
         }
-        if moved {
+        if before != (self.state.antenna_rx.clone(), self.state.antenna_tx.clone()) {
             let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
         }
     }
