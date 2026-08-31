@@ -5629,7 +5629,17 @@ pub(in crate::app) fn settings_sdrplay_tab(
     // set: the driver ignores a switch the real hardware lacks, whereas a
     // hidden switch cannot be un-hidden by an operator whose service just
     // isn't running yet.
-    let listed = devices.iter().find(|d| d.serial == cfg.sdrplay.serial).or(devices.first());
+    //
+    // A named serial that the list does not carry is *not* licence to describe
+    // some other receiver: on a station with two RSPs that put the RSPdx's
+    // serial in the picker and the RSPduo's antenna ports, tuner rows and LNA
+    // ladder underneath it (issue #259). Only "— first one found —" falls back
+    // to whatever is first.
+    let listed = if cfg.sdrplay.serial.trim().is_empty() {
+        devices.first()
+    } else {
+        devices.iter().find(|d| d.serial == cfg.sdrplay.serial)
+    };
     let model = listed.map(|d| d.model()).unwrap_or(SdrPlayModel::Rsp1b);
     // ...and the same rule, kept rather than dropped, is what decides the
     // RSPduo's own rows. An empty device list is *not* evidence that this is
@@ -5655,6 +5665,23 @@ pub(in crate::app) fn settings_sdrplay_tab(
     // empty serial, indistinguishable from "first one found".
     if let Some(w) = devices.iter().find_map(|d| d.identity_warning()) {
         ui.label(RichText::new(w).color(Color32::from_rgb(220, 170, 70)));
+        ui.add_space(6.0);
+    }
+
+    // A serial pinned to a receiver that is not there any more — unplugged,
+    // switched off in Device Manager, or held by another application. Said
+    // here rather than left for Apply to fail on, because the rows below now
+    // describe nothing in particular and the picker looks, misleadingly, as
+    // though a receiver were selected.
+    if listed.is_none() && !cfg.sdrplay.serial.trim().is_empty() && !devices.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "Serial {} is not among the receivers the SDRplay service reports. Pick one \
+                 of the listed receivers, or replug this one and press Rescan.",
+                cfg.sdrplay.serial.trim()
+            ))
+            .color(Color32::from_rgb(220, 170, 70)),
+        );
         ui.add_space(6.0);
     }
 
