@@ -8763,7 +8763,7 @@ spoken announcements below them under `[speech]`:
   window size and is what you want; **Desktop**, **Tablet**, **Small screen**
   and **Phone** force it, to see how the compact strips look without a phone to
   hand, or to keep the menus in a small desktop window rather than a strip
-  wrapped over three rows. See [9.4](#94-phones-and-tablets) for what each one
+  wrapped over three rows. See [9.5](#95-phones-and-tablets) for what each one
   shows.
 
   **Small screen** is Tablet with everything pulled in — the single-row strip
@@ -8858,7 +8858,7 @@ spoken announcements below them under `[speech]`:
   so a Large interface with a Small waterfall font still has larger frequency
   labels than a Medium one. Bear in mind that **Large** leaves the window fewer
   points to lay out in, so a small window may drop to the tablet control strip
-  ([9.4](#94-phones-and-tablets)) — force **Layout: Desktop** above if you would
+  ([9.5](#95-phones-and-tablets)) — force **Layout: Desktop** above if you would
   rather keep the full strip.
 - **Check for updates at startup** — asks sdroxide.com once per start whether a
   newer release has been published, and if so says which in a dismissable banner
