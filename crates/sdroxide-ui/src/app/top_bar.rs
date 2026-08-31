@@ -4291,7 +4291,7 @@ impl SdroxideApp {
     /// The first five window chips — the condensed System box's top row.
     /// `extra` stretches each chip past its label; the popup passes 0.
     fn system_chips_top(&mut self, ui: &mut egui::Ui, extra: f32) {
-        let [log, spots, awards, bands, sat_label, ism, websdr] = SYSTEM_CHIPS_TOP;
+        let [log, spots, awards, bands, sat_label, ism, public_sdrs] = SYSTEM_CHIPS_TOP;
         if chip_stretched(ui, self.show_logbook, log, extra)
             .on_hover_text("Logbook — all QSOs (digital + manual)")
             .clicked()
@@ -4374,8 +4374,17 @@ impl SdroxideApp {
         {
             self.show_ism = !self.show_ism;
         }
-        if chip_stretched(ui, self.show_public_sdrs, websdr, extra)
-            .on_hover_text("Public SDRs on the internet — browse and open one as a radio")
+        // Named for what it lists rather than for the WebSDR network, which is
+        // the one thing it does *not* list: PA3FWM's receivers speak a
+        // proprietary codec their author asks third-party clients to stay away
+        // from, and OpenWebRX has neither a stable protocol across its forks
+        // nor a machine-readable directory. "WEB SDR" on the chip had operators
+        // looking for websdr.org's list behind it (issue #254).
+        if chip_stretched(ui, self.show_public_sdrs, public_sdrs, extra)
+            .on_hover_text(
+                "Public SDRs on the internet — browse the KiwiSDR and SpyServer directories \
+                 and open one as a radio",
+            )
             .clicked()
         {
             self.show_public_sdrs = !self.show_public_sdrs;
@@ -4560,9 +4569,10 @@ impl PttPress {
 /// reserved narrower than its contents does not clip them. The row simply
 /// carries on past the box, and whatever crosses the window edge is lost. That
 /// is how SCAN, SETTINGS and HELP came to vanish on the layouts where the strip
-/// put this box near the end of a row — and, later, how WEB SDR did, drawn in
-/// the top row while a single split index still counted it in the bottom one.
-const SYSTEM_CHIPS_TOP: [&str; 7] = ["LOG", "SPOTS", "AWARDS", "BANDS", "SAT", "ISM", "WEB SDR"];
+/// put this box near the end of a row — and, later, how the public-SDR chip
+/// did, drawn in the top row while a single split index still counted it in the
+/// bottom one.
+const SYSTEM_CHIPS_TOP: [&str; 7] = ["LOG", "SPOTS", "AWARDS", "BANDS", "SAT", "ISM", "PUBLIC SDR"];
 
 /// The rest of them. See [`SYSTEM_CHIPS_TOP`].
 const SYSTEM_CHIPS_BOTTOM: [&str; 5] = ["MAIL", "MEM", "SCAN", "⚙ SETTINGS", "? HELP"];

@@ -1010,7 +1010,19 @@ use sdroxide_types::{
 /// dropped snapshot costs nothing because the next carries the same
 /// information, and a client that connects mid-session gets the whole log
 /// rather than whatever happens to arrive next.
-pub const PROTO_VERSION: u16 = 114;
+/// **115** — stated tuning ranges follow the interface they were stated for
+/// (issue #254).
+///
+/// [`sdroxide_types::RadioConfig`] gains `freq_ranges_parked`, the RX/TX ranges
+/// belonging to interfaces this radio is not on at the moment — what
+/// `RadioConfig::set_backend` puts the old interface's numbers into when a tab
+/// is moved to another device, so that a public receiver's published coverage
+/// stops clamping the transceiver that was there before it. Appended to the end
+/// of the struct, like every field above it, and the struct rides
+/// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole: a v114 peer
+/// would read the tail of one as garbage, which is what the handshake's
+/// equality test stops before a frame is exchanged.
+pub const PROTO_VERSION: u16 = 115;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

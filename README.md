@@ -425,7 +425,7 @@ starting sdroxide before the rig is fine:
   above it is the receiver's own 0–30 MHz waterfall. Tuning across the strip
   retunes the receiver. About 64 kB/s while connected.
 
-  Browse the public ones with **WEB SDR** in the System box; picking one there
+  Browse the public ones with **PUBLIC SDR** in the System box; picking one there
   fills the address in and opens it, either in this radio or in a tab of its
   own.
 

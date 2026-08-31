@@ -1581,7 +1581,27 @@ impl SdroxideApp {
                     // lists — with nothing to choose from there is nothing to
                     // choose, so the row is a label until they can be had.
                     if io.can_probe {
-                        enum_combo(ui, "iface", &mut cfg.backend, io.iface_opts, Backend::label);
+                        // Chosen into a copy and applied through `set_backend`,
+                        // never straight into the field: the stated tuning
+                        // ranges belong to the interface they were typed for,
+                        // and moving a tab to another device has to leave them
+                        // behind with it. Issue #254 is what the field
+                        // assignment cost — a public SpyServer's 200-350 MHz
+                        // still clamping the dial after the tab was switched
+                        // back to an IC-9700 over the LAN.
+                        let mut chosen = cfg.backend;
+                        enum_combo(ui, "iface", &mut chosen, io.iface_opts, Backend::label);
+                        if chosen != cfg.backend {
+                            cfg.set_backend(chosen);
+                            // The two boxes below are showing what was typed
+                            // for the interface that has just been left. Reseed
+                            // them from the one now selected, or Apply would
+                            // write one radio's ranges onto another.
+                            *ranges = (
+                                sdroxide_types::format_freq_ranges(&cfg.freq_ranges_rx),
+                                sdroxide_types::format_freq_ranges(&cfg.freq_ranges_tx),
+                            );
+                        }
                     } else {
                         ui.label(backend.label()).on_hover_text(
                             "Waiting for the machine the radio is attached to. Its interface \

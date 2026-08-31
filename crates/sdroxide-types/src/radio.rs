@@ -5754,6 +5754,30 @@ impl SoapyConfig {
     }
 }
 
+/// Tuning ranges an operator stated for an interface this radio is not on at
+/// the moment.
+///
+/// [`RadioConfig::freq_ranges_rx`] and its transmit twin describe *a device*,
+/// and a tab can be moved from one device to another — by the interface picker
+/// in Settings, or wholesale by "Public SDRs". Leaving the numbers where they
+/// were makes them a statement about hardware that is no longer there: issue
+/// #254, where taking a public SpyServer in the tab an IC-9700 was in left the
+/// receiver's published 200-350 MHz clamped over the Icom when the operator
+/// switched back, with no way to see where it had come from.
+///
+/// So the ranges travel with the interface they were stated for.
+/// [`RadioConfig::set_backend`] parks the pair being left here and takes back
+/// whatever this radio last stated for the one being taken up. One entry per
+/// interface at most, which bounds the list at the number of variants
+/// [`Backend`] has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParkedRanges {
+    pub backend: Backend,
+    pub rx: Vec<(f64, f64)>,
+    pub tx: Vec<(f64, f64)>,
+}
+
 /// Persisted backend configuration (`radio.json`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -5845,6 +5869,53 @@ pub struct RadioConfig {
     /// KiwiSDR / Web-888. Appended after `hydrasdr`, for the same reason as
     /// every field above it: the layout is positional.
     pub kiwi: KiwiConfig,
+    /// Stated tuning ranges belonging to interfaces this radio is not on —
+    /// see [`ParkedRanges`]. Appended after `kiwi`, for the same reason as
+    /// every field above it: the layout is positional.
+    ///
+    /// Empty in a configuration written before this existed, which is exactly
+    /// right: such a radio has only ever stated ranges for the interface it is
+    /// on, and those are still in the two fields above.
+    pub freq_ranges_parked: Vec<ParkedRanges>,
+}
+
+impl RadioConfig {
+    /// Point this radio at another interface, carrying the stated tuning
+    /// ranges with the interface they were stated for.
+    ///
+    /// Every path that changes [`Self::backend`] on a configured radio goes
+    /// through here rather than assigning the field: the ranges are the
+    /// operator's word about a *device*, and a tab that has been moved to a
+    /// different one must not go on enforcing the last one's limits. See
+    /// [`ParkedRanges`] for what that cost in issue #254.
+    ///
+    /// Nothing else in the configuration moves. Every interface already has a
+    /// block of its own, so the address, the sound cards and the converter in
+    /// front of them are all still there when a radio comes back to where it
+    /// was.
+    pub fn set_backend(&mut self, backend: Backend) {
+        if backend == self.backend {
+            return;
+        }
+        // Park what the interface being left had stated, under its own name,
+        // so that coming back to it is not a retype. Nothing is parked for an
+        // interface that stated nothing — an empty pair means "take the
+        // device's own answer", which is also what a missing entry means.
+        let (rx, tx) =
+            (std::mem::take(&mut self.freq_ranges_rx), std::mem::take(&mut self.freq_ranges_tx));
+        let left = self.backend;
+        self.freq_ranges_parked.retain(|p| p.backend != left);
+        if !rx.is_empty() || !tx.is_empty() {
+            self.freq_ranges_parked.push(ParkedRanges { backend: left, rx, tx });
+        }
+        // ...and take back whatever was stated for the one being taken up.
+        if let Some(i) = self.freq_ranges_parked.iter().position(|p| p.backend == backend) {
+            let p = self.freq_ranges_parked.remove(i);
+            self.freq_ranges_rx = p.rx;
+            self.freq_ranges_tx = p.tx;
+        }
+        self.backend = backend;
+    }
 }
 
 #[cfg(test)]
@@ -6742,6 +6813,66 @@ mod tests {
             serde_json::from_str(r#"{"freq_ranges_tx": [[430000000.0, 440000000.0]]}"#)
                 .expect("parses");
         assert_eq!(cfg.freq_ranges_tx, vec![(430_000_000.0, 440_000_000.0)]);
+    }
+
+    /// Issue #254. The stated ranges describe a device, so moving a tab to
+    /// another interface has to leave them behind with the one they were
+    /// stated for — and hand them back when the operator comes home.
+    #[test]
+    fn stated_ranges_travel_with_the_interface_they_were_stated_for() {
+        let mut cfg = RadioConfig { backend: Backend::IcomNet, ..RadioConfig::default() };
+        cfg.freq_ranges_rx = vec![(144e6, 148e6)];
+        cfg.freq_ranges_tx = vec![(144e6, 146e6)];
+
+        cfg.set_backend(Backend::SpyServer);
+        assert_eq!(cfg.backend, Backend::SpyServer);
+        assert!(cfg.freq_ranges_rx.is_empty(), "the Icom's receive range came along");
+        assert!(cfg.freq_ranges_tx.is_empty(), "the Icom's transmit range came along");
+
+        // The receiver states its own, the way "Public SDRs" does.
+        cfg.freq_ranges_rx = vec![(200e6, 350e6)];
+
+        cfg.set_backend(Backend::IcomNet);
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)], "the Icom's own, back again");
+        assert_eq!(cfg.freq_ranges_tx, vec![(144e6, 146e6)]);
+
+        cfg.set_backend(Backend::SpyServer);
+        assert_eq!(cfg.freq_ranges_rx, vec![(200e6, 350e6)], "and the SpyServer's, back again");
+        assert!(cfg.freq_ranges_tx.is_empty());
+    }
+
+    /// The parked list is keyed by interface, so a tab shuffled around the
+    /// picker cannot grow one without bound — and an interface that stated
+    /// nothing parks nothing, because an empty pair and a missing entry both
+    /// mean "take the device's own answer".
+    #[test]
+    fn parking_ranges_keeps_one_entry_per_interface_and_none_for_an_empty_one() {
+        let mut cfg = RadioConfig { backend: Backend::IcomNet, ..RadioConfig::default() };
+        cfg.freq_ranges_rx = vec![(144e6, 148e6)];
+        for _ in 0..4 {
+            cfg.set_backend(Backend::SpyServer);
+            cfg.set_backend(Backend::IcomNet);
+        }
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)]);
+        assert!(cfg.freq_ranges_parked.is_empty(), "{:?}", cfg.freq_ranges_parked);
+
+        // Setting the interface it is already on is not a move.
+        cfg.set_backend(Backend::IcomNet);
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)]);
+        assert!(cfg.freq_ranges_parked.is_empty());
+    }
+
+    /// A `radio.json` from before the parked list existed loads with an empty
+    /// one, which is the truth about it: such a radio has only ever stated
+    /// ranges for the interface it is on, and those are still where they were.
+    #[test]
+    fn a_config_from_before_ranges_were_parked_still_loads() {
+        let cfg: RadioConfig = serde_json::from_str(
+            r#"{"backend": "IcomNet", "freq_ranges_rx": [[144000000.0, 148000000.0]]}"#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.freq_ranges_rx, vec![(144_000_000.0, 148_000_000.0)]);
+        assert!(cfg.freq_ranges_parked.is_empty());
     }
 
     #[test]

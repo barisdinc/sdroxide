@@ -5393,7 +5393,7 @@ radio. Everything below the selector changes to match the choice:
 - **KiwiSDR / Web-888 (network)** — one of the ~870 receivers published on
   `rx.kiwisdr.com`, or a private one on the same firmware. A ~12 kHz I/Q window
   that follows the dial, plus the receiver's own 0–30 MHz waterfall for the
-  full-band strip. Receive only. Browse the public ones with **WEB SDR** and
+  full-band strip. Receive only. Browse the public ones with **PUBLIC SDR** and
   open one as a radio: see
   [15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver).
 - **RX-888 (USB)** — an RX-888 / RX-888 Mk2 direct-sampling receiver, likewise
@@ -5585,6 +5585,15 @@ is the same side the device's own answer comes from. With a converter set they
 are shifted onto the dial along with everything else — the receive range by the
 receive offset and the transmit range by whatever the **Transmit** row says, so
 each ends up in the numbers you will actually be reading.
+
+They also belong to the **interface** they were typed for, not to the tab. Change
+**Radio interface** and the two boxes reload with whatever you had stated for the
+one you have just moved to — empty, on an interface you have never stated
+anything for. What you typed for the interface you left is kept and comes back
+with it. That matters most when a tab is pointed at a public receiver
+([15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver)), which
+brings a range of its own: the transceiver that was in the tab gets its own
+ranges back when you switch the interface back to it.
 
 #### 6.2.1 SoapySDR devices
 
@@ -8996,7 +9005,7 @@ open a session, so it takes none of the receiver's channels — and says what it
 is, what it covers, how many channels are free, and whether its operator allows
 connections from apps other than a browser at all.
 
-To find a receiver rather than type one in, use **WEB SDR** in the System box:
+To find a receiver rather than type one in, use **PUBLIC SDR** in the System box:
 [15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver).
 
 ### 6.3 UI: display preferences and voice announcements
@@ -11002,7 +11011,7 @@ row of menu buttons:
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |
 | **DISP** | ☀ 3D, WIDE, FIT, CTR, the panadapter boxes (the spectrum and waterfall switches, peak hold, their speeds and the detail), the skimmers, and the spectrum floor/ceiling and FFT size |
-| **SYS** | LOG, SPOTS, AWARDS, BANDS, SAT, ISM, WEB SDR, MAIL, MEM, SCAN, SETTINGS, HELP |
+| **SYS** | LOG, SPOTS, AWARDS, BANDS, SAT, ISM, PUBLIC SDR, MAIL, MEM, SCAN, SETTINGS, HELP |
 
 A menu stays open until you tap outside it or tap its button again — the top-bar
 popups do not fade away on a touch screen the way they do under a mouse, because
@@ -12711,9 +12720,17 @@ VHF/UHF dongles.
 Everything here is **receive only**, and not because of a missing feature.
 These are other people's antennas.
 
+Two networks you may be looking for are deliberately absent, which is why the
+chip says **PUBLIC SDR** rather than "WebSDR". PA3FWM's WebSDR — the receivers
+listed at `websdr.org` — sends audio in a proprietary codec whose author asks
+third-party clients to stay away, and **OpenWebRX** delivers demodulated audio
+only, over a protocol that has diverged between its forks and has no
+machine-readable directory to read in the first place. Neither is a
+"not yet"; use their web pages.
+
 #### Browsing
 
-**WEB SDR** in the System box opens the list. The buttons across the top filter
+**PUBLIC SDR** in the System box opens the list. The buttons across the top filter
 it by network, by whether a receiver can actually be used right now, and by
 whether it covers the frequency you are on; the search box matches on the
 name, the place, the antenna and the band, so `40m denmark` or `7000` both
@@ -12723,6 +12740,20 @@ Each row offers two things. **USE** points the radio you are on at that
 receiver, keeping everything else about it — converter offset, audio devices,
 the lot. **+ TAB** opens it as another radio in a tab of its own, leaving the
 one you were on alone.
+
+**USE** replaces a radio, so on a tab that already has an interface it asks
+first, across the top of the list: which radio is about to become which
+receiver, and **REPLACE** / **+ TAB INSTEAD** / **CANCEL**. Going ahead also
+**renames the tab** after the receiver — a tab still calling itself "IC-9700"
+while it is really a dongle in another country, refusing your 2 m calling
+frequency as out of range, is a puzzle nobody should have to solve.
+
+Nothing is lost by taking a receiver in a tab you had set up. Every interface
+keeps its own settings, and the tuning ranges you stated go with the interface
+they were stated for ([6.2](#62-radio-choosing-and-configuring-the-rig)),
+so switching **Radio interface** back in Settings → Radio brings the transceiver
+back as it was — its address, its sound cards and its ranges. What it does not
+bring back is the tab's name; type it again in the **Name** box on that page.
 
 The lists are fetched by the machine the radio is attached to, not by the
 screen you are sitting at — so this works the same in the browser client, and

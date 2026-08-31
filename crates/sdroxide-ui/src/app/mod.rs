@@ -333,6 +333,15 @@ pub struct SdroxideApp {
     /// Take a SpyServer in its VFO+FFT shape rather than wideband. No effect on
     /// a KiwiSDR, which has only one shape.
     public_sdr_low_bw: bool,
+    /// The receiver whose **USE** is waiting to be confirmed.
+    ///
+    /// USE replaces the radio the operator is on, and a radio is a station's
+    /// worth of setting up — issue #254 is somebody losing an IC-9700 to a
+    /// SpyServer on one click, with the tab still carrying the Icom's name
+    /// afterwards. So the row's button arms this instead of acting, and the
+    /// window puts the choice, and the way out of it, in front of the list.
+    /// `None` is the ordinary state.
+    public_sdr_confirm: Option<Box<sdroxide_types::PublicSdrEntry>>,
     /// FlexRadios found by the last SmartSDR "Discover" listen.
     smartsdr_devices: Vec<sdroxide_types::SmartSdrDevice>,
     /// Result of the last SmartSDR "Test connection".
@@ -1152,6 +1161,7 @@ impl SdroxideApp {
             public_sdr_free_only: true,
             public_sdr_in_band: false,
             public_sdr_low_bw: false,
+            public_sdr_confirm: None,
             smartsdr_devices: Vec::new(),
             smartsdr_test_result: None,
             pluto_devices: Vec::new(),
