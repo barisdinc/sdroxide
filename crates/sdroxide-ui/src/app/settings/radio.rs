@@ -904,11 +904,15 @@ pub(in crate::app) fn settings_hpsdr_tab(
         ui.end_row();
 
         ui.label("Filter board").on_hover_text(
-            "Accessory board on the Hermes-Lite 2's J16 header. Leave this at \"None\" \
-             unless a filter board is actually fitted: those seven pins are \
+            "Accessory board on the Hermes-Lite 2's J16 header (or the open-collector \
+             outputs of any other openHPSDR board). \"N2ADR\" picks one relay per band; \
+             \"Alex / Hermes band code\" puts the band number on outputs 1-4, which is what \
+             an ANAN's Alex board, a Zeus SDR, a HiQSDR and Quisk expect. Leave this at \
+             \"None\" unless a filter board is actually fitted: those seven pins are \
              general-purpose open-collector outputs, and operators also wire them to \
              amplifier PTT, antenna relays and transverter switching. Driving them from \
-             band data would start operating whatever is connected.",
+             band data would start operating whatever is connected. Applies on \
+             Apply / reconnect.",
         );
         ComboBox::from_id_salt("hpsdr_filter")
             .width(220.0)

@@ -6285,7 +6285,15 @@ involved:
   band data would start operating whatever is connected. With the **N2ADR filter
   board** selected, the low-pass filter follows the band you are on (the
   transmit band while keyed) and the board's 3 MHz receive high-pass is switched
-  in above 3 MHz.
+  in above 3 MHz. **Alex / Hermes band code** is the other convention: the band
+  goes out as a four-bit number on outputs 1–4 (160 m = 1, 80 m = 2, 60 m = 0,
+  40 m = 3, 30 m = 4, 20 m = 5, 17 m = 6, 15 m = 7, 12 m = 8, 10 m = 9, 6 m =
+  10), which is what an ANAN's Alex board, a Zeus SDR, a HiQSDR and Quisk all
+  expect. Outputs 5–7 stay off on that preset — they carry no part of the band
+  code, and on those boards they are the spare pins operators wire to a
+  preamplifier, an attenuator or a transverter. Either preset follows the
+  transmit frequency while keyed and the receive frequency otherwise, and both
+  take effect on **Apply / reconnect**.
 - **Transmit buffer** — how far ahead of real time transmit audio is fed toward
   the board, 10 to 500 ms, before sdroxide slows down to feed it at exactly the
   rate the board consumes it. That head start is the only thing covering a
@@ -12190,7 +12198,9 @@ All in [§6.2.3](#623-hpsdr-network-radios):
 - **Filter board:** leave at `None` unless one really is fitted — the J16
   pins are general-purpose outputs that operators also wire to amp PTT and
   antenna relays, and driving them from band data would operate whatever is
-  connected.
+  connected. `N2ADR` is one relay per band; `Alex / Hermes band code` is the
+  four-bit band number on outputs 1–4 that an ANAN, a Zeus SDR, a HiQSDR or
+  Quisk expects.
 - Over WiFi or a VPN raise **Transmit buffer** to 100–200 ms.
 - Protocol 1 boards (the HL2 among them) top out at 384 kHz and have DDC1
   only; a Protocol 2 board gives a second band to a second radio tab on

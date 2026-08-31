@@ -1199,15 +1199,26 @@ pub enum HpsdrFilterBoard {
     /// N2ADR filter board: one-hot relay select, forwarded by the gateware over
     /// I2C to the board's MCP23008.
     N2adr,
+    /// Alex-style band code: the band as a four-bit number on outputs 1–4,
+    /// which is what a Hermes/ANAN, a Zeus SDR, a HiQSDR and Quisk's own
+    /// filter switching all expect (issue #196).
+    ///
+    /// Outputs 5–7 stay off. They are not part of the band code — on the
+    /// boards that use this mapping they are spare pins operators wire to a
+    /// preamplifier, an attenuator or a transverter, and this backend has no
+    /// way to know which.
+    Alex,
 }
 
 impl HpsdrFilterBoard {
-    pub const ALL: [HpsdrFilterBoard; 2] = [HpsdrFilterBoard::None, HpsdrFilterBoard::N2adr];
+    pub const ALL: [HpsdrFilterBoard; 3] =
+        [HpsdrFilterBoard::None, HpsdrFilterBoard::N2adr, HpsdrFilterBoard::Alex];
 
     pub fn label(self) -> &'static str {
         match self {
             HpsdrFilterBoard::None => "None — outputs stay off",
             HpsdrFilterBoard::N2adr => "N2ADR filter board",
+            HpsdrFilterBoard::Alex => "Alex / Hermes band code (Zeus, HiQSDR, Quisk)",
         }
     }
 }
