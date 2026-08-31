@@ -10292,6 +10292,12 @@ impl Engine {
         let center = sc.mem_slices[sc.mem_slice].0;
         sc.phase = ScanPhase::Settling(now + settle);
 
+        // Whether this is a move at all. A list that fits in one window is the
+        // common case and has exactly one of these, so a lap comes back to a
+        // centre the front end is already on — and throwing the analyser away
+        // there would blank the panadapter several times a second for a scan
+        // that never moved the radio.
+        let moved = (self.state.center_hz - center).abs() > 0.5;
         // The dial goes with it, as it does on a range sweep: the operator
         // should see where the scan is looking rather than a readout left
         // behind on the last channel it stopped at.
@@ -10305,10 +10311,12 @@ impl Engine {
             // back and said so, and the next window may still be reachable.
             return Refill::Waiting;
         }
-        // The running average is still holding the last window's samples, and
-        // they are from another part of the band entirely.
-        self.analyzer.reset();
-        self.zoom = None;
+        if moved {
+            // The running average is still holding the last window's samples,
+            // and they are from another part of the band entirely.
+            self.analyzer.reset();
+            self.zoom = None;
+        }
         self.update_tuning();
         self.emit_state();
         Refill::Waiting
