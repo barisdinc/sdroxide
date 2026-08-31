@@ -2330,6 +2330,10 @@ struct Engine {
     /// turns it on again. Not persisted to disk — there is nothing here worth
     /// surviving a restart.
     qo100_cfg: sdroxide_types::Qo100Settings,
+    /// The QO-100 spectral tracker's closed loop: what it has done to
+    /// `RadioConfig::converter_offset_hz` since the tracker was switched on.
+    /// Only live while `state.qo100.auto_apply` is set.
+    qo100_auto: Qo100Auto,
     /// Open capture file for `--record-iq`, and the interleaving scratch it is
     /// written from.
     iq_rec: Option<std::io::BufWriter<std::fs::File>>,
@@ -2737,6 +2741,81 @@ fn qo100_rate_for_cfg(cfg: &sdroxide_types::Qo100Settings) -> f64 {
         w = w.max(cfg.park_hi_hz.max(cfg.park_lo_hz).max(0.0));
     }
     qo100_capture_rate_for(w)
+}
+
+/// The QO-100 spectral tracker's closed loop, engine side. The worker reports
+/// where the beacon sits; this decides — slowly, and only on a clean, steady
+/// estimate — whether to nudge `RadioConfig::converter_offset_hz` so the
+/// beacon (and the receiver behind it) lands back on 10489.750 MHz.
+#[derive(Default)]
+struct Qo100Auto {
+    /// When the last correction was written, for the rate limit.
+    last_apply: Option<Instant>,
+    /// The previous estimate that passed the quality bar, so a correction
+    /// needs two clean cycles that agree, not one.
+    pending_hz: Option<f64>,
+    /// Signed Hz written into the converter offset since the tracker came on,
+    /// and how many writes that took — shown on the QO-100 page.
+    total_hz: f64,
+    applies: u64,
+    /// The last single correction, and the unix second it happened.
+    last_hz: f64,
+    last_unix: i64,
+}
+
+/// The tracker's estimate must clear all of these before its correction is
+/// written: a convincing twin-lobe shape, not a marginal one.
+const QO100_AUTO_NULL_DB: f32 = 5.0;
+const QO100_AUTO_SYM: f32 = 0.7;
+const QO100_AUTO_SNR_DB: f32 = 4.0;
+/// Two consecutive clean estimates must agree within this for a correction to
+/// go out — one good cycle alone does not move a running receiver.
+const QO100_AUTO_AGREE_HZ: f64 = 300.0;
+/// Corrections smaller than this are left alone: below it the reopen is not
+/// worth the interruption, and the residual is already within a hair of a
+/// hertz of the beacon.
+const QO100_AUTO_DEADBAND_HZ: f64 = 150.0;
+/// The soonest a second correction can follow the first — the LNB drifts over
+/// minutes, not seconds, so this only ever bites on a bad run.
+const QO100_AUTO_MIN_INTERVAL: Duration = Duration::from_secs(12);
+
+/// What one pass of the tracker's closed loop decided.
+struct Qo100AutoOutcome {
+    /// Hz to add to the converter offset now — `None` means "not this cycle".
+    correction: Option<f64>,
+    /// What the "previous clean estimate" slot should hold going forward.
+    pending_hz: Option<f64>,
+}
+
+/// The closed loop's decision, pure so it can be tested without an engine: a
+/// correction goes out only on a *clean* estimate (a convincing twin-lobe
+/// shape) that a previous clean cycle *agreed with*, that clears the
+/// deadband, and only if the last correction has had time to settle.
+/// `since_last` is `None` before the loop has ever acted.
+fn qo100_auto_correction(
+    est_offset_hz: Option<f64>,
+    null_db: f32,
+    sym: f32,
+    snr_db: f32,
+    pending_hz: Option<f64>,
+    since_last: Option<Duration>,
+) -> Qo100AutoOutcome {
+    let none = |pending| Qo100AutoOutcome { correction: None, pending_hz: pending };
+
+    let Some(off) = est_offset_hz else { return none(None) };
+    let clean =
+        null_db >= QO100_AUTO_NULL_DB && sym >= QO100_AUTO_SYM && snr_db >= QO100_AUTO_SNR_DB;
+    if !clean {
+        return none(None);
+    }
+    if !pending_hz.is_some_and(|p| (p - off).abs() <= QO100_AUTO_AGREE_HZ) {
+        return none(Some(off)); // first clean cycle — wait for a second that agrees
+    }
+    let cooled = since_last.is_none_or(|d| d >= QO100_AUTO_MIN_INTERVAL);
+    if !cooled || off.abs() < QO100_AUTO_DEADBAND_HZ {
+        return none(Some(off));
+    }
+    Qo100AutoOutcome { correction: Some(off), pending_hz: None }
 }
 
 /// How soon after noticing a disconnected front-end the first reconnect attempt
@@ -3280,6 +3359,7 @@ fn engine_thread(
         // Session-scoped only, unlike `skim_cfg`/`ism_cfg` — see
         // `sync_qo100`'s doc for why this one is not read back from disk.
         qo100_cfg: sdroxide_types::Qo100Settings::default(),
+        qo100_auto: Qo100Auto::default(),
         iq_rec,
         iq_rec_buf: Vec::new(),
         iq_wav: None,
@@ -8684,12 +8764,68 @@ impl Engine {
         ddc.set_offset_hz(sdroxide_types::QO100_BEACON_HZ - self.state.center_hz);
     }
 
-    /// Drain the QO-100 beacon decoder's latest status and forward it.
+    /// Drain the QO-100 beacon decoder's latest status, run the tracker's
+    /// closed loop against it, and forward it.
     fn poll_qo100(&mut self) {
         let Some(c) = self.qo100.as_ref() else { return };
-        if let Some(status) = c.poll() {
-            let _ = self.event_tx.send(RadioEvent::Qo100Status(status));
+        let Some(mut status) = c.poll() else { return };
+
+        let armed = self.state.qo100.enabled && self.state.qo100.auto_apply;
+        if !armed {
+            // Turning the loop off (or the whole tracker off) starts the
+            // running totals fresh next time.
+            self.qo100_auto = Qo100Auto::default();
+        } else {
+            self.qo100_auto_step(&status);
+            status.auto_applying = true;
+            status.auto_total_hz = self.qo100_auto.total_hz;
+            status.auto_applies = self.qo100_auto.applies;
+            status.auto_last_hz = self.qo100_auto.last_hz;
+            status.auto_last_unix = self.qo100_auto.last_unix;
         }
+
+        let _ = self.event_tx.send(RadioEvent::Qo100Status(status));
+    }
+
+    /// One pass of the tracker's closed loop: decide whether this estimate is
+    /// clean and steady enough to write into the converter offset, and if so
+    /// do it. Deadband + rate-limit + a two-cycle agreement check keep it
+    /// from yanking a running receiver on a single bad reading — the
+    /// "deadband + rare reopen" approach the QO-100 page is built around.
+    fn qo100_auto_step(&mut self, status: &sdroxide_types::Qo100Status) {
+        let out = qo100_auto_correction(
+            status.est_offset_hz,
+            status.est_null_depth_db,
+            status.est_symmetry,
+            status.est_snr_db,
+            self.qo100_auto.pending_hz,
+            self.qo100_auto.last_apply.map(|t| t.elapsed()),
+        );
+        self.qo100_auto.pending_hz = out.pending_hz;
+        let Some(off) = out.correction else { return };
+
+        // `hardware_hz = dial_hz + offset`, so moving the beacon from where it
+        // reads (`target + off`) back onto `target` means adding `off` to the
+        // converter offset — the same maths the page's APPLY button uses.
+        let mut cfg = self.store.load_radio_config();
+        cfg.converter_offset_hz += off;
+        if let Err(e) = self.store.save_radio_config(&cfg) {
+            warn!("qo100 auto-apply: saving radio config: {e}");
+            return;
+        }
+        self.emit_radio_config();
+        self.reopen_source();
+
+        self.qo100_auto.last_apply = Some(Instant::now());
+        self.qo100_auto.total_hz += off;
+        self.qo100_auto.applies += 1;
+        self.qo100_auto.last_hz = off;
+        self.qo100_auto.last_unix = unix_now_f64() as i64;
+        info!(
+            correction_hz = off,
+            total_hz = self.qo100_auto.total_hz,
+            "QO-100 tracker corrected the converter offset"
+        );
     }
 
     /// Drain the ISM decoder's device table and status and forward them.
@@ -15265,6 +15401,63 @@ mod skim_window_tests {
 mod qo100_rate_tests {
     use super::{qo100_capture_rate_for, qo100_rate_for_cfg};
     use sdroxide_types::Qo100Settings;
+
+    use super::{QO100_AUTO_MIN_INTERVAL, qo100_auto_correction};
+    use std::time::Duration;
+
+    // A twin-lobe shape clean enough for the loop to act on.
+    const CLEAN: (f32, f32, f32) = (7.0, 0.85, 6.0);
+
+    #[test]
+    fn the_loop_needs_two_agreeing_clean_cycles_before_it_corrects() {
+        let (n, s, r) = CLEAN;
+        // First clean cycle: nothing applied, estimate remembered.
+        let a = qo100_auto_correction(Some(400.0), n, s, r, None, None);
+        assert_eq!(a.correction, None);
+        assert_eq!(a.pending_hz, Some(400.0));
+        // Second clean cycle that agrees: correction goes out.
+        let b = qo100_auto_correction(Some(390.0), n, s, r, a.pending_hz, None);
+        assert_eq!(b.correction, Some(390.0));
+        assert_eq!(b.pending_hz, None);
+    }
+
+    #[test]
+    fn a_marginal_shape_never_corrects_and_forgets_the_pending_estimate() {
+        // null-depth below the bar, even with a pending estimate that agrees.
+        let out = qo100_auto_correction(Some(400.0), 3.0, 0.85, 6.0, Some(400.0), None);
+        assert_eq!(out.correction, None);
+        assert_eq!(out.pending_hz, None, "a bad cycle clears the agreement chain");
+    }
+
+    #[test]
+    fn two_clean_cycles_that_disagree_do_not_correct() {
+        let (n, s, r) = CLEAN;
+        let out = qo100_auto_correction(Some(400.0), n, s, r, Some(-400.0), None);
+        assert_eq!(out.correction, None);
+        assert_eq!(out.pending_hz, Some(400.0), "the newer estimate becomes the pending one");
+    }
+
+    #[test]
+    fn inside_the_deadband_nothing_is_written() {
+        let (n, s, r) = CLEAN;
+        let out = qo100_auto_correction(Some(90.0), n, s, r, Some(95.0), None);
+        assert_eq!(out.correction, None);
+    }
+
+    #[test]
+    fn a_recent_correction_holds_the_next_one_off() {
+        let (n, s, r) = CLEAN;
+        let just_now = Some(Duration::from_secs(2));
+        assert_eq!(
+            qo100_auto_correction(Some(400.0), n, s, r, Some(400.0), just_now).correction,
+            None
+        );
+        let settled = Some(QO100_AUTO_MIN_INTERVAL + Duration::from_secs(1));
+        assert_eq!(
+            qo100_auto_correction(Some(400.0), n, s, r, Some(400.0), settled).correction,
+            Some(400.0)
+        );
+    }
 
     #[test]
     fn the_tracker_parking_window_widens_the_capture_but_only_while_enabled() {
