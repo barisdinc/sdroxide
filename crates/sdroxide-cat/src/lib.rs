@@ -66,6 +66,10 @@ const PUSHED_POLL_PERIOD: Duration = Duration::from_secs(3);
 /// Mirrors the LAN backend's watchdog, which exists for the same reasons: the
 /// enables are fire-and-forget, and several ordinary things stop the sweeps.
 const SCOPE_STALL: Duration = Duration::from_secs(3);
+/// How long to wait before asking a rig again which antenna socket it is on,
+/// and how many times. See where `antenna_probes_left` is seeded.
+const ANTENNA_PROBE_RETRY: Duration = Duration::from_secs(2);
+const ANTENNA_PROBE_RETRIES: u8 = 3;
 
 /// How soon after a stall to ask the radio again, and the ceiling the interval
 /// backs off to while it stays quiet. The enables are idempotent, but a rig
@@ -2033,6 +2037,17 @@ fn serial_thread(
         let mut last_sweep = Instant::now();
         let mut next_scope_nudge = Instant::now() + SCOPE_STALL;
         let mut scope_retry = SCOPE_RETRY;
+        // The antenna read is the one opening question whose *absence of an
+        // answer* is itself meaningful — it is how a rig with one socket says
+        // so — which makes a lost reply indistinguishable from a rig without a
+        // selector, and leaves the panel with no antenna control until the next
+        // reconnect (issue #258). So it is asked again, a few times, and then
+        // let go: three more chances at a reply cost four frames on a radio
+        // that has no selector, and rescue the far commoner case of an answer
+        // that collided with the opening burst.
+        let mut antenna_probes_left =
+            if protocol.antennas_probed() { ANTENNA_PROBE_RETRIES } else { 0 };
+        let mut next_antenna_probe = Instant::now() + ANTENNA_PROBE_RETRY;
 
         let mut next_poll = Instant::now();
         // Backdated so the first poll of a connection carries the mode: the app
@@ -2594,6 +2609,22 @@ fn serial_thread(
                     next_scope_nudge = now + scope_retry;
                     scope_retry = (scope_retry * 2).min(SCOPE_RETRY_MAX);
                     for f in protocol.scope_requests() {
+                        if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                            break 'io true;
+                        }
+                    }
+                }
+            }
+
+            // Ask again for the socket while the rig has not answered at all.
+            // See where `antenna_probes_left` is seeded.
+            if antenna_probes_left > 0 && Instant::now() >= next_antenna_probe {
+                if antennas_known.load(std::sync::atomic::Ordering::Relaxed) {
+                    antenna_probes_left = 0;
+                } else {
+                    antenna_probes_left -= 1;
+                    next_antenna_probe = Instant::now() + ANTENNA_PROBE_RETRY;
+                    for f in protocol.read_antenna() {
                         if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
                             break 'io true;
                         }

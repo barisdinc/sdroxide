@@ -1027,6 +1027,11 @@ pub struct Session {
     pub squelch_db: f32,
     /// Main receiver's noise reduction (engine + strength, or off).
     pub noise_reduction: sdroxide_types::NrLevel,
+    /// Whether binaural (pseudo-stereo) audio was left switched on. Set by ear
+    /// like the noise reduction above it, and remembered for the same reason:
+    /// an operator who listens this way listens to *everything* this way, and
+    /// should not have to switch it back on every start.
+    pub binaural: bool,
     /// How far the raw IQ was being decimated (a power of two; 1 is off).
     ///
     /// Kept per radio like everything else in this file, because it is a
@@ -1117,6 +1122,7 @@ impl Default for Session {
             tx_eq: radio.tx.eq,
             squelch_db: radio.rx[0].squelch_db,
             noise_reduction: radio.rx[0].noise_reduction,
+            binaural: radio.rx[0].binaural,
             decimation: radio.decimation,
             repeater: radio.repeater,
             gains: Vec::new(),
@@ -1466,6 +1472,19 @@ pub fn load_rotator_config() -> sdroxide_types::RotatorConfig {
 
 pub fn save_rotator_config(cfg: &sdroxide_types::RotatorConfig) -> Result<(), ConfigError> {
     save_json("rotator.json", cfg)
+}
+
+/// The external transmit/receive switch — the relay board or contact closure
+/// that grounds the SDR's antenna while the station transmits. Owned by the
+/// engine, like the rotator above, and for the same reason: it is a fact about
+/// the machine the antenna is attached to, not about the screen in front of the
+/// operator.
+pub fn load_relay_config() -> sdroxide_types::RelayConfig {
+    load_json("relay.json")
+}
+
+pub fn save_relay_config(cfg: &sdroxide_types::RelayConfig) -> Result<(), ConfigError> {
+    save_json("relay.json", cfg)
 }
 
 // ── Broadcast station schedules ──────────────────────────────────────────────
@@ -1921,6 +1940,7 @@ mod tests {
             },
             squelch_db: -70.0,
             noise_reduction: sdroxide_types::NrLevel::RnnMed,
+            binaural: true,
             decimation: 4,
             repeater: sdroxide_types::RepeaterState {
                 shift: sdroxide_types::Shift::Minus,
@@ -1967,6 +1987,7 @@ mod tests {
         // did, and on the front end's own gains rather than on invented ones.
         assert_eq!(old.squelch_db, radio.rx[0].squelch_db);
         assert_eq!(old.noise_reduction, radio.rx[0].noise_reduction);
+        assert_eq!(old.binaural, radio.rx[0].binaural);
         assert!(old.gains.is_empty(), "no gain preference until one is expressed");
         assert!(old.tx_gains.is_empty());
         // And it names one dial, which is the one it was left on: B mirrors it,

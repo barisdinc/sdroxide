@@ -190,7 +190,8 @@ fn entry_row(
                             if crate::chrome::chip(ui, false, "USE")
                                 .on_hover_text(
                                     "Point *this* radio at the receiver, replacing whatever \
-                                     interface it is on now",
+                                     interface it is on now — asked again first, because that \
+                                     is a whole radio's worth of setting up",
                                 )
                                 .clicked()
                             {
@@ -223,6 +224,50 @@ fn entry_row(
 enum PickAction {
     NewRadio,
     ThisRadio,
+}
+
+/// What the operator answered the **USE** confirmation with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Confirm {
+    /// Go ahead: this radio becomes the receiver.
+    Replace,
+    /// The way out that keeps both — the receiver arrives in a tab of its own
+    /// and the radio the operator is on is left alone.
+    NewTab,
+    Cancel,
+}
+
+/// The question **USE** asks before it replaces a configured radio, and the
+/// three answers to it.
+///
+/// Drawn across the top of the list rather than in a window of its own: the
+/// row that raised it is still on screen behind, and a second window over a
+/// list of eleven hundred rows would have to be dismissed before the operator
+/// could look at what they were about to lose.
+fn confirm_panel(ui: &mut egui::Ui, blurb: &str) -> Option<Confirm> {
+    let mut answer = None;
+    crate::chrome::red_panel(ui, |ui| {
+        ui.label(RichText::new(blurb).color(crate::theme::TEXT_STRONG()).size(12.0));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if crate::chrome::chip(ui, false, "REPLACE")
+                .on_hover_text("Point the radio you are on at this receiver")
+                .clicked()
+            {
+                answer = Some(Confirm::Replace);
+            }
+            if crate::chrome::chip(ui, false, "+ TAB INSTEAD")
+                .on_hover_text("Open the receiver as another radio and leave this one alone")
+                .clicked()
+            {
+                answer = Some(Confirm::NewTab);
+            }
+            if crate::chrome::chip(ui, false, "CANCEL").clicked() {
+                answer = Some(Confirm::Cancel);
+            }
+        });
+    });
+    answer
 }
 
 impl SdroxideApp {
@@ -280,6 +325,10 @@ impl SdroxideApp {
         let mut open = self.show_public_sdrs;
         let mut refresh = false;
         let mut picked: Option<(PublicSdrEntry, PickAction)> = None;
+        // Worked out before the window borrows `self`: it reads the roster and
+        // the radio's own configuration, neither of which the list does.
+        let blurb = self.public_sdr_confirm.as_deref().map(|e| self.replace_blurb(e));
+        let mut answer: Option<Confirm> = None;
 
         let resp = egui::Window::new("PUBLIC SDRS")
             .id(crate::layout::salted_id(ctx, "PUBLIC SDRS"))
@@ -290,6 +339,10 @@ impl SdroxideApp {
             .default_height(crate::layout::window_h(ctx, 520.0))
             .show(ctx, |ui| {
                 crate::chrome::window_body_bg(ui);
+                if let Some(blurb) = &blurb {
+                    answer = confirm_panel(ui, blurb);
+                    ui.add_space(6.0);
+                }
                 ui.horizontal(|ui| {
                     for (i, net) in PublicSdrNetwork::ALL.iter().enumerate() {
                         if crate::chrome::chip(ui, self.public_sdr_nets_shown[i], net.label())
@@ -434,9 +487,83 @@ impl SdroxideApp {
             self.public_sdrs = None;
             self.ask_device(ctx, sdroxide_types::DeviceProbe::PublicSdrs { refresh: true });
         }
-        if let Some((entry, action)) = picked {
-            self.take_public_sdr(&entry, action);
+        // The question, then the answer to it. Closing the window is a "no":
+        // an armed confirmation that outlived the list it was raised from
+        // would fire on whatever radio the operator had moved to by then.
+        if !open {
+            self.public_sdr_confirm = None;
         }
+        if let Some(choice) = answer {
+            // Taken only once an answer is in — a `take` in the pattern would
+            // run on every frame the window is drawn and disarm the question
+            // before it could be read.
+            if let Some(entry) = self.public_sdr_confirm.take() {
+                match choice {
+                    Confirm::Replace => self.take_public_sdr(&entry, PickAction::ThisRadio),
+                    Confirm::NewTab => self.take_public_sdr(&entry, PickAction::NewRadio),
+                    Confirm::Cancel => {}
+                }
+            }
+        }
+        if let Some((entry, action)) = picked {
+            // A fresh press supersedes a question still on screen, whichever
+            // row it came from.
+            self.public_sdr_confirm = None;
+            match action {
+                // Nothing to lose only when there is no radio there to lose:
+                // an interface never chosen. Anything else — an address typed,
+                // a rig dialled, sound cards picked — is asked about first.
+                PickAction::ThisRadio if self.radio_is_configured() => {
+                    self.public_sdr_confirm = Some(Box::new(entry));
+                }
+                _ => self.take_public_sdr(&entry, action),
+            }
+        }
+    }
+
+    /// Whether this radio has an interface at all, which is what decides
+    /// whether **USE** has anything to destroy.
+    ///
+    /// Reads the configuration if it has not been read yet: `radio_cfg` is
+    /// otherwise filled in only by opening the settings dialog, and whether
+    /// USE asks first must not depend on whether anybody has.
+    fn radio_is_configured(&mut self) -> bool {
+        if self.radio_cfg.is_none() {
+            self.radio_cfg = self.ctrl.radio_config();
+        }
+        self.radio_cfg.as_ref().is_some_and(|c| c.backend != sdroxide_types::Backend::None)
+    }
+
+    /// What the confirmation says: which radio is about to become which
+    /// receiver, what that costs, and what it does not.
+    ///
+    /// Written out in full rather than left as "are you sure?", because the
+    /// two things an operator gets wrong here are both invisible otherwise —
+    /// that the tab goes on carrying its old name, and that the receiver's
+    /// published coverage becomes the dial's limit. Both were the report.
+    fn replace_blurb(&self, entry: &PublicSdrEntry) -> String {
+        let chip = self.radio_roster.iter().find(|c| c.id == self.radio_id);
+        let this = match chip {
+            Some(c) if !c.name.is_empty() => c.name.clone(),
+            Some(c) => c.default_name.clone(),
+            None => "this radio".to_string(),
+        };
+        let iface = self
+            .radio_cfg
+            .as_ref()
+            .map_or_else(|| "its interface".to_string(), |c| c.backend.label().to_string());
+        format!(
+            "Replace {this} with {}?\n\n\
+             {this} is on {iface}. Taking this receiver points the same tab at {} instead, \
+             renames it “{}”, and holds the dial to the {} the receiver \
+             publishes — nothing here transmits.\n\n\
+             The {iface} settings stay where they are, and so do the ranges stated for them: \
+             switching the interface back in Settings → Radio brings the radio back as it was.",
+            entry.name,
+            entry.address,
+            entry.name,
+            entry.range_label(),
+        )
     }
 
     /// Act on a picked receiver.
@@ -446,15 +573,47 @@ impl SdroxideApp {
     /// "open it in a tab" and "use it here" would drift into two subtly
     /// different radios.
     fn take_public_sdr(&mut self, entry: &PublicSdrEntry, action: PickAction) {
-        // Built on this radio's own configuration where there is one, so
-        // pointing it at a receiver keeps its converter offset, its audio
-        // devices and everything else the operator had set.
-        let base = self.radio_cfg.clone().unwrap_or_default();
-        let cfg = entry.radio_config(&base, self.public_sdr_low_bw);
         match action {
             PickAction::ThisRadio => {
+                // Built on this radio's own configuration, so pointing it at a
+                // receiver keeps its converter offset, its audio devices and
+                // everything else the operator had set — and refused outright
+                // where there is none to build on, because the alternative is
+                // a *default* radio written over theirs. `radio_cfg` is filled
+                // in by opening the settings dialog, which nobody need ever
+                // have done.
+                if self.radio_cfg.is_none() {
+                    self.radio_cfg = self.ctrl.radio_config();
+                }
+                let Some(base) = self.radio_cfg.clone() else {
+                    self.show_notice(
+                        "This radio's configuration has not arrived from the machine it is on \
+                         yet, so there is nothing to point at the receiver — take it with + TAB \
+                         instead."
+                            .into(),
+                    );
+                    return;
+                };
+                let cfg = entry.radio_config(&base, self.public_sdr_low_bw);
+                // The settings dialog edits its own copy of `radio_cfg` and
+                // writes it back whenever the two differ, so that copy has to
+                // move too — otherwise a dialog left open would push the radio
+                // that was here a moment ago straight back over this one. The
+                // typed range boxes go with it, for the same reason they are
+                // reseeded when the interface picker is used.
+                self.radio_cfg = Some(cfg.clone());
+                self.range_edit = None;
                 self.ctrl.set_radio_config(cfg);
                 self.ctrl.reopen_source();
+                // A tab named after the transceiver that used to be in it,
+                // now running somebody else's receiver on the other side of
+                // the world, is the half of issue #254 that no amount of
+                // correct range checking would have made sense of: the dial
+                // refused 144.8 MHz as out of range while the tab, its mode
+                // tag and its packet monitor all still said IC-9700. The
+                // confirmation says the rename is coming.
+                self.radio_tab_requests
+                    .push(RadioTabRequest::Rename { id: self.radio_id, name: entry.name.clone() });
                 self.show_notice(format!("Pointing this radio at {}…", entry.name));
                 self.show_public_sdrs = false;
             }
@@ -470,5 +629,90 @@ impl SdroxideApp {
                 self.show_notice(format!("Opening {} as another radio…", entry.name));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The question the panel is drawn with in these tests. Its text does not
+    /// matter to what is being pinned, only that there is some.
+    const BLURB: &str = "Replace Radio 1 with Twente?";
+
+    /// Draw the same chips [`confirm_panel`] draws, in the same frame and the
+    /// same order, and report where the one named ended up.
+    ///
+    /// The panel returns the answer rather than the responses, so a press has
+    /// to be aimed by redrawing its layout. Keeping this beside it is the
+    /// point: a chip renamed in one and not the other stops the test dead
+    /// instead of quietly pressing nothing.
+    fn chip_pos(ui: &mut egui::Ui, label: &str) -> egui::Pos2 {
+        let mut at = egui::Pos2::ZERO;
+        crate::chrome::red_panel(ui, |ui| {
+            ui.label(RichText::new(BLURB).size(12.0));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for l in ["REPLACE", "+ TAB INSTEAD", "CANCEL"] {
+                    let r = crate::chrome::chip(ui, false, l);
+                    if l == label {
+                        at = r.rect.center();
+                    }
+                }
+            });
+        });
+        at
+    }
+
+    /// Press one of the confirmation's chips and report what the panel
+    /// answered. Two passes, the way `crate::app`'s own chip test does it: the
+    /// first tells egui where everything is, the second aims at it.
+    fn press(label: &str) -> Option<Confirm> {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let mut at = egui::Pos2::ZERO;
+        ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            at = chip_pos(ui, label);
+        })
+        .drop_without_applying_deltas();
+        assert_ne!(at, egui::Pos2::ZERO, "{label} is not one of the panel's chips");
+
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut answer = None;
+        for events in [vec![egui::Event::PointerMoved(at), button(true)], vec![button(false)]] {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            ctx.run_ui(input, |ui| answer = answer.or(confirm_panel(ui, BLURB)))
+                .drop_without_applying_deltas();
+        }
+        answer
+    }
+
+    /// Each of the three answers has to come back as itself. A confirmation
+    /// whose CANCEL replaced the radio anyway would be worse than none at all
+    /// — issue #254 is somebody losing a configured IC-9700 to one click.
+    #[test]
+    fn every_answer_to_the_use_confirmation_comes_back_as_itself() {
+        assert_eq!(press("REPLACE"), Some(Confirm::Replace));
+        assert_eq!(press("+ TAB INSTEAD"), Some(Confirm::NewTab));
+        assert_eq!(press("CANCEL"), Some(Confirm::Cancel));
+    }
+
+    /// ...and a panel nobody has pressed answers nothing, or the question
+    /// would answer itself on the frame it was raised.
+    #[test]
+    fn an_unpressed_confirmation_answers_nothing() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let mut answer = Some(Confirm::Replace);
+        ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            answer = confirm_panel(ui, BLURB);
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(answer, None);
     }
 }

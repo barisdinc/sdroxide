@@ -335,6 +335,15 @@ pub struct SdroxideApp {
     /// Take a SpyServer in its VFO+FFT shape rather than wideband. No effect on
     /// a KiwiSDR, which has only one shape.
     public_sdr_low_bw: bool,
+    /// The receiver whose **USE** is waiting to be confirmed.
+    ///
+    /// USE replaces the radio the operator is on, and a radio is a station's
+    /// worth of setting up — issue #254 is somebody losing an IC-9700 to a
+    /// SpyServer on one click, with the tab still carrying the Icom's name
+    /// afterwards. So the row's button arms this instead of acting, and the
+    /// window puts the choice, and the way out of it, in front of the list.
+    /// `None` is the ordinary state.
+    public_sdr_confirm: Option<Box<sdroxide_types::PublicSdrEntry>>,
     /// FlexRadios found by the last SmartSDR "Discover" listen.
     smartsdr_devices: Vec<sdroxide_types::SmartSdrDevice>,
     /// Result of the last SmartSDR "Test connection".
@@ -773,6 +782,18 @@ pub struct SdroxideApp {
     /// server configs.
     rot_cfg_edit: sdroxide_types::RotatorConfig,
     rot_cfg_seeded: bool,
+    /// The external T/R switch's health, mirrored from
+    /// [`RadioEvent::RelayStatus`]. Replayed on connect by the server, so a
+    /// remote client is told about a relay that is not answering before it
+    /// touches PTT rather than after.
+    relay_status: sdroxide_types::RelayStatus,
+    /// The T/R switch settings dialog's working copy, seeded once like the
+    /// server configs.
+    relay_edit: sdroxide_types::RelayConfig,
+    relay_seeded: bool,
+    /// The switching devices the engine's machine can see, from
+    /// [`sdroxide_types::DeviceProbe::Relays`].
+    relay_devices: Vec<sdroxide_types::RelayDevice>,
     /// The station's IARU region, as the General tab's dropdown last showed it.
     ///
     /// Unlike the config buffers around it this is not seeded-once-then-owned
@@ -1155,6 +1176,7 @@ impl SdroxideApp {
             public_sdr_free_only: true,
             public_sdr_in_band: false,
             public_sdr_low_bw: false,
+            public_sdr_confirm: None,
             smartsdr_devices: Vec::new(),
             smartsdr_test_result: None,
             pluto_devices: Vec::new(),
@@ -1342,6 +1364,10 @@ impl SdroxideApp {
             qo100_win: Default::default(),
             rotator_status: None,
             rot_cfg_edit: Default::default(),
+            relay_status: Default::default(),
+            relay_edit: Default::default(),
+            relay_seeded: false,
+            relay_devices: Vec::new(),
             rot_cfg_seeded: false,
             // Whatever this process is already on: the binary applies the
             // station's setting before the app is built, and a remote client

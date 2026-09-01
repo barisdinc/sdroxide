@@ -151,6 +151,12 @@ const SCOPE_STALL: Duration = Duration::from_secs(3);
 const SCOPE_RETRY: Duration = Duration::from_secs(2);
 const SCOPE_RETRY_MAX: Duration = Duration::from_secs(30);
 
+/// How long to leave between repeats of the antenna-socket read, and how many
+/// of them to send, while the radio has answered none. See where they are
+/// spent in `IcomNetSource::pump`.
+const ANTENNA_PROBE_RETRY: Duration = Duration::from_secs(2);
+const ANTENNA_PROBE_RETRIES: u8 = 3;
+
 /// The scope's amplitude scale runs from 0 to the model's own full scale, and
 /// Icom documents no dB per step for any of them. The engine's `auto_levels`
 /// normalises whatever it is given, so this only has to put the trace in a
@@ -222,6 +228,10 @@ pub struct IcomNetSource {
     /// which a radio with one connector NAKs instead — see
     /// [`civ::read_antenna_frame`].
     antenna: Option<&'static str>,
+    /// How many more times to ask, and when the last ask went out. See where
+    /// they are spent in [`Self::pump`].
+    antenna_probes_left: u8,
+    last_antenna_probe: Instant,
     /// The dial this end has already put the radio's own repeater shift back
     /// to simplex for — see [`civ::simplex_frame`], and [`Self::pump`] for why
     /// it is a dial rather than a one-off.
@@ -353,6 +363,8 @@ impl IcomNetSource {
             transmitting: false,
             squelch_set: false,
             antenna: None,
+            antenna_probes_left: ANTENNA_PROBE_RETRIES,
+            last_antenna_probe: Instant::now(),
             simplex_dial: None,
             menu_read: Vec::new(),
             menu_restore: Vec::new(),
@@ -661,6 +673,20 @@ impl IcomNetSource {
         // key-down, and mid-over the link belongs to the meters.
         if !self.transmitting && self.dial.vfo > 0.0 {
             self.assert_simplex(self.dial.vfo);
+        }
+
+        // Ask again for the antenna socket while the radio has not answered.
+        // The absence of a reply is how a single-connector radio says it has no
+        // selector, so a *lost* reply is indistinguishable from that and leaves
+        // the panel with no antenna control at all until the next reconnect
+        // (issue #258). A few more chances, then let it go.
+        if self.antenna.is_none()
+            && self.antenna_probes_left > 0
+            && self.last_antenna_probe.elapsed() >= ANTENNA_PROBE_RETRY
+        {
+            self.antenna_probes_left -= 1;
+            self.last_antenna_probe = Instant::now();
+            self.send(civ::read_antenna_frame(self.civ_addr));
         }
 
         if self.last_poll.elapsed() >= POLL_PERIOD {

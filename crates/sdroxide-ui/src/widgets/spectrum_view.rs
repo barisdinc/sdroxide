@@ -1573,7 +1573,14 @@ pub fn show_ext(
             let r = &mut state.rx[rx.index()];
             let max_hz = r.mode.max_filter_hz() as f64;
             let (mut lo, mut hi) = (r.filter_lo as f64, r.filter_hi as f64);
-            if is_hi {
+            if r.mode.filter_symmetric() {
+                // AM and FM carve a channel out about the carrier, so the grip
+                // being dragged sets the *half* width and the other edge
+                // follows it (issue #256). Read from whichever grip was
+                // grabbed, so either one widens and narrows the passband.
+                let half = rel.abs().clamp(25.0, max_hz);
+                (lo, hi) = (-half, half);
+            } else if is_hi {
                 hi = rel.clamp(lo + 50.0, max_hz);
             } else {
                 lo = rel.clamp(-max_hz, hi - 50.0);
@@ -1928,7 +1935,22 @@ pub fn show_ext(
     let span_before = view.span();
     // Not before the front end has said what it is: see [`WindowPan::known`].
     if pan.known {
-        view.clamp_to(zoom_center, zoom_span);
+        // Against the window as it is *now*. `zoom_center` was measured at the
+        // top of the frame, and on a front end with no full-band lane the pan
+        // bounds *are* the passband — which [`pan_center`] has just moved, by
+        // exactly the overshoot this clamp would otherwise pull the view back
+        // over. That undoes the pan every frame, and the next frame finds the
+        // view outside the window again on the other side: the window and the
+        // view chase each other, one frame apart, and the panadapter jitters
+        // sideways for as long as the button is held. Measured on a 1.5 Msps
+        // generator: a steady drag reversed direction on 40 of its 50 frames,
+        // and went on oscillating ±76 kHz with the pointer standing still.
+        //
+        // A front end that *has* a full-band lane is unaffected either way —
+        // its bounds are that lane's fixed window and do not move with the
+        // passband — which is why this never showed on a KiwiSDR.
+        let (clamp_center, clamp_span) = pan.view_bounds(dev_center, dev_span);
+        view.clamp_to(clamp_center, clamp_span);
     }
     follow_view_into_the_band(view, state, dev_center, dev_span, pan, cmds);
     let (lo_now, hi_now, span_now) = (view.view_lo_hz, view.view_hi_hz, view.span());
@@ -3463,6 +3485,89 @@ mod tests {
             (13_200_000.0, 15_200_000.0),
             "the pan must survive the clamp, or the drag fights itself"
         );
+    }
+
+    /// Several frames of one held drag, run in the order the widget runs them:
+    /// the pan bounds are read at the top of the frame, the overshoot goes to
+    /// the front end in the middle, and the view is clamped at the bottom.
+    ///
+    /// The clamp has to be against the window as it is *then*. Against the
+    /// frame's opening snapshot it pulls the view back over exactly the
+    /// overshoot the centre has just moved by, so the next frame finds the view
+    /// outside the window on the *other* side and moves the centre back:
+    /// window and view chase each other one frame apart, and the panadapter
+    /// jitters sideways for as long as the button is held. Measured on a
+    /// 1.5 Msps generator before the fix — a steady 24-step drag reversed
+    /// direction on 40 of its 50 frames, travelled 177 kHz of the 298 kHz asked
+    /// for, and went on oscillating ±76 kHz with the pointer standing still.
+    #[test]
+    fn a_held_drag_moves_one_way_only() {
+        let (center, span) = (14_150_000.0, 2_000_000.0);
+        let step = 25_000.0;
+        let mut view =
+            ViewState { view_lo_hz: center - span / 2.0, view_hi_hz: center + span / 2.0, ..def() };
+        let mut state = RadioState { center_hz: center, sample_rate: span, ..state() };
+        let mut dev_center = center;
+        let pan = movable();
+        let mut sent: Vec<f64> = Vec::new();
+
+        for _ in 0..6 {
+            let mut cmds = Vec::new();
+            let (zoom_center, zoom_span) = pan.view_bounds(dev_center, span);
+            let over = pan_view(&mut view, step, zoom_center, zoom_span);
+            pan_center(&mut dev_center, &mut state, over, pan, &mut cmds);
+            let (clamp_center, clamp_span) = pan.view_bounds(dev_center, span);
+            view.clamp_to(clamp_center, clamp_span);
+            sent.extend(cmds.iter().filter_map(|c| match c {
+                Command::SetCenter(hz) => Some(*hz),
+                _ => None,
+            }));
+        }
+
+        assert_eq!(sent.len(), 6, "one retune a frame: {sent:?}");
+        for (a, b) in sent.iter().zip(sent.iter().skip(1)) {
+            assert!(b > a, "the drag reversed on itself: {sent:?}");
+        }
+        assert!(
+            (dev_center - (center + 6.0 * step)).abs() < 0.5,
+            "six {step} Hz steps should have travelled {}, got {}",
+            6.0 * step,
+            dev_center - center,
+        );
+    }
+
+    /// The same drag on a front end with a full-band lane — a KiwiSDR, a
+    /// SpyServer, an RX-888's wide strip.
+    ///
+    /// There the pan bounds are that lane's own fixed window: they do not move
+    /// with the passband, so the clamp reads the same numbers whichever end of
+    /// the frame it is taken at and the fix above cannot reach this path. The
+    /// drag just slides the view across the wide picture, the receiver is never
+    /// asked to move, and it is `follow_view_into_the_band` that brings it over
+    /// on the way back in. Measured on the generator with a 30 MHz lane bolted
+    /// on: nought retunes, before the fix and after it.
+    #[test]
+    fn a_drag_inside_a_full_band_lane_never_retunes() {
+        let (center, span) = (14_150_000.0, 2_000_000.0);
+        let pan = movable().with_outer(Some((15_000_000.0, 30_000_000.0)), span);
+        let mut view =
+            ViewState { view_lo_hz: center - span / 2.0, view_hi_hz: center + span / 2.0, ..def() };
+        let mut state = RadioState { center_hz: center, sample_rate: span, ..state() };
+        let mut dev_center = center;
+        let mut cmds = Vec::new();
+
+        for _ in 0..6 {
+            let (zoom_center, zoom_span) = pan.view_bounds(dev_center, span);
+            let over = pan_view(&mut view, 25_000.0, zoom_center, zoom_span);
+            pan_center(&mut dev_center, &mut state, over, pan, &mut cmds);
+            let (clamp_center, clamp_span) = pan.view_bounds(dev_center, span);
+            view.clamp_to(clamp_center, clamp_span);
+        }
+
+        assert!(cmds.is_empty(), "a pan inside the wide lane must not move the receiver: {cmds:?}");
+        assert_eq!(dev_center, center);
+        // And it really did pan — the view has walked six steps up the lane.
+        assert!((view.view_lo_hz - (center - span / 2.0 + 150_000.0)).abs() < 0.5);
     }
 
     /// The transition frame: a zoomed-in view that runs into the edge mid-pan

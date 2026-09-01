@@ -2143,6 +2143,27 @@ pub(in crate::app) fn settings_tci_tab(
             );
         ui.end_row();
 
+        // How far the rig's IQ runs behind the `dds:` that moved it. The
+        // panadapter labels each frame with the centre its *samples* were taken
+        // at, and this is the only number that says which centre that was — so
+        // it belongs to the rig, not to sdroxide, and the default is a
+        // measurement of one particular rig rather than a constant.
+        ui.label("Stream delay");
+        crate::chrome::slider(
+            ui,
+            egui::Slider::new(&mut cfg.tci.stream_delay_ms, 0.0..=400.0).suffix(" ms").step_by(1.0),
+        )
+        .on_hover_text(
+            "How long the rig's IQ takes to arrive on a new centre after sdroxide moves it. \
+             It is the rig's own DSP pipeline, not the network — a server on this machine \
+             has one too — and while the panadapter is dragged fully zoomed out, being wrong \
+             by this much moves the newest waterfall rows sideways of the history by the \
+             error times the speed of the drag. Too high displaces them exactly as far as \
+             too low, the other way. Measure it with `cargo run --release -p sdroxide-tci \
+             --example retune_latency`; the default is a SunSDR2DX on ExpertSDR3 at 192 kHz.",
+        );
+        ui.end_row();
+
         ui.label("");
         // The test opens its own socket from wherever it is pressed, so a
         // green answer here would only say this screen can reach the rig — a
@@ -2957,6 +2978,21 @@ pub(in crate::app) fn settings_smartsdr_tab(
         });
         ui.end_row();
 
+        // Said out loud rather than left in the tooltip above: "why is the band
+        // only 192 kHz wide?" is the question this interface gets asked (issue
+        // #184), and an operator wondering that is looking at this row, not
+        // hovering it.
+        ui.label("");
+        ui.label(
+            RichText::new(
+                "192 kHz is the widest DAX IQ stream a FLEX will send, and the radio ties \
+                 the panadapter's span to it — so that is the whole span, and no setting \
+                 here widens it.",
+            )
+            .weak(),
+        );
+        ui.end_row();
+
         ui.label("DAX IQ channel").on_hover_text(
             "The radio has four. Change this only if something else on the network \
              is already using channel 1 — the radio refuses a channel twice over.",
@@ -3512,6 +3548,9 @@ pub(in crate::app) fn settings_rx888_tab(
     rescan: &mut bool,
     apply: &mut bool,
     can_probe: bool,
+    // Where the dial is, so a width the tuner's IF cannot fill can say so while
+    // the receiver is actually up there rather than only in the abstract.
+    dial_hz: f64,
     cmds: &mut Vec<Command>,
 ) {
     use sdroxide_types::Rx888Config;
@@ -3648,20 +3687,32 @@ pub(in crate::app) fn settings_rx888_tab(
         ui.label("Panadapter width");
         ui.horizontal(|ui| {
             let rate = cfg.rx888.adc_rate_hz;
+            // A width the tuner's IF cannot fill is marked rather than hidden:
+            // it is a perfectly good HF setting, and on a receiver that spends
+            // its life below 65 MHz there is nothing wrong with it at all.
             let width_label = |bins: u32| {
                 format!(
-                    "{} — 1/{}",
+                    "{} — 1/{}{}",
                     bw_label(Rx888Config::ddc_out_rate_hz(rate, bins)),
                     Rx888Config::DDC_BLOCK / bins.max(1),
+                    if Rx888Config::width_works_on_vhf(rate, bins) { "" } else { "  · HF only" },
                 )
             };
             let bins = cfg.rx888.ddc_bins;
             ComboBox::from_id_salt("rx888_width")
-                .width(180.0)
+                .width(210.0)
                 .selected_text(width_label(if bins == 0 { 256 } else { bins }))
                 .show_styled(ui, |ui| {
                     for b in Rx888Config::DDC_BIN_CHOICES {
-                        ui.selectable_value(&mut cfg.rx888.ddc_bins, b, width_label(b));
+                        ui.selectable_value(&mut cfg.rx888.ddc_bins, b, width_label(b))
+                            .on_hover_text(if Rx888Config::width_works_on_vhf(rate, b) {
+                                "Usable on both front ends."
+                            } else {
+                                "Below the VHF crossover this is an ordinary width. Above it \
+                                 the tuner's 8 MHz IF cannot be centred in a window this \
+                                 wide, so the live spectrum sits off to one side of the \
+                                 panadapter with nothing beside it."
+                            });
                     }
                 });
             ui.add(
@@ -3673,22 +3724,47 @@ pub(in crate::app) fn settings_rx888_tab(
         });
         ui.end_row();
         ui.label("");
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(
-                    "How much of the digitised spectrum the panadapter shows at once. \
-                     The whole DSP chain runs at this width, so wider costs \
-                     proportionally more CPU — 1/2 is the entire band in the \
-                     waterfall, and a serious amount of arithmetic. Above the \
-                     VHF crossover the tuner's IF filter is 8 MHz wide: wider \
-                     settings show its skirts, and on ones too wide to centre \
-                     on the IF the tuned signal simply rides off-centre in \
-                     the panadapter.",
+        let rate = cfg.rx888.adc_rate_hz;
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "How much of the digitised spectrum the panadapter shows at once. \
+                         The whole DSP chain runs at this width, so wider costs \
+                         proportionally more CPU — 1/2 is the entire band in the \
+                         waterfall, and a serious amount of arithmetic. Above the VHF \
+                         crossover ({:.1} MHz) the panadapter is not looking at the \
+                         antenna but at the tuner's IF, which is 8 MHz wide and parked \
+                         at {:.2} MHz — so anything wider than {} cannot be centred on \
+                         it, and the extra width is dead spectrum beside the signal \
+                         rather than more of it.",
+                        Rx888Config::vhf_crossover_hz(rate) / 1e6,
+                        Rx888Config::VHF_IF_CENTER_HZ / 1e6,
+                        bw_label(2.0 * Rx888Config::VHF_IF_CENTER_HZ),
+                    ))
+                    .weak(),
                 )
-                .weak(),
-            )
-            .wrap(),
-        );
+                .wrap(),
+            );
+            // Said out loud while it is actually happening: the symptom — every
+            // signal crowded onto the right-hand half — looks like a broken
+            // receiver rather than a setting.
+            if dial_hz >= Rx888Config::vhf_crossover_hz(rate)
+                && !Rx888Config::width_works_on_vhf(rate, cfg.rx888.ddc_bins)
+            {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The dial is above the crossover now, so this width is showing \
+                             the tuner's 8 MHz off-centre with dead spectrum beside it. \
+                             Narrow the width to fill the panadapter.",
+                        )
+                        .color(crate::theme::YELLOW()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
         ui.end_row();
 
         ui.label("VGA gain");
@@ -5870,7 +5946,17 @@ pub(in crate::app) fn settings_sdrplay_tab(
     // set: the driver ignores a switch the real hardware lacks, whereas a
     // hidden switch cannot be un-hidden by an operator whose service just
     // isn't running yet.
-    let listed = devices.iter().find(|d| d.serial == cfg.sdrplay.serial).or(devices.first());
+    //
+    // A named serial that the list does not carry is *not* licence to describe
+    // some other receiver: on a station with two RSPs that put the RSPdx's
+    // serial in the picker and the RSPduo's antenna ports, tuner rows and LNA
+    // ladder underneath it (issue #259). Only "— first one found —" falls back
+    // to whatever is first.
+    let listed = if cfg.sdrplay.serial.trim().is_empty() {
+        devices.first()
+    } else {
+        devices.iter().find(|d| d.serial == cfg.sdrplay.serial)
+    };
     let model = listed.map(|d| d.model()).unwrap_or(SdrPlayModel::Rsp1b);
     // ...and the same rule, kept rather than dropped, is what decides the
     // RSPduo's own rows. An empty device list is *not* evidence that this is
@@ -5896,6 +5982,23 @@ pub(in crate::app) fn settings_sdrplay_tab(
     // empty serial, indistinguishable from "first one found".
     if let Some(w) = devices.iter().find_map(|d| d.identity_warning()) {
         ui.label(RichText::new(w).color(Color32::from_rgb(220, 170, 70)));
+        ui.add_space(6.0);
+    }
+
+    // A serial pinned to a receiver that is not there any more — unplugged,
+    // switched off in Device Manager, or held by another application. Said
+    // here rather than left for Apply to fail on, because the rows below now
+    // describe nothing in particular and the picker looks, misleadingly, as
+    // though a receiver were selected.
+    if listed.is_none() && !cfg.sdrplay.serial.trim().is_empty() && !devices.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "Serial {} is not among the receivers the SDRplay service reports. Pick one \
+                 of the listed receivers, or replug this one and press Rescan.",
+                cfg.sdrplay.serial.trim()
+            ))
+            .color(Color32::from_rgb(220, 170, 70)),
+        );
         ui.add_space(6.0);
     }
 

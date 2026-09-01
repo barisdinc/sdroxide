@@ -11,7 +11,9 @@
 //!
 //! Measured this way on a SunSDR2DX over the loopback interface: 109–131 ms at
 //! 192 kHz, 129 ms at 96 kHz, 169 ms at 48 kHz, of which only about 21 ms was
-//! buffered on this side.
+//! buffered on this side. A second ExpertSDR3 setup on the same rig model, also
+//! on loopback, gave 159 ms at 192 kHz. Being on `127.0.0.1` does not make it
+//! small: nearly all of it is inside the rig's own DSP, not the socket.
 //!
 //! `cargo run --release -p sdroxide-tci --example retune_latency -- [addr] [center_hz] [step_hz] [rate_hz]`
 
@@ -97,7 +99,8 @@ fn main() {
     }
     let (before, mag) = peak_offset_hz(&buf);
     println!("before: strongest tone at {before:+.0} Hz from centre (mag {mag:.5})");
-    if mag < 1e-4 {
+    let weak = mag < 1e-4;
+    if weak {
         println!(
             "  NOTE: nothing much there. Point the rig at a strong carrier for a clean answer."
         );
@@ -147,20 +150,60 @@ fn main() {
         }
     }
     println!();
-    match (elapsed_first, settled) {
-        (Some(a), Some(b)) => println!(
-            "retune latency: first movement {:.0} ms, on frequency {:.0} ms",
-            a.as_secs_f64() * 1e3,
-            b.as_secs_f64() * 1e3
-        ),
-        _ => println!("the tone never reached the new offset — check the signal and the step size"),
+    let Some(b) = settled else {
+        // Nothing was measured. Saying so and stopping, rather than printing a
+        // summary built from a defaulted zero — which reads exactly like "your
+        // rig has no latency", the one conclusion this run cannot support.
+        println!("NO MEASUREMENT: the tone never reached the new offset.");
+        if weak {
+            println!(
+                "The reference was {:.5} — a noise peak, not a carrier. Tune the rig to \n\
+                 something strong (a shortwave broadcast, a local beacon) a few tens of kHz \n\
+                 off the centre you pass in, and run it again.",
+                mag,
+            );
+        } else {
+            println!(
+                "The carrier was strong enough, so suspect the step: it must stay inside \n\
+                 the span after the move, and clear of DC. Try a smaller one.",
+            );
+        }
+        h.set_center(center);
+        return;
+    };
+    let first = elapsed_first.unwrap_or(b);
+    println!(
+        "retune latency: first movement {:.0} ms, on frequency {:.0} ms",
+        first.as_secs_f64() * 1e3,
+        b.as_secs_f64() * 1e3,
+    );
+    if weak {
+        println!(
+            "  ...but off a reference of {mag:.5}, which is a very weak carrier. The figure \n\
+             tracked something real (it landed on the expected offset), but treat it as a \n\
+             starting point and confirm it on a strong signal."
+        );
+    }
+    // The transition is not a step: the rig's pipeline ramps from the first
+    // movement to the new frequency, and while it does, the samples are a blend
+    // of both. A pure delay — which is all `stream_delay_ms` can express —
+    // cannot be right across a ramp this wide, only centred in it.
+    let ramp = b.saturating_sub(first).as_secs_f64() * 1e3;
+    if ramp > 20.0 {
+        println!(
+            "  the move takes {ramp:.0} ms from first to last, so no single delay is exact \n\
+             across it — expect some residual smear on a fast drag."
+        );
     }
     println!(
-        "\nA drag moves the centre about once per displayed frame. At 60 fps and\n\
-         {:.0} ms of latency the picture runs {:.0} frames behind the label the\n\
-         engine puts on it.",
-        settled.unwrap_or_default().as_secs_f64() * 1e3,
-        settled.unwrap_or_default().as_secs_f64() * 60.0
+        "\nSet `stream_delay_ms` (Settings -> Radio -> Stream delay) to {:.0}.\n\
+         A drag moves the centre about once per displayed frame, so at 60 fps the\n\
+         picture runs {:.0} frames behind the label the engine would otherwise put\n\
+         on it. Setting it too high displaces the newest waterfall rows exactly as\n\
+         far as too low, the other way: if they run ahead of the older rows in the\n\
+         direction you are dragging, it is too high; if they trail, too low.",
+        b.as_secs_f64() * 1e3,
+        b.as_secs_f64() * 60.0,
     );
     h.set_center(center);
 }

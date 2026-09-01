@@ -23,8 +23,8 @@ use sdroxide_digi::{
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
-    AdcMeter, Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
-    MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
+    AdcMeter, Agc, AutoNotch, Binaural, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc,
+    Modulator, MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
     SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target, make_demod,
     make_modulator,
 };
@@ -235,6 +235,17 @@ const SCOPE_MAIN_STALE: Duration = Duration::from_secs(10);
 /// payload is a handful of floats, so the extra traffic is immaterial even over
 /// the remote-client WebSocket.
 const METER_INTERVAL: Duration = Duration::from_millis(33);
+
+/// The longest the engine's thread will be held waiting for the external T/R
+/// switch's contacts before RF is let out.
+///
+/// A relay throws in five to fifteen milliseconds and a sequencer wants a
+/// little more; anything beyond this is an audible hole in the receive tail and
+/// a delay between the operator's thumb and their own transmitter, and is far
+/// more likely to be a mistyped setting than a real requirement. Capped rather
+/// than refused, because a switch that leads by a quarter of a second is still
+/// a switch that protects the receiver.
+const MAX_TR_LEAD: Duration = Duration::from_millis(250);
 
 /// Consecutive over-limit SWR readings required before the guard fires. At the
 /// 33 ms meter interval this is about a fifth of a second of genuinely bad SWR,
@@ -447,6 +458,14 @@ pub struct EngineConfig {
     /// Which radio is on FreeDV, shared like `tx_gate`. `None` (the default,
     /// and every single-radio start): this engine's own mode is the answer.
     pub rade_watch: Option<Arc<crate::RadeWatch>>,
+    /// The station's external T/R switch, shared like `tx_gate` — the relay
+    /// that grounds the SDR's antenna while anything in this process is on the
+    /// air. `None` (the default) switches nothing.
+    ///
+    /// Shared rather than per-engine because the relay is in the antenna line,
+    /// not in a front end: whichever radio keys, the same contacts have to
+    /// throw, and they must not open while another one is still transmitting.
+    pub tr_switch: Option<Arc<crate::TrSwitch>>,
 }
 
 impl Default for EngineConfig {
@@ -468,6 +487,7 @@ impl Default for EngineConfig {
             tx_gate: None,
             store_sync: None,
             rade_watch: None,
+            tr_switch: None,
             record_iq: None,
         }
     }
@@ -1639,6 +1659,53 @@ fn run_chain_block(
     }
 }
 
+/// Binaural (pseudo-stereo) audio: spread the receive passband across the two
+/// ears, so that pitch becomes direction and tuning a signal floats it from one
+/// ear to the other (issue #263). What it actually does to the audio is
+/// [`sdroxide_dsp::Binaural`]'s business; this is where the receiver decides
+/// whether it runs at all.
+///
+/// `mono` comes in as the speaker audio and goes out as the left ear, with the
+/// right in `right`; `scratch` is where the left is built before the two are
+/// swapped, so nothing is copied twice. Both are left exactly as they were —
+/// and the widener dropped, rather than left holding a filter's worth of stale
+/// audio — whenever it is not wanted:
+///
+/// * the operator has not asked for it, or the mode is not one that has it
+///   ([`Mode::binaural_audio`]);
+/// * something else already owns the right ear. The sub receiver claims it
+///   explicitly and WFM stereo fills it automatically, and neither is worth
+///   giving up for an effect: the same order of precedence the stereo
+///   broadcast itself yields to.
+///
+/// A free function rather than a method for the reason [`run_chain_block`] is
+/// one: the buffers it works on and the widener that owns the filter state are
+/// separate fields of the engine, and both receive paths — a demodulated radio
+/// and a transceiver handing over its own audio — have to reach it.
+fn binaural_split(
+    slot: &mut Option<Binaural>,
+    rx: &RxState,
+    rate: f64,
+    right_free: bool,
+    mono: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+    right: &mut Vec<f32>,
+) {
+    if !rx.binaural || !rx.mode.binaural_audio() || !right_free || !right.is_empty() {
+        *slot = None;
+        return;
+    }
+    let b = slot.get_or_insert_with(|| Binaural::new(rate, rx.filter_lo, rx.filter_hi));
+    // Both re-asserted per block and both no-ops when nothing has moved: the
+    // speaker's rate changes when the operator picks another sound card, and
+    // the passband every time a filter edge is dragged.
+    b.set_rate(rate);
+    b.set_passband(rx.filter_lo, rx.filter_hi);
+    scratch.clear();
+    b.process(mono, scratch, right);
+    std::mem::swap(mono, scratch);
+}
+
 /// A satellite lock in progress: the parsed propagator, who is watching from
 /// where, and the numbers most recently computed from them.
 struct ActiveSatLock {
@@ -1825,6 +1892,11 @@ struct Engine {
     /// The centre the samples now arriving were taken at: the last entry of
     /// [`Engine::center_trail`] to have aged in. Seeded from the front end's
     /// own centre at open, and re-seeded whenever the source is replaced.
+    ///
+    /// Only meaningful on a front end that *declares* a stream delay — the
+    /// others have no trail to age anything in, and this stays on its seed
+    /// however far the dial travels. Read it through
+    /// [`Engine::stream_center_now`], never directly.
     stream_center_hz: f64,
     /// Device-rate samples this engine has taken from the front end, ever.
     ///
@@ -2303,8 +2375,15 @@ struct Engine {
     /// chain ends before a digital-voice mode gets the chance to replace it.
     main_play: Vec<f32>,
     /// Right channel of the main chain, non-empty only while WFM stereo is
-    /// decoding and the sub receiver is off.
+    /// decoding and the sub receiver is off — or while the binaural widener
+    /// below is placing the passband across the two ears.
     main_play_r: Vec<f32>,
+    /// Binaural (pseudo-stereo) audio: built on the first block that asks for it
+    /// and dropped when the operator switches it off, so a receiver that never
+    /// uses it carries no filter state. Its left ear lands in `bin_left`, which
+    /// is then swapped into `main_play` — see [`binaural_split`].
+    binaural: Option<Binaural>,
+    bin_left: Vec<f32>,
     /// Speaker-path attenuation asked for by a local spoken announcement.
     /// Held here as well as in the mixer so a device swap, which builds a new
     /// mixer, does not come back at full volume mid-announcement.
@@ -2416,6 +2495,22 @@ struct Engine {
     /// connection transitions bypass the throttle, movement does not.
     rot_last_status: Option<sdroxide_rotator::RotStatus>,
     next_rot_emit: Instant,
+    /// The external T/R switch's config as persisted (`relay.json`), announced
+    /// in the station bundle the way the rotator's is.
+    relay_cfg: sdroxide_types::RelayConfig,
+    /// The switch itself, shared with every other engine. The driver behind it
+    /// is built by the primary engine only — one station, one antenna line —
+    /// but every engine publishes into it, because any of them keying is the
+    /// station being on the air.
+    tr_switch: Option<Arc<crate::TrSwitch>>,
+    /// What was last told to the clients, so a status only goes out when it
+    /// changed.
+    relay_last_status: Option<sdroxide_types::RelayStatus>,
+    /// A configuration that arrived while the station was on the air, waiting
+    /// for the over to end. See [`Engine::sync_relay`].
+    relay_pending: bool,
+    /// Whether the lead cap has already been complained about this session.
+    relay_lead_capped: bool,
     /// What was last written to `session.json`, so the periodic check only
     /// touches the disk when the operator has actually moved. `None` when this
     /// engine does not remember its session (see
@@ -2948,6 +3043,7 @@ fn engine_thread(
         state.rx[0].agc = s.agc;
         state.rx[0].squelch_db = s.squelch_db;
         state.rx[0].noise_reduction = s.noise_reduction;
+        state.rx[0].binaural = s.binaural;
         state.tx.drive = s.drive;
         state.tx.tune_drive = s.tune_drive;
         state.tx.mic_gain = s.mic_gain;
@@ -3145,6 +3241,8 @@ fn engine_thread(
         voice_play: Vec::new(),
         main_play: Vec::new(),
         main_play_r: Vec::new(),
+        binaural: None,
+        bin_left: Vec::new(),
         speech_duck: 1.0,
         main_play_rec: Vec::new(),
         main_play_r_rec: Vec::new(),
@@ -3180,6 +3278,11 @@ fn engine_thread(
         tle_refresh: None,
         sat_lock: None,
         rot_cfg: sdroxide_types::RotatorConfig::default(),
+        relay_cfg: sdroxide_types::RelayConfig::default(),
+        tr_switch: engine_cfg.tr_switch.clone(),
+        relay_last_status: None,
+        relay_pending: false,
+        relay_lead_capped: false,
         rotator: None,
         rot_last_status: None,
         next_rot_emit: Instant::now(),
@@ -3279,6 +3382,12 @@ fn engine_thread(
     if engine.primary {
         engine.sync_rotator();
     }
+    engine.relay_cfg = sdroxide_config::load_relay_config();
+    // One station, one antenna line: only the primary engine opens the switch.
+    // Every engine still publishes into it — see `Engine::poll_tr_switch`.
+    if engine.primary {
+        engine.sync_relay();
+    }
     // Seed clients with the whole station configuration up front, for the same
     // reason as the operator config above: a settings dialog that has not been
     // told what the station is set to would show defaults, and applying those
@@ -3354,7 +3463,12 @@ fn engine_thread(
                         let _ = engine.source.tx_end();
                     }
                     // A dying engine must not leave the station interlock
-                    // claimed, or no surviving radio could ever key again.
+                    // claimed, or no surviving radio could ever key again —
+                    // nor its claim on the T/R switch, or the station's antenna
+                    // relay stays where this engine left it.
+                    engine.tx_active = false;
+                    engine.rig_tx = false;
+                    engine.cw_gate_until = None;
                     engine.release_tx_gate();
                     info!("all controllers gone; engine stopping");
                     return;
@@ -3426,6 +3540,7 @@ fn engine_thread(
         engine.poll_tle_refresh();
         engine.poll_sat_track();
         engine.poll_rotator_status();
+        engine.poll_tr_switch();
         // Attach (or re-attach) the configured radio on its own when the
         // front-end is only a stand-in — no trip through Settings.
         engine.poll_reconnect();
@@ -3447,7 +3562,10 @@ fn engine_thread(
                     warn!("could not unkey after a transmit failure: {e}");
                 }
                 // Same as the controller-gone exit: a dead engine must not
-                // keep the station interlock.
+                // keep the station interlock, nor the T/R switch.
+                engine.tx_active = false;
+                engine.rig_tx = false;
+                engine.cw_gate_until = None;
                 engine.release_tx_gate();
                 return;
             }
@@ -4129,6 +4247,22 @@ impl Engine {
             }
         }
 
+        // Binaural audio, if the operator asked for it: one ear becomes two, with
+        // the passband spread across them. Here rather than inside the receive
+        // chain because this is where the demodulated path and the transceiver's
+        // own audio have met, and because everything the decoders, the recorder
+        // and the remote stream tap is upstream of it — turning this on changes
+        // what the operator hears and nothing else.
+        binaural_split(
+            &mut self.binaural,
+            &self.state.rx[0],
+            out_rate,
+            !self.state.sub_rx_enabled,
+            &mut self.main_play,
+            &mut self.bin_left,
+            &mut self.main_play_r,
+        );
+
         // Both taps come out of one borrow: `run`'s own return would keep the
         // chain mutably borrowed, leaving no way to ask for the recorder tap
         // as well.
@@ -4369,10 +4503,23 @@ impl Engine {
         self.analyzer.process(iq);
 
         self.play_rx_audio(self.radio_fs);
-        // Mono: a demod-audio rig has one receiver and no sub, so there is
-        // never a second ear to fill.
+        // A demod-audio rig has one receiver and no sub, so the second ear is
+        // free — and the binaural widener is the one thing that fills it. This
+        // is the front end a great many operators are listening on, so it gets
+        // the same treatment the demodulated path does.
+        self.main_play_r.clear();
+        binaural_split(
+            &mut self.binaural,
+            &self.state.rx[0],
+            self.audio_out_rate,
+            true,
+            &mut self.audio_play,
+            &mut self.bin_left,
+            &mut self.main_play_r,
+        );
+        let right = (!self.main_play_r.is_empty()).then_some(&self.main_play_r[..]);
         if let Some(mixer) = self.mixer.as_mut() {
-            mixer.push(&self.audio_play, None, &self.audio_play_rec, None);
+            mixer.push(&self.audio_play, right, &self.audio_play_rec, None);
         }
     }
 
@@ -4733,19 +4880,7 @@ impl Engine {
             // An over the operator started at the radio. Recorded, never
             // answered: see [`ControlUpdate::RigTx`] for why keying along with
             // it would talk over the person holding the microphone.
-            ControlUpdate::RigTx(on) => {
-                if on != self.rig_tx {
-                    self.rig_tx = on;
-                    info!(
-                        "the radio is {} under its own control",
-                        match on {
-                            true => "transmitting",
-                            false => "receiving",
-                        }
-                    );
-                    self.follow_rig_tx(on);
-                }
-            }
+            ControlUpdate::RigTx(on) => self.adopt_rig_tx(on, "its own control"),
             ControlUpdate::Mode(m) => {
                 let cur = self.state.rx[0].mode;
                 // Against the mode we *command*, not the one on screen: SSTV is
@@ -5280,6 +5415,12 @@ impl Engine {
                         // control — the rig keys its own transmitter here and
                         // never looks at the audio we send it.
                         self.source.set_tx_drive(self.state.tx.drive as f64);
+                        // And throw the external T/R switch, for the same
+                        // reason and with the same lead. `tx_active` never
+                        // becomes true on this path, so nothing else in the
+                        // engine would ever key the relay for a message the rig
+                        // is about to put on the air at full power.
+                        self.lead_tr_switch();
                         self.source.send_cw(&text);
                     }
                 }
@@ -5288,6 +5429,13 @@ impl Engine {
                     self.cw_gate_until = None;
                     if !self.tx_active {
                         self.release_tx_gate();
+                        // The message never finished, so the hold has to start
+                        // now rather than at the length it was going to be.
+                        // `poll_tr_switch` would get there on the next tick;
+                        // this makes the receiver's return prompt instead.
+                        if let Some(hub) = self.tr_switch.as_ref() {
+                            hub.unkey(self.instance);
+                        }
                     }
                 }
             }
@@ -6041,7 +6189,7 @@ impl Engine {
         // the panadapter between the two sources every time the dial moved.
         wide_covers_viewport(
             (vp_lo, vp_hi),
-            self.stream_center_hz,
+            self.stream_center_now(),
             self.state.sample_rate,
             (wide_center, wide_span),
             self.wide_bins.len(),
@@ -6138,6 +6286,30 @@ impl Engine {
             return;
         }
         self.center_trail.push_back((self.samples_read, center_hz));
+    }
+
+    /// Where the samples in hand were taken, for a decision that has to be made
+    /// against the stream rather than against the dial.
+    ///
+    /// [`Engine::display_center_hz`] walks [`Engine::center_trail`] to work
+    /// this out, but only a front end that declares a stream delay ever builds
+    /// a trail: with no delay the samples in hand *are* at the commanded
+    /// centre, that function short-circuits, and
+    /// [`Engine::stream_center_hz`] is never written after its seed.
+    ///
+    /// Reading the field regardless is how the main panadapter came to compare
+    /// its viewport against wherever the receiver happened to be when the
+    /// engine opened. Every tune after that looked, to
+    /// [`Engine::wide_main_window`], like a viewport panned clean off the
+    /// passband — so an RX-888 drew the whole of HF from its 64.8 MHz overview
+    /// lane at 16 kHz a bin, everywhere except the one window the engine had
+    /// started in.
+    fn stream_center_now(&self) -> f64 {
+        if self.source.stream_delay_s() > 0.0 {
+            self.stream_center_hz
+        } else {
+            self.state.center_hz
+        }
     }
 
     /// The centre the samples now being drawn were actually taken at.
@@ -6502,6 +6674,7 @@ impl Engine {
             }
             SetAutoNotch { rx, on } => self.state.rx[rx.index()].auto_notch = on,
             SetWfmStereo { rx, on } => self.state.rx[rx.index()].wfm_stereo = on,
+            SetBinaural { rx, on } => self.state.rx[rx.index()].binaural = on,
             // Main receiver only, like the status it answers: the DRM panel
             // shows the broadcast being listened to.
             SetDrmService { service } => {
@@ -7734,6 +7907,32 @@ impl Engine {
                 self.rot_cfg = cfg;
                 self.sync_rotator();
                 self.emit_station_config();
+                return;
+            }
+            SetRelayConfig(cfg) => {
+                if let Err(e) = sdroxide_config::save_relay_config(&cfg) {
+                    warn!("saving T/R switch config: {e}");
+                }
+                self.relay_cfg = *cfg;
+                // Whichever engine is told opens the hardware and becomes the
+                // switch's owner — *not* only the primary one.
+                //
+                // The primary opens it at startup because somebody has to and
+                // one of them has to be chosen. But a remote client is attached
+                // to one radio's session, so its `SetRelayConfig` reaches that
+                // radio and no other: gating this on `primary` would mean an
+                // operator who set the switch up from their second radio's tab
+                // saved a configuration that never opened anything. The hub
+                // holds a single driver either way, and `sync_relay` closes the
+                // old one before opening the new.
+                self.sync_relay();
+                self.emit_station_config();
+                return;
+            }
+            TestRelay { channel } => {
+                if let Some(hub) = self.tr_switch.as_ref() {
+                    hub.test(channel);
+                }
                 return;
             }
             SetRegion(region) => {
@@ -9310,6 +9509,7 @@ impl Engine {
                 wsjtx: self.wsjtx_cfg.clone(),
                 sat: self.sat_cfg.clone(),
                 rotator: self.rot_cfg.clone(),
+                relay: self.relay_cfg.clone(),
                 region: sdroxide_types::region(),
                 band_plan: sdroxide_types::band_plan().clone(),
             },
@@ -9668,6 +9868,166 @@ impl Engine {
                 el_deg: st.el_deg,
                 error: st.error,
             });
+        }
+    }
+
+    /// (Re)build the external T/R switch to match the config.
+    ///
+    /// Refused while anything is on the air. Rebuilding drops the driver, and
+    /// dropping it puts every contact back to receive — under live RF that is
+    /// an antenna relay thrown mid-over, which is precisely the accident the
+    /// whole subsystem exists to prevent. The operator pressing APPLY during
+    /// their own transmission is not a rare mistake; it is what happens when
+    /// they are trying to fix the thing while testing it.
+    fn sync_relay(&mut self) {
+        let Some(hub) = self.tr_switch.clone() else { return };
+        if hub.busy() {
+            warn!("not rebuilding the T/R switch while the station is on the air");
+            self.notice("the T/R switch will be reconfigured after this over");
+            self.relay_pending = true;
+            return;
+        }
+        self.relay_pending = false;
+        self.relay_last_status = None;
+        // Close the old one *first*. Its thread owns a serial port or a device
+        // node, and the new configuration is very often the same one with a
+        // number changed — so opening before closing would have this engine
+        // race itself for its own hardware. Also the moment the contacts are
+        // put back to receive, which is why this is refused while on the air.
+        hub.install(None, &self.relay_cfg);
+        match sdroxide_relay::open(&self.relay_cfg) {
+            Ok(handle) => {
+                if let Some(h) = handle.as_ref() {
+                    info!("T/R switch: {}. {}", h.describe(), self.relay_cfg.sequence_note());
+                }
+                hub.set_open_error(None);
+                hub.install(handle, &self.relay_cfg);
+            }
+            Err(e) => {
+                warn!("T/R switch: {e}");
+                hub.install(None, &self.relay_cfg);
+                hub.set_open_error(Some(e.to_string()));
+            }
+        }
+        self.emit_relay_status();
+    }
+
+    /// Whether this radio is on the air by any route.
+    ///
+    /// Three terms, and the absence of a fourth is deliberate. `hw_ptt` is
+    /// **not** here: [`Engine::apply_hw_ptt`] sets it and *then* asks for the
+    /// over, so a key-down the rails refuse leaves it standing true with
+    /// nothing transmitting — and a relay driven from it would ground the
+    /// antenna for an over that never happened and hold it there until the
+    /// operator let go of the foot switch. A hardware PTT line reaches the
+    /// switch through `tx_active` like every other route.
+    fn on_air(&self) -> bool {
+        // `cw_gate_until` covers the one over with no key-up of its own: a
+        // message the rig's own keyer is sending, where `tx_active` is false
+        // throughout and the radio is nonetheless transmitting.
+        self.tx_active || self.rig_tx || self.cw_gate_until.is_some()
+    }
+
+    /// Throw the contacts and wait for them, immediately before RF.
+    ///
+    /// Blocking the engine's thread here is deliberate. The relay *command*
+    /// does not block it — the driver owns the port on its own thread and this
+    /// is a channel send — but the lead is waited out, because on a CAT rig
+    /// `tx_begin` **is** the key-down: RF appears the moment the PTT frame goes
+    /// out. Anything that did not block could not promise "contacts before RF",
+    /// which is the only thing this feature is for. The wait lands in the gap
+    /// where the receive path is about to be paused anyway, and at the ten or
+    /// twenty milliseconds a relay actually needs it is inside what the output
+    /// ring already carries.
+    ///
+    /// Capped, because an operator who types 500 ms should get a switch that
+    /// works and not a radio that stutters.
+    fn lead_tr_switch(&mut self) {
+        let Some(hub) = self.tr_switch.as_ref() else { return };
+        let wait = hub.key(self.instance);
+        if wait.is_zero() {
+            return;
+        }
+        if wait > MAX_TR_LEAD {
+            if !self.relay_lead_capped {
+                self.relay_lead_capped = true;
+                warn!(
+                    "the T/R switch asks for {} ms before transmit; waiting {} ms — a longer \
+                     lead would be an audible hole in the receive audio and a delay between the \
+                     operator and their own transmitter",
+                    wait.as_millis(),
+                    MAX_TR_LEAD.as_millis()
+                );
+            }
+            std::thread::sleep(MAX_TR_LEAD);
+        } else {
+            std::thread::sleep(wait);
+        }
+    }
+
+    /// Keep the shared switch in step with this radio, and relay its health.
+    ///
+    /// Called every tick. In the common case that is one atomic load and a
+    /// comparison — see [`crate::TrSwitch::publish`].
+    fn poll_tr_switch(&mut self) {
+        let Some(hub) = self.tr_switch.clone() else { return };
+        hub.publish(self.instance, self.on_air());
+
+        // A transmitter out in the shack keyed itself, and the sense line saw
+        // it in milliseconds rather than the few hundred the CAT poll takes.
+        // Adopted by exactly one engine — the hub decides which, since on a
+        // multi-radio station only one of them is the transceiver with the wire
+        // in it and telling the others would mute the wrong receiver and refuse
+        // the wrong key-down.
+        if let Some(keyed) = hub.take_sense_edge(self.instance) {
+            self.adopt_rig_tx(keyed, "the transmit sense line");
+        }
+
+        // A configuration that arrived mid-over, applied now that the station
+        // is off the air.
+        if self.relay_pending && !hub.busy() {
+            self.sync_relay();
+        }
+
+        if self.primary {
+            let st = hub.status();
+            if self.relay_last_status.as_ref() != Some(&st) {
+                self.relay_last_status = Some(st.clone());
+                let _ = self.event_tx.send(RadioEvent::RelayStatus(Box::new(st)));
+            }
+        }
+    }
+
+    fn emit_relay_status(&mut self) {
+        let Some(hub) = self.tr_switch.as_ref() else { return };
+        let st = hub.status();
+        self.relay_last_status = Some(st.clone());
+        let _ = self.event_tx.send(RadioEvent::RelayStatus(Box::new(st)));
+    }
+
+    /// The radio in front of us started an over of its own — reported over CAT,
+    /// or seen on the T/R switch's sense line, which is the same fact arriving
+    /// a few hundred milliseconds sooner.
+    ///
+    /// Recorded, never answered: keying along with it would talk over the
+    /// person holding the microphone. See [`ControlUpdate::RigTx`].
+    fn adopt_rig_tx(&mut self, on: bool, how: &str) {
+        if on == self.rig_tx {
+            return;
+        }
+        self.rig_tx = on;
+        info!(
+            "the radio is {} under {how}",
+            match on {
+                true => "transmitting",
+                false => "receiving",
+            }
+        );
+        self.follow_rig_tx(on);
+        // Straight through to the switch rather than waiting for the next tick.
+        // The whole value of hearing about this early is spending none of it.
+        if let Some(hub) = self.tr_switch.as_ref() {
+            hub.publish(self.instance, self.on_air());
         }
     }
 
@@ -10744,7 +11104,19 @@ impl Engine {
                     filter_lo: m.filter_lo,
                     filter_hi: m.filter_hi,
                 };
+                // The setup the channel was stored with, read exactly as
+                // `RecallMemory` reads it — an absent one as plain simplex with
+                // no tone (issue #204). A scan stops on a channel to be worked,
+                // and the operator who answers the call reaches for the PTT
+                // rather than for the shift: without this the over goes out on
+                // the last repeater's shift and tone, whichever channel the
+                // scan is actually sitting on (issue #264).
+                let repeater = m.repeater.unwrap_or_default().clamped();
                 self.place_entry_in_span(entry);
+                // After the dial, not before it: a channel stored with AUTO on
+                // resolves its shift against the frequency it lands on, and the
+                // one being left is the wrong band to ask about.
+                self.set_repeater(repeater);
             }
             ScanTarget::Freq(hz) => {
                 if self.state.rx[0].mode != self.scan_cfg.mode {
@@ -10825,10 +11197,21 @@ impl Engine {
         self.notice(&format!("transmit refused — {reason}"));
     }
 
-    /// Hand back the station's transmit interlock, if this engine holds it.
+    /// Hand back the station's transmit interlock, if this engine holds it,
+    /// and reconcile the external T/R switch with what is actually happening.
+    ///
+    /// Reconciled rather than released, and the difference matters: this is
+    /// called from [`Engine::deny_tx`], which runs on refusals that have
+    /// nothing to do with whether the station is on the air — a key-down
+    /// refused *because the rig is transmitting on its own PTT* being the case
+    /// in point. Dropping the contacts there would open an antenna relay under
+    /// somebody else's live RF and throw it straight back on the next tick.
     fn release_tx_gate(&self) {
         if let Some(gate) = self.tx_gate.as_ref() {
             gate.release(self.instance);
+        }
+        if let Some(hub) = self.tr_switch.as_ref() {
+            hub.publish(self.instance, self.on_air());
         }
     }
 
@@ -10931,35 +11314,38 @@ impl Engine {
     /// never worked leaves the front end exactly where it was — the same
     /// "no preference means no assertion" rule [`Engine::restore_antennas`]
     /// follows, and for the same reason.
+    ///
+    /// The socket is *asserted*, not compared: on a band change the radio may
+    /// already have moved it under us. An Icom's band stacking register carries
+    /// a socket of its own, so crossing into 40 m puts the rig on whatever was
+    /// last used there — and if that happens to match what sdroxide last read,
+    /// a comparison against the cached socket sends nothing and the wrong
+    /// aerial stays connected. That is why 30 m → 40 m left an IC-7610 on ANT1
+    /// while 20 m → 40 m switched it correctly: the same preference, and only
+    /// the *cached* value differed (issue #258).
     fn follow_band_antenna(&mut self, band: Band) {
         // Not where the source owns the receive port: a LimeRFE listens on the
         // socket it is cabled to whatever the band. Same exemption as
         // `restore_antennas`.
         let Some((rx, tx)) = self.band_antenna.get(&band).cloned() else { return };
-        let mut moved = false;
-        if let Some(name) = rx.filter(|n| {
-            !self.source.owns_rx_antenna()
-                && self.caps.antennas_rx.contains(n)
-                && self.state.antenna_rx != *n
-        }) {
+        let before = (self.state.antenna_rx.clone(), self.state.antenna_tx.clone());
+        if let Some(name) =
+            rx.filter(|n| !self.source.owns_rx_antenna() && self.caps.antennas_rx.contains(n))
+        {
             if let Err(e) = self.source.set_antenna(&name) {
                 warn!("switching to RX antenna {name} for {band:?}: {e}");
             }
             self.state.antenna_rx = self.source.current_antenna();
             self.want_antenna.0 = Some(name);
-            moved = true;
         }
-        if let Some(name) =
-            tx.filter(|n| self.caps.antennas_tx.contains(n) && self.state.antenna_tx != *n)
-        {
+        if let Some(name) = tx.filter(|n| self.caps.antennas_tx.contains(n)) {
             if let Err(e) = self.source.set_tx_antenna(&name) {
                 warn!("switching to TX antenna {name} for {band:?}: {e}");
             }
             self.state.antenna_tx = self.source.current_tx_antenna();
             self.want_antenna.1 = Some(name);
-            moved = true;
         }
-        if moved {
+        if before != (self.state.antenna_rx.clone(), self.state.antenna_tx.clone()) {
             let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
         }
     }
@@ -11118,6 +11504,7 @@ impl Engine {
             tx_eq: self.state.tx.eq,
             squelch_db: self.state.rx[0].squelch_db,
             noise_reduction: self.state.rx[0].noise_reduction,
+            binaural: self.state.rx[0].binaural,
             // The standing choice again, not what the front end of the moment
             // could do with it: a session written while the radio was switched
             // off would otherwise put 1 on disk and lose it for good.
@@ -12257,6 +12644,18 @@ impl Engine {
             // frequency, and the contact sits a sidetone above the dial — the
             // same offset the receive window already rides on.
             let rig_txf = txf + self.rig_cw_offset_hz();
+            // Every rail has passed and the station is about to be on the air.
+            // The external T/R switch leads the RF — contacts first, drive
+            // second, always — which is the one guarantee that whole subsystem
+            // exists to make. Placed after the rails on purpose, so a refused
+            // key-down never touches the hardware and there is nothing to
+            // unwind.
+            if let Some(hub) = self.tr_switch.as_ref() {
+                if let Some(why) = hub.refusal() {
+                    return self.deny_tx(&why);
+                }
+            }
+            self.lead_tr_switch();
             match self.source.tx_begin(rig_txf, begin_rate) {
                 Ok(tx_rate) => {
                     // Rate-match the digital modes to whatever this radio
@@ -12369,11 +12768,28 @@ impl Engine {
                         self.burst_unkeys = false;
                     }
                 }
-                Err(e) => self.deny_tx(&format!("the radio refused to key: {e}")),
+                Err(e) => {
+                    // The contacts were thrown a moment ago and nothing came of
+                    // it. Dropped with no hold: there was never anything on the
+                    // air to protect, and a receiver held off for it would be
+                    // deaf for no reason.
+                    if let Some(hub) = self.tr_switch.as_ref() {
+                        hub.abort(self.instance);
+                    }
+                    self.deny_tx(&format!("the radio refused to key: {e}"))
+                }
             }
         } else {
             if let Err(e) = self.source.tx_end() {
                 warn!("tx_end: {e}");
+            }
+            // Immediately after the radio has been told to stop, so the hold
+            // times are measured from when the RF actually ends rather than
+            // from whenever the next loop tick happens to come round. Returns
+            // at once — the holds are the driver's business and this thread has
+            // a receiver to get back to.
+            if let Some(hub) = self.tr_switch.as_ref() {
+                hub.unkey(self.instance);
             }
             // Give a rig with its own power control its operating level back.
             // TUNE holds it at the (deliberately low) tune level for the length
@@ -14036,6 +14452,118 @@ fn slide_rows(batch: &mut [u8], from: (f64, f64, usize), to: (f64, f64, usize)) 
         }
     }
     true
+}
+
+#[cfg(test)]
+mod binaural_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+
+    fn cw(binaural: bool) -> RxState {
+        RxState { binaural, ..RxState::with_mode(Mode::Cw) }
+    }
+
+    /// A 700 Hz note in the middle of the CW passband, at a level the clamp
+    /// never reaches.
+    fn note() -> Vec<f32> {
+        (0..4_096)
+            .map(|i| 0.3 * (std::f64::consts::TAU * 700.0 * f64::from(i) / RATE).cos() as f32)
+            .collect()
+    }
+
+    /// `binaural_split` against one block: what came back in each ear, and
+    /// whether the widener was kept.
+    fn split(rx: &RxState, right_free: bool, right_in: &[f32]) -> (Vec<f32>, Vec<f32>, bool) {
+        let mut slot = None;
+        let (mut mono, mut scratch) = (note(), Vec::new());
+        let mut right = right_in.to_vec();
+        binaural_split(&mut slot, rx, RATE, right_free, &mut mono, &mut scratch, &mut right);
+        (mono, right, slot.is_some())
+    }
+
+    /// With it on in CW, the second ear is filled and the two are no longer
+    /// the same signal — but they still sum back to the audio that went in.
+    #[test]
+    fn cw_fills_the_second_ear() {
+        let (left, right, kept) = split(&cw(true), true, &[]);
+        assert!(kept, "the widener should be kept while it is running");
+        assert_eq!(left.len(), 4_096);
+        assert_eq!(right.len(), 4_096);
+        assert!(left != right, "the two ears are the same signal");
+        // Past the latency, where both ears carry real audio rather than the
+        // priming zeros.
+        let mono = note();
+        let far = 2_048;
+        assert!(
+            (far..4_096).any(|i| (left[i] - mono[i]).abs() > 0.05),
+            "the left ear is unchanged, so nothing was spread"
+        );
+        assert!(right[far..].iter().any(|s| s.abs() > 0.05), "the right ear is silent");
+    }
+
+    /// SSB is spread too — the same treatment as CW, which is what the modes
+    /// the chip is drawn in ask for.
+    #[test]
+    fn ssb_is_spread_as_well() {
+        let rx = RxState { binaural: true, ..RxState::with_mode(Mode::Usb) };
+        let (left, right, kept) = split(&rx, true, &[]);
+        assert!(kept);
+        assert_eq!(right.len(), 4_096);
+        assert!(left != right, "the two ears are the same signal");
+    }
+
+    /// Every mode that is *not* offered it is left exactly as it was: no second
+    /// ear, no widener, and the audio untouched.
+    #[test]
+    fn other_modes_are_left_mono() {
+        for mode in [Mode::Am, Mode::Nfm, Mode::Ft8, Mode::Digu] {
+            let rx = RxState { binaural: true, ..RxState::with_mode(mode) };
+            let (left, right, kept) = split(&rx, true, &[]);
+            assert_eq!(left, note(), "{mode:?} was widened");
+            assert!(right.is_empty(), "{mode:?} filled the right ear");
+            assert!(!kept);
+        }
+    }
+
+    /// …and so is CW with it switched off, which is also where the filter
+    /// state is dropped rather than left to go stale.
+    #[test]
+    fn switching_it_off_leaves_the_audio_alone() {
+        let (left, right, kept) = split(&cw(false), true, &[]);
+        assert_eq!(left, note());
+        assert!(right.is_empty());
+        assert!(!kept);
+
+        let mut slot = None;
+        let (mut mono, mut scratch, mut right) = (note(), Vec::new(), Vec::new());
+        binaural_split(&mut slot, &cw(true), RATE, true, &mut mono, &mut scratch, &mut right);
+        assert!(slot.is_some());
+        right.clear();
+        binaural_split(&mut slot, &cw(false), RATE, true, &mut mono, &mut scratch, &mut right);
+        assert!(slot.is_none(), "the widener outlived the setting that asked for it");
+    }
+
+    /// The sub receiver owns the right ear when it is running: an explicit
+    /// second receiver outranks an effect on the first.
+    #[test]
+    fn the_sub_receiver_keeps_the_right_ear() {
+        let (left, right, kept) = split(&cw(true), false, &[]);
+        assert_eq!(left, note());
+        assert!(right.is_empty());
+        assert!(!kept);
+    }
+
+    /// So does audio that is already stereo — nothing here overwrites an ear
+    /// something else has filled.
+    #[test]
+    fn an_ear_that_is_already_filled_is_not_taken() {
+        let filled = vec![0.1f32; 4_096];
+        let (left, right, kept) = split(&cw(true), true, &filled);
+        assert_eq!(left, note());
+        assert_eq!(right, filled);
+        assert!(!kept);
+    }
 }
 
 #[cfg(test)]

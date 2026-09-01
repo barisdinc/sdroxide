@@ -117,6 +117,15 @@ pub enum DeviceProbe {
     /// verified against hardware, so a fault can be reported without asking
     /// anyone to reproduce it under a log filter.
     Report(ReportKind),
+    /// The switching devices on that machine — USB HID relay boards and the
+    /// sound cards with usable GPIO pins — for the T/R switch's picker.
+    ///
+    /// Serial relay boards are not here: they are serial ports, and
+    /// [`DeviceProbe::SerialPorts`] already answers for those. Non-invasive,
+    /// like the dongle probes: nothing is opened.
+    ///
+    /// Appended last, for the usual reason.
+    Relays,
 }
 
 /// A connection test: open, ask what is there, and hang up again.
@@ -187,6 +196,13 @@ pub enum ReportKind {
     Elad,
     Lime,
     HydraSdr,
+    /// The external T/R switch. Not "unverified against hardware" like the rest
+    /// of this list so much as *unverifiable from here*: the relay either
+    /// clicked or it did not, and nothing in the program can tell which — so
+    /// the trace of what it was told is the whole of the evidence.
+    ///
+    /// Appended last, for the usual reason.
+    Relay,
 }
 
 /// What the machine with the radio on it answered.
@@ -228,4 +244,7 @@ pub enum ProbeAnswer {
     /// without them. The controls that ask are greyed out rather than left to
     /// look broken, so this is an answer and not a silence.
     Unsupported,
+    /// The switching devices that machine can see. Appended last, for the usual
+    /// reason.
+    Relays(Vec<crate::RelayDevice>),
 }

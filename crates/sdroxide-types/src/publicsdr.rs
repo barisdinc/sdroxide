@@ -124,7 +124,12 @@ impl PublicSdrEntry {
     /// differently depending on how it was opened.
     pub fn radio_config(&self, base: &RadioConfig, low_bandwidth: bool) -> RadioConfig {
         let mut cfg = base.clone();
-        cfg.backend = self.backend(low_bandwidth);
+        // Through `set_backend`, not by assigning the field: whatever ranges
+        // the operator had stated for the interface this radio is leaving are
+        // its own radio's, and have to be parked with it rather than
+        // overwritten by the two lines below. That was issue #254 — a public
+        // SpyServer's 200-350 MHz left clamped over an IC-9700.
+        cfg.set_backend(self.backend(low_bandwidth));
         match self.network {
             PublicSdrNetwork::SpyServer => {
                 let block = if low_bandwidth { &mut cfg.spyserver_vfo } else { &mut cfg.spyserver };
@@ -142,7 +147,10 @@ impl PublicSdrEntry {
         }
         // The receiver's published range, so the dial and the transmit gate are
         // held to what the far end actually covers. A Kiwi that starts at
-        // 10 kHz and one that starts at 1.8 MHz are different radios.
+        // 10 kHz and one that starts at 1.8 MHz are different radios. Written
+        // over whatever this interface last carried rather than merged: it
+        // describes the receiver being taken now, not the one taken last week.
+        cfg.freq_ranges_rx.clear();
         if self.min_hz < self.max_hz {
             cfg.freq_ranges_rx = vec![(self.min_hz, self.max_hz)];
         }
@@ -743,6 +751,41 @@ var kiwisdr_com =
             narrow.spyserver, base.spyserver,
             "the low-bandwidth pick must not also write the wideband block"
         );
+    }
+
+    /// Issue #254. Taking a public receiver in the tab a transceiver was in
+    /// must not leave the receiver's coverage behind on the transceiver: the
+    /// operator switched an IC-9700 tab to a SpyServer, switched it straight
+    /// back, and found the dial still held to the SpyServer's 200-350 MHz with
+    /// nothing on the page to say why.
+    #[test]
+    fn taking_a_receiver_leaves_the_transceivers_own_ranges_where_they_were() {
+        // A rig on the LAN with the operator's own word for what it covers.
+        let mut base = RadioConfig { backend: Backend::IcomNet, ..RadioConfig::default() };
+        base.freq_ranges_rx = vec![(144e6, 148e6), (430e6, 450e6)];
+        base.freq_ranges_tx = vec![(144e6, 146e6)];
+
+        let kiwi = &parse_kiwisdr_directory(KIWI_SAMPLE).expect("parses")[0];
+        let taken = kiwi.radio_config(&base, false);
+        assert_eq!(taken.freq_ranges_rx, vec![(0.0, 30e6)], "the Kiwi's own coverage");
+        assert!(taken.freq_ranges_tx.is_empty(), "these are other people's antennas");
+
+        // And back again, the way the reporter did it: the interface picker.
+        let mut back = taken.clone();
+        back.set_backend(Backend::IcomNet);
+        assert_eq!(back.freq_ranges_rx, base.freq_ranges_rx, "the Icom's own ranges, restored");
+        assert_eq!(back.freq_ranges_tx, base.freq_ranges_tx);
+        assert_eq!(back.kiwi.address, taken.kiwi.address, "and the Kiwi is still configured");
+    }
+
+    /// Two receivers on the same interface, one after the other: the second
+    /// one's coverage replaces the first's rather than being added to it.
+    #[test]
+    fn a_second_receiver_replaces_the_first_ones_coverage() {
+        let entries = parse_kiwisdr_directory(KIWI_SAMPLE).expect("parses");
+        let first = entries[0].radio_config(&RadioConfig::default(), false);
+        let second = entries[2].radio_config(&first, false);
+        assert_eq!(second.freq_ranges_rx.len(), 1, "{:?}", second.freq_ranges_rx);
     }
 
     #[test]

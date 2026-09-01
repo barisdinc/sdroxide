@@ -181,6 +181,7 @@ async fn run_session(
         adsb_status,
         vdl2_status,
         drm,
+        relay,
     ) = {
         let latest = shared.latest.lock().unwrap();
         (
@@ -203,6 +204,7 @@ async fn run_session(
             latest.adsb_status.clone(),
             latest.vdl2_status.clone(),
             latest.drm.clone(),
+            latest.relay.clone(),
         )
     };
     let ack = ServerMsg::HelloAck { proto: PROTO_VERSION, caps, state, rx_codec, tx_codec };
@@ -285,6 +287,12 @@ async fn run_session(
     // to see it immediately, and must not offer to start one that is running.
     if sat_track.is_some() {
         let _ = socket.send(msg(&ServerMsg::SatTrack(sat_track))).await;
+    }
+    // And the T/R switch, for the strongest version of the same reason: a relay
+    // that is not answering is the one standing condition here that a client
+    // needs to know about *before* it touches the PTT button.
+    if let Some(r) = relay {
+        let _ = socket.send(msg(&ServerMsg::RelayStatus(r))).await;
     }
     // A standing condition rather than an event: whoever attaches next has to
     // know the radio is refusing tunes or reconnecting, not just whoever

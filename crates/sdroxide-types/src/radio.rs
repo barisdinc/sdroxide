@@ -1496,6 +1496,15 @@ impl TciConfig {
     /// it wrong is bounded either way — the axis is off by the drag rate times
     /// the *error*, where before it was off by the drag rate times the whole
     /// delay.
+    ///
+    /// A second ExpertSDR3 setup on another SunSDR2DX, also on loopback,
+    /// measured **159 ms** at 192 kHz (2026-08-31) — 47 ms to first movement
+    /// and 159 ms to settle, so the retune is a ramp rather than a step and no
+    /// single delay is exact across it. That is a 50 ms spread on the same rig
+    /// *model*, which is why this is a slider on the settings tab and not a
+    /// constant: it has to be calibrated per setup with
+    /// `cargo run --release -p sdroxide-tci --example retune_latency`, and
+    /// confirmed by eye on a drag.
     pub const DEFAULT_STREAM_DELAY_MS: f64 = 130.0;
 }
 
@@ -2699,6 +2708,38 @@ impl Rx888Config {
     pub fn ddc_out_rate_hz(adc_rate_hz: f64, ddc_bins: u32) -> f64 {
         let bins = if ddc_bins == 0 { 256 } else { ddc_bins };
         adc_rate_hz * f64::from(bins) / f64::from(Self::DDC_BLOCK)
+    }
+
+    /// The R828D's IF carrier with its 8 MHz filter selected
+    /// (`sdroxide_rx888::band::IF_CENTER_HZ`), repeated here for the reason
+    /// [`Self::DDC_BLOCK`] is: the settings UI has to be able to label a width
+    /// without linking the driver.
+    pub const VHF_IF_CENTER_HZ: f64 = 4_570_000.0;
+
+    /// Where the receiver hands over to its tuner
+    /// (`sdroxide_rx888::band::crossover_hz`): the ADC's own Nyquist limit,
+    /// unless that lands below the tuner's floor.
+    pub fn vhf_crossover_hz(adc_rate_hz: f64) -> f64 {
+        (adc_rate_hz / 2.0).max(24_000_000.0)
+    }
+
+    /// Whether a panadapter width is usable *above* that crossover.
+    ///
+    /// The downconverter reads a **real** spectrum, so its window must lie
+    /// inside DC..Nyquist and its centre clamps up to `out/2` at the bottom.
+    /// Above the crossover the wanted signal is no longer the antenna — it is
+    /// the tuner's IF, parked at [`Self::VHF_IF_CENTER_HZ`] — so a window wider
+    /// than twice that cannot be centred on the IF at all. It pins at `out/2`,
+    /// the tuner's 8 MHz of IF fills only the low part of it, and the VHF
+    /// path's spectrum inversion then puts that on the *right* of the
+    /// panadapter with dead spectrum to its left.
+    ///
+    /// Nothing is broken when this is false — every width is delivered, and the
+    /// tuned signal is received and reported off-centre. There is simply no
+    /// more signal to show: the tuner has 8 MHz and no more, however wide the
+    /// window asking for it.
+    pub fn width_works_on_vhf(adc_rate_hz: f64, ddc_bins: u32) -> bool {
+        Self::ddc_out_rate_hz(adc_rate_hz, ddc_bins) <= 2.0 * Self::VHF_IF_CENTER_HZ
     }
 }
 
@@ -5935,6 +5976,30 @@ impl FobosConfig {
     ];
 }
 
+/// Tuning ranges an operator stated for an interface this radio is not on at
+/// the moment.
+///
+/// [`RadioConfig::freq_ranges_rx`] and its transmit twin describe *a device*,
+/// and a tab can be moved from one device to another — by the interface picker
+/// in Settings, or wholesale by "Public SDRs". Leaving the numbers where they
+/// were makes them a statement about hardware that is no longer there: issue
+/// #254, where taking a public SpyServer in the tab an IC-9700 was in left the
+/// receiver's published 200-350 MHz clamped over the Icom when the operator
+/// switched back, with no way to see where it had come from.
+///
+/// So the ranges travel with the interface they were stated for.
+/// [`RadioConfig::set_backend`] parks the pair being left here and takes back
+/// whatever this radio last stated for the one being taken up. One entry per
+/// interface at most, which bounds the list at the number of variants
+/// [`Backend`] has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParkedRanges {
+    pub backend: Backend,
+    pub rx: Vec<(f64, f64)>,
+    pub tx: Vec<(f64, f64)>,
+}
+
 /// Persisted backend configuration (`radio.json`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -6029,6 +6094,53 @@ pub struct RadioConfig {
     /// RigExpert Fobos SDR. Appended after `kiwi`, for the same reason as
     /// every field above it.
     pub fobos: FobosConfig,
+    /// Stated tuning ranges belonging to interfaces this radio is not on —
+    /// see [`ParkedRanges`]. Appended after `fobos`, for the same reason as
+    /// every field above it: the layout is positional.
+    ///
+    /// Empty in a configuration written before this existed, which is exactly
+    /// right: such a radio has only ever stated ranges for the interface it is
+    /// on, and those are still in the two fields above.
+    pub freq_ranges_parked: Vec<ParkedRanges>,
+}
+
+impl RadioConfig {
+    /// Point this radio at another interface, carrying the stated tuning
+    /// ranges with the interface they were stated for.
+    ///
+    /// Every path that changes [`Self::backend`] on a configured radio goes
+    /// through here rather than assigning the field: the ranges are the
+    /// operator's word about a *device*, and a tab that has been moved to a
+    /// different one must not go on enforcing the last one's limits. See
+    /// [`ParkedRanges`] for what that cost in issue #254.
+    ///
+    /// Nothing else in the configuration moves. Every interface already has a
+    /// block of its own, so the address, the sound cards and the converter in
+    /// front of them are all still there when a radio comes back to where it
+    /// was.
+    pub fn set_backend(&mut self, backend: Backend) {
+        if backend == self.backend {
+            return;
+        }
+        // Park what the interface being left had stated, under its own name,
+        // so that coming back to it is not a retype. Nothing is parked for an
+        // interface that stated nothing — an empty pair means "take the
+        // device's own answer", which is also what a missing entry means.
+        let (rx, tx) =
+            (std::mem::take(&mut self.freq_ranges_rx), std::mem::take(&mut self.freq_ranges_tx));
+        let left = self.backend;
+        self.freq_ranges_parked.retain(|p| p.backend != left);
+        if !rx.is_empty() || !tx.is_empty() {
+            self.freq_ranges_parked.push(ParkedRanges { backend: left, rx, tx });
+        }
+        // ...and take back whatever was stated for the one being taken up.
+        if let Some(i) = self.freq_ranges_parked.iter().position(|p| p.backend == backend) {
+            let p = self.freq_ranges_parked.remove(i);
+            self.freq_ranges_rx = p.rx;
+            self.freq_ranges_tx = p.tx;
+        }
+        self.backend = backend;
+    }
 }
 
 #[cfg(test)]
@@ -6928,6 +7040,66 @@ mod tests {
         assert_eq!(cfg.freq_ranges_tx, vec![(430_000_000.0, 440_000_000.0)]);
     }
 
+    /// Issue #254. The stated ranges describe a device, so moving a tab to
+    /// another interface has to leave them behind with the one they were
+    /// stated for — and hand them back when the operator comes home.
+    #[test]
+    fn stated_ranges_travel_with_the_interface_they_were_stated_for() {
+        let mut cfg = RadioConfig { backend: Backend::IcomNet, ..RadioConfig::default() };
+        cfg.freq_ranges_rx = vec![(144e6, 148e6)];
+        cfg.freq_ranges_tx = vec![(144e6, 146e6)];
+
+        cfg.set_backend(Backend::SpyServer);
+        assert_eq!(cfg.backend, Backend::SpyServer);
+        assert!(cfg.freq_ranges_rx.is_empty(), "the Icom's receive range came along");
+        assert!(cfg.freq_ranges_tx.is_empty(), "the Icom's transmit range came along");
+
+        // The receiver states its own, the way "Public SDRs" does.
+        cfg.freq_ranges_rx = vec![(200e6, 350e6)];
+
+        cfg.set_backend(Backend::IcomNet);
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)], "the Icom's own, back again");
+        assert_eq!(cfg.freq_ranges_tx, vec![(144e6, 146e6)]);
+
+        cfg.set_backend(Backend::SpyServer);
+        assert_eq!(cfg.freq_ranges_rx, vec![(200e6, 350e6)], "and the SpyServer's, back again");
+        assert!(cfg.freq_ranges_tx.is_empty());
+    }
+
+    /// The parked list is keyed by interface, so a tab shuffled around the
+    /// picker cannot grow one without bound — and an interface that stated
+    /// nothing parks nothing, because an empty pair and a missing entry both
+    /// mean "take the device's own answer".
+    #[test]
+    fn parking_ranges_keeps_one_entry_per_interface_and_none_for_an_empty_one() {
+        let mut cfg = RadioConfig { backend: Backend::IcomNet, ..RadioConfig::default() };
+        cfg.freq_ranges_rx = vec![(144e6, 148e6)];
+        for _ in 0..4 {
+            cfg.set_backend(Backend::SpyServer);
+            cfg.set_backend(Backend::IcomNet);
+        }
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)]);
+        assert!(cfg.freq_ranges_parked.is_empty(), "{:?}", cfg.freq_ranges_parked);
+
+        // Setting the interface it is already on is not a move.
+        cfg.set_backend(Backend::IcomNet);
+        assert_eq!(cfg.freq_ranges_rx, vec![(144e6, 148e6)]);
+        assert!(cfg.freq_ranges_parked.is_empty());
+    }
+
+    /// A `radio.json` from before the parked list existed loads with an empty
+    /// one, which is the truth about it: such a radio has only ever stated
+    /// ranges for the interface it is on, and those are still where they were.
+    #[test]
+    fn a_config_from_before_ranges_were_parked_still_loads() {
+        let cfg: RadioConfig = serde_json::from_str(
+            r#"{"backend": "IcomNet", "freq_ranges_rx": [[144000000.0, 148000000.0]]}"#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.freq_ranges_rx, vec![(144_000_000.0, 148_000_000.0)]);
+        assert!(cfg.freq_ranges_parked.is_empty());
+    }
+
     #[test]
     fn hpsdr_defaults_round_trip() {
         let cfg = HpsdrConfig::default();
@@ -6968,5 +7140,33 @@ mod tests {
         assert_eq!(chains("LimeSDR-PCIe, media=PCIe"), 2);
         assert_eq!(chains("LimeSDR-Mini_v2, media=USB 3.0"), 1);
         assert_eq!(chains("LimeNET-Micro, media=USB 2.0"), 1);
+    }
+
+    /// Which RX-888 panadapter widths the tuner's IF can actually fill.
+    ///
+    /// The reported case, at the 129.6 MHz clock: 1/32 and 1/16 look right and
+    /// everything above them puts the whole of the live spectrum on the right
+    /// of the waterfall. That is not a width the receiver failed to deliver —
+    /// it is the R828D's 8 MHz IF, parked at 4.57 MHz, in a window too wide to
+    /// centre on it, mirrored by the VHF path's high-side injection.
+    #[test]
+    fn a_vhf_width_has_to_fit_around_the_tuners_if() {
+        const CLOCK: f64 = 129_600_000.0;
+        let ok = |bins| Rx888Config::width_works_on_vhf(CLOCK, bins);
+        assert!(ok(256), "1/32 — 4.05 MHz, centred on the IF with room to spare");
+        assert!(ok(512), "1/16 — 8.1 MHz, the widest that still centres");
+        assert!(!ok(1024), "1/8 — 16.2 MHz, the width in the report");
+        assert!(!ok(2048));
+        assert!(!ok(4096));
+
+        // The boundary is twice the IF carrier, whatever the clock: at half
+        // this one the same 8.1 MHz is 1/8 rather than 1/16, and still fits.
+        assert!(Rx888Config::width_works_on_vhf(64_800_000.0, 1024));
+        assert!(!Rx888Config::width_works_on_vhf(64_800_000.0, 2048));
+
+        // And the crossover the warning is keyed on: Nyquist, until that falls
+        // below the tuner's own floor.
+        assert_eq!(Rx888Config::vhf_crossover_hz(CLOCK), 64_800_000.0);
+        assert_eq!(Rx888Config::vhf_crossover_hz(32_400_000.0), 24_000_000.0);
     }
 }

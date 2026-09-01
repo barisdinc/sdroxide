@@ -131,6 +131,10 @@ pub struct RealFir {
 }
 
 impl RealFir {
+    pub fn new(taps: Vec<f32>) -> Self {
+        RealFir { taps, buf: Vec::new() }
+    }
+
     pub fn lowpass(ntaps: usize, cutoff_hz: f64, sample_rate: f64) -> Self {
         RealFir { taps: lowpass_taps(ntaps, cutoff_hz / sample_rate), buf: Vec::new() }
     }

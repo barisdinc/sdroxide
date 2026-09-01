@@ -53,6 +53,7 @@ pub fn probe(req: DeviceProbe, radio: u32) -> ProbeAnswer {
         DeviceProbe::Fobos => ProbeAnswer::Fobos(fobos_devices()),
         DeviceProbe::Test(t) => ProbeAnswer::Test(t.kind(), test(&t)),
         DeviceProbe::Report(k) => ProbeAnswer::Report(k, report(k, radio)),
+        DeviceProbe::Relays => ProbeAnswer::Relays(sdroxide_relay::list()),
     }
 }
 
@@ -172,6 +173,11 @@ fn report(kind: ReportKind, radio: u32) -> String {
                 .to_string()
         }),
         ReportKind::Lime => lime_report(),
+        ReportKind::Relay => sdroxide_relay::diagnostics().unwrap_or_else(|| {
+            "No T/R switch has been opened yet — set one up in Settings \u{2192} T/R switch and \
+             press APPLY first."
+                .to_string()
+        }),
     }
 }
 

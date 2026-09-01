@@ -73,6 +73,12 @@ pub struct RxState {
     /// the audio gate opens. `None` (the default) is carrier squelch — the
     /// gate follows [`Self::squelch_db`] alone. NFM only.
     pub tone_sql: Option<crate::SubTone>,
+    /// Binaural (pseudo-stereo) audio: spread the passband across the stereo
+    /// image, so that pitch becomes direction and tuning a signal floats it
+    /// from one ear to the other. CW and SSB ([`crate::Mode::binaural_audio`]),
+    /// and read from the main receiver alone — the sub receiver *is* the other
+    /// ear, and claims it whenever it is running.
+    pub binaural: bool,
 }
 
 impl RxState {
@@ -92,6 +98,7 @@ impl RxState {
             auto_notch: false,
             wfm_stereo: true,
             tone_sql: None,
+            binaural: false,
         }
     }
 }

@@ -1010,7 +1010,46 @@ use sdroxide_types::{
 /// dropped snapshot costs nothing because the next carries the same
 /// information, and a client that connects mid-session gets the whole log
 /// rather than whatever happens to arrive next.
-pub const PROTO_VERSION: u16 = 114;
+/// **115** — stated tuning ranges follow the interface they were stated for
+/// (issue #254).
+///
+/// [`sdroxide_types::RadioConfig`] gains `freq_ranges_parked`, the RX/TX ranges
+/// belonging to interfaces this radio is not on at the moment — what
+/// `RadioConfig::set_backend` puts the old interface's numbers into when a tab
+/// is moved to another device, so that a public receiver's published coverage
+/// stops clamping the transceiver that was there before it. Appended to the end
+/// of the struct, like every field above it, and the struct rides
+/// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole: a v114 peer
+/// would read the tail of one as garbage, which is what the handshake's
+/// equality test stops before a frame is exchanged.
+/// **116** — binaural (pseudo-stereo) CW audio (issue #263).
+///
+/// [`sdroxide_types::RxState`] gains `binaural`, and with it
+/// `Command::SetBinaural`. The field is appended to the end of the struct and
+/// the command to the end of its enum, as everything above them is — but
+/// `RxState` rides inside `RadioState`, which is sent whole a few times a
+/// second, so a v115 peer would read the tail of every state message one byte
+/// out. That is what the handshake's equality test stops before a frame is
+/// exchanged.
+///
+/// Nothing else on the wire moves: the widener runs on the *speaker* path of
+/// whichever end is doing the listening, and the audio a remote client is sent
+/// is the mono downmix, which binaural leaves untouched by construction.
+/// **117** — the station's external transmit/receive switch (issue #227).
+///
+/// A relay board, a handshake line or a sound-card GPIO pin that grounds the
+/// SDR's antenna while the station transmits, and sequences an amplifier with
+/// it. [`sdroxide_types::StationConfig`] gains `relay`, `Command` gains
+/// `SetRelayConfig` and `TestRelay`, and `ServerMsg` gains `RelayStatus`.
+///
+/// The command and the message are appended to the end of their enums as
+/// always, but the config field is the reason this is a bump rather than a
+/// free addition: `StationConfig` rides `RadioEvent::StationConfig` and
+/// `ServerMsg::StationConfig` **whole**, so a v116 peer would read the tail of
+/// every station bundle one field out — and that bundle carries the band plan
+/// the client draws its band edges from. The handshake's equality test stops
+/// that before a frame is exchanged.
+pub const PROTO_VERSION: u16 = 117;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1411,6 +1450,21 @@ pub enum ServerMsg {
     /// when it is not. A whole snapshot, twice a second — see
     /// [`sdroxide_types::Vdl2Status`].
     Vdl2Status(Box<sdroxide_types::Vdl2Status>),
+    /// The station's external T/R switch, mirrored from the engine's
+    /// `RadioEvent::RelayStatus`: whether one is configured, whether the
+    /// hardware is answering, what it is, and whether the contacts are in their
+    /// transmit state.
+    ///
+    /// Cached by the server and replayed on connect — unlike
+    /// [`ServerMsg::RotatorStatus`], which is not, and which therefore leaves a
+    /// client that attaches mid-session with a blank panel. This is a standing
+    /// condition and a safety one: an operator opening the settings dialog
+    /// remotely has to be told at once that the relay protecting the receiver
+    /// is not answering, rather than after the next thing that happens to
+    /// change.
+    ///
+    /// Appended last, for the usual reason.
+    RelayStatus(Box<sdroxide_types::RelayStatus>),
 }
 
 /// One radio in a station's roster, as a client sees it.
