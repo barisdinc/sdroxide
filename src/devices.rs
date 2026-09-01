@@ -50,10 +50,22 @@ pub fn probe(req: DeviceProbe, radio: u32) -> ProbeAnswer {
         DeviceProbe::PublicSdrs { refresh } => {
             ProbeAnswer::PublicSdrs(Box::new(sdroxide_config::public_sdr_directory(refresh)))
         }
+        DeviceProbe::Fobos => ProbeAnswer::Fobos(fobos_devices()),
         DeviceProbe::Test(t) => ProbeAnswer::Test(t.kind(), test(&t)),
         DeviceProbe::Report(k) => ProbeAnswer::Report(k, report(k, radio)),
         DeviceProbe::Relays => ProbeAnswer::Relays(sdroxide_relay::list()),
     }
+}
+
+/// `fobos_rx_list_devices`, translated into the wasm-safe type. `libfobos`'s
+/// own `DevInfo` also carries the index `fobos_rx_open` wants, which is not
+/// here: `sdroxide-fobos::device::open` re-derives it by matching the serial
+/// again, the same lookup-by-serial every other backend's config uses.
+fn fobos_devices() -> Vec<sdroxide_types::FobosDevice> {
+    sdroxide_fobos::list()
+        .into_iter()
+        .map(|d| sdroxide_types::FobosDevice { serial: d.serial })
+        .collect()
 }
 
 /// The whole SoapySDR enumeration, pseudo-drivers included: this feeds a list

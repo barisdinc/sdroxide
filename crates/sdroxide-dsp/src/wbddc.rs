@@ -42,6 +42,38 @@ use rustfft::{Fft, FftPlanner};
 use crate::Complex32;
 use crate::nco::Nco;
 
+/// The centre frequencies a downconverter built with these two rates can
+/// land on, as a range: it selects a band directly out of a real FFT's
+/// non-negative bins (see the module doc), so it can never centre closer to
+/// DC — or closer to Nyquist — than half its own output rate. A free
+/// function, not a method, so a caller with no `WbDdc` instance of its own
+/// can still compute exactly what one would reach.
+///
+/// This is *not* the range to publish as a device's own tuning limit — a
+/// caller like `sdroxide-fobos`'s `IqSource` tried that and it broke the far
+/// more common case, an operator clicking anywhere still inside the current
+/// span: that dial needs no retune and is genuinely receivable regardless of
+/// where the centre itself is pinned, so the wider Nyquist span is what a
+/// `DeviceCaps::freq_ranges_rx` entry wants (see `sdroxide-rx888::band::
+/// freq_ranges`'s own identical choice for the identical clamp). This range
+/// is for the narrower question [`clamp_center_hz`] answers: where a
+/// specific request for the *centre itself* to move here would actually
+/// land.
+pub fn reachable_range_hz(in_rate_hz: f64, out_rate_hz: f64) -> (f64, f64) {
+    let lowest = out_rate_hz / 2.0;
+    let highest = (in_rate_hz / 2.0 - out_rate_hz / 2.0).max(lowest);
+    (lowest, highest)
+}
+
+/// Where a requested centre actually lands — `requested_hz` clamped into
+/// [`reachable_range_hz`]. [`WbDdc::set_center_hz`] uses this too, rather
+/// than keeping a second copy of the same formula that could drift from
+/// this one.
+pub fn clamp_center_hz(requested_hz: f64, in_rate_hz: f64, out_rate_hz: f64) -> f64 {
+    let (lowest, highest) = reachable_range_hz(in_rate_hz, out_rate_hz);
+    requested_hz.clamp(lowest, highest)
+}
+
 /// Fraction of the selected band over which the filter rolls off at each edge.
 ///
 /// A rectangular selection is a brick wall, and a brick wall in frequency is a
@@ -230,8 +262,7 @@ impl WbDdc {
     /// Tune. Snaps the band selection to the nearest bin and puts the remainder
     /// on the output mixer, so the achieved centre is exact.
     pub fn set_center_hz(&mut self, hz: f64) {
-        let lowest = self.out_rate() / 2.0;
-        let hz = hz.clamp(lowest, self.max_center_hz().max(lowest));
+        let hz = clamp_center_hz(hz, self.in_rate, self.out_rate());
 
         // Centre bin, clamped so the half-width window either side stays inside
         // the real half-spectrum.
@@ -553,6 +584,42 @@ mod tests {
         assert!(d.center_hz() > 0.0);
         d.set_center_hz(FS);
         assert!(d.center_hz() < FS / 2.0);
+    }
+
+    /// A caller with no `WbDdc` of its own — `sdroxide-fobos`'s `IqSource`,
+    /// whose DDC instances live on a separate thread — has to be able to
+    /// predict exactly where a real instance would land, or the UI's own
+    /// pan/zoom state drifts away from what the receiver actually reports:
+    /// this is the bug a mismatched clamp caused on real hardware (dragging
+    /// the panadapter's view below the reachable floor kept scrolling the
+    /// frequency axis while the spectrum itself stayed pinned at the true,
+    /// clamped centre). `clamp_center_hz` has to agree with the real thing
+    /// bit-for-bit, across and outside the reachable range, not just roughly.
+    #[test]
+    fn clamp_center_hz_matches_a_real_wbddc_exactly() {
+        let mut d = WbDdc::new(FS, N, M);
+        for want in [0.0, FS / 4.0, FS / 2.0 - 1.0, FS / 2.0, FS, -FS] {
+            d.set_center_hz(want);
+            let predicted = clamp_center_hz(want, FS, d.out_rate());
+            assert!(
+                (d.center_hz() - predicted).abs() < 1.0,
+                "requested {want}: real WbDdc landed on {}, clamp_center_hz predicted {predicted}",
+                d.center_hz()
+            );
+        }
+    }
+
+    /// Real bug, real numbers: 80 Msps in / 2.5 Msps out (a Fobos HF port at
+    /// its old default bandwidth) reached exactly 1.25 MHz down to nothing
+    /// closer. A range that instead published `(0, ...)`, as
+    /// `sdroxide-fobos`'s own capability report once did, let the engine ask
+    /// for anything down to 0 Hz — the source corrected it a frame later, but
+    /// the dial visibly flashed to whatever was actually requested first.
+    /// Publishing this range instead is what makes the engine refuse the ask
+    /// before it ever reaches the source.
+    #[test]
+    fn reachable_range_hz_matches_the_820_khz_bug_report() {
+        assert_eq!(reachable_range_hz(80_000_000.0, 2_500_000.0), (1_250_000.0, 38_750_000.0));
     }
 
     /// The taper is in FFT order, so it is flat at DC (index 0, and index m-1

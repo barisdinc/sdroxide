@@ -3278,6 +3278,13 @@ impl SdroxideApp {
             sdroxide_types::Backend::SdrPlay => {
                 Some((cfg.sdrplay.duo.mode, cfg.sdrplay.duo.rate, cfg.sdrplay.duo.frozen))
             }
+            // Fobos's own filter only exists on FobosPort::HfDual — every
+            // other port has nothing to combine, and `caps.diversity` (set
+            // from that same port choice) already keeps the box off screen
+            // for them, so no port check is needed here too.
+            sdroxide_types::Backend::Fobos => {
+                Some((cfg.fobos.div_mode, cfg.fobos.div_rate, cfg.fobos.div_frozen))
+            }
             // Every other interface with a second receiver keeps them apart.
             _ => None,
         }
@@ -3304,6 +3311,9 @@ impl SdroxideApp {
             sdroxide_types::Backend::SdrPlay => {
                 let d = &mut cfg.sdrplay.duo;
                 (&mut d.mode, &mut d.rate, &mut d.frozen)
+            }
+            sdroxide_types::Backend::Fobos => {
+                (&mut cfg.fobos.div_mode, &mut cfg.fobos.div_rate, &mut cfg.fobos.div_frozen)
             }
             _ => return,
         };

@@ -37,8 +37,9 @@ use self::net::{
 };
 use self::radio::{
     settings_airspy_tab, settings_airspyhf_tab, settings_cat_tab, settings_elad_tab,
-    settings_hackrf_tab, settings_hpsdr_tab, settings_hydrasdr_tab, settings_icomnet_tab,
-    settings_kiwisdr_tab, settings_lime_tab, settings_pluto_tab, settings_rtlsdr_tab,
+    settings_fobos_tab, settings_hackrf_tab, settings_hpsdr_tab, settings_hydrasdr_tab,
+    settings_icomnet_tab, settings_kiwisdr_tab, settings_lime_tab, settings_pluto_tab,
+    settings_rtlsdr_tab,
     settings_rtltcp_tab, settings_rx888_tab, settings_sdrplay_tab, settings_smartsdr_tab,
     settings_soapy_devices, settings_soapy_tab, settings_spyserver_tab, settings_tci_tab,
 };
@@ -191,6 +192,8 @@ pub(in crate::app) struct SettingsIo<'a> {
     /// Ask the SDRplay API service for its device list. Brief and
     /// non-invasive, so it cannot disturb a running stream.
     sdrplay_rescan: &'a mut bool,
+    /// Re-enumerate the USB bus for Fobos SDRs. Opens nothing.
+    fobos_rescan: &'a mut bool,
     /// Re-run the SoapySDR enumeration. Opens nothing, but loads every
     /// installed module and asks each to scan, so it is not instant.
     soapy_rescan: &'a mut bool,
@@ -399,6 +402,90 @@ pub(in crate::app) fn enum_combo<T: PartialEq + Copy>(
     });
 }
 
+/// The concrete interface types the user chooses between in the picker.
+/// SoapySDR only appears when compiled in; there is no auto-detect (an
+/// unavailable interface falls back to a null source so the user can
+/// reconfigure).
+///
+/// Built in whatever order the reasoning below groups them and sorted by
+/// label at the end: the list is long enough now that an operator looks
+/// for their radio by name rather than reading it through, and sorting
+/// means a backend added here needs no thought about where to put it. A
+/// free function (not inlined into the settings UI) so
+/// [`every_backend_but_auto_and_none_is_offered_in_the_picker`] can check it
+/// stays complete without going through the whole `egui` render path.
+fn iface_opts(soapy_supported: bool) -> Vec<sdroxide_types::Backend> {
+    let mut opts: Vec<sdroxide_types::Backend> = Vec::new();
+    if soapy_supported {
+        opts.push(sdroxide_types::Backend::Soapy);
+    }
+    opts.push(sdroxide_types::Backend::Hpsdr);
+    opts.push(sdroxide_types::Backend::Cat);
+    opts.push(sdroxide_types::Backend::Tci);
+    // Pure-Rust UDP, no system library — in every build variant, as TCI is.
+    opts.push(sdroxide_types::Backend::IcomNet);
+    opts.push(sdroxide_types::Backend::SmartSdr);
+    // Pure-Rust IIOD over TCP — no libiio, no libusb — so like the two USB
+    // backends below it is in every build variant.
+    opts.push(sdroxide_types::Backend::Pluto);
+    // Ungated, unlike SoapySDR: the RTL-SDR driver is pure Rust and needs
+    // no system library, so it is compiled into every build variant.
+    opts.push(sdroxide_types::Backend::RtlSdr);
+    // The same driver over a socket instead of the USB bus — pure Rust and
+    // std::net, so it is in every build variant too.
+    opts.push(sdroxide_types::Backend::RtlTcp);
+    // Pure Rust over std::net as well: any receiver somebody has published
+    // with spyserver, in either of the two shapes it can send.
+    opts.push(sdroxide_types::Backend::SpyServer);
+    opts.push(sdroxide_types::Backend::SpyServerVfo);
+    // Pure Rust over `ws://`, no TLS and no system library: the ~900
+    // public KiwiSDRs and Web-888s, and any private one on the same
+    // firmware.
+    opts.push(sdroxide_types::Backend::KiwiSdr);
+    // Same reasoning as the RTL-SDR: pure Rust over `nusb`, no system
+    // library, so it is in every build variant.
+    opts.push(sdroxide_types::Backend::Rx888);
+    // Same reasoning again: pure Rust over `nusb`, no libairspyhf and no
+    // system library, so it is in every build variant.
+    opts.push(sdroxide_types::Backend::AirspyHf);
+    // Same again, and a different radio from the HF+ above despite the
+    // name: an R2/Mini is other silicon behind another protocol.
+    opts.push(sdroxide_types::Backend::Airspy);
+    // A fork of the Airspy R2 rather than a relative of it, and its own
+    // interface for the same reason the two crates are separate: neither
+    // driver tunes the other's hardware correctly.
+    opts.push(sdroxide_types::Backend::HydraSdr);
+    // And again — pure Rust over `nusb`, no libhackrf. The only one of
+    // these USB backends that transmits, which is why it is the only one
+    // whose settings tab has a switch to arm before it will.
+    opts.push(sdroxide_types::Backend::HackRf);
+    // Also in every build variant, but for a different reason: nothing is
+    // linked at build time — the vendor's sdrplay_api library is found
+    // with dlopen at runtime, and opening explains what to install when
+    // it is absent.
+    opts.push(sdroxide_types::Backend::SdrPlay);
+    // Pure Rust over `nusb` again, so it is in every build variant. On an
+    // FDM-DUO this one interface covers the whole radio — the USB receiver,
+    // the CAT serial link and the transmit sound card — which is why it is
+    // here rather than under CAT / Audio.
+    opts.push(sdroxide_types::Backend::Elad);
+    // The one interface here that needs a library installed rather than
+    // shipping its own driver — LimeSuite, found by dlopen at runtime, so
+    // this still builds and runs everywhere and merely finds nothing where
+    // the library is absent. Offered unconditionally for that reason: a
+    // greyed-out entry would not say what to install.
+    opts.push(sdroxide_types::Backend::Lime);
+    // Also in every build variant, and for the same reason as SdrPlay
+    // above: libfobos is LGPL and open source, but still found with
+    // dlopen at runtime rather than linked, so nothing here needs it
+    // installed to build or to see this entry — only to open it.
+    opts.push(sdroxide_types::Backend::Fobos);
+    // Case-folded so HackRF lands under H beside HPSDR rather than after
+    // it, which a byte-order sort would do.
+    opts.sort_by_key(|b| b.label().to_ascii_lowercase());
+    opts
+}
+
 /// The device list an interface draws itself from, where asking for it is
 /// free: a USB enumeration that opens nothing, a sound-card list, or the
 /// SDRplay service's own device table.
@@ -420,6 +507,7 @@ fn free_device_probe(backend: sdroxide_types::Backend) -> Option<sdroxide_types:
         B::HackRf => P::HackRf,
         B::SdrPlay => P::SdrPlay,
         B::Elad => P::Elad,
+        B::Fobos => P::Fobos,
         _ => return None,
     })
 }
@@ -469,6 +557,7 @@ impl SdroxideApp {
             A::HydraSdr(d) => self.hydrasdr_devices = d,
             A::HackRf(d) => self.hackrf_devices = d,
             A::SdrPlay(d) => self.sdrplay_devices = d,
+            A::Fobos(d) => self.fobos_devices = d,
             A::Elad(d) => self.elad_devices = d,
             A::Lime(d) => self.lime_devices = d,
             // `Some` even when empty: "enumerated and found nothing" is a
@@ -627,6 +716,7 @@ impl SdroxideApp {
         let mut hydrasdr_rescan = false;
         let mut hydrasdr_copy_report = false;
         let mut sdrplay_rescan = false;
+        let mut fobos_rescan = false;
         let mut soapy_rescan = false;
         let mut tci_test = false;
         let mut icomnet_test = false;
@@ -682,77 +772,8 @@ impl SdroxideApp {
         let mut bc_reload = false;
         let mut bc_refetch = false;
 
-        // The concrete interface types the user chooses between. SoapySDR only
-        // appears when compiled in; there is no auto-detect (an unavailable
-        // interface falls back to a null source so the user can reconfigure).
-        //
-        // Built in whatever order the reasoning below groups them and sorted by
-        // label at the end: the list is long enough now that an operator looks
-        // for their radio by name rather than reading it through, and sorting
-        // means a backend added here needs no thought about where to put it.
-        let mut iface_opts: Vec<sdroxide_types::Backend> = Vec::new();
-        if self.soapy_supported {
-            iface_opts.push(sdroxide_types::Backend::Soapy);
-        }
-        iface_opts.push(sdroxide_types::Backend::Hpsdr);
-        iface_opts.push(sdroxide_types::Backend::Cat);
-        iface_opts.push(sdroxide_types::Backend::Tci);
-        // Pure-Rust UDP, no system library — in every build variant, as TCI is.
-        iface_opts.push(sdroxide_types::Backend::IcomNet);
-        iface_opts.push(sdroxide_types::Backend::SmartSdr);
-        // Pure-Rust IIOD over TCP — no libiio, no libusb — so like the two USB
-        // backends below it is in every build variant.
-        iface_opts.push(sdroxide_types::Backend::Pluto);
-        // Ungated, unlike SoapySDR: the RTL-SDR driver is pure Rust and needs
-        // no system library, so it is compiled into every build variant.
-        iface_opts.push(sdroxide_types::Backend::RtlSdr);
-        // The same driver over a socket instead of the USB bus — pure Rust and
-        // std::net, so it is in every build variant too.
-        iface_opts.push(sdroxide_types::Backend::RtlTcp);
-        // Pure Rust over std::net as well: any receiver somebody has published
-        // with spyserver, in either of the two shapes it can send.
-        iface_opts.push(sdroxide_types::Backend::SpyServer);
-        iface_opts.push(sdroxide_types::Backend::SpyServerVfo);
-        // Pure Rust over `ws://`, no TLS and no system library: the ~900
-        // public KiwiSDRs and Web-888s, and any private one on the same
-        // firmware.
-        iface_opts.push(sdroxide_types::Backend::KiwiSdr);
-        // Same reasoning as the RTL-SDR: pure Rust over `nusb`, no system
-        // library, so it is in every build variant.
-        iface_opts.push(sdroxide_types::Backend::Rx888);
-        // Same reasoning again: pure Rust over `nusb`, no libairspyhf and no
-        // system library, so it is in every build variant.
-        iface_opts.push(sdroxide_types::Backend::AirspyHf);
-        // Same again, and a different radio from the HF+ above despite the
-        // name: an R2/Mini is other silicon behind another protocol.
-        iface_opts.push(sdroxide_types::Backend::Airspy);
-        // A fork of the Airspy R2 rather than a relative of it, and its own
-        // interface for the same reason the two crates are separate: neither
-        // driver tunes the other's hardware correctly.
-        iface_opts.push(sdroxide_types::Backend::HydraSdr);
-        // And again — pure Rust over `nusb`, no libhackrf. The only one of
-        // these USB backends that transmits, which is why it is the only one
-        // whose settings tab has a switch to arm before it will.
-        iface_opts.push(sdroxide_types::Backend::HackRf);
-        // Also in every build variant, but for a different reason: nothing is
-        // linked at build time — the vendor's sdrplay_api library is found
-        // with dlopen at runtime, and opening explains what to install when
-        // it is absent.
-        iface_opts.push(sdroxide_types::Backend::SdrPlay);
-        // Pure Rust over `nusb` again, so it is in every build variant. On an
-        // FDM-DUO this one interface covers the whole radio — the USB receiver,
-        // the CAT serial link and the transmit sound card — which is why it is
-        // here rather than under CAT / Audio.
-        iface_opts.push(sdroxide_types::Backend::Elad);
-        // The one interface here that needs a library installed rather than
-        // shipping its own driver — LimeSuite, found by dlopen at runtime, so
-        // this still builds and runs everywhere and merely finds nothing where
-        // the library is absent. Offered unconditionally for that reason: a
-        // greyed-out entry would not say what to install.
-        iface_opts.push(sdroxide_types::Backend::Lime);
-        // Case-folded so HackRF lands under H beside HPSDR rather than after
-        // it, which a byte-order sort would do.
-        iface_opts.sort_by_key(|b| b.label().to_ascii_lowercase());
+        // The concrete interface types the user chooses between.
+        let iface_opts = iface_opts(self.soapy_supported);
 
         let mut tab = self.settings_tab;
         let mut upload_tab = self.settings_upload_tab;
@@ -854,6 +875,7 @@ impl SdroxideApp {
                             hydrasdr_rescan: &mut hydrasdr_rescan,
                             hydrasdr_copy_report: &mut hydrasdr_copy_report,
                             sdrplay_rescan: &mut sdrplay_rescan,
+                            fobos_rescan: &mut fobos_rescan,
                             soapy_rescan: &mut soapy_rescan,
                             tci_test: &mut tci_test,
                             smartsdr_discover: &mut smartsdr_discover,
@@ -1045,6 +1067,9 @@ impl SdroxideApp {
         }
         if sdrplay_rescan {
             self.ask_device(ctx, P::SdrPlay);
+        }
+        if fobos_rescan {
+            self.ask_device(ctx, P::Fobos);
         }
         if soapy_rescan {
             // Loads every installed SoapySDR module and asks each to scan, so
@@ -2104,6 +2129,16 @@ impl SdroxideApp {
                         self.caps.as_ref(),
                         io.radio_edit,
                         io.sdrplay_rescan,
+                        io.apply_iface,
+                        io.can_probe,
+                        cmds,
+                    ),
+                    Backend::Fobos => settings_fobos_tab(
+                        ui,
+                        &self.fobos_devices,
+                        self.caps.as_ref(),
+                        io.radio_edit,
+                        io.fobos_rescan,
                         io.apply_iface,
                         io.can_probe,
                         cmds,
@@ -3628,5 +3663,38 @@ mod roster_order_tests {
         assert_eq!(reordered(&ids, 3, Some(0)), vec![3, 0, 1, 2], "to the front");
         assert_eq!(reordered(&ids, 0, None), vec![1, 2, 3, 0], "to the end");
         assert_eq!(reordered(&ids, 0, Some(3)), vec![1, 2, 0, 3], "into the middle");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iface_opts;
+
+    /// A backend registered everywhere else (`Backend::ALL`, the `open_*`
+    /// dispatch in `src/main.rs`, its own settings tab) but never pushed
+    /// into this picker's own list is invisible in the UI despite every
+    /// other touchpoint being wired up — exactly what happened to Fobos:
+    /// `Backend::ALL.contains(&Backend::Fobos)` was true the whole time,
+    /// which is a different list, and asserting against it (as the
+    /// `sdroxide-types` test for `HydraSdr` does) gives no real coverage of
+    /// what the operator actually sees. This checks the list `iface_opts`
+    /// itself, the same slice `enum_combo` renders from.
+    #[test]
+    fn every_backend_but_auto_and_none_is_offered_in_the_picker() {
+        let opts = iface_opts(true);
+        for b in sdroxide_types::Backend::ALL {
+            if matches!(b, sdroxide_types::Backend::Auto | sdroxide_types::Backend::None) {
+                continue;
+            }
+            assert!(opts.contains(&b), "{b:?} is in Backend::ALL but missing from iface_opts");
+        }
+    }
+
+    /// SoapySDR is the one entry gated on compile-time support — dropped,
+    /// not just greyed out, when it isn't there to try.
+    #[test]
+    fn soapy_only_appears_when_supported() {
+        assert!(iface_opts(true).contains(&sdroxide_types::Backend::Soapy));
+        assert!(!iface_opts(false).contains(&sdroxide_types::Backend::Soapy));
     }
 }

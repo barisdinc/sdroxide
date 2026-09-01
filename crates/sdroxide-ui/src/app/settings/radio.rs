@@ -5277,6 +5277,247 @@ pub(in crate::app) fn settings_hydrasdr_tab(
     );
 }
 
+/// Fobos SDR interface: receiver, input, sample rate, gain, clock source.
+///
+/// The receiver, input and sample rate all reopen the device rather than
+/// applying live: the input because `Rf` and the HF ports are different
+/// hardware paths (`fobos_rx_set_direct_sampling`) and the HF ports build a
+/// software downconverter at open time, the rate because a live change on
+/// `Rf` is stop/reconfigure/restart and the HF ports don't support one at
+/// all yet. LNA/VGA gain and the clock source apply immediately — the gain
+/// sliders only doing anything on `Rf`, see
+/// [`sdroxide_types::FobosPort`]'s own doc comment for why.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn settings_fobos_tab(
+    ui: &mut egui::Ui,
+    devices: &[sdroxide_types::FobosDevice],
+    caps: Option<&sdroxide_types::DeviceCaps>,
+    radio_edit: &mut Option<sdroxide_types::RadioConfig>,
+    rescan: &mut bool,
+    apply: &mut bool,
+    can_probe: bool,
+    cmds: &mut Vec<Command>,
+) {
+    use sdroxide_types::{FobosConfig, FobosPort, diversity_cost_note};
+    let Some(cfg) = radio_edit.as_mut() else {
+        ui.label("Waiting for the configuration of the machine the radio is attached to.");
+        return;
+    };
+
+    let before = (cfg.fobos.serial.clone(), cfg.fobos.port, cfg.fobos.sample_rate_hz);
+
+    // The rates this particular unit turned out to have once one is
+    // connected, else a list measured on the one real unit this backend was
+    // verified against — see `FobosConfig::SAMPLE_RATES`'s own doc comment.
+    let rates: Vec<f64> = match caps {
+        Some(c) if c.driver == "fobos" && !c.sample_rates.is_empty() => c.sample_rates.clone(),
+        _ => FobosConfig::SAMPLE_RATES.to_vec(),
+    };
+    let from_device = caps.is_some_and(|c| c.driver == "fobos" && !c.sample_rates.is_empty());
+
+    egui::Grid::new("fobos-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("Receiver");
+        probe_only(ui, can_probe, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Rescan")
+                    .on_hover_text(
+                        "Re-list Fobos SDRs. No device is opened, so this is safe to \
+                         press while receiving.",
+                    )
+                    .clicked()
+                {
+                    *rescan = true;
+                }
+                let shown = if cfg.fobos.serial.is_empty() {
+                    "— first one found —".to_string()
+                } else {
+                    cfg.fobos.serial.clone()
+                };
+                ComboBox::from_id_salt("fobos_dev").width(300.0).selected_text(shown).show_styled(
+                    ui,
+                    |ui| {
+                        if devices.is_empty() {
+                            ui.label("No Fobos SDR found — press Rescan");
+                        }
+                        ui.selectable_value(
+                            &mut cfg.fobos.serial,
+                            String::new(),
+                            "— first one found —",
+                        );
+                        for d in devices {
+                            ui.selectable_value(
+                                &mut cfg.fobos.serial,
+                                d.serial.clone(),
+                                d.label(),
+                            );
+                        }
+                    },
+                );
+            });
+        });
+        ui.end_row();
+
+        ui.label("Input");
+        ui.horizontal(|ui| {
+            for p in FobosPort::ALL {
+                let hover = match p {
+                    FobosPort::Rf => {
+                        "Through the tuner: LNA, VGA, and the mixer's own frequency range."
+                    }
+                    FobosPort::Hf1 => {
+                        "Direct sampling on the HF1 antenna input — no tuner, no LNA/VGA \
+                         gain, tuned entirely in software."
+                    }
+                    FobosPort::Hf2 => "Direct sampling on the HF2 antenna input, same as HF1.",
+                    FobosPort::HfDual => {
+                        "Both real ADC channels at once, combined by the diversity filter \
+                         below — a noise source nulled, or two fading paths combined."
+                    }
+                };
+                ui.selectable_value(&mut cfg.fobos.port, p, p.name()).on_hover_text(hover);
+            }
+        });
+        ui.end_row();
+        if cfg.fobos.port != FobosPort::Rf {
+            ui.label("");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Direct sampling — the tuner (and so LNA/VGA gain) is not in the \
+                         path. The rate below is a target for the software downconverter, \
+                         not a hardware setting, so the achieved rate can differ from it.",
+                    )
+                    .weak(),
+                )
+                .wrap(),
+            );
+            ui.end_row();
+        }
+
+        ui.label("Sample rate");
+        ui.horizontal(|ui| {
+            ComboBox::from_id_salt("fobos_rate")
+                .width(150.0)
+                .selected_text(format!("{:.3} Msps", cfg.fobos.sample_rate_hz / 1e6))
+                .show_styled(ui, |ui| {
+                    for r in &rates {
+                        ui.selectable_value(
+                            &mut cfg.fobos.sample_rate_hz,
+                            *r,
+                            format!("{:.3} Msps", r / 1e6),
+                        );
+                    }
+                });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(if from_device {
+                        "this receiver's own reported rates".to_string()
+                    } else {
+                        "measured on one real unit — connect this receiver and Rescan to \
+                         see its own list"
+                            .to_string()
+                    })
+                    .weak(),
+                )
+                .wrap(),
+            );
+        });
+        ui.end_row();
+
+        ui.label("LNA gain");
+        ui.add_enabled_ui(cfg.fobos.port == FobosPort::Rf, |ui| {
+            if crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut cfg.fobos.lna_gain, 0..=FobosConfig::LNA_GAIN_MAX),
+            )
+            .changed()
+            {
+                push_gain(cmds, FobosConfig::LNA_GAIN_ELEMENT, cfg.fobos.lna_gain as f64);
+            }
+        });
+        ui.end_row();
+
+        ui.label("VGA gain");
+        ui.add_enabled_ui(cfg.fobos.port == FobosPort::Rf, |ui| {
+            if crate::chrome::slider(
+                ui,
+                egui::Slider::new(&mut cfg.fobos.vga_gain, 0..=FobosConfig::VGA_GAIN_MAX),
+            )
+            .changed()
+            {
+                push_gain(cmds, FobosConfig::VGA_GAIN_ELEMENT, cfg.fobos.vga_gain as f64);
+            }
+        });
+        ui.end_row();
+
+        ui.label("Clock source");
+        if ui.checkbox(&mut cfg.fobos.clk_external, "External reference").changed() {
+            push_gain(
+                cmds,
+                FobosConfig::CLK_EXTERNAL_ELEMENT,
+                cfg.fobos.clk_external as u8 as f64,
+            );
+        }
+        ui.end_row();
+
+        // Which way it combines, how fast it chases, and holding it are on
+        // the main window's own DIV strip once this radio is selected (see
+        // `sdroxide_types::DIV_MODE_ELEMENT`'s own doc comment) — filter
+        // length is the one control that stays here, the same split every
+        // other diversity-capable backend's settings tab uses.
+        if cfg.fobos.port == FobosPort::HfDual {
+            ui.label("Diversity taps");
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        DragValue::new(&mut cfg.fobos.div_taps)
+                            .speed(1.0)
+                            .range(1..=FobosConfig::DIV_TAPS_MAX)
+                            .suffix(" taps"),
+                    )
+                    .on_hover_text(
+                        "One tap is a gain and a phase — a null at one frequency that \
+                         gets worse either side of it, which is all an analogue phaser \
+                         can do. Each further tap buys one sample period of the path \
+                         difference between HF1 and HF2 that the filter can equalise, \
+                         which is what turns that notch into a band quiet all the way \
+                         across.",
+                    )
+                    .changed()
+                {
+                    push_gain(
+                        cmds,
+                        sdroxide_types::DIV_TAPS_ELEMENT,
+                        f64::from(cfg.fobos.div_taps),
+                    );
+                }
+                ui.label(
+                    RichText::new(diversity_cost_note(cfg.fobos.div_taps, cfg.fobos.sample_rate_hz))
+                        .weak(),
+                );
+            });
+            ui.end_row();
+        }
+    });
+
+    if (cfg.fobos.serial.clone(), cfg.fobos.port, cfg.fobos.sample_rate_hz) != before {
+        *apply = true;
+    }
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(
+            "Receive only. RF port (tuner), HF1/HF2 (direct sampling, decoded in software) \
+             and HF1+HF2 (both at once, combined by the diversity filter) all work. The \
+             receiver, input and sample rate take effect on Apply; gain, clock source and \
+             taps apply as you change them — the diversity filter's mode, adapt rate and \
+             hold are on the main window's own DIV box once this radio is selected.",
+        )
+        .weak(),
+    );
+}
+
 /// HackRF interface: radio, rate, the front end, and — behind its own switch —
 /// the transmitter.
 ///

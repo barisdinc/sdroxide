@@ -4795,6 +4795,7 @@ dependencies = [
  "sdroxide-config",
  "sdroxide-dsp",
  "sdroxide-elad",
+ "sdroxide-fobos",
  "sdroxide-hackrf",
  "sdroxide-hpsdr",
  "sdroxide-hydrasdr",
@@ -4990,6 +4991,19 @@ dependencies = [
  "rtrb",
  "sdroxide-dsp",
  "sdroxide-types",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sdroxide-fobos"
+version = "1.6.2"
+dependencies = [
+ "crossbeam-channel",
+ "libloading 0.9.0",
+ "rtrb",
+ "sdroxide-dsp",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",

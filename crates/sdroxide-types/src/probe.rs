@@ -22,9 +22,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AirspyDevice, AirspyHfDevice, EladDevice, HackRfDevice, HpsdrDevice, HydraSdrDevice,
-    IcomNetConfig, LimeDevice, PlutoDevice, PublicSdrDirectory, RtlSdrDevice, Rx888Device,
-    SdrPlayDevice, SmartSdrDevice, SoapyDeviceInfo,
+    AirspyDevice, AirspyHfDevice, EladDevice, FobosDevice, HackRfDevice, HpsdrDevice,
+    HydraSdrDevice, IcomNetConfig, LimeDevice, PlutoDevice, PublicSdrDirectory, RtlSdrDevice,
+    Rx888Device, SdrPlayDevice, SmartSdrDevice, SoapyDeviceInfo,
 };
 
 /// A question about the machine the radio is attached to.
@@ -108,6 +108,9 @@ pub enum DeviceProbe {
     /// quarter of an hour is served from disk, which is what makes opening the
     /// window instant.
     PublicSdrs { refresh: bool },
+    /// Fobos SDRs `fobos_rx_list_devices` reports, same contract as
+    /// [`DeviceProbe::RtlSdr`] — no device is opened.
+    Fobos,
     /// Try an address and report what answered, without starting a stream.
     Test(ProbeTest),
     /// The last session's trace from one of the backends that has not been
@@ -233,6 +236,7 @@ pub enum ProbeAnswer {
     /// hundred receivers — and every other variant would otherwise be padded
     /// to its size.
     PublicSdrs(Box<PublicSdrDirectory>),
+    Fobos(Vec<FobosDevice>),
     /// A connection test, and which button asked for it.
     Test(TestKind, Result<String, String>),
     Report(ReportKind, String),
