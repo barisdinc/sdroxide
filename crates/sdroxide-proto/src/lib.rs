@@ -1049,7 +1049,24 @@ use sdroxide_types::{
 /// every station bundle one field out — and that bundle carries the band plan
 /// the client draws its band edges from. The handshake's equality test stops
 /// that before a frame is exchanged.
-pub const PROTO_VERSION: u16 = 117;
+/// **118** — the RigExpert Fobos SDR backend (issue #273).
+///
+/// [`sdroxide_types::Backend`] gains `Fobos`, [`sdroxide_types::DeviceProbe`]
+/// and [`sdroxide_types::ProbeAnswer`] each gain a `Fobos` variant that
+/// enumerates one, and [`sdroxide_types::RadioConfig`] gains a `fobos` block.
+///
+/// The three enum variants are appended to the end of their own enums as
+/// always, so no surviving discriminant moves and none of them is the reason
+/// for this bump. The config field is: `RadioConfig` rides
+/// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` **whole**, so a v117
+/// peer handed one with a `FobosConfig` on the end has nowhere to put it and
+/// reads the tail of every one of those messages out of step — the same
+/// not-survivable addition every backend before this one made (v64 ELAD, v65
+/// LimeSDR). `#[serde(default)]` rescues a `radio.json` written before this
+/// existed, because JSON is self-describing; postcard is not, so it rescues
+/// nothing on the wire. The handshake's equality test is what stops that
+/// before a frame is exchanged.
+pub const PROTO_VERSION: u16 = 118;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

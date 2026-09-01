@@ -108,9 +108,6 @@ pub enum DeviceProbe {
     /// quarter of an hour is served from disk, which is what makes opening the
     /// window instant.
     PublicSdrs { refresh: bool },
-    /// Fobos SDRs `fobos_rx_list_devices` reports, same contract as
-    /// [`DeviceProbe::RtlSdr`] — no device is opened.
-    Fobos,
     /// Try an address and report what answered, without starting a stream.
     Test(ProbeTest),
     /// The last session's trace from one of the backends that has not been
@@ -126,6 +123,13 @@ pub enum DeviceProbe {
     ///
     /// Appended last, for the usual reason.
     Relays,
+    /// Fobos SDRs `fobos_rx_list_devices` reports, same contract as
+    /// [`DeviceProbe::RtlSdr`] — no device is opened.
+    ///
+    /// After `Relays` rather than beside the other dongle probes, for the
+    /// usual reason: appending is what leaves every surviving discriminant
+    /// where a peer already expects it.
+    Fobos,
 }
 
 /// A connection test: open, ask what is there, and hang up again.
@@ -236,7 +240,6 @@ pub enum ProbeAnswer {
     /// hundred receivers — and every other variant would otherwise be padded
     /// to its size.
     PublicSdrs(Box<PublicSdrDirectory>),
-    Fobos(Vec<FobosDevice>),
     /// A connection test, and which button asked for it.
     Test(TestKind, Result<String, String>),
     Report(ReportKind, String),
@@ -247,4 +250,7 @@ pub enum ProbeAnswer {
     /// The switching devices that machine can see. Appended last, for the usual
     /// reason.
     Relays(Vec<crate::RelayDevice>),
+    /// The Fobos SDRs that machine can see. After `Relays` for the same
+    /// reason [`DeviceProbe::Fobos`] is.
+    Fobos(Vec<FobosDevice>),
 }

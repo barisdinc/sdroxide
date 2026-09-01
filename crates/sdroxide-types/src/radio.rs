@@ -6091,17 +6091,22 @@ pub struct RadioConfig {
     /// KiwiSDR / Web-888. Appended after `hydrasdr`, for the same reason as
     /// every field above it: the layout is positional.
     pub kiwi: KiwiConfig,
-    /// RigExpert Fobos SDR. Appended after `kiwi`, for the same reason as
-    /// every field above it.
-    pub fobos: FobosConfig,
     /// Stated tuning ranges belonging to interfaces this radio is not on —
-    /// see [`ParkedRanges`]. Appended after `fobos`, for the same reason as
+    /// see [`ParkedRanges`]. Appended after `kiwi`, for the same reason as
     /// every field above it: the layout is positional.
     ///
     /// Empty in a configuration written before this existed, which is exactly
     /// right: such a radio has only ever stated ranges for the interface it is
     /// on, and those are still in the two fields above.
     pub freq_ranges_parked: Vec<ParkedRanges>,
+    /// RigExpert Fobos SDR. Appended after `freq_ranges_parked`, for the same
+    /// reason as every field above it: the layout is positional, so a new
+    /// block goes on the end and nowhere else — and, appended or not, it is
+    /// what made `PROTO_VERSION` 118 (see that constant's own history entry:
+    /// this struct rides `ServerMsg::RadioConfig` and
+    /// `Command::SetRadioConfig` whole, so a peer one field short reads the
+    /// tail of every one of them out of step).
+    pub fobos: FobosConfig,
 }
 
 impl RadioConfig {
