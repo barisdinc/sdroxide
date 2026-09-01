@@ -49,6 +49,10 @@ sdroxide-tci.workspace = true
 # streams — the engine just publishes state and drains requests.
 sdroxide-rigctld = { path = "../sdroxide-rigctld" }
 sdroxide-rotator = { path = "../sdroxide-rotator" }
+# The station's external T/R switch: the relay that grounds the SDR's antenna
+# while anything in this process is transmitting. Driven from the engine rather
+# than from a source, because it follows the whole station and not one front end.
+sdroxide-relay = { path = "../sdroxide-relay" }
 sdroxide-wsjtx = { path = "../sdroxide-wsjtx" }
 # SSTV: encode received images to PNG for the config store, decode composed
 # TX images (PNG) back to RGB. Minimal formats to keep the build lean.

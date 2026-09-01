@@ -894,4 +894,31 @@ pub enum Command {
         rx: RxId,
         on: bool,
     },
+
+    /// Set up the station's external transmit/receive switch: the relay board
+    /// or contact closure that grounds the SDR's antenna while the station
+    /// transmits, and sequences whatever else has to move with the over.
+    ///
+    /// Saved to `relay.json` and echoed back in
+    /// [`crate::RadioEvent::StationConfig`], because the operator setting it up
+    /// may be on another machine entirely and the hardware is on this one.
+    ///
+    /// Boxed: the configuration carries a channel table and four strings, and
+    /// an enum is as big as its largest variant everywhere it is held.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetRelayConfig(Box<crate::RelayConfig>),
+
+    /// Close one of the T/R switch's contacts briefly, so the operator can hear
+    /// the relay and check their wiring with the transmitter cold.
+    ///
+    /// Refused by the driver while anything is on the air: throwing a relay
+    /// under live RF is the accident the whole subsystem exists to prevent, and
+    /// a test button is exactly the thing somebody presses while wondering why
+    /// their transmission sounds odd.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    TestRelay {
+        channel: u8,
+    },
 }

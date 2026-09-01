@@ -780,6 +780,18 @@ pub struct SdroxideApp {
     /// server configs.
     rot_cfg_edit: sdroxide_types::RotatorConfig,
     rot_cfg_seeded: bool,
+    /// The external T/R switch's health, mirrored from
+    /// [`RadioEvent::RelayStatus`]. Replayed on connect by the server, so a
+    /// remote client is told about a relay that is not answering before it
+    /// touches PTT rather than after.
+    relay_status: sdroxide_types::RelayStatus,
+    /// The T/R switch settings dialog's working copy, seeded once like the
+    /// server configs.
+    relay_edit: sdroxide_types::RelayConfig,
+    relay_seeded: bool,
+    /// The switching devices the engine's machine can see, from
+    /// [`sdroxide_types::DeviceProbe::Relays`].
+    relay_devices: Vec<sdroxide_types::RelayDevice>,
     /// The station's IARU region, as the General tab's dropdown last showed it.
     ///
     /// Unlike the config buffers around it this is not seeded-once-then-owned
@@ -1349,6 +1361,10 @@ impl SdroxideApp {
             qo100_win: Default::default(),
             rotator_status: None,
             rot_cfg_edit: Default::default(),
+            relay_status: Default::default(),
+            relay_edit: Default::default(),
+            relay_seeded: false,
+            relay_devices: Vec::new(),
             rot_cfg_seeded: false,
             // Whatever this process is already on: the binary applies the
             // station's setting before the app is built, and a remote client

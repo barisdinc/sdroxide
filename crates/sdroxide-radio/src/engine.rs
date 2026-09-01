@@ -236,6 +236,17 @@ const SCOPE_MAIN_STALE: Duration = Duration::from_secs(10);
 /// the remote-client WebSocket.
 const METER_INTERVAL: Duration = Duration::from_millis(33);
 
+/// The longest the engine's thread will be held waiting for the external T/R
+/// switch's contacts before RF is let out.
+///
+/// A relay throws in five to fifteen milliseconds and a sequencer wants a
+/// little more; anything beyond this is an audible hole in the receive tail and
+/// a delay between the operator's thumb and their own transmitter, and is far
+/// more likely to be a mistyped setting than a real requirement. Capped rather
+/// than refused, because a switch that leads by a quarter of a second is still
+/// a switch that protects the receiver.
+const MAX_TR_LEAD: Duration = Duration::from_millis(250);
+
 /// Consecutive over-limit SWR readings required before the guard fires. At the
 /// 33 ms meter interval this is about a fifth of a second of genuinely bad SWR,
 /// which is long enough to ride out the key-up transient and short enough that
@@ -447,6 +458,14 @@ pub struct EngineConfig {
     /// Which radio is on FreeDV, shared like `tx_gate`. `None` (the default,
     /// and every single-radio start): this engine's own mode is the answer.
     pub rade_watch: Option<Arc<crate::RadeWatch>>,
+    /// The station's external T/R switch, shared like `tx_gate` — the relay
+    /// that grounds the SDR's antenna while anything in this process is on the
+    /// air. `None` (the default) switches nothing.
+    ///
+    /// Shared rather than per-engine because the relay is in the antenna line,
+    /// not in a front end: whichever radio keys, the same contacts have to
+    /// throw, and they must not open while another one is still transmitting.
+    pub tr_switch: Option<Arc<crate::TrSwitch>>,
 }
 
 impl Default for EngineConfig {
@@ -468,6 +487,7 @@ impl Default for EngineConfig {
             tx_gate: None,
             store_sync: None,
             rade_watch: None,
+            tr_switch: None,
             record_iq: None,
         }
     }
@@ -2475,6 +2495,22 @@ struct Engine {
     /// connection transitions bypass the throttle, movement does not.
     rot_last_status: Option<sdroxide_rotator::RotStatus>,
     next_rot_emit: Instant,
+    /// The external T/R switch's config as persisted (`relay.json`), announced
+    /// in the station bundle the way the rotator's is.
+    relay_cfg: sdroxide_types::RelayConfig,
+    /// The switch itself, shared with every other engine. The driver behind it
+    /// is built by the primary engine only — one station, one antenna line —
+    /// but every engine publishes into it, because any of them keying is the
+    /// station being on the air.
+    tr_switch: Option<Arc<crate::TrSwitch>>,
+    /// What was last told to the clients, so a status only goes out when it
+    /// changed.
+    relay_last_status: Option<sdroxide_types::RelayStatus>,
+    /// A configuration that arrived while the station was on the air, waiting
+    /// for the over to end. See [`Engine::sync_relay`].
+    relay_pending: bool,
+    /// Whether the lead cap has already been complained about this session.
+    relay_lead_capped: bool,
     /// What was last written to `session.json`, so the periodic check only
     /// touches the disk when the operator has actually moved. `None` when this
     /// engine does not remember its session (see
@@ -3242,6 +3278,11 @@ fn engine_thread(
         tle_refresh: None,
         sat_lock: None,
         rot_cfg: sdroxide_types::RotatorConfig::default(),
+        relay_cfg: sdroxide_types::RelayConfig::default(),
+        tr_switch: engine_cfg.tr_switch.clone(),
+        relay_last_status: None,
+        relay_pending: false,
+        relay_lead_capped: false,
         rotator: None,
         rot_last_status: None,
         next_rot_emit: Instant::now(),
@@ -3341,6 +3382,12 @@ fn engine_thread(
     if engine.primary {
         engine.sync_rotator();
     }
+    engine.relay_cfg = sdroxide_config::load_relay_config();
+    // One station, one antenna line: only the primary engine opens the switch.
+    // Every engine still publishes into it — see `Engine::poll_tr_switch`.
+    if engine.primary {
+        engine.sync_relay();
+    }
     // Seed clients with the whole station configuration up front, for the same
     // reason as the operator config above: a settings dialog that has not been
     // told what the station is set to would show defaults, and applying those
@@ -3416,7 +3463,12 @@ fn engine_thread(
                         let _ = engine.source.tx_end();
                     }
                     // A dying engine must not leave the station interlock
-                    // claimed, or no surviving radio could ever key again.
+                    // claimed, or no surviving radio could ever key again —
+                    // nor its claim on the T/R switch, or the station's antenna
+                    // relay stays where this engine left it.
+                    engine.tx_active = false;
+                    engine.rig_tx = false;
+                    engine.cw_gate_until = None;
                     engine.release_tx_gate();
                     info!("all controllers gone; engine stopping");
                     return;
@@ -3488,6 +3540,7 @@ fn engine_thread(
         engine.poll_tle_refresh();
         engine.poll_sat_track();
         engine.poll_rotator_status();
+        engine.poll_tr_switch();
         // Attach (or re-attach) the configured radio on its own when the
         // front-end is only a stand-in — no trip through Settings.
         engine.poll_reconnect();
@@ -3509,7 +3562,10 @@ fn engine_thread(
                     warn!("could not unkey after a transmit failure: {e}");
                 }
                 // Same as the controller-gone exit: a dead engine must not
-                // keep the station interlock.
+                // keep the station interlock, nor the T/R switch.
+                engine.tx_active = false;
+                engine.rig_tx = false;
+                engine.cw_gate_until = None;
                 engine.release_tx_gate();
                 return;
             }
@@ -4824,19 +4880,7 @@ impl Engine {
             // An over the operator started at the radio. Recorded, never
             // answered: see [`ControlUpdate::RigTx`] for why keying along with
             // it would talk over the person holding the microphone.
-            ControlUpdate::RigTx(on) => {
-                if on != self.rig_tx {
-                    self.rig_tx = on;
-                    info!(
-                        "the radio is {} under its own control",
-                        match on {
-                            true => "transmitting",
-                            false => "receiving",
-                        }
-                    );
-                    self.follow_rig_tx(on);
-                }
-            }
+            ControlUpdate::RigTx(on) => self.adopt_rig_tx(on, "its own control"),
             ControlUpdate::Mode(m) => {
                 let cur = self.state.rx[0].mode;
                 // Against the mode we *command*, not the one on screen: SSTV is
@@ -5371,6 +5415,12 @@ impl Engine {
                         // control — the rig keys its own transmitter here and
                         // never looks at the audio we send it.
                         self.source.set_tx_drive(self.state.tx.drive as f64);
+                        // And throw the external T/R switch, for the same
+                        // reason and with the same lead. `tx_active` never
+                        // becomes true on this path, so nothing else in the
+                        // engine would ever key the relay for a message the rig
+                        // is about to put on the air at full power.
+                        self.lead_tr_switch();
                         self.source.send_cw(&text);
                     }
                 }
@@ -5379,6 +5429,13 @@ impl Engine {
                     self.cw_gate_until = None;
                     if !self.tx_active {
                         self.release_tx_gate();
+                        // The message never finished, so the hold has to start
+                        // now rather than at the length it was going to be.
+                        // `poll_tr_switch` would get there on the next tick;
+                        // this makes the receiver's return prompt instead.
+                        if let Some(hub) = self.tr_switch.as_ref() {
+                            hub.unkey(self.instance);
+                        }
                     }
                 }
             }
@@ -7852,6 +7909,32 @@ impl Engine {
                 self.emit_station_config();
                 return;
             }
+            SetRelayConfig(cfg) => {
+                if let Err(e) = sdroxide_config::save_relay_config(&cfg) {
+                    warn!("saving T/R switch config: {e}");
+                }
+                self.relay_cfg = *cfg;
+                // Whichever engine is told opens the hardware and becomes the
+                // switch's owner — *not* only the primary one.
+                //
+                // The primary opens it at startup because somebody has to and
+                // one of them has to be chosen. But a remote client is attached
+                // to one radio's session, so its `SetRelayConfig` reaches that
+                // radio and no other: gating this on `primary` would mean an
+                // operator who set the switch up from their second radio's tab
+                // saved a configuration that never opened anything. The hub
+                // holds a single driver either way, and `sync_relay` closes the
+                // old one before opening the new.
+                self.sync_relay();
+                self.emit_station_config();
+                return;
+            }
+            TestRelay { channel } => {
+                if let Some(hub) = self.tr_switch.as_ref() {
+                    hub.test(channel);
+                }
+                return;
+            }
             SetRegion(region) => {
                 if let Err(e) = sdroxide_config::save_region(region) {
                     warn!("saving IARU region: {e}");
@@ -9426,6 +9509,7 @@ impl Engine {
                 wsjtx: self.wsjtx_cfg.clone(),
                 sat: self.sat_cfg.clone(),
                 rotator: self.rot_cfg.clone(),
+                relay: self.relay_cfg.clone(),
                 region: sdroxide_types::region(),
                 band_plan: sdroxide_types::band_plan().clone(),
             },
@@ -9784,6 +9868,166 @@ impl Engine {
                 el_deg: st.el_deg,
                 error: st.error,
             });
+        }
+    }
+
+    /// (Re)build the external T/R switch to match the config.
+    ///
+    /// Refused while anything is on the air. Rebuilding drops the driver, and
+    /// dropping it puts every contact back to receive — under live RF that is
+    /// an antenna relay thrown mid-over, which is precisely the accident the
+    /// whole subsystem exists to prevent. The operator pressing APPLY during
+    /// their own transmission is not a rare mistake; it is what happens when
+    /// they are trying to fix the thing while testing it.
+    fn sync_relay(&mut self) {
+        let Some(hub) = self.tr_switch.clone() else { return };
+        if hub.busy() {
+            warn!("not rebuilding the T/R switch while the station is on the air");
+            self.notice("the T/R switch will be reconfigured after this over");
+            self.relay_pending = true;
+            return;
+        }
+        self.relay_pending = false;
+        self.relay_last_status = None;
+        // Close the old one *first*. Its thread owns a serial port or a device
+        // node, and the new configuration is very often the same one with a
+        // number changed — so opening before closing would have this engine
+        // race itself for its own hardware. Also the moment the contacts are
+        // put back to receive, which is why this is refused while on the air.
+        hub.install(None, &self.relay_cfg);
+        match sdroxide_relay::open(&self.relay_cfg) {
+            Ok(handle) => {
+                if let Some(h) = handle.as_ref() {
+                    info!("T/R switch: {}. {}", h.describe(), self.relay_cfg.sequence_note());
+                }
+                hub.set_open_error(None);
+                hub.install(handle, &self.relay_cfg);
+            }
+            Err(e) => {
+                warn!("T/R switch: {e}");
+                hub.install(None, &self.relay_cfg);
+                hub.set_open_error(Some(e.to_string()));
+            }
+        }
+        self.emit_relay_status();
+    }
+
+    /// Whether this radio is on the air by any route.
+    ///
+    /// Three terms, and the absence of a fourth is deliberate. `hw_ptt` is
+    /// **not** here: [`Engine::apply_hw_ptt`] sets it and *then* asks for the
+    /// over, so a key-down the rails refuse leaves it standing true with
+    /// nothing transmitting — and a relay driven from it would ground the
+    /// antenna for an over that never happened and hold it there until the
+    /// operator let go of the foot switch. A hardware PTT line reaches the
+    /// switch through `tx_active` like every other route.
+    fn on_air(&self) -> bool {
+        // `cw_gate_until` covers the one over with no key-up of its own: a
+        // message the rig's own keyer is sending, where `tx_active` is false
+        // throughout and the radio is nonetheless transmitting.
+        self.tx_active || self.rig_tx || self.cw_gate_until.is_some()
+    }
+
+    /// Throw the contacts and wait for them, immediately before RF.
+    ///
+    /// Blocking the engine's thread here is deliberate. The relay *command*
+    /// does not block it — the driver owns the port on its own thread and this
+    /// is a channel send — but the lead is waited out, because on a CAT rig
+    /// `tx_begin` **is** the key-down: RF appears the moment the PTT frame goes
+    /// out. Anything that did not block could not promise "contacts before RF",
+    /// which is the only thing this feature is for. The wait lands in the gap
+    /// where the receive path is about to be paused anyway, and at the ten or
+    /// twenty milliseconds a relay actually needs it is inside what the output
+    /// ring already carries.
+    ///
+    /// Capped, because an operator who types 500 ms should get a switch that
+    /// works and not a radio that stutters.
+    fn lead_tr_switch(&mut self) {
+        let Some(hub) = self.tr_switch.as_ref() else { return };
+        let wait = hub.key(self.instance);
+        if wait.is_zero() {
+            return;
+        }
+        if wait > MAX_TR_LEAD {
+            if !self.relay_lead_capped {
+                self.relay_lead_capped = true;
+                warn!(
+                    "the T/R switch asks for {} ms before transmit; waiting {} ms — a longer \
+                     lead would be an audible hole in the receive audio and a delay between the \
+                     operator and their own transmitter",
+                    wait.as_millis(),
+                    MAX_TR_LEAD.as_millis()
+                );
+            }
+            std::thread::sleep(MAX_TR_LEAD);
+        } else {
+            std::thread::sleep(wait);
+        }
+    }
+
+    /// Keep the shared switch in step with this radio, and relay its health.
+    ///
+    /// Called every tick. In the common case that is one atomic load and a
+    /// comparison — see [`crate::TrSwitch::publish`].
+    fn poll_tr_switch(&mut self) {
+        let Some(hub) = self.tr_switch.clone() else { return };
+        hub.publish(self.instance, self.on_air());
+
+        // A transmitter out in the shack keyed itself, and the sense line saw
+        // it in milliseconds rather than the few hundred the CAT poll takes.
+        // Adopted by exactly one engine — the hub decides which, since on a
+        // multi-radio station only one of them is the transceiver with the wire
+        // in it and telling the others would mute the wrong receiver and refuse
+        // the wrong key-down.
+        if let Some(keyed) = hub.take_sense_edge(self.instance) {
+            self.adopt_rig_tx(keyed, "the transmit sense line");
+        }
+
+        // A configuration that arrived mid-over, applied now that the station
+        // is off the air.
+        if self.relay_pending && !hub.busy() {
+            self.sync_relay();
+        }
+
+        if self.primary {
+            let st = hub.status();
+            if self.relay_last_status.as_ref() != Some(&st) {
+                self.relay_last_status = Some(st.clone());
+                let _ = self.event_tx.send(RadioEvent::RelayStatus(Box::new(st)));
+            }
+        }
+    }
+
+    fn emit_relay_status(&mut self) {
+        let Some(hub) = self.tr_switch.as_ref() else { return };
+        let st = hub.status();
+        self.relay_last_status = Some(st.clone());
+        let _ = self.event_tx.send(RadioEvent::RelayStatus(Box::new(st)));
+    }
+
+    /// The radio in front of us started an over of its own — reported over CAT,
+    /// or seen on the T/R switch's sense line, which is the same fact arriving
+    /// a few hundred milliseconds sooner.
+    ///
+    /// Recorded, never answered: keying along with it would talk over the
+    /// person holding the microphone. See [`ControlUpdate::RigTx`].
+    fn adopt_rig_tx(&mut self, on: bool, how: &str) {
+        if on == self.rig_tx {
+            return;
+        }
+        self.rig_tx = on;
+        info!(
+            "the radio is {} under {how}",
+            match on {
+                true => "transmitting",
+                false => "receiving",
+            }
+        );
+        self.follow_rig_tx(on);
+        // Straight through to the switch rather than waiting for the next tick.
+        // The whole value of hearing about this early is spending none of it.
+        if let Some(hub) = self.tr_switch.as_ref() {
+            hub.publish(self.instance, self.on_air());
         }
     }
 
@@ -10953,10 +11197,21 @@ impl Engine {
         self.notice(&format!("transmit refused — {reason}"));
     }
 
-    /// Hand back the station's transmit interlock, if this engine holds it.
+    /// Hand back the station's transmit interlock, if this engine holds it,
+    /// and reconcile the external T/R switch with what is actually happening.
+    ///
+    /// Reconciled rather than released, and the difference matters: this is
+    /// called from [`Engine::deny_tx`], which runs on refusals that have
+    /// nothing to do with whether the station is on the air — a key-down
+    /// refused *because the rig is transmitting on its own PTT* being the case
+    /// in point. Dropping the contacts there would open an antenna relay under
+    /// somebody else's live RF and throw it straight back on the next tick.
     fn release_tx_gate(&self) {
         if let Some(gate) = self.tx_gate.as_ref() {
             gate.release(self.instance);
+        }
+        if let Some(hub) = self.tr_switch.as_ref() {
+            hub.publish(self.instance, self.on_air());
         }
     }
 
@@ -12389,6 +12644,18 @@ impl Engine {
             // frequency, and the contact sits a sidetone above the dial — the
             // same offset the receive window already rides on.
             let rig_txf = txf + self.rig_cw_offset_hz();
+            // Every rail has passed and the station is about to be on the air.
+            // The external T/R switch leads the RF — contacts first, drive
+            // second, always — which is the one guarantee that whole subsystem
+            // exists to make. Placed after the rails on purpose, so a refused
+            // key-down never touches the hardware and there is nothing to
+            // unwind.
+            if let Some(hub) = self.tr_switch.as_ref() {
+                if let Some(why) = hub.refusal() {
+                    return self.deny_tx(&why);
+                }
+            }
+            self.lead_tr_switch();
             match self.source.tx_begin(rig_txf, begin_rate) {
                 Ok(tx_rate) => {
                     // Rate-match the digital modes to whatever this radio
@@ -12501,11 +12768,28 @@ impl Engine {
                         self.burst_unkeys = false;
                     }
                 }
-                Err(e) => self.deny_tx(&format!("the radio refused to key: {e}")),
+                Err(e) => {
+                    // The contacts were thrown a moment ago and nothing came of
+                    // it. Dropped with no hold: there was never anything on the
+                    // air to protect, and a receiver held off for it would be
+                    // deaf for no reason.
+                    if let Some(hub) = self.tr_switch.as_ref() {
+                        hub.abort(self.instance);
+                    }
+                    self.deny_tx(&format!("the radio refused to key: {e}"))
+                }
             }
         } else {
             if let Err(e) = self.source.tx_end() {
                 warn!("tx_end: {e}");
+            }
+            // Immediately after the radio has been told to stop, so the hold
+            // times are measured from when the RF actually ends rather than
+            // from whenever the next loop tick happens to come round. Returns
+            // at once — the holds are the driver's business and this thread has
+            // a receiver to get back to.
+            if let Some(hub) = self.tr_switch.as_ref() {
+                hub.unkey(self.instance);
             }
             // Give a rig with its own power control its operating level back.
             // TUNE holds it at the (deliberately low) tune level for the length

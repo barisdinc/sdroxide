@@ -1035,7 +1035,21 @@ use sdroxide_types::{
 /// Nothing else on the wire moves: the widener runs on the *speaker* path of
 /// whichever end is doing the listening, and the audio a remote client is sent
 /// is the mono downmix, which binaural leaves untouched by construction.
-pub const PROTO_VERSION: u16 = 116;
+/// **117** — the station's external transmit/receive switch (issue #227).
+///
+/// A relay board, a handshake line or a sound-card GPIO pin that grounds the
+/// SDR's antenna while the station transmits, and sequences an amplifier with
+/// it. [`sdroxide_types::StationConfig`] gains `relay`, `Command` gains
+/// `SetRelayConfig` and `TestRelay`, and `ServerMsg` gains `RelayStatus`.
+///
+/// The command and the message are appended to the end of their enums as
+/// always, but the config field is the reason this is a bump rather than a
+/// free addition: `StationConfig` rides `RadioEvent::StationConfig` and
+/// `ServerMsg::StationConfig` **whole**, so a v116 peer would read the tail of
+/// every station bundle one field out — and that bundle carries the band plan
+/// the client draws its band edges from. The handshake's equality test stops
+/// that before a frame is exchanged.
+pub const PROTO_VERSION: u16 = 117;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1436,6 +1450,21 @@ pub enum ServerMsg {
     /// when it is not. A whole snapshot, twice a second — see
     /// [`sdroxide_types::Vdl2Status`].
     Vdl2Status(Box<sdroxide_types::Vdl2Status>),
+    /// The station's external T/R switch, mirrored from the engine's
+    /// `RadioEvent::RelayStatus`: whether one is configured, whether the
+    /// hardware is answering, what it is, and whether the contacts are in their
+    /// transmit state.
+    ///
+    /// Cached by the server and replayed on connect — unlike
+    /// [`ServerMsg::RotatorStatus`], which is not, and which therefore leaves a
+    /// client that attaches mid-session with a blank panel. This is a standing
+    /// condition and a safety one: an operator opening the settings dialog
+    /// remotely has to be told at once that the relay protecting the receiver
+    /// is not answering, rather than after the next thing that happens to
+    /// change.
+    ///
+    /// Appended last, for the usual reason.
+    RelayStatus(Box<sdroxide_types::RelayStatus>),
 }
 
 /// One radio in a station's roster, as a client sees it.

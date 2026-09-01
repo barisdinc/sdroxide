@@ -4806,6 +4806,7 @@ dependencies = [
  "sdroxide-pluto",
  "sdroxide-proto",
  "sdroxide-radio",
+ "sdroxide-relay",
  "sdroxide-rtlsdr",
  "sdroxide-rx888",
  "sdroxide-sdrplay",
@@ -5218,6 +5219,7 @@ dependencies = [
  "sdroxide-kiss",
  "sdroxide-net",
  "sdroxide-qo100",
+ "sdroxide-relay",
  "sdroxide-rigctld",
  "sdroxide-rotator",
  "sdroxide-skimmer",
@@ -5232,6 +5234,20 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "triple_buffer",
+]
+
+[[package]]
+name = "sdroxide-relay"
+version = "1.6.3"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "sdroxide-types",
+ "serialport",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

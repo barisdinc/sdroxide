@@ -223,6 +223,12 @@ pub(crate) struct Latest {
     /// file here, so a client elsewhere has no copy, and the settings panel it
     /// feeds would otherwise open on defaults and write them back.
     pub radio: Option<Box<sdroxide_types::RadioConfig>>,
+    /// The external T/R switch's health. Replayed on connect for `sat_track`'s
+    /// reason and one more: it is the only thing that tells a remote operator
+    /// whether the relay standing between a kilowatt and their receiver is
+    /// answering, and "nothing has changed since you attached" must not read as
+    /// "nothing is wrong".
+    pub relay: Option<Box<sdroxide_types::RelayStatus>>,
     /// What the RDS decoder has made of the station currently tuned. Replayed on
     /// connect for the same reason as `digi` and `voice`: which station is being
     /// listened to is a standing condition, and a client that attaches after the
@@ -1181,6 +1187,10 @@ fn handle_event(shared: &Shared, ev: RadioEvent) {
             }
             RadioEvent::RotatorStatus { connected, az_deg, el_deg, error } => {
                 Some(ServerMsg::RotatorStatus { connected, az_deg, el_deg, error })
+            }
+            RadioEvent::RelayStatus(st) => {
+                latest.relay = Some(st.clone());
+                Some(ServerMsg::RelayStatus(st))
             }
             // Handled above, and deliberately not forwarded: the skimmer
             // firehose is a hundred times the spot list's traffic, and the

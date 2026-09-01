@@ -322,6 +322,16 @@ pub enum RadioEvent {
     /// table are far larger than anything else in this enum, and an enum is as
     /// big as its largest variant everywhere it is held.
     Vdl2Status(Box<crate::Vdl2Status>),
+    /// The station's external T/R switch: whether it is configured, whether the
+    /// hardware is answering, what it is, and whether the contacts are in their
+    /// transmit state.
+    ///
+    /// Emitted by the primary engine only — one station, one antenna line — and
+    /// only when it changes. Boxed for the usual reason: it carries two strings
+    /// and an enum is as big as its largest variant everywhere it is held.
+    ///
+    /// Appended last, for the usual reason.
+    RelayStatus(Box<crate::RelayStatus>),
 }
 
 /// Snapshot of the frontend's switchable sound devices (native clients).

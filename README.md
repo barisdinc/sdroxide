@@ -118,6 +118,16 @@ One binary, three ways to run it:
   Announcements play on their own sound device, so they are never recorded and
   never sent to a remote listener. The window is also exposed to NVDA, Orca and
   VoiceOver.
+- **T/R switch** — drives an external relay that disconnects and grounds the
+  SDR's antenna input while the station transmits, and sequences an amplifier or
+  an outboard T/R relay with it (per-contact lead and hold, so the antenna
+  always throws before the amplifier is keyed and unkeys before it comes back).
+  Works with the cheap USB relay boards (LCUS/CH340, KMtronic, Numato), USB HID
+  relay boards, CM108/CM119 sound-card GPIO, a serial RTS/DTR line into any
+  interface that wants a PTT closure, a Raspberry Pi GPIO line, or an external
+  command. An optional transmit-sense input on the same port sees a rig keyed at
+  its own microphone in milliseconds instead of the few hundred a CAT poll
+  takes. See "T/R switch" in the user manual for what this cannot do.
 - **Persistence** — device, rates, gains, memories, band stacks, the FT8/FT4/FT2
   operator profile, network/QSL credentials, control bindings, and the logbook
   are all stored under `~/.config/sdroxide/`.
@@ -1324,6 +1334,44 @@ its version at startup (`LimeSuite loaded, version …`). If sdroxide lists a bo
 you do not recognise, note that LimeSuite claims the bare Cypress FX3 id that an
 *unprogrammed RX-888* also presents — sdroxide filters those out by board name
 and `--probe` names what it skipped.
+
+### T/R switch permissions
+
+Only two of the six kinds of switching hardware need anything here.
+
+**USB HID relay boards and CM108 sound-card GPIO.** sdroxide writes HID reports
+to these, and no distribution grants that by default — a card that plainly works
+for audio still cannot switch anything until the rule is in:
+
+```sh
+sudo cp packaging/linux/60-sdroxide-relay.rules /usr/lib/udev/rules.d/
+sudo udevadm control --reload
+```
+
+The `.deb` installs it for you. As with the LimeRFE rule, it is worth knowing
+what it costs: the dcttech relay boards carry `16c0:05df`, a *V-USB hobby id*
+shared with other people's home-made keyboards and LED controllers, so the rule
+loosens permissions on any such device on the machine. sdroxide's own device list
+additionally filters on the product string (`USBRelay…`), so it does not offer
+you somebody's keyboard as an antenna relay — but udev cannot make that
+distinction.
+
+**Serial relay boards** (LCUS, KMtronic, Numato) and **RTS/DTR lines** need
+nothing from this file: they are serial ports, so add yourself to `dialout` as
+you would for a CAT cable.
+
+To check what a machine can see, and to throw one contact with the transmitter
+cold:
+
+```sh
+cargo run -p sdroxide-relay --example relay -- --list --all
+cargo run -p sdroxide-relay --example relay -- --serial /dev/ttyUSB0 --board lcus --set 1 on
+```
+
+**Windows and macOS.** No driver and no permissions to set — but note that the
+HID paths on both have never been run against hardware, only compiled. If a
+board is not found or does not switch on either, the `--list --all` transcript
+above is what to attach to a bug report.
 
 ### SDRplay RSP prerequisites
 

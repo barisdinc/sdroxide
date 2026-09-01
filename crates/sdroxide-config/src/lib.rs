@@ -1474,6 +1474,19 @@ pub fn save_rotator_config(cfg: &sdroxide_types::RotatorConfig) -> Result<(), Co
     save_json("rotator.json", cfg)
 }
 
+/// The external transmit/receive switch — the relay board or contact closure
+/// that grounds the SDR's antenna while the station transmits. Owned by the
+/// engine, like the rotator above, and for the same reason: it is a fact about
+/// the machine the antenna is attached to, not about the screen in front of the
+/// operator.
+pub fn load_relay_config() -> sdroxide_types::RelayConfig {
+    load_json("relay.json")
+}
+
+pub fn save_relay_config(cfg: &sdroxide_types::RelayConfig) -> Result<(), ConfigError> {
+    save_json("relay.json", cfg)
+}
+
 // ── Broadcast station schedules ──────────────────────────────────────────────
 //
 // Three layers, in the order they win:

@@ -19,6 +19,7 @@ pub(in crate::app) mod controls;
 pub(in crate::app) mod general;
 pub(in crate::app) mod net;
 pub(in crate::app) mod radio;
+pub(in crate::app) mod relay;
 #[cfg(not(target_arch = "wasm32"))]
 pub(in crate::app) mod remote;
 pub(in crate::app) mod servers;
@@ -70,6 +71,14 @@ pub(in crate::app) enum SettingsTab {
     Uploads,
     Winlink,
     Servers,
+    /// The external transmit/receive switch: the relay that grounds the SDR's
+    /// antenna while the station transmits.
+    ///
+    /// A tab of its own rather than another section under `Servers`, where the
+    /// rotator lives. Two reasons: the panel is large — a channel table, the
+    /// sequencer's timings and a test button apiece — and this is the one page
+    /// in here whose being hard to find could cost somebody a front end.
+    TrSwitch,
     /// Dial another station. Native only: a browser client is already attached
     /// to the server that served it and has nowhere to put a second one.
     #[cfg(not(target_arch = "wasm32"))]
@@ -246,6 +255,10 @@ pub(in crate::app) struct SettingsIo<'a> {
     /// The rotctld *client* — the satellite lock steering a motorized antenna.
     rot_edit: &'a mut sdroxide_types::RotatorConfig,
     rot_apply: &'a mut bool,
+    relay_edit: &'a mut sdroxide_types::RelayConfig,
+    relay_apply: &'a mut bool,
+    /// Which contact the operator asked to hear, if any.
+    relay_test: &'a mut Option<u8>,
     /// Control-input bindings, plus the row (if any) waiting to capture a
     /// keypress. Persisted on close, since a rebind has no APPLY step.
     input_edit: &'a mut sdroxide_types::InputSettings,
@@ -465,6 +478,7 @@ impl SdroxideApp {
             A::Hpsdr(d) => self.hpsdr_devices = d,
             A::SmartSdr(d) => self.smartsdr_devices = d,
             A::Pluto(d) => self.pluto_devices = d,
+            A::Relays(d) => self.relay_devices = d,
             // Not a device on this machine but a list from the internet,
             // fetched by it — see `DeviceProbe::PublicSdrs`. Kept whole rather
             // than merged so a refresh that came back short replaces the list
@@ -526,6 +540,10 @@ impl SdroxideApp {
             // list below is built rather than when somebody reaches for it.
             self.ask_device(ctx, sdroxide_types::DeviceProbe::Host);
             self.ask_device(ctx, sdroxide_types::DeviceProbe::SerialPorts);
+            // The switching hardware, for the T/R switch's picker. Non-invasive
+            // — nothing is opened — and asked here rather than when the tab is
+            // opened so the list is already there when it is.
+            self.ask_device(ctx, sdroxide_types::DeviceProbe::Relays);
             // Everything the *station* is set to — the network cockpit, the two
             // built-in servers, the WSJT-X broadcast and the satellites — was
             // seeded from `RadioEvent::StationConfig` and needs no query here:
@@ -650,6 +668,9 @@ impl SdroxideApp {
         let mut wsjtx_apply = false;
         let mut rot_edit = self.rot_cfg_edit.clone();
         let mut rot_apply = false;
+        let mut relay_edit = self.relay_edit.clone();
+        let mut relay_apply = false;
+        let mut relay_test: Option<u8> = None;
         let mut input_edit = self.input.cfg.clone();
         let mut key_capture = self.input.key_capture;
         let mut midi_learn = self.input.midi_learn;
@@ -876,6 +897,9 @@ impl SdroxideApp {
                             wsjtx_apply: &mut wsjtx_apply,
                             rot_edit: &mut rot_edit,
                             rot_apply: &mut rot_apply,
+                            relay_edit: &mut relay_edit,
+                            relay_apply: &mut relay_apply,
+                            relay_test: &mut relay_test,
                             input_edit: &mut input_edit,
                             key_capture: &mut key_capture,
                             midi_learn: &mut midi_learn,
@@ -964,6 +988,16 @@ impl SdroxideApp {
         if rot_apply {
             // The engine persists rotator.json when it (re)starts the client.
             cmds.push(Command::SetRotatorConfig(self.rot_cfg_edit.clone()));
+        }
+        self.relay_edit = relay_edit;
+        if relay_apply {
+            // The engine persists relay.json when it (re)opens the switch — and
+            // refuses to reopen it mid-over, which is why this is an APPLY and
+            // not a write-through.
+            cmds.push(Command::SetRelayConfig(Box::new(self.relay_edit.clone())));
+        }
+        if let Some(channel) = relay_test {
+            cmds.push(Command::TestRelay { channel });
         }
         self.sat_ui = sat_ui;
         if self.sat_cfg_seeded && sat_edit != self.sat_cfg_edit {
@@ -1352,6 +1386,7 @@ impl SdroxideApp {
             (SettingsTab::Uploads, "Uploads"),
             (SettingsTab::Winlink, "Winlink"),
             (SettingsTab::Servers, "Servers"),
+            (SettingsTab::TrSwitch, "T/R switch"),
         ];
         // Next to Servers: the two are the same subject from opposite ends —
         // what this station offers others, and where this screen goes.
@@ -2786,6 +2821,18 @@ impl SdroxideApp {
                     self.rot_cfg_seeded,
                     &self.rotator_status,
                     io.rot_apply,
+                );
+            }
+            SettingsTab::TrSwitch => {
+                relay::settings_relay_tab(
+                    ui,
+                    io.relay_edit,
+                    self.relay_seeded,
+                    &self.relay_status,
+                    &self.serial_ports,
+                    &self.relay_devices,
+                    io.relay_apply,
+                    io.relay_test,
                 );
             }
             #[cfg(not(target_arch = "wasm32"))]
