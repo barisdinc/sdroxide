@@ -1382,6 +1382,17 @@ in that span together — the whole of 2 m in well under a second. A CAT rig
 feeding demodulated audio has no such span, so it falls back to visiting
 channels one at a time, and behaves like the handheld.
 
+**A memory scan stops on each channel in its own set-up.** Stopping on a
+channel sets the mode, the filter and the **DUPLEX and TONE** stored with it, so
+a scan across a mixed list leaves you on a repeater channel with its shift and
+tone on and on a simplex one with both off. That matters more here than on a
+recall, because a scan hands you whichever channel called and you answer it by
+reaching straight for the PTT — a shift left standing from the last stop would
+put the over 600 kHz away from the station calling you. A channel stored before
+the set-up existed counts as plain simplex with no tone, exactly as a recall
+reads it ([2.12](#212-memory-channels)). The antenna is the one thing a stop
+does not touch, unlike a recall: a scan is not worth a relay per channel.
+
 **A memory scan can be pointed at chosen folders.** With folders in use
 ([2.12](#212-memory-channels)) a **Folders** row appears above the channel list:
 **ALL**, then one button per folder with the number of channels in it, and

@@ -10773,7 +10773,19 @@ impl Engine {
                     filter_lo: m.filter_lo,
                     filter_hi: m.filter_hi,
                 };
+                // The setup the channel was stored with, read exactly as
+                // `RecallMemory` reads it — an absent one as plain simplex with
+                // no tone (issue #204). A scan stops on a channel to be worked,
+                // and the operator who answers the call reaches for the PTT
+                // rather than for the shift: without this the over goes out on
+                // the last repeater's shift and tone, whichever channel the
+                // scan is actually sitting on (issue #264).
+                let repeater = m.repeater.unwrap_or_default().clamped();
                 self.place_entry_in_span(entry);
+                // After the dial, not before it: a channel stored with AUTO on
+                // resolves its shift against the frequency it lands on, and the
+                // one being left is the wrong band to ask about.
+                self.set_repeater(repeater);
             }
             ScanTarget::Freq(hz) => {
                 if self.state.rx[0].mode != self.scan_cfg.mode {

@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use sdroxide_radio::{Complex32, EngineConfig, IqSource, Result, rtrb, start_engine};
 use sdroxide_types::{
-    Command, DeviceCaps, MemoryChannel, Mode, RadioEvent, ScanKind, ScanResume, ScannerConfig, Vfo,
+    Command, DeviceCaps, MemoryChannel, Mode, RadioEvent, RepeaterState, ScanKind, ScanResume,
+    ScannerConfig, Shift, ToneMode, Vfo,
 };
 
 const RATE: f64 = 1_536_000.0;
@@ -133,6 +134,9 @@ struct Watch {
     running: bool,
     holding: bool,
     held_at: Option<f64>,
+    /// The repeater setup the engine was in when it stopped — the shift and the
+    /// tone that would go out if the operator answered the call.
+    held_repeater: Option<sdroxide_types::RepeaterState>,
     notices: Vec<String>,
     /// The settings as the engine last persisted them — which is where a skip
     /// taken during a scan has to end up if it is to survive the next run.
@@ -195,6 +199,10 @@ impl Rig {
                     self.w.holding = s.scan.holding;
                     if s.scan.holding && self.w.held_at.is_none() {
                         self.w.held_at = Some(s.active_freq_hz());
+                        // Captured with the frequency rather than read off the
+                        // last state seen: what matters is the setup in force on
+                        // the channel the scan stopped on.
+                        self.w.held_repeater = Some(s.repeater);
                     }
                 }
                 RadioEvent::Notice(Some(n)) => self.w.notices.push(n),
@@ -228,6 +236,7 @@ impl Rig {
     /// what `clear_memories` is for.
     fn forget_seen(&mut self) {
         self.w.held_at = None;
+        self.w.held_repeater = None;
         self.w.notices.clear();
         self.w.dials.clear();
     }
@@ -441,6 +450,74 @@ fn a_memory_scan_passes_over_skipped_channels() {
     rig.forget_seen();
     rig.send(Command::SetScanning(true));
     assert_eq!(rig.pump(2.5, true).held_at, None, "it stopped on a channel it was told to skip");
+}
+
+/// A memory scan carries each channel's stored repeater setup with it, in both
+/// directions: stopping on a repeater channel puts the shift and the tone on,
+/// and stopping on a simplex one takes them off again (issue #264).
+///
+/// This matters more in a scan than in a recall. A recall is a channel the
+/// operator picked; a scan hands them whichever channel called, and they answer
+/// it by reaching straight for the PTT — so a shift left standing from the last
+/// stop transmits 600 kHz away from the station that is calling them.
+#[test]
+fn a_memory_scan_carries_each_channels_repeater_setup() {
+    const RPTR: f64 = 145_600_000.0;
+    const SIMPLEX: f64 = 145_500_000.0;
+    let mut rig = Rig::new(Some(RPTR));
+    rig.clear_memories();
+
+    // One repeater channel and one simplex one, each stored with the setup it
+    // is worked on — which is what every memory stores nowadays.
+    let shifted = RepeaterState {
+        shift: Shift::Minus,
+        offset_hz: 600_000,
+        tone: ToneMode::Ctcss,
+        ..RepeaterState::default()
+    };
+    rig.send(Command::SetRepeater(shifted));
+    rig.send(Command::SetVfo { vfo: Vfo::A, hz: RPTR });
+    rig.send(Command::StoreMemory { name: "repeater".into() });
+    rig.send(Command::SetRepeater(RepeaterState::default()));
+    rig.send(Command::SetVfo { vfo: Vfo::A, hz: SIMPLEX });
+    rig.send(Command::StoreMemory { name: "simplex".into() });
+    assert_eq!(rig.memories(2).len(), 2, "both memories should have been stored");
+
+    let cfg = ScannerConfig {
+        kind: ScanKind::Memories,
+        threshold_db: -60.0,
+        dwell_ms: 60,
+        resume: ScanResume::Manual,
+        ..range_cfg()
+    };
+    rig.send(Command::SetScannerConfig(cfg));
+    rig.send(Command::SetScanning(true));
+    let w = rig.pump(5.0, true);
+    let held = w.held_at.expect("should have stopped on the repeater channel");
+    assert!((held - RPTR).abs() < 1.0, "stopped on {held} rather than {RPTR}");
+    let r = w.held_repeater.expect("a state came with the stop");
+    assert_eq!(
+        (r.shift, r.tone),
+        (Shift::Minus, ToneMode::Ctcss),
+        "the repeater channel was not put into its stored setup: {r:?}"
+    );
+
+    // And now the way round the bug was reported: the radio is sitting in that
+    // repeater's shift with its tone on, and the channel that calls next is a
+    // simplex one.
+    rig.send(Command::SetScanning(false));
+    *rig.signal.lock().unwrap() = Some(SIMPLEX);
+    rig.forget_seen();
+    rig.send(Command::SetScanning(true));
+    let w = rig.pump(5.0, true);
+    let held = w.held_at.expect("should have stopped on the simplex channel");
+    assert!((held - SIMPLEX).abs() < 1.0, "stopped on {held} rather than {SIMPLEX}");
+    let r = w.held_repeater.expect("a state came with the stop");
+    assert_eq!(
+        (r.shift, r.tone),
+        (Shift::Simplex, ToneMode::Off),
+        "the simplex channel was left in the last repeater's setup: {r:?}"
+    );
 }
 
 /// A fast memory scan reads its channels off the wideband spectrum instead of
