@@ -23,8 +23,8 @@ use sdroxide_digi::{
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
-    AdcMeter, Agc, AutoNotch, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc, Modulator,
-    MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
+    AdcMeter, Agc, AutoNotch, Binaural, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc,
+    Modulator, MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
     SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target, make_demod,
     make_modulator,
 };
@@ -1639,6 +1639,53 @@ fn run_chain_block(
     }
 }
 
+/// Binaural (pseudo-stereo) CW: spread the receive passband across the two
+/// ears, so that pitch becomes direction and tuning a signal floats it from one
+/// ear to the other (issue #263). What it actually does to the audio is
+/// [`sdroxide_dsp::Binaural`]'s business; this is where the receiver decides
+/// whether it runs at all.
+///
+/// `mono` comes in as the speaker audio and goes out as the left ear, with the
+/// right in `right`; `scratch` is where the left is built before the two are
+/// swapped, so nothing is copied twice. Both are left exactly as they were —
+/// and the widener dropped, rather than left holding a filter's worth of stale
+/// audio — whenever it is not wanted:
+///
+/// * the operator has not asked for it, or the mode is not one that has it
+///   ([`Mode::binaural_audio`]);
+/// * something else already owns the right ear. The sub receiver claims it
+///   explicitly and WFM stereo fills it automatically, and neither is worth
+///   giving up for an effect: the same order of precedence the stereo
+///   broadcast itself yields to.
+///
+/// A free function rather than a method for the reason [`run_chain_block`] is
+/// one: the buffers it works on and the widener that owns the filter state are
+/// separate fields of the engine, and both receive paths — a demodulated radio
+/// and a transceiver handing over its own audio — have to reach it.
+fn binaural_split(
+    slot: &mut Option<Binaural>,
+    rx: &RxState,
+    rate: f64,
+    right_free: bool,
+    mono: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+    right: &mut Vec<f32>,
+) {
+    if !rx.binaural || !rx.mode.binaural_audio() || !right_free || !right.is_empty() {
+        *slot = None;
+        return;
+    }
+    let b = slot.get_or_insert_with(|| Binaural::new(rate, rx.filter_lo, rx.filter_hi));
+    // Both re-asserted per block and both no-ops when nothing has moved: the
+    // speaker's rate changes when the operator picks another sound card, and
+    // the passband every time a filter edge is dragged.
+    b.set_rate(rate);
+    b.set_passband(rx.filter_lo, rx.filter_hi);
+    scratch.clear();
+    b.process(mono, scratch, right);
+    std::mem::swap(mono, scratch);
+}
+
 /// A satellite lock in progress: the parsed propagator, who is watching from
 /// where, and the numbers most recently computed from them.
 struct ActiveSatLock {
@@ -2308,8 +2355,15 @@ struct Engine {
     /// chain ends before a digital-voice mode gets the chance to replace it.
     main_play: Vec<f32>,
     /// Right channel of the main chain, non-empty only while WFM stereo is
-    /// decoding and the sub receiver is off.
+    /// decoding and the sub receiver is off — or while the binaural widener
+    /// below is placing the passband across the two ears.
     main_play_r: Vec<f32>,
+    /// Binaural (pseudo-stereo) CW: built on the first block that asks for it
+    /// and dropped when the operator switches it off, so a receiver that never
+    /// uses it carries no filter state. Its left ear lands in `bin_left`, which
+    /// is then swapped into `main_play` — see [`binaural_split`].
+    binaural: Option<Binaural>,
+    bin_left: Vec<f32>,
     /// Speaker-path attenuation asked for by a local spoken announcement.
     /// Held here as well as in the mixer so a device swap, which builds a new
     /// mixer, does not come back at full volume mid-announcement.
@@ -2953,6 +3007,7 @@ fn engine_thread(
         state.rx[0].agc = s.agc;
         state.rx[0].squelch_db = s.squelch_db;
         state.rx[0].noise_reduction = s.noise_reduction;
+        state.rx[0].binaural = s.binaural;
         state.tx.drive = s.drive;
         state.tx.tune_drive = s.tune_drive;
         state.tx.mic_gain = s.mic_gain;
@@ -3150,6 +3205,8 @@ fn engine_thread(
         voice_play: Vec::new(),
         main_play: Vec::new(),
         main_play_r: Vec::new(),
+        binaural: None,
+        bin_left: Vec::new(),
         speech_duck: 1.0,
         main_play_rec: Vec::new(),
         main_play_r_rec: Vec::new(),
@@ -4134,6 +4191,22 @@ impl Engine {
             }
         }
 
+        // Binaural CW, if the operator asked for it: one ear becomes two, with
+        // the passband spread across them. Here rather than inside the receive
+        // chain because this is where the demodulated path and the transceiver's
+        // own audio have met, and because everything the decoders, the recorder
+        // and the remote stream tap is upstream of it — turning this on changes
+        // what the operator hears and nothing else.
+        binaural_split(
+            &mut self.binaural,
+            &self.state.rx[0],
+            out_rate,
+            !self.state.sub_rx_enabled,
+            &mut self.main_play,
+            &mut self.bin_left,
+            &mut self.main_play_r,
+        );
+
         // Both taps come out of one borrow: `run`'s own return would keep the
         // chain mutably borrowed, leaving no way to ask for the recorder tap
         // as well.
@@ -4374,10 +4447,23 @@ impl Engine {
         self.analyzer.process(iq);
 
         self.play_rx_audio(self.radio_fs);
-        // Mono: a demod-audio rig has one receiver and no sub, so there is
-        // never a second ear to fill.
+        // A demod-audio rig has one receiver and no sub, so the second ear is
+        // free — and binaural CW is the one thing that fills it. This is the
+        // front end a great many CW operators are listening on, so it gets the
+        // same widener the demodulated path does.
+        self.main_play_r.clear();
+        binaural_split(
+            &mut self.binaural,
+            &self.state.rx[0],
+            self.audio_out_rate,
+            true,
+            &mut self.audio_play,
+            &mut self.bin_left,
+            &mut self.main_play_r,
+        );
+        let right = (!self.main_play_r.is_empty()).then_some(&self.main_play_r[..]);
         if let Some(mixer) = self.mixer.as_mut() {
-            mixer.push(&self.audio_play, None, &self.audio_play_rec, None);
+            mixer.push(&self.audio_play, right, &self.audio_play_rec, None);
         }
     }
 
@@ -6531,6 +6617,7 @@ impl Engine {
             }
             SetAutoNotch { rx, on } => self.state.rx[rx.index()].auto_notch = on,
             SetWfmStereo { rx, on } => self.state.rx[rx.index()].wfm_stereo = on,
+            SetBinaural { rx, on } => self.state.rx[rx.index()].binaural = on,
             // Main receiver only, like the status it answers: the DRM panel
             // shows the broadcast being listened to.
             SetDrmService { service } => {
@@ -11162,6 +11249,7 @@ impl Engine {
             tx_eq: self.state.tx.eq,
             squelch_db: self.state.rx[0].squelch_db,
             noise_reduction: self.state.rx[0].noise_reduction,
+            binaural: self.state.rx[0].binaural,
             // The standing choice again, not what the front end of the moment
             // could do with it: a session written while the radio was switched
             // off would otherwise put 1 on disk and lose it for good.
@@ -14080,6 +14168,105 @@ fn slide_rows(batch: &mut [u8], from: (f64, f64, usize), to: (f64, f64, usize)) 
         }
     }
     true
+}
+
+#[cfg(test)]
+mod binaural_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+
+    fn cw(binaural: bool) -> RxState {
+        RxState { binaural, ..RxState::with_mode(Mode::Cw) }
+    }
+
+    /// A 700 Hz note in the middle of the CW passband, at a level the clamp
+    /// never reaches.
+    fn note() -> Vec<f32> {
+        (0..4_096)
+            .map(|i| 0.3 * (std::f64::consts::TAU * 700.0 * f64::from(i) / RATE).cos() as f32)
+            .collect()
+    }
+
+    /// `binaural_split` against one block: what came back in each ear, and
+    /// whether the widener was kept.
+    fn split(rx: &RxState, right_free: bool, right_in: &[f32]) -> (Vec<f32>, Vec<f32>, bool) {
+        let mut slot = None;
+        let (mut mono, mut scratch) = (note(), Vec::new());
+        let mut right = right_in.to_vec();
+        binaural_split(&mut slot, rx, RATE, right_free, &mut mono, &mut scratch, &mut right);
+        (mono, right, slot.is_some())
+    }
+
+    /// With it on in CW, the second ear is filled and the two are no longer
+    /// the same signal — but they still sum back to the audio that went in.
+    #[test]
+    fn cw_fills_the_second_ear() {
+        let (left, right, kept) = split(&cw(true), true, &[]);
+        assert!(kept, "the widener should be kept while it is running");
+        assert_eq!(left.len(), 4_096);
+        assert_eq!(right.len(), 4_096);
+        assert!(left != right, "the two ears are the same signal");
+        // Past the latency, where both ears carry real audio rather than the
+        // priming zeros.
+        let mono = note();
+        let far = 2_048;
+        assert!(
+            (far..4_096).any(|i| (left[i] - mono[i]).abs() > 0.05),
+            "the left ear is unchanged, so nothing was spread"
+        );
+        assert!(right[far..].iter().any(|s| s.abs() > 0.05), "the right ear is silent");
+    }
+
+    /// Every other mode is left exactly as it was: no second ear, no widener,
+    /// and the audio untouched.
+    #[test]
+    fn other_modes_are_left_mono() {
+        let rx = RxState { binaural: true, ..RxState::with_mode(Mode::Usb) };
+        let (left, right, kept) = split(&rx, true, &[]);
+        assert_eq!(left, note());
+        assert!(right.is_empty());
+        assert!(!kept);
+    }
+
+    /// …and so is CW with it switched off, which is also where the filter
+    /// state is dropped rather than left to go stale.
+    #[test]
+    fn switching_it_off_leaves_the_audio_alone() {
+        let (left, right, kept) = split(&cw(false), true, &[]);
+        assert_eq!(left, note());
+        assert!(right.is_empty());
+        assert!(!kept);
+
+        let mut slot = None;
+        let (mut mono, mut scratch, mut right) = (note(), Vec::new(), Vec::new());
+        binaural_split(&mut slot, &cw(true), RATE, true, &mut mono, &mut scratch, &mut right);
+        assert!(slot.is_some());
+        right.clear();
+        binaural_split(&mut slot, &cw(false), RATE, true, &mut mono, &mut scratch, &mut right);
+        assert!(slot.is_none(), "the widener outlived the setting that asked for it");
+    }
+
+    /// The sub receiver owns the right ear when it is running: an explicit
+    /// second receiver outranks an effect on the first.
+    #[test]
+    fn the_sub_receiver_keeps_the_right_ear() {
+        let (left, right, kept) = split(&cw(true), false, &[]);
+        assert_eq!(left, note());
+        assert!(right.is_empty());
+        assert!(!kept);
+    }
+
+    /// So does audio that is already stereo — nothing here overwrites an ear
+    /// something else has filled.
+    #[test]
+    fn an_ear_that_is_already_filled_is_not_taken() {
+        let filled = vec![0.1f32; 4_096];
+        let (left, right, kept) = split(&cw(true), true, &filled);
+        assert_eq!(left, note());
+        assert_eq!(right, filled);
+        assert!(!kept);
+    }
 }
 
 #[cfg(test)]

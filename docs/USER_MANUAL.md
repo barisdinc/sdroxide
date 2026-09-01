@@ -499,6 +499,15 @@ mode. What is in the box never changes; only where the two rows are cut does.
   only what you hear; the FT8/FT4/FT2/PSK/RTTY decoders still receive the untouched
   signal, and a steady unmodulated carrier — a heterodyne — is treated as noise
   and suppressed. Any NR engine also forces WFM to mono — see **ST** below.)
+- **BIN** (CW only) — **binaural** audio: the receive passband spread across the
+  two ears, so that a signal's *pitch* becomes a *direction*. A station at the
+  sidetone pitch sits in the middle of your head, one above it moves to the
+  right, one below it to the left, and tuning a station floats it across from
+  one ear to the other.
+
+  The button greys out while the **sub receiver** is running, which claims the
+  right ear for a second receiver — an explicit second signal outranks an effect
+  on the first.
 - **ST** (WFM only) — broadcast **stereo**. It lights when the station's 19 kHz
   stereo pilot is locked, and needs nothing from you: mono and stereo stations
   are handled automatically, at the same volume, so there is no jump when one
@@ -11038,7 +11047,7 @@ row of menu buttons:
 | Button | What it holds |
 | --- | --- |
 | **PTT** | Keys the transmitter. Hold it down to talk, or click it with a mouse to latch it on. |
-| **RX** | Volume, front-end gain, AGC, squelch, NB, ANC, NR |
+| **RX** | Volume, front-end gain, AGC, squelch, NB, ANC, NR, BIN |
 | **VFO** | A↔B, A→B, SPLIT, SUB, and the RIT/XIT offsets |
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |

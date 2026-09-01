@@ -347,6 +347,15 @@ pub(crate) fn apply_action(
             cmds.push(Command::SetNoiseReduction { rx, level: state.rx[0].noise_reduction.next() })
         }
         AutoNotch => cmds.push(Command::SetAutoNotch { rx, on: !state.rx[0].auto_notch }),
+        // Only where the mode has it: in every other mode the chip is not
+        // drawn, and a binding that toggled a hidden setting would change what
+        // CW came back to without saying so — the same rule the AGC follows
+        // just below.
+        Binaural => {
+            if state.rx[0].mode.binaural_audio() {
+                cmds.push(Command::SetBinaural { rx, on: !state.rx[0].binaural });
+            }
+        }
         AgcCycle => {
             // In FM the chain bypasses the AGC and the chip is hidden; cycling
             // here would invisibly change what the next mode comes back to.
@@ -1016,6 +1025,7 @@ fn indicator(act: Action, state: &RadioState, view: &ViewState) -> Option<u8> {
         NoiseBlanker => on(state.noise_blanker),
         NoiseReductionCycle => on(state.rx[0].noise_reduction.is_on()),
         AutoNotch => on(state.rx[0].auto_notch),
+        Binaural => on(state.rx[0].binaural),
         SubRx => on(state.sub_rx_enabled),
         Split => on(state.split),
         RitEnable => on(state.rit.enabled),

@@ -1,6 +1,7 @@
 mod adc;
 pub mod afsk;
 mod agc;
+mod binaural;
 mod ctcss;
 mod cw;
 mod ddc;
@@ -51,6 +52,7 @@ mod window;
 pub use adc::AdcMeter;
 pub use afsk::{AFSK_TX_PEAK, AfskProfile, AfskRx, AfskTx};
 pub use agc::Agc;
+pub use binaural::Binaural;
 pub use ctcss::{SubToneDetect, golay23_decode, golay23_encode};
 pub use cw::{CwDecoder, CwRx, CwTx, morse_decode, morse_encode, text_duration_s};
 pub use ddc::Ddc;

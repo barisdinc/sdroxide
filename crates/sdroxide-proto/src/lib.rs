@@ -1022,7 +1022,20 @@ use sdroxide_types::{
 /// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole: a v114 peer
 /// would read the tail of one as garbage, which is what the handshake's
 /// equality test stops before a frame is exchanged.
-pub const PROTO_VERSION: u16 = 115;
+/// **116** — binaural (pseudo-stereo) CW audio (issue #263).
+///
+/// [`sdroxide_types::RxState`] gains `binaural`, and with it
+/// `Command::SetBinaural`. The field is appended to the end of the struct and
+/// the command to the end of its enum, as everything above them is — but
+/// `RxState` rides inside `RadioState`, which is sent whole a few times a
+/// second, so a v115 peer would read the tail of every state message one byte
+/// out. That is what the handshake's equality test stops before a frame is
+/// exchanged.
+///
+/// Nothing else on the wire moves: the widener runs on the *speaker* path of
+/// whichever end is doing the listening, and the audio a remote client is sent
+/// is the mono downmix, which binaural leaves untouched by construction.
+pub const PROTO_VERSION: u16 = 116;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

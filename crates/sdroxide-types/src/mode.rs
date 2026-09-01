@@ -881,6 +881,22 @@ impl Mode {
         !matches!(self, Mode::Nfm | Mode::Wfm | Mode::Drm | Mode::Adsb | Mode::Vdl2)
     }
 
+    /// Whether this mode offers binaural (pseudo-stereo) audio — the receive
+    /// passband spread across the stereo image, so that pitch becomes
+    /// direction (issue #263).
+    ///
+    /// CW alone, because that is the mode the pan law fits: a CW signal *is* a
+    /// tone, so placing it by pitch places the signal, and two stations a
+    /// couple of hundred hertz apart in a pile-up become two sources rather
+    /// than two notes. Across a voice passband the same law would spread one
+    /// speaker's own formants across the head, which is the pseudo-stereo that
+    /// hi-fi gave up on, and across a broadcast channel it would be an effect
+    /// rather than a receiving aid. Neither is worth a permanent button on a
+    /// row that has to fit a 1366-pixel screen.
+    pub fn binaural_audio(self) -> bool {
+        matches!(self, Mode::Cw)
+    }
+
     /// Furthest a filter edge may be dragged from the carrier — bounded by
     /// the mode's DSP channel bandwidth.
     pub fn max_filter_hz(self) -> f32 {
