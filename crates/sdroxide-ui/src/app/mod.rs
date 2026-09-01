@@ -301,6 +301,8 @@ pub struct SdroxideApp {
     hackrf_devices: Vec<sdroxide_types::HackRfDevice>,
     /// RSPs the SDRplay API service reported on the last Rescan.
     sdrplay_devices: Vec<sdroxide_types::SdrPlayDevice>,
+    /// Fobos SDRs found on the last Rescan.
+    fobos_devices: Vec<sdroxide_types::FobosDevice>,
     /// The interface whose device list was last asked for, so switching to
     /// another one inside the open dialog asks for that one's — once, not
     /// every frame. `None` while the dialog is shut.
@@ -1135,6 +1137,7 @@ impl SdroxideApp {
             hydrasdr_devices: Vec::new(),
             hackrf_devices: Vec::new(),
             sdrplay_devices: Vec::new(),
+            fobos_devices: Vec::new(),
             iface_probed: None,
             soapy_devices: None,
             tci_test_result: None,

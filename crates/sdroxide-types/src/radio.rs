@@ -152,13 +152,22 @@ pub enum Backend {
     /// protocol offers; there is no wideband I/Q to ask for.
     ///
     /// Receive only, and not because of a missing feature: these are other
-    /// people's antennas. Appended last, for the same reason as `SmartSdr`
-    /// above.
+    /// people's antennas. Appended after `HydraSdr` above, for the same
+    /// reason as `SmartSdr` there.
     KiwiSdr,
+    /// RigExpert Fobos SDR, driven through the vendor's `libfobos` — the one
+    /// interface this radio speaks; no separately documented raw USB
+    /// protocol exists to reimplement instead. `libfobos` is LGPL-2.1 and
+    /// open source, but found with dlopen at *runtime* all the same, for the
+    /// same build-portability reason the SDRplay and LimeSDR backends do:
+    /// nothing is linked at build time, so this ships in every build variant
+    /// and a machine without it enumerates nothing and opening explains what
+    /// to install. Appended last, for the same reason as `SmartSdr` above.
+    Fobos,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 21] = [
+    pub const ALL: [Backend; 22] = [
         Backend::Auto,
         Backend::Soapy,
         Backend::Cat,
@@ -180,6 +189,7 @@ impl Backend {
         Backend::Elad,
         Backend::Lime,
         Backend::HydraSdr,
+        Backend::Fobos,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -204,6 +214,7 @@ impl Backend {
             Backend::Elad => "ELAD FDM-DUO / FDM-S (USB)",
             Backend::Lime => "LimeSDR + LimeRFE (LimeSuite)",
             Backend::HydraSdr => "HydraSDR RFOne (USB)",
+            Backend::Fobos => "RigExpert Fobos SDR (USB)",
             Backend::None => "Not configured",
         }
     }
@@ -5754,6 +5765,176 @@ impl SoapyConfig {
     }
 }
 
+/// One Fobos SDR from `fobos_rx_list_devices` — free to ask for (no device is
+/// opened), unlike most of the vendor-library-backed enumerations here.
+/// Always has a serial: `libfobos`'s own enumeration is serial-based, unlike
+/// a bare USB descriptor that may have none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FobosDevice {
+    pub serial: String,
+}
+
+impl FobosDevice {
+    pub fn label(&self) -> String {
+        format!("Fobos SDR  (serial {})", self.serial)
+    }
+}
+
+/// Which of the Fobos SDR's inputs to stream. `Rf` goes through the tuner
+/// (mixer, LNA, VGA); `Hf1`/`Hf2` bypass it for direct sampling of one real
+/// ADC channel apiece, turned into complex baseband entirely in software
+/// (`sdroxide_fobos::stream`'s own `WbDdc` path) — the front end LNA/VGA gain
+/// switches is powered down while either runs, so those two controls have no
+/// effect here. `HfDual` runs both real channels at once, through their own
+/// `WbDdc`s, combined by [`FobosConfig`]'s own diversity filter — the two
+/// channels come from one ADC and one clock, so unlike an RSPduo's two
+/// independent tuners the relative phase between them is reproducible across
+/// a restart (measured directly on the radio, not assumed: under a degree
+/// of inter-channel phase drift across repeated stop/start cycles).
+/// Changing the port reopens the device: `Rf` and the HF ports use
+/// different hardware paths
+/// (`fobos_rx_set_direct_sampling`) and the HF ports build their
+/// downconverter(s) at open time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FobosPort {
+    #[default]
+    Rf,
+    Hf1,
+    Hf2,
+    HfDual,
+}
+
+impl FobosPort {
+    pub fn name(self) -> &'static str {
+        match self {
+            FobosPort::Rf => "RF",
+            FobosPort::Hf1 => "HF1",
+            FobosPort::Hf2 => "HF2",
+            FobosPort::HfDual => "HF1 + HF2 (diversity)",
+        }
+    }
+
+    pub const ALL: [FobosPort; 4] =
+        [FobosPort::Rf, FobosPort::Hf1, FobosPort::Hf2, FobosPort::HfDual];
+}
+
+/// RigExpert Fobos SDR (USB) backend configuration. Receive only, through
+/// `libfobos` — LGPL-2.1 and open source (github.com/rigexpert/libfobos),
+/// found with dlopen at runtime the way the SDRplay and LimeSDR backends find
+/// their own vendor libraries, for the same build-portability reason: this
+/// crate ships in every build variant without every contributor needing
+/// `libfobos` installed to compile sdroxide.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FobosConfig {
+    /// Pin a receiver by its serial; empty means "the first one found".
+    pub serial: String,
+    pub port: FobosPort,
+    /// The ADC's own I/Q rate on [`FobosPort::Rf`]; the *target* complex
+    /// output rate of the software downconverter on the HF ports — the
+    /// achieved rate can differ from either (both a real hardware quirk
+    /// below ~8 Msps on `Rf`, and the HF path's own power-of-two bin
+    /// quantization), reported back rather than assumed.
+    ///
+    /// On the HF ports this also sets a floor on which centre frequencies
+    /// are reachable at all: the downconverter selects a band directly out
+    /// of a real FFT's non-negative bins, so the band can never straddle DC,
+    /// and the lowest centre it can select is half this rate. A wider
+    /// output rate here means a wider panadapter view but a higher floor —
+    /// see `FobosConfig::default()`'s own comment for why the default is as
+    /// narrow as it is.
+    pub sample_rate_hz: f64,
+    /// 0..3. [`FobosPort::Rf`] only — see [`FobosPort`]'s own doc comment.
+    pub lna_gain: u8,
+    /// 0..31. Same caveat as `lna_gain`.
+    pub vga_gain: u8,
+    pub clk_external: bool,
+
+    /// Diversity filter settings — meaningful only on [`FobosPort::HfDual`],
+    /// which is what actually turns the filter on. Unlike an RSPduo or a
+    /// LimeSDR's second chain there is no separate `enabled`/`role` field
+    /// here: running both real channels *is* asking for diversity, so the
+    /// port selection already says so.
+    ///
+    /// The same adaptive [`sdroxide_dsp::Diversity`] filter the RSPduo and
+    /// the LimeSDR's second chain already use: Cancel or Combine mode,
+    /// configurable taps and adaptation rate, with a freeze/hold control.
+    pub div_mode: DiversityMode,
+    /// How many taps the adaptive filter has, 1 to [`DIVERSITY_MAX_TAPS`].
+    pub div_taps: u8,
+    /// How fast the filter adapts, 0 to 1.
+    pub div_rate: f32,
+    /// Hold the filter where it is.
+    pub div_frozen: bool,
+}
+
+impl Default for FobosConfig {
+    fn default() -> Self {
+        FobosConfig {
+            serial: String::new(),
+            port: FobosPort::default(),
+            // Narrow enough that the HF ports' near-DC floor (half this
+            // rate — see `sample_rate_hz`'s own doc comment) sits at
+            // 312.5 kHz, under every AM/mediumwave broadcast frequency, not
+            // above most of them: a wider figure such as 2 Msps (this
+            // backend's first default) puts the floor at 1.25 MHz, which
+            // silently makes the entire AM broadcast band untunable on
+            // Hf1/Hf2/HfDual — the dial accepts a lower frequency, the
+            // downconverter clamps it back up to the floor without saying
+            // so, and whatever is actually at the floor gets decoded and
+            // labelled with the frequency the operator asked for instead.
+            // 625 kHz is also this crate's own achievable minimum: the
+            // downconverter's smallest bin count already lands here, so
+            // nothing narrower is being left on the table by picking this
+            // as the default. On `Rf` this may snap to a different rate —
+            // see `sample_rate_hz`'s own doc comment — which is reported
+            // back rather than hidden.
+            sample_rate_hz: 625_000.0,
+            // The values this backend was verified against real hardware
+            // with, not a documented "recommended" figure — a reasonable,
+            // moderate starting point either way.
+            lna_gain: 2,
+            vga_gain: 10,
+            clk_external: false,
+            div_mode: DiversityMode::default(),
+            div_taps: 8,
+            div_rate: 0.7,
+            div_frozen: false,
+        }
+    }
+}
+
+impl FobosConfig {
+    /// A real hardware gain stage, 0..3 — see [`FobosPort`]'s own doc
+    /// comment for why it only does anything on [`FobosPort::Rf`].
+    pub const LNA_GAIN_ELEMENT: &'static str = "LNA";
+    pub const LNA_GAIN_MAX: u8 = 3;
+    /// A real hardware gain stage, 0..31, same [`FobosPort::Rf`]-only
+    /// caveat as `LNA_GAIN_ELEMENT`.
+    pub const VGA_GAIN_ELEMENT: &'static str = "VGA";
+    pub const VGA_GAIN_MAX: u8 = 31;
+    /// Pseudo-element carrying the clock-source switch: internal (default)
+    /// or external reference. Rides the existing `SetGain` command so this
+    /// backend needs no new `Command` variant, and is deliberately absent
+    /// from `DeviceCaps::gains` so nothing renders it as a slider.
+    pub const CLK_EXTERNAL_ELEMENT: &'static str = "CLKEXT";
+    /// See [`DIVERSITY_MAX_TAPS`] — the settings panel's own bound on
+    /// `div_taps`, same constant every other diversity-capable backend here
+    /// uses.
+    pub const DIV_TAPS_MAX: u8 = DIVERSITY_MAX_TAPS;
+
+    /// Sample rates to offer before a receiver has answered — the settings
+    /// tab shows the device's own reported list once `DeviceCaps` has one,
+    /// same as [`HydraSdrConfig::SAMPLE_RATES`]. These are not from a
+    /// datasheet: they are the 13-entry list `fobos_rx_get_samplerates`
+    /// reported on the real unit this backend was verified against, which
+    /// may not be every Fobos's own list.
+    pub const SAMPLE_RATES: [f64; 13] = [
+        1.25e6, 2.5e6, 5.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6, 25.0e6, 32.0e6, 40.0e6,
+        50.0e6, 80.0e6,
+    ];
+}
+
 /// Persisted backend configuration (`radio.json`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -5845,6 +6026,9 @@ pub struct RadioConfig {
     /// KiwiSDR / Web-888. Appended after `hydrasdr`, for the same reason as
     /// every field above it: the layout is positional.
     pub kiwi: KiwiConfig,
+    /// RigExpert Fobos SDR. Appended after `kiwi`, for the same reason as
+    /// every field above it.
+    pub fobos: FobosConfig,
 }
 
 #[cfg(test)]

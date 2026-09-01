@@ -101,7 +101,7 @@ pub use spectrum_paint::{
 pub use sstv::{SstvEvent, SstvRx, SstvTx};
 pub use thor::{ThorRx, ThorTx};
 pub use tonegen::{BURST_LEVEL, SUB_TONE_LEVEL, SubToneGen, ToneBurst};
-pub use wbddc::WbDdc;
+pub use wbddc::{WbDdc, clamp_center_hz, reachable_range_hz};
 pub use wbspectrum::WideSpectrum;
 pub use wefax::{Ioc as WefaxIoc, Lpm as WefaxLpm, WefaxEvent, WefaxRx};
 pub use window::blackman_harris;
