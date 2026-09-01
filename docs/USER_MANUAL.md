@@ -123,7 +123,8 @@ or connects to a remote sdroxide server.
 - **Many radio backends:** SoapySDR devices, OpenHPSDR (Hermes/Metis) Ethernet
   SDRs, a TCI server (ExpertSDR3/Thetis), a SmartSDR radio (FlexRadio
   FLEX-6000/8000), RTL-SDR, RX-888, Airspy HF+ and SDRplay RSP receivers over
-  USB, an Airspy R2 or Mini over USB, a HydraSDR RFOne over USB, a HackRF
+  USB, an Airspy R2 or Mini over USB, a HydraSDR RFOne over USB, a RigExpert
+  Fobos SDR over USB, a HackRF
   transceiver over USB, an RTL-SDR
   published over the network by
   `rtl_tcp`, a PlutoSDR, or a CAT-controlled radio with audio over a USB sound
@@ -5485,6 +5486,12 @@ radio. Everything below the selector changes to match the choice:
   On a two-chain board the second receiver can carry a second aerial, nulling a
   local noise source or filling in fades.
   See [6.2.17](#6217-limesdr-family--limerfe-limesuite).
+- **RigExpert Fobos SDR (USB)** — a Fobos SDR, through RigExpert's own libfobos.
+  Three inputs that behave as different radios: an RF port through the tuner,
+  and two HF ports that direct-sample with no local oscillator at all and are
+  tuned entirely in software. Both HF ports at once are combined by the same
+  adaptive filter the RSPduo and LimeSDR use.
+  See [6.2.20](#6220-rigexpert-fobos-sdr-usb).
 
 There is no auto-detect: you pick the interface, and an interface that cannot be
 opened falls back to a silent source rather than guessing at another one.
@@ -9074,6 +9081,101 @@ connections from apps other than a browser at all.
 
 To find a receiver rather than type one in, use **PUBLIC SDR** in the System box:
 [15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver).
+
+#### 6.2.20 RigExpert Fobos SDR (USB)
+
+A **Fobos SDR**, driven through RigExpert's own **libfobos**. Receive only.
+
+**The library is found at runtime, not linked.** libfobos is LGPL-2.1 and open
+source ([github.com/rigexpert/libfobos](https://github.com/rigexpert/libfobos)),
+but sdroxide loads it the same way it loads the SDRplay API and LimeSuite —
+by name, when you open the interface. The reason is build portability rather
+than licensing: this interface is in every build variant on every platform,
+nobody needs libfobos installed to compile sdroxide, and a machine without it
+simply lists no receivers and says what to install. Build and install it from
+that repository, then press **Rescan**.
+
+**Receiver.** Rescan lists what is on the bus; the list is built from
+`fobos_rx_list_devices`, which opens nothing, so it is safe to press while
+receiving. Receivers are named by serial, and leaving the picker on *first one
+found* is right for a one-radio shack.
+
+**Input: three genuinely different radios in one box.** The **RF** port goes
+through the tuner — a mixer, an LNA and a VGA — and covers roughly
+25 MHz–5.4 GHz. **HF1** and **HF2** bypass the tuner entirely for direct
+sampling. **HF1 + HF2** runs both at once and combines them.
+
+That split matters more than a socket choice usually does, because the HF ports
+have **no local oscillator at all**. The receiver hands back two independent
+*real* ADC channels — HF1 in one, HF2 in the other — and sdroxide makes complex
+baseband from them itself, with the same wideband channelizer the RX-888 uses
+for the identical problem. Two consequences follow:
+
+- **Tuning on HF1/HF2 is pure software.** Nothing is commanded at the radio when
+  you move the dial; the downconverter moves instead.
+- **The LNA and VGA sliders do nothing there.** The front end they belong to is
+  powered down while direct sampling runs. The panel greys them out and the
+  status line says so, rather than leaving two controls that look live and are
+  not.
+
+Changing the input reopens the receiver: RF and the HF ports are different
+hardware paths, and the HF ports build their downconverter at open time.
+
+**Sample rate, and why it decides how low you can tune.** On **RF** this is the
+ADC's own I/Q rate, picked from the list the receiver reports. Below about
+8 Msps the hardware snaps the request up to 8 Msps whatever you asked for; the
+rate it actually landed on is what sdroxide reports and works from, so the span
+on screen stays honest.
+
+On the **HF** ports the figure is a *target* for the software downconverter,
+which lands on the nearest power-of-two bin count — so the achieved rate can
+differ from the one you picked, and again the achieved one is what is reported.
+The number matters for a second reason: the downconverter selects a band out of
+a real spectrum, so **it can never centre closer to DC than half its own output
+rate**. At 2.5 Msps that floor is 1.25 MHz, which puts the entire AM/mediumwave
+broadcast band out of reach. The default is **625 kHz** for exactly that reason
+— a floor of 312.5 kHz, below every mediumwave channel.
+
+Ask for a dial below the current floor and sdroxide does *not* quietly receive
+something else and label it with the frequency you asked for: the log says the
+request was below the floor, and the frequency the receiver really landed on is
+reported back so the panadapter's own scale agrees with the spectrum under it.
+A wider view means a higher floor, so if you want both, change the rate rather
+than fighting the dial.
+
+Changing the rate reopens the receiver, like the input.
+
+**HF1 + HF2: cancelling a noise source, or combining two aerials.** Selecting
+this input runs both real channels and puts them through the same adaptive
+filter the RSPduo's second tuner and the LimeSDR's second receive chain use.
+*Cancel* is the DSP form of a noise-cancelling phaser: it finds the gain, phase
+and delay that make a local noise source line up on both aerials and subtracts
+it. *Combine* is diversity reception: it adds the two in the phase that
+reinforces and weights each by how well it hears, which fills in HF fades. The
+filter is multi-tap, so a null holds across the span rather than at one
+frequency.
+
+Mode, adaptation rate and **HOLD** are on the main window's DIV strip, where you
+can reach them while listening; **Diversity taps** is on this tab, with a note
+of what the length costs. **RESTART** zeroes the filter and lets it find the
+null again — it also releases HOLD, because a filter zeroed and left held is
+parked at zero and stops cancelling anything, which looks exactly like Combine
+mode and says nothing about why.
+
+Both channels come off **one ADC on one clock**, so unlike two independent
+tuners the phase between them is reproducible across a restart.
+
+**Clock source.** *External reference* switches the receiver to an external
+clock; it applies immediately, without a reopen.
+
+**What has been verified.** All three inputs were checked against a real Fobos
+SDR by the contributor who wrote the backend, including 38.6 dB of measured
+cancellation on real aerials. Two ADC rates turned out to be unusable for
+*streaming* on that unit even though the receiver accepts them — 40 Msps never
+streams at all, and 50 Msps streams but distorts audibly — and the rate
+selection steers around both. The cost is a practical ceiling around 10 MHz for
+the widest HF views; wider targets need a faster ADC than the safe rates
+provide.
 
 ### 6.3 UI: display preferences and voice announcements
 

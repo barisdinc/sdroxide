@@ -47,7 +47,8 @@ One binary, three ways to run it:
   verified / TX unmeasured), Airspy R2/Mini (native support, experimental!),
   HydraSDR RFOne (native support, experimental!),
   ELAD FDM-DUO / FDM-S1 / FDM-S2 (native support, experimental!),
-  LimeSDR family + LimeRFE front end (via LimeSuite, experimental!)
+  LimeSDR family + LimeRFE front end (via LimeSuite, experimental!),
+  RigExpert Fobos SDR (native, via libfobos)
 - **Panadapter** — GPU (wgpu) waterfall + spectrum line, wheel-zoom around the
   cursor, drag-to-pan, per-digit frequency readout, selectable colormaps,
   peak-hold, and **auto-contrast** ("FIT", on by default) that keeps the display
@@ -727,6 +728,50 @@ starting sdroxide before the rig is fine:
   For the LimeRFE specifically, `cargo run -p sdroxide-limerfe --example rfe --
   /dev/ttyUSB0` talks to the board on its own and prints what happened at each
   step.
+
+- **RigExpert Fobos SDR (USB)** — a Fobos SDR, driven through RigExpert's own
+  **libfobos**. That library is LGPL-2.1 and open source
+  ([github.com/rigexpert/libfobos](https://github.com/rigexpert/libfobos)), but
+  it is still **found at runtime rather than linked** — same as SDRplay and
+  LimeSuite above, and for the same reason: this interface is in every build
+  variant, nobody needs the library installed to compile sdroxide, and a
+  machine without it enumerates nothing and says what to install. Receive only.
+
+  **Three inputs, and they are genuinely different radios.** The **RF port**
+  goes through the tuner — 25 MHz–5.4 GHz, the receiver's own reported sample
+  rates up to 80 Msps, with the LNA (0–3) and VGA (0–31) gain stages on the
+  Radio tab. **HF1** and **HF2** bypass the tuner for direct sampling, which
+  means no local oscillator at all: the receiver hands back two independent
+  *real* ADC channels, and sdroxide turns the selected one into complex
+  baseband itself with the same wideband channelizer the RX-888 uses for the
+  identical problem. Tuning on those two is therefore pure software — nothing
+  is commanded at the radio — and the gain sliders do nothing, because the
+  front end they belong to is powered down while direct sampling runs. The
+  panel says so rather than leaving them looking broken.
+
+  **The rate you pick on HF1/HF2 sets how low you can tune.** The
+  downconverter selects a band out of a real spectrum, so it can never centre
+  closer to DC than half its own output rate: at 2.5 Msps the floor is
+  1.25 MHz, which puts the whole AM broadcast band out of reach. The default is
+  **625 kHz** for exactly that reason — a floor of 312.5 kHz, under every
+  mediumwave channel — and a dial below whatever the current floor is says so
+  in the log and reports the frequency it really landed on, rather than
+  labelling something else with the frequency you asked for.
+
+  **HF1 + HF2 runs both real channels at once**, combined by the same adaptive
+  filter the RSPduo's second tuner and the LimeSDR's second chain use: *cancel*
+  to null a local noise source, or *combine* for diversity reception, with mode,
+  adaptation rate and hold on the main strip and the filter length on the Radio
+  tab. Both channels come off one ADC on one clock, so unlike two independent
+  tuners the phase between them is reproducible across a restart. An external
+  clock reference is a switch on the same tab.
+
+  **Verified against real hardware** by the contributor who wrote it, on all
+  three inputs — including 38.6 dB of measured cancellation on real aerials.
+  Two ADC rates turned out to be unusable for streaming on that unit (40 Msps
+  never streams; 50 Msps streams but distorts audibly), and the rate selection
+  steers around both, at the cost of a practical ceiling around 10 MHz for the
+  widest HF views.
 
 - **PlutoSDR (network)** — an ADALM-Pluto, driven directly over the **IIOD**
   protocol its on-board daemon serves. **No SoapySDR and no libiio**, so it
