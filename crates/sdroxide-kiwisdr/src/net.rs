@@ -121,8 +121,15 @@ fn connect(host: &str, port: u16, path: &str) -> Result<WebSocket<TcpStream>> {
         .ok_or_else(|| Error::Net(format!("no address for {host}:{port}")))?;
     let stream = TcpStream::connect_timeout(&sockaddr, Duration::from_secs(6))
         .map_err(|e| Error::Net(format!("connect {host}:{port}: {e}")))?;
+    // The upgrade gets a generous timeout of its own, and only the finished
+    // WebSocket gets the short streaming poll. Windows reports a receive
+    // timeout as `WSAETIMEDOUT` rather than the `EAGAIN` a Unix gives, and
+    // tungstenite resumes an interrupted handshake for `WouldBlock` alone —
+    // anything else, `TimedOut` included, is a failure it cannot come back
+    // from. With the poll set here first, every receiver more than 20 ms away
+    // failed to open on Windows and only on Windows (issue #266).
     stream
-        .set_read_timeout(Some(POLL))
+        .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .map_err(|e| Error::Net(format!("set read timeout: {e}")))?;
     let url = format!("ws://{host}:{port}{path}");
 
@@ -152,6 +159,9 @@ fn connect(host: &str, port: u16, path: &str) -> Result<WebSocket<TcpStream>> {
             }
         }
     };
+    ws.get_ref()
+        .set_read_timeout(Some(POLL))
+        .map_err(|e| Error::Net(format!("set read timeout: {e}")))?;
     Ok(ws)
 }
 
