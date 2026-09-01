@@ -178,14 +178,42 @@ fn the_downmix_is_what_it_always_was() {
     assert!(db.abs() < 1.0, "the downmix moved by {db} dB");
 }
 
-/// The mode gate, through the engine: the same request in SSB changes nothing.
-/// The chip is not drawn there, but a stale setting or a remote client could
-/// still ask.
+/// SSB is spread too, and the image follows the *filter* rather than the mode:
+/// the same 900 Hz note that sits above CW's 700 Hz sidetone pitch sits 600 Hz
+/// *below* the centre of a 150–2850 Hz voice passband, so it comes out of the
+/// other ear. Nothing in the widener knows which mode it is in — this is what
+/// that means from the outside.
 #[test]
-fn ssb_ignores_the_request() {
+fn the_same_note_swaps_ears_in_ssb() {
     let frames = run(&[
         Command::SetMode { rx: RxId::Main, mode: Mode::Usb },
         Command::SetBinaural { rx: RxId::Main, on: true },
     ]);
-    assert!(frames.iter().all(|(l, r)| l == r), "SSB was widened");
+    let (l, r) = (bin(&frames, false), bin(&frames, true));
+    assert!(l.norm() > 1e-3 && r.norm() > 1e-3, "the note never reached the speaker");
+
+    let ild = 20.0 * (l.norm() / r.norm()).log10();
+    assert!(ild > 2.0, "the left ear should be the louder in SSB, got {ild} dB");
+
+    let mut ipd = (l.arg() - r.arg()).to_degrees();
+    if ipd > 180.0 {
+        ipd -= 360.0;
+    } else if ipd < -180.0 {
+        ipd += 360.0;
+    }
+    assert!((20.0..120.0).contains(&ipd), "the left ear should lead in SSB, got {ipd}°");
+}
+
+/// The mode gate, through the engine: a mode the chip is not drawn in ignores
+/// the request even though a stale setting or a remote client can still make
+/// it. DIGU is the honest case to check — same demodulator as SSB, same audio
+/// in the passband, and no reason to spread a decoder's input across a head.
+#[test]
+fn a_mode_without_it_ignores_the_request() {
+    let frames = run(&[
+        Command::SetMode { rx: RxId::Main, mode: Mode::Digu },
+        Command::SetBinaural { rx: RxId::Main, on: true },
+    ]);
+    assert!(rms(frames.iter().map(|f| f.0)) > 1e-3, "the note never reached the speaker");
+    assert!(frames.iter().all(|(l, r)| l == r), "DIGU was widened");
 }

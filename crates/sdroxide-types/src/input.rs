@@ -53,7 +53,7 @@ pub enum Action {
     /// whichever engine is selected. The engine itself is picked from the UI.
     NoiseReductionCycle,
     AutoNotch,
-    /// Binaural (pseudo-stereo) CW audio — see [`crate::Mode::binaural_audio`].
+    /// Binaural (pseudo-stereo) audio — see [`crate::Mode::binaural_audio`].
     Binaural,
     AgcCycle,
     SubRx,
@@ -184,7 +184,7 @@ impl Action {
             NoiseBlanker => "Noise blanker",
             NoiseReductionCycle => "Noise reduction (cycle)",
             AutoNotch => "Auto notch",
-            Binaural => "Binaural CW",
+            Binaural => "Binaural audio",
             AgcCycle => "AGC (cycle)",
             SubRx => "Sub receiver",
             Split => "Split",

@@ -1027,10 +1027,10 @@ pub struct Session {
     pub squelch_db: f32,
     /// Main receiver's noise reduction (engine + strength, or off).
     pub noise_reduction: sdroxide_types::NrLevel,
-    /// Whether binaural (pseudo-stereo) CW audio was left switched on. Set by
-    /// ear like the noise reduction above it, and remembered for the same
-    /// reason: an operator who listens to CW this way listens to *all* of it
-    /// this way, and should not have to switch it back on every start.
+    /// Whether binaural (pseudo-stereo) audio was left switched on. Set by ear
+    /// like the noise reduction above it, and remembered for the same reason:
+    /// an operator who listens this way listens to *everything* this way, and
+    /// should not have to switch it back on every start.
     pub binaural: bool,
     /// How far the raw IQ was being decimated (a power of two; 1 is off).
     ///

@@ -75,7 +75,7 @@ pub struct RxState {
     pub tone_sql: Option<crate::SubTone>,
     /// Binaural (pseudo-stereo) audio: spread the passband across the stereo
     /// image, so that pitch becomes direction and tuning a signal floats it
-    /// from one ear to the other. CW only ([`crate::Mode::binaural_audio`]),
+    /// from one ear to the other. CW and SSB ([`crate::Mode::binaural_audio`]),
     /// and read from the main receiver alone — the sub receiver *is* the other
     /// ear, and claims it whenever it is running.
     pub binaural: bool,

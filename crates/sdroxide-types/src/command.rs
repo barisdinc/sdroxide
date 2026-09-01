@@ -884,7 +884,7 @@ pub enum Command {
 
     /// Binaural (pseudo-stereo) audio on a receiver: spread the passband across
     /// the stereo image so that pitch becomes direction, and tuning a signal
-    /// floats it from one ear to the other (issue #263). CW only — see
+    /// floats it from one ear to the other (issue #263). CW and SSB — see
     /// [`crate::Mode::binaural_audio`] — and ignored while the sub receiver has
     /// the right ear. Only the main receiver's audio is ever spread: the sub
     /// receiver *is* the other ear, so it has nothing to be placed across.

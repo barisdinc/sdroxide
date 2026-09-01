@@ -885,16 +885,28 @@ impl Mode {
     /// passband spread across the stereo image, so that pitch becomes
     /// direction (issue #263).
     ///
-    /// CW alone, because that is the mode the pan law fits: a CW signal *is* a
-    /// tone, so placing it by pitch places the signal, and two stations a
-    /// couple of hundred hertz apart in a pile-up become two sources rather
-    /// than two notes. Across a voice passband the same law would spread one
-    /// speaker's own formants across the head, which is the pseudo-stereo that
-    /// hi-fi gave up on, and across a broadcast channel it would be an effect
-    /// rather than a receiving aid. Neither is worth a permanent button on a
-    /// row that has to fit a 1366-pixel screen.
+    /// CW is the mode the pan law fits exactly: a CW signal *is* a tone, so
+    /// placing it by pitch places the signal, and two stations a couple of
+    /// hundred hertz apart in a pile-up become two sources rather than two
+    /// notes.
+    ///
+    /// SSB is here because operators asked for it, and what it buys there is a
+    /// different thing worth having: a voice occupies the whole passband rather
+    /// than a point in it, so two stations do not separate the way two notes
+    /// do, but the *noise* still decorrelates across the image while the voice
+    /// stays coherent in the middle of it — which is the spaciousness that
+    /// makes a long listen on a noisy band less tiring. The cost is that one
+    /// speaker's own spectrum is spread across the head, low formants to one
+    /// side and sibilance to the other, and not everybody likes it. It is
+    /// opt-in and off by default, so that is the operator's call to make.
+    ///
+    /// Everything else is left out. The data modes have no listener to place
+    /// anything for; AM and FM broadcast would get an effect rather than a
+    /// receiving aid; WFM already has a second ear of its own. None of them is
+    /// worth another permanent button on a row that has to fit a 1366-pixel
+    /// screen.
     pub fn binaural_audio(self) -> bool {
-        matches!(self, Mode::Cw)
+        matches!(self, Mode::Cw | Mode::Lsb | Mode::Usb)
     }
 
     /// Furthest a filter edge may be dragged from the carrier — bounded by

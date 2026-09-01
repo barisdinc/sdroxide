@@ -2626,27 +2626,35 @@ impl SdroxideApp {
                 }
             }
             RxChip::Bin => {
-                // Binaural CW: the passband spread across the two ears, so
+                // Binaural audio: the passband spread across the two ears, so
                 // that pitch becomes direction. The hover text says what it is
                 // for rather than what it does — an operator who has not met a
                 // binaural receiver has no reason to guess that a stereo
-                // effect is a copying aid.
+                // effect is a copying aid — and it says something different in
+                // CW and SSB, because what it buys is a different thing in
+                // each.
                 let on = self.state.rx[0].binaural;
                 let sub = self.state.sub_rx_enabled;
+                let cw = self.state.rx[0].mode == Mode::Cw;
                 let chip = ui
                     .add_enabled_ui(!sub, |ui| crate::chrome::chip(ui, on && !sub, "BIN"))
                     .inner
                     .on_hover_text(if sub {
-                        "Binaural CW — not while the sub receiver has the right ear"
+                        "Binaural audio — not while the sub receiver has the right ear"
                     } else if on {
-                        "Binaural CW: the passband is spread across the two ears, so signals at \
-                         different pitches come from different directions and the one you tune \
-                         floats across. Click to go back to mono"
-                    } else {
+                        "Binaural audio: the passband is spread across the two ears, so signals \
+                         at different pitches come from different directions and the one you \
+                         tune floats across. Click to go back to mono"
+                    } else if cw {
                         "Binaural CW: spread the passband across the two ears, so that signals \
                          at different pitches come from different directions — a pile-up becomes \
                          several places instead of one crowded note, and tuning a station floats \
                          it across. Best on headphones"
+                    } else {
+                        "Binaural audio: spread the passband across the two ears. On voice the \
+                         noise spreads over the whole image while the station stays in the \
+                         middle of it, which is easier to listen to for an hour — at the cost \
+                         of the voice itself being spread out. Best on headphones"
                     });
                 if chip.clicked() {
                     self.state.rx[0].binaural = !on; // optimistic echo
@@ -4954,8 +4962,9 @@ fn rx_chips(mode: Mode) -> Vec<RxChip> {
     // popup (issue #217). That is also one chip fewer on a strip that has to
     // fit on a 1366-pixel screen (issue #211).
     let mut chips = vec![RxChip::Nb, RxChip::Anc, RxChip::Nr, RxChip::Mute, RxChip::Rec];
-    // Binaural audio goes where it is worth a permanent button: in CW, where
-    // the signal is a tone and so placing it by pitch places the signal
+    // Binaural audio goes where it is worth a permanent button: CW, where the
+    // signal is a tone and so placing it by pitch places the signal, and SSB,
+    // where what it buys is the decorrelated noise around the voice
     // (Mode::binaural_audio). It rides ahead of MUTE rather than on the end,
     // beside the other things done to the audio on its way to the ear.
     if mode.binaural_audio() {

@@ -1639,7 +1639,7 @@ fn run_chain_block(
     }
 }
 
-/// Binaural (pseudo-stereo) CW: spread the receive passband across the two
+/// Binaural (pseudo-stereo) audio: spread the receive passband across the two
 /// ears, so that pitch becomes direction and tuning a signal floats it from one
 /// ear to the other (issue #263). What it actually does to the audio is
 /// [`sdroxide_dsp::Binaural`]'s business; this is where the receiver decides
@@ -2358,7 +2358,7 @@ struct Engine {
     /// decoding and the sub receiver is off — or while the binaural widener
     /// below is placing the passband across the two ears.
     main_play_r: Vec<f32>,
-    /// Binaural (pseudo-stereo) CW: built on the first block that asks for it
+    /// Binaural (pseudo-stereo) audio: built on the first block that asks for it
     /// and dropped when the operator switches it off, so a receiver that never
     /// uses it carries no filter state. Its left ear lands in `bin_left`, which
     /// is then swapped into `main_play` — see [`binaural_split`].
@@ -4191,7 +4191,7 @@ impl Engine {
             }
         }
 
-        // Binaural CW, if the operator asked for it: one ear becomes two, with
+        // Binaural audio, if the operator asked for it: one ear becomes two, with
         // the passband spread across them. Here rather than inside the receive
         // chain because this is where the demodulated path and the transceiver's
         // own audio have met, and because everything the decoders, the recorder
@@ -4448,9 +4448,9 @@ impl Engine {
 
         self.play_rx_audio(self.radio_fs);
         // A demod-audio rig has one receiver and no sub, so the second ear is
-        // free — and binaural CW is the one thing that fills it. This is the
-        // front end a great many CW operators are listening on, so it gets the
-        // same widener the demodulated path does.
+        // free — and the binaural widener is the one thing that fills it. This
+        // is the front end a great many operators are listening on, so it gets
+        // the same treatment the demodulated path does.
         self.main_play_r.clear();
         binaural_split(
             &mut self.binaural,
@@ -14218,15 +14218,28 @@ mod binaural_tests {
         assert!(right[far..].iter().any(|s| s.abs() > 0.05), "the right ear is silent");
     }
 
-    /// Every other mode is left exactly as it was: no second ear, no widener,
-    /// and the audio untouched.
+    /// SSB is spread too — the same treatment as CW, which is what the modes
+    /// the chip is drawn in ask for.
     #[test]
-    fn other_modes_are_left_mono() {
+    fn ssb_is_spread_as_well() {
         let rx = RxState { binaural: true, ..RxState::with_mode(Mode::Usb) };
         let (left, right, kept) = split(&rx, true, &[]);
-        assert_eq!(left, note());
-        assert!(right.is_empty());
-        assert!(!kept);
+        assert!(kept);
+        assert_eq!(right.len(), 4_096);
+        assert!(left != right, "the two ears are the same signal");
+    }
+
+    /// Every mode that is *not* offered it is left exactly as it was: no second
+    /// ear, no widener, and the audio untouched.
+    #[test]
+    fn other_modes_are_left_mono() {
+        for mode in [Mode::Am, Mode::Nfm, Mode::Ft8, Mode::Digu] {
+            let rx = RxState { binaural: true, ..RxState::with_mode(mode) };
+            let (left, right, kept) = split(&rx, true, &[]);
+            assert_eq!(left, note(), "{mode:?} was widened");
+            assert!(right.is_empty(), "{mode:?} filled the right ear");
+            assert!(!kept);
+        }
     }
 
     /// …and so is CW with it switched off, which is also where the filter

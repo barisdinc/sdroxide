@@ -1,6 +1,6 @@
-//! Binaural CW — the receive passband spread across the stereo image, so that
-//! signals at different pitches arrive from different directions and tuning one
-//! floats it from one ear to the other (issue #263).
+//! Binaural audio — the receive passband spread across the stereo image, so
+//! that signals at different pitches arrive from different directions and
+//! tuning one floats it from one ear to the other (issue #263).
 //!
 //! This is the software form of KK7B's binaural receiver, and of the `BIN`
 //! button on a FlexRadio: what it buys is not a prettier noise but a second
@@ -9,6 +9,13 @@
 //! are two *sources*, which is the problem hearing evolved to solve. The noise
 //! spreads over the whole image while a signal stays a point in it, so a note
 //! that was buried in a diffuse hiss stands out of it.
+//!
+//! On SSB the same arithmetic buys the second half of that and not the first: a
+//! voice fills the passband rather than sitting at a point in it, so two
+//! stations do not separate, but the noise still decorrelates across the image
+//! while the station stays coherent in the middle of it. Which modes are
+//! offered it is the caller's business ([`sdroxide_types::Mode::binaural_audio`]);
+//! nothing here knows or cares what is in the passband.
 //!
 //! **How the placement is made.** A sound reaches the nearer ear first, and it
 //! is that interaural delay — plus, higher up, the head's shadow — that the
@@ -66,13 +73,18 @@ use crate::{Complex32, RealFir};
 
 /// Half-length of the Hilbert transformer, in seconds of audio.
 ///
-/// A windowed Hilbert transformer is accurate from about two of its frequency
-/// bins upwards, and the bin spacing is the reciprocal of its length: that is
-/// what decides how low a CW pitch its quadrature partner is still honest at.
-/// 5.3 ms puts the floor near 200 Hz at 48 kHz — well below the bottom edge of
-/// any CW passband — and costs a filter of about 500 taps, which at audio rates
-/// is nothing. Expressed in time rather than in taps so that it means the same
-/// thing on a 44.1 kHz sound card as on a 96 kHz one.
+/// This is what decides how low a frequency the quadrature partner is still
+/// honest at, and so how far down the passband the placement holds: a windowed
+/// transformer's response falls away towards DC over roughly its first couple
+/// of frequency bins, and the bin spacing is the reciprocal of its length.
+///
+/// 5.3 ms is about 500 taps at 48 kHz, which at audio rates is nothing.
+/// Measured against the 150–2850 Hz voice passband, the ends of the image come
+/// out at 4.81 dB / 89.5° at 150 Hz against an ideal 4.77 dB / 90° — the error
+/// only becomes visible below the band anything is received in (5.48 dB / 81°
+/// at 100 Hz), and it is a gentler placement rather than an artefact.
+/// Expressed in time rather than in taps so that it means the same thing on a
+/// 44.1 kHz sound card as on a 96 kHz one.
 const HILBERT_SECS: f64 = 0.0053;
 
 /// How much of the pan is carried as a level difference rather than as a delay,
@@ -452,6 +464,26 @@ mod tests {
             (usb_ipd + lsb_ipd).abs() < 5.0,
             "phases {usb_ipd}° and {lsb_ipd}° are not mirrored"
         );
+    }
+
+    /// A voice passband is spread the same way, and the pan reaches its ends:
+    /// the bottom of the audio to one ear, the top to the other, the middle in
+    /// the middle. Nothing here knows it is looking at speech rather than a
+    /// note — which is exactly why SSB needed no new arithmetic.
+    #[test]
+    fn a_voice_passband_is_spread_end_to_end() {
+        // The 2.7 kHz SSB filter sdroxide opens on.
+        let (lo, hi) = (150.0f32, 2850.0f32);
+        let (ild, ipd, _) = measure(1500.0, lo, hi);
+        assert!(ild.abs() < 0.5, "level difference {ild} dB in the middle of the voice");
+        assert!(ipd.abs() < 8.0, "phase difference {ipd}° in the middle of the voice");
+
+        let (low_ild, low_ipd, _) = measure(300.0, lo, hi);
+        let (high_ild, high_ipd, _) = measure(2700.0, lo, hi);
+        assert!(low_ild > 2.0, "the bottom of the voice should lean left, got {low_ild} dB");
+        assert!(high_ild < -2.0, "the top of the voice should lean right, got {high_ild} dB");
+        assert!(low_ipd > 30.0, "the left ear should lead at the bottom, got {low_ipd}°");
+        assert!(high_ipd < -30.0, "the right ear should lead at the top, got {high_ipd}°");
     }
 
     /// A passband with the carrier inside it — AM, FM — demodulates to audio

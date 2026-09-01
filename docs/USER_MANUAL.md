@@ -499,11 +499,30 @@ mode. What is in the box never changes; only where the two rows are cut does.
   only what you hear; the FT8/FT4/FT2/PSK/RTTY decoders still receive the untouched
   signal, and a steady unmodulated carrier — a heterodyne — is treated as noise
   and suppressed. Any NR engine also forces WFM to mono — see **ST** below.)
-- **BIN** (CW only) — **binaural** audio: the receive passband spread across the
-  two ears, so that a signal's *pitch* becomes a *direction*. A station at the
-  sidetone pitch sits in the middle of your head, one above it moves to the
-  right, one below it to the left, and tuning a station floats it across from
-  one ear to the other.
+- **BIN** (CW and SSB) — **binaural** audio: the receive passband spread across
+  the two ears, so that a signal's *pitch* becomes a *direction*. Whatever sits
+  at the middle of the filter is in the middle of your head, anything above it
+  moves to the right, anything below it to the left, and tuning a station floats
+  it across from one ear to the other. Wear headphones: most of the effect is
+  the difference in arrival time between your two ears, which a pair of speakers
+  largely throws away.
+
+  In **CW** that separates a pile-up into several places you can attend to one
+  at a time, instead of one crowded note. In **SSB** a voice fills the passband
+  rather than sitting at a point in it, so stations do not separate that way —
+  but the noise still spreads across the image while the station stays in the
+  middle of it, which makes a long listen on a noisy band less tiring. The cost
+  is that the voice itself is spread out, low notes towards one ear and
+  sibilance towards the other; try it on a long session and see whether you like
+  it.
+
+  The image follows the *filter*, not the mode, so narrowing the passband
+  spreads the same left-to-right image across less of the band — and the same
+  note lands in a different ear in CW and in SSB, because the middle of a 500 Hz
+  CW filter and the middle of a 2.7 kHz voice filter are not the same frequency.
+  Nothing downstream can tell it is on: the decoders read the audio before this
+  stage, recordings are written from the same tap, and a remote client is sent
+  the mono downmix, which binaural leaves untouched.
 
   The button greys out while the **sub receiver** is running, which claims the
   right ear for a second receiver — an explicit second signal outranks an effect
