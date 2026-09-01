@@ -54,7 +54,12 @@ fn to_driver_port(p: FobosPort) -> Port {
 /// the reachable floor while the spectrum itself stayed pinned at the true,
 /// clamped centre — the axis and the spectrum visibly disagreeing about
 /// where the receiver actually was.
-fn achieved_center_hz(port: FobosPort, requested_hz: f64, adc_rate_hz: f64, out_rate_hz: f64) -> Option<f64> {
+fn achieved_center_hz(
+    port: FobosPort,
+    requested_hz: f64,
+    adc_rate_hz: f64,
+    out_rate_hz: f64,
+) -> Option<f64> {
     match port {
         FobosPort::Rf => None,
         FobosPort::Hf1 | FobosPort::Hf2 | FobosPort::HfDual => {
@@ -132,7 +137,8 @@ impl FobosSource {
                 String::new()
             }
         );
-        let achieved = achieved_center_hz(cfg.port, center_hz, handle.adc_rate_hz, handle.sample_rate_hz);
+        let achieved =
+            achieved_center_hz(cfg.port, center_hz, handle.adc_rate_hz, handle.sample_rate_hz);
         let pending_center = achieved.filter(|a| (a - center_hz).abs() >= 0.5);
         if let Some(a) = pending_center {
             tracing::warn!(
@@ -218,7 +224,12 @@ impl IqSource for FobosSource {
 
     fn set_center_hz(&mut self, hz: f64) -> Result<()> {
         self.center = hz;
-        let achieved = achieved_center_hz(self.port, hz, self.handle.adc_rate_hz, self.handle.current_rate_hz());
+        let achieved = achieved_center_hz(
+            self.port,
+            hz,
+            self.handle.adc_rate_hz,
+            self.handle.current_rate_hz(),
+        );
         self.pending_center = achieved.filter(|a| (a - hz).abs() >= 0.5);
         self.handle.set_center_hz(hz);
         Ok(())
@@ -244,7 +255,9 @@ impl IqSource for FobosSource {
             if self.aux_scratch.len() < need {
                 self.aux_scratch.resize(need, 0.0);
             }
-            let n = self.handle.rx_read_pair(&mut self.rx_scratch[..need], &mut self.aux_scratch[..need]);
+            let n = self
+                .handle
+                .rx_read_pair(&mut self.rx_scratch[..need], &mut self.aux_scratch[..need]);
             if n > 0 {
                 for p in 0..n {
                     buf[p] = Complex32::new(self.rx_scratch[2 * p], self.rx_scratch[2 * p + 1]);
@@ -253,7 +266,8 @@ impl IqSource for FobosSource {
                     self.aux_buf.resize(n, Complex32::new(0.0, 0.0));
                 }
                 for p in 0..n {
-                    self.aux_buf[p] = Complex32::new(self.aux_scratch[2 * p], self.aux_scratch[2 * p + 1]);
+                    self.aux_buf[p] =
+                        Complex32::new(self.aux_scratch[2 * p], self.aux_scratch[2 * p + 1]);
                 }
                 diversity.process(&mut buf[..n], &self.aux_buf[..n]);
             }
@@ -307,7 +321,8 @@ impl IqSource for FobosSource {
                 self.handle.set_clk_external(db >= 0.5);
             }
             sdroxide_types::DIV_MODE_ELEMENT => {
-                self.div_mode = if db >= 0.5 { DiversityMode::Combine } else { DiversityMode::Cancel };
+                self.div_mode =
+                    if db >= 0.5 { DiversityMode::Combine } else { DiversityMode::Cancel };
                 if let Some(d) = self.diversity.as_mut() {
                     d.set_mode(dsp_div_mode(self.div_mode));
                 }
@@ -318,7 +333,8 @@ impl IqSource for FobosSource {
                 }
             }
             sdroxide_types::DIV_TAPS_ELEMENT => {
-                let taps = db.round().clamp(1.0, f64::from(sdroxide_types::DIVERSITY_MAX_TAPS)) as u8;
+                let taps =
+                    db.round().clamp(1.0, f64::from(sdroxide_types::DIVERSITY_MAX_TAPS)) as u8;
                 if let Some(d) = self.diversity.as_mut() {
                     d.set_taps(usize::from(taps));
                 }
@@ -368,7 +384,9 @@ impl IqSource for FobosSource {
                 // un-lights for good. Cosmetic only — the filter really is
                 // unfrozen underneath the whole time — but worth the same
                 // review note as the rest of this comment.
-                if db >= 0.5 && let Some(d) = self.diversity.as_mut() {
+                if db >= 0.5
+                    && let Some(d) = self.diversity.as_mut()
+                {
                     d.reset();
                     d.set_frozen(false);
                 }

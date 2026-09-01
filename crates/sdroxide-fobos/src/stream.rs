@@ -256,9 +256,17 @@ fn run(
         Port::Rf => pump_rf(&api, dev, out_rate, &ctrl, &mut rx, &shared),
         // `rx` moves into a dedicated DDC thread for these two — see
         // `pump_hf`'s own doc comment for why.
-        Port::Hf1 | Port::Hf2 => {
-            pump_hf(&api, dev, params.port, adc_rate, params.center_hz, out_rate, &ctrl, rx, &shared)
-        }
+        Port::Hf1 | Port::Hf2 => pump_hf(
+            &api,
+            dev,
+            params.port,
+            adc_rate,
+            params.center_hz,
+            out_rate,
+            &ctrl,
+            rx,
+            &shared,
+        ),
         Port::HfDual => {
             pump_hf_dual(&api, dev, adc_rate, params.center_hz, out_rate, &ctrl, rx, &shared)
         }
@@ -513,7 +521,13 @@ fn pump_rf(
         let pairs = (actual as usize).min(buf_len as usize);
         if pairs > 0 {
             stats.on_iq(pairs);
-            push_iq(rx, &scratch[..pairs * 2], 2, &mut stats, shared.rx_paused.load(Ordering::Relaxed));
+            push_iq(
+                rx,
+                &scratch[..pairs * 2],
+                2,
+                &mut stats,
+                shared.rx_paused.load(Ordering::Relaxed),
+            );
             shared.last_rx_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
 
@@ -666,11 +680,14 @@ fn hf_pump(
 }
 
 /// The HF path: read two interleaved real channels, keep the selected one,
-/// run it through [`WbDdc`] for complex baseband. No rate-change support
-/// yet — the ADC rate is fixed at the top rate for the life of the stream;
-/// changing the *output* rate would mean rebuilding the FFT plans, which
-/// `Ctrl` has no message for — and no `fobos_rx_set_frequency` call at all:
-/// tuning is `WbDdc::set_center_hz` alone.
+/// run it through [`WbDdc`] for complex baseband. No rate-change support —
+/// the ADC rate is whatever [`hf_adc_rate_wanted`] settled on at open time
+/// and stays there for the life of the stream, and changing the *output*
+/// rate would mean rebuilding the FFT plans and the bin count with them.
+/// That is not a gap: a rate change reaches this backend as a reopen, never
+/// as a live control (see [`Ctrl::Rate`]'s own doc comment). And no
+/// `fobos_rx_set_frequency` call at all: tuning is `WbDdc::set_center_hz`
+/// alone.
 ///
 /// The blocking hardware read ([`hf_pump`]) and the DDC's own FFT work
 /// ([`hf_convert_loop`]) run on separate threads rather than back to back on
@@ -861,9 +878,10 @@ fn pump_hf_dual(
     let (empty_tx, empty_rx) = crossbeam_channel::bounded::<Vec<f32>>(HF_HANDOFF_DEPTH + 2);
     let (retune_tx, retune_rx) = crossbeam_channel::unbounded::<f64>();
     let conv_shared = Arc::clone(shared);
-    let converter = std::thread::Builder::new().name("sdroxide-fobos-hf-ddc".into()).spawn(
-        move || hf_dual_convert_loop(ddc_main, ddc_aux, full_rx, empty_tx, rx, conv_shared, retune_rx),
-    );
+    let converter =
+        std::thread::Builder::new().name("sdroxide-fobos-hf-ddc".into()).spawn(move || {
+            hf_dual_convert_loop(ddc_main, ddc_aux, full_rx, empty_tx, rx, conv_shared, retune_rx)
+        });
     let converter = match converter {
         Ok(t) => t,
         Err(e) => {

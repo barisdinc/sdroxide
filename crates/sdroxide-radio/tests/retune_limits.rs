@@ -216,11 +216,8 @@ fn a_vfo_below_the_centres_own_floor_but_inside_the_current_span_needs_no_retune
     // The wide, Nyquist-style range a WbDdc-backed front end actually
     // publishes (sdroxide-rx888::band::freq_ranges's own choice for the
     // identical clamp) — not the narrower centre-only range.
-    let mut h = start_engine(
-        Box::new(source),
-        caps(vec![(0.0, 40_000_000.0)]),
-        EngineConfig::default(),
-    );
+    let mut h =
+        start_engine(Box::new(source), caps(vec![(0.0, 40_000_000.0)]), EngineConfig::default());
     let thread = h.thread.take();
 
     h.cmd_tx.send(Command::SetVfo { vfo: Vfo::A, hz: DIAL }).unwrap();

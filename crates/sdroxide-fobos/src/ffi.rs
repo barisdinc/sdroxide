@@ -15,6 +15,18 @@
 //! plus primitive types. There is nothing to `offset_of!`-pin and nothing an
 //! ABI drift could silently misalign.
 //!
+//! # A missing symbol is not always a missing library
+//!
+//! Three of the bindings below — `fobos_rx_reset`, `fobos_rx_read_firmware`
+//! and `fobos_rx_write_firmware` — are newer than the header this crate first
+//! targeted, and nothing here calls any of them. They are bound as `Option`
+//! so an older `libfobos` still loads: a library missing a call this crate
+//! never makes can stream just as well as one that has it, and refusing to
+//! load it would report "no Fobos SDR found" for a receiver that is plugged
+//! in and working perfectly. Everything this crate actually calls stays
+//! required, so a genuinely wrong library still fails loudly at load rather
+//! than at the first read.
+//!
 //! # What's bound, and what's deliberately not
 //!
 //! Every function in the current header except the two low-level chip-tuning
@@ -67,7 +79,8 @@ pub struct Api {
     /// either.
     _lib: libloading::Library,
 
-    pub get_api_info: unsafe extern "C" fn(lib_version: *mut c_char, drv_version: *mut c_char) -> c_int,
+    pub get_api_info:
+        unsafe extern "C" fn(lib_version: *mut c_char, drv_version: *mut c_char) -> c_int,
     pub get_device_count: unsafe extern "C" fn() -> c_int,
     pub list_devices: unsafe extern "C" fn(serials: *mut c_char) -> c_int,
     pub open: unsafe extern "C" fn(out_dev: *mut Dev, index: u32) -> c_int,
@@ -76,7 +89,13 @@ pub struct Api {
     /// library after the header this crate first targeted; not called
     /// anywhere yet, kept in mind for `device.rs`'s error-recovery path as a
     /// stronger option than plain close-then-reopen.
-    pub reset: unsafe extern "C" fn(dev: Dev) -> c_int,
+    ///
+    /// `Option`, not a plain pointer, precisely *because* it is newer than
+    /// the rest and nothing here calls it: an older `libfobos` that streams
+    /// perfectly well must not be turned into "no Fobos backend at all" over
+    /// a symbol this crate never invokes. Same arrangement `sdroxide-lime`
+    /// uses for the LimeRFE half of LimeSuite.
+    pub reset: Option<unsafe extern "C" fn(dev: Dev) -> c_int>,
     pub get_board_info: unsafe extern "C" fn(
         dev: Dev,
         hw_revision: *mut c_char,
@@ -94,8 +113,7 @@ pub struct Api {
     pub set_lna_gain: unsafe extern "C" fn(dev: Dev, value: c_int) -> c_int,
     /// 0..31, likewise confirmed (`value & 0x001F`).
     pub set_vga_gain: unsafe extern "C" fn(dev: Dev, value: c_int) -> c_int,
-    pub get_samplerates:
-        unsafe extern "C" fn(dev: Dev, values: *mut f64, count: *mut u32) -> c_int,
+    pub get_samplerates: unsafe extern "C" fn(dev: Dev, values: *mut f64, count: *mut u32) -> c_int,
     pub set_samplerate: unsafe extern "C" fn(dev: Dev, value: f64, actual: *mut f64) -> c_int,
     /// Bound but never called — see module doc.
     pub read_async: unsafe extern "C" fn(
@@ -115,13 +133,15 @@ pub struct Api {
         unsafe extern "C" fn(dev: Dev, buf: *mut f32, actual_buf_length: *mut u32) -> c_int,
     pub stop_sync: unsafe extern "C" fn(dev: Dev) -> c_int,
     /// Added to the vendor library after the header this crate first
-    /// targeted; not called anywhere yet.
+    /// targeted; not called anywhere yet, and `Option` for the same reason
+    /// as [`Api::reset`].
     pub read_firmware:
-        unsafe extern "C" fn(dev: Dev, file_name: *const c_char, verbose: c_int) -> c_int,
+        Option<unsafe extern "C" fn(dev: Dev, file_name: *const c_char, verbose: c_int) -> c_int>,
     /// Added to the vendor library after the header this crate first
-    /// targeted; not called anywhere yet.
+    /// targeted; not called anywhere yet, and `Option` for the same reason
+    /// as [`Api::reset`].
     pub write_firmware:
-        unsafe extern "C" fn(dev: Dev, file_name: *const c_char, verbose: c_int) -> c_int,
+        Option<unsafe extern "C" fn(dev: Dev, file_name: *const c_char, verbose: c_int) -> c_int>,
     pub error_name: unsafe extern "C" fn(error: c_int) -> *const c_char,
 }
 
@@ -156,7 +176,14 @@ fn lib_candidates() -> Vec<std::ffi::OsString> {
     let mut out: Vec<std::ffi::OsString> = vec!["fobos.dll".into()];
     for var in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(pf) = std::env::var_os(var) {
-            out.push(PathBuf::from(pf).join("RigExpert").join("Fobos").join("lib").join("fobos.dll").into_os_string());
+            out.push(
+                PathBuf::from(pf)
+                    .join("RigExpert")
+                    .join("Fobos")
+                    .join("lib")
+                    .join("fobos.dll")
+                    .into_os_string(),
+            );
         }
     }
     out
@@ -184,13 +211,22 @@ impl Api {
                     .map_err(|e| format!("{} missing from libfobos: {e}", $name))?
             };
         }
+        // Symbols newer than the header this crate first targeted, none of
+        // which anything here calls. Absent on an older `libfobos` that is
+        // otherwise perfectly capable of streaming, so their absence must not
+        // fail the load — see [`Api::reset`]'s own doc comment.
+        macro_rules! opt {
+            ($name:literal) => {
+                unsafe { lib.get(concat!($name, "\0").as_bytes()) }.ok().map(|s| *s)
+            };
+        }
         Ok(Api {
             get_api_info: sym!("fobos_rx_get_api_info"),
             get_device_count: sym!("fobos_rx_get_device_count"),
             list_devices: sym!("fobos_rx_list_devices"),
             open: sym!("fobos_rx_open"),
             close: sym!("fobos_rx_close"),
-            reset: sym!("fobos_rx_reset"),
+            reset: opt!("fobos_rx_reset"),
             get_board_info: sym!("fobos_rx_get_board_info"),
             set_frequency: sym!("fobos_rx_set_frequency"),
             set_direct_sampling: sym!("fobos_rx_set_direct_sampling"),
@@ -205,8 +241,8 @@ impl Api {
             start_sync: sym!("fobos_rx_start_sync"),
             read_sync: sym!("fobos_rx_read_sync"),
             stop_sync: sym!("fobos_rx_stop_sync"),
-            read_firmware: sym!("fobos_rx_read_firmware"),
-            write_firmware: sym!("fobos_rx_write_firmware"),
+            read_firmware: opt!("fobos_rx_read_firmware"),
+            write_firmware: opt!("fobos_rx_write_firmware"),
             error_name: sym!("fobos_rx_error_name"),
 
             _lib: lib,

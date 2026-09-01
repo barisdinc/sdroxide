@@ -4998,7 +4998,7 @@ dependencies = [
 
 [[package]]
 name = "sdroxide-fobos"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.9.0",

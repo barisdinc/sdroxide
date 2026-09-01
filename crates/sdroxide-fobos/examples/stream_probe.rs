@@ -60,7 +60,10 @@ fn main() {
     println!("--- {} ---", handle.label);
     println!(
         "hw {}  fw {}  {} {}",
-        handle.board.hw_revision, handle.board.fw_version, handle.board.manufacturer, handle.board.product
+        handle.board.hw_revision,
+        handle.board.fw_version,
+        handle.board.manufacturer,
+        handle.board.product
     );
     println!("rate {:.3} Msps (of {} offered)", handle.sample_rate_hz / 1e6, handle.rates_hz.len());
 
@@ -142,7 +145,10 @@ fn main() {
         }
     };
     println!("--- {} ---", handle.label);
-    println!("rate {:.3} Msps per channel (target 0.625 Msps complex, via two WbDdcs)", handle.sample_rate_hz / 1e6);
+    println!(
+        "rate {:.3} Msps per channel (target 0.625 Msps complex, via two WbDdcs)",
+        handle.sample_rate_hz / 1e6
+    );
 
     let mut main = vec![0.0f32; 1 << 16];
     let mut aux = vec![0.0f32; 1 << 16];

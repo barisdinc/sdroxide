@@ -23,6 +23,12 @@ const SERIALS_BUF_LEN: usize = 256;
 const REOPEN_ATTEMPTS: u32 = 5;
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 
+/// Rates [`samplerates`] adds to whatever the receiver itself reports — see
+/// that function's own doc comment for what they are for and why they are
+/// offered on every port. Narrowest last, matching the order they are
+/// appended in; `samplerates` sorts the whole list afterwards anyway.
+const EXTRA_HF_RATES_HZ: [f64; 4] = [5_000_000.0, 2_500_000.0, 1_250_000.0, 625_000.0];
+
 struct ApiState {
     api: Option<Arc<ffi::Api>>,
     /// One log line per absence, not one per rescan tick.
@@ -196,11 +202,32 @@ pub unsafe fn close(api: &ffi::Api, dev: ffi::Dev) {
     }
 }
 
-/// The sample rates `fobos_rx_get_samplerates` reports, plus three lower
-/// rates produced by a software DDC from the raw feed rather than read
-/// straight from the hardware — those exist only for the RF port; the HF
-/// ports run their own DDC here instead (see `handle.rs`/`stream.rs`) and
-/// don't need them.
+/// The sample rates `fobos_rx_get_samplerates` reports, plus four lower ones
+/// this crate adds itself.
+///
+/// The added four are for the **HF ports**, where the requested rate is a
+/// target for this crate's own `WbDdc` (see `stream.rs`) rather than anything
+/// the hardware is asked for: they are the narrow views that make the low end
+/// of HF reachable at all, since the downconverter cannot centre closer to DC
+/// than half its own output rate, and the hardware's own list bottoms out
+/// well above them. 625 kHz is both the narrowest the DDC's smallest bin
+/// count can produce and the one that keeps the whole AM/mediumwave
+/// broadcast band tunable — see `sdroxide_types::FobosConfig::default`'s own
+/// comment, and `stream.rs`'s
+/// `the_default_hf_rate_keeps_the_whole_am_broadcast_band_reachable`. Leaving
+/// it out of this list while shipping it as the default is what made the
+/// default unreachable from the settings dropdown: it rendered as the
+/// selected text with no entry behind it, so touching that control once lost
+/// it for good.
+///
+/// On `Rf` there is no software DDC — `stream::open_rf` asks the hardware for
+/// the rate and reports back whatever it landed on — and the receiver snaps
+/// any request below 8 Msps up to 8 Msps. So all four are offered there too
+/// and none of them is honoured; the achieved rate is reported rather than
+/// hidden, which is what keeps the engine's own view of the span correct.
+/// They are not filtered per port because this call has no port to filter by:
+/// the operator picks the rate in the same settings tab that picks the port,
+/// before either reaches the hardware.
 ///
 /// # Safety
 /// `dev` must be a still-open handle from [`open`] belonging to `api`.
@@ -215,7 +242,7 @@ pub unsafe fn samplerates(api: &ffi::Api, dev: ffi::Dev) -> Result<Vec<f64>> {
         return Err(Error::api("fobos_rx_get_samplerates", api.err_text(rc)));
     }
     let mut values: Vec<f64> = values[..(count as usize).min(values.len())].to_vec();
-    for extra in [5_000_000.0, 2_500_000.0, 1_250_000.0] {
+    for extra in EXTRA_HF_RATES_HZ {
         if !values.iter().any(|&v| (v - extra).abs() < 1.0) {
             values.push(extra);
         }
@@ -268,5 +295,27 @@ fn cstr_buf_to_string(buf: &[c_char]) -> String {
             // rather than reaching past it the way `CStr::from_ptr` would.
             String::from_utf8_lossy(bytes).trim().to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `sdroxide_types::FobosConfig`'s default `sample_rate_hz` is 625 kHz,
+    /// and the settings dropdown builds its entries from whatever this
+    /// module hands back once a receiver has answered. A default with no
+    /// entry behind it renders as selected text and then cannot be chosen
+    /// again — so the narrow rates have to survive here as well as in
+    /// `FobosConfig::SAMPLE_RATES`, which is the *other* list, shown only
+    /// until a device answers. The figure is duplicated rather than imported
+    /// because this crate deliberately has no dependency on
+    /// `sdroxide-types` — see `Cargo.toml`'s own comment on why.
+    #[test]
+    fn the_added_rates_include_the_backends_own_default() {
+        assert!(EXTRA_HF_RATES_HZ.iter().any(|r| (r - 625_000.0).abs() < 1.0));
+        // Every one of them is below the 8 Msps floor the hardware's own list
+        // bottoms out at, or there would be no reason to add it.
+        assert!(EXTRA_HF_RATES_HZ.iter().all(|&r| r < 8_000_000.0));
     }
 }

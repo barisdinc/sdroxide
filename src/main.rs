@@ -1943,7 +1943,8 @@ fn open_fobos_source(
     radio: &RadioConfig,
     center_hz: f64,
 ) -> anyhow::Result<(Box<dyn IqSource>, DeviceCaps)> {
-    let src = fobos_source::FobosSource::open(&radio.fobos, center_hz).context("opening Fobos SDR")?;
+    let src =
+        fobos_source::FobosSource::open(&radio.fobos, center_hz).context("opening Fobos SDR")?;
     let caps = fobos_caps(&src, radio.fobos.port);
     Ok((Box::new(src), caps))
 }

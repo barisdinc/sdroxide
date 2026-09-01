@@ -5968,11 +5968,19 @@ impl FobosConfig {
     /// tab shows the device's own reported list once `DeviceCaps` has one,
     /// same as [`HydraSdrConfig::SAMPLE_RATES`]. These are not from a
     /// datasheet: they are the 13-entry list `fobos_rx_get_samplerates`
-    /// reported on the real unit this backend was verified against, which
-    /// may not be every Fobos's own list.
-    pub const SAMPLE_RATES: [f64; 13] = [
-        1.25e6, 2.5e6, 5.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6, 25.0e6, 32.0e6, 40.0e6,
-        50.0e6, 80.0e6,
+    /// reported on the real unit this backend was verified against (which
+    /// may not be every Fobos's own list), plus the 625 kHz entry
+    /// `sdroxide-fobos::device::samplerates` adds to that reported list for
+    /// the HF ports — see its own doc comment.
+    ///
+    /// [`FobosConfig::default`]'s `sample_rate_hz` must always appear here
+    /// and in that list both, or the settings dropdown renders it as
+    /// selected text with no entry behind it and the first touch of that
+    /// control loses it for good — which is exactly what happened to 625 kHz,
+    /// the rate the default was chosen as in the first place.
+    pub const SAMPLE_RATES: [f64; 14] = [
+        0.625e6, 1.25e6, 2.5e6, 5.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6, 25.0e6, 32.0e6,
+        40.0e6, 50.0e6, 80.0e6,
     ];
 }
 
@@ -6765,6 +6773,29 @@ mod tests {
             assert!(!HydraSdrConfig::rate_note(r).is_empty(), "{r} is unannotated");
         }
         assert!(HydraSdrConfig::SAMPLE_RATES.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    /// A default the operator can never get back to is worse than no default:
+    /// the settings dropdown builds its entries from this list and renders
+    /// `sample_rate_hz` as the *selected text* whether or not an entry
+    /// matches, so a default missing from the list looks selected right up
+    /// until the first click and then cannot be chosen again. 625 kHz was
+    /// exactly that — and it is not an arbitrary rate to lose: it is the one
+    /// the default was chosen as, because half of it is the HF ports'
+    /// reachable floor and anything wider puts that floor above the bottom of
+    /// the AM broadcast band (see `FobosConfig::default`'s own comment, and
+    /// `sdroxide-fobos::stream`'s
+    /// `the_default_hf_rate_keeps_the_whole_am_broadcast_band_reachable`).
+    #[test]
+    fn the_default_fobos_rate_is_one_the_settings_menu_actually_offers() {
+        let default = FobosConfig::default().sample_rate_hz;
+        assert!(
+            FobosConfig::SAMPLE_RATES.iter().any(|r| (r - default).abs() < 1.0),
+            "the default {default} Hz is not in SAMPLE_RATES {:?}",
+            FobosConfig::SAMPLE_RATES,
+        );
+        // Narrowest first, the way the menu reads.
+        assert!(FobosConfig::SAMPLE_RATES.windows(2).all(|w| w[0] < w[1]));
     }
 
     /// The `part_id` word is the only thing that says which HF+ is on the other

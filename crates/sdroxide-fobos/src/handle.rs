@@ -37,7 +37,15 @@ pub(crate) enum Ctrl {
     /// A rate change is not a live setting — it stops the sync stream,
     /// reprograms the sample rate, and restarts it with a buffer sized for
     /// the new rate. Verified against real hardware in this exact
-    /// stop/reconfigure/restart shape — see `stream.rs`'s `rebuild`.
+    /// stop/reconfigure/restart shape on `Port::Rf`; the HF ports build
+    /// their downconverter at open time and log-and-ignore one instead.
+    ///
+    /// Part of this crate's own API rather than something sdroxide drives:
+    /// `IqSource` has no live rate setter, so `src/fobos_source.rs` never
+    /// sends this and an operator changing the rate in Settings gets a
+    /// reopen. `examples/stream_probe.rs` is what exercises it — the same
+    /// arrangement `sdroxide-hydrasdr`, `sdroxide-airspy` and
+    /// `sdroxide-hackrf` all have for their own `Ctrl::Rate`.
     Rate(f64),
     /// 0..3, confirmed against `fobos.c`'s own register mask.
     LnaGain(u8),
@@ -175,8 +183,11 @@ impl RxStats {
         let ksps = self.win_samples as f64 / dt.as_secs_f64() / 1000.0;
         let silent = self.win_samples == 0;
         if self.win_dropped > 0 || self.win_errors > 0 || silent {
-            let mut line =
-                format!("Fobos RX: {} samples ({ksps:.1} ksps) over {:.2}s", self.win_samples, dt.as_secs_f64());
+            let mut line = format!(
+                "Fobos RX: {} samples ({ksps:.1} ksps) over {:.2}s",
+                self.win_samples,
+                dt.as_secs_f64()
+            );
             if silent {
                 line.push_str(
                     "; NOTHING ARRIVED — the receiver is not sending, which is a \
@@ -229,7 +240,13 @@ impl RxStats {
 /// partial push leaves the ring out of step with its own lane boundary,
 /// which for `lanes: 2` swaps I with Q and for `lanes: 4` scrambles which
 /// float belongs to which channel, for the rest of the session.
-pub(crate) fn push_iq(rx: &mut Producer<f32>, iq: &[f32], lanes: usize, stats: &mut RxStats, paused: bool) {
+pub(crate) fn push_iq(
+    rx: &mut Producer<f32>,
+    iq: &[f32],
+    lanes: usize,
+    stats: &mut RxStats,
+    paused: bool,
+) {
     let Ok(mut chunk) = rx.write_chunk(iq.len()) else {
         if paused {
             stats.on_dropped_keyed(iq.len() / lanes);

@@ -5282,11 +5282,13 @@ pub(in crate::app) fn settings_hydrasdr_tab(
 /// The receiver, input and sample rate all reopen the device rather than
 /// applying live: the input because `Rf` and the HF ports are different
 /// hardware paths (`fobos_rx_set_direct_sampling`) and the HF ports build a
-/// software downconverter at open time, the rate because a live change on
-/// `Rf` is stop/reconfigure/restart and the HF ports don't support one at
-/// all yet. LNA/VGA gain and the clock source apply immediately — the gain
-/// sliders only doing anything on `Rf`, see
-/// [`sdroxide_types::FobosPort`]'s own doc comment for why.
+/// software downconverter at open time, the rate because `IqSource` has no
+/// live rate setter to carry one — the driver crate has the stop/reconfigure/
+/// restart machinery (`sdroxide_fobos::handle::Ctrl::Rate`), but nothing
+/// short of a reopen reaches it, so this is a reopen like the other two and
+/// not a live control that happens to be slow. LNA/VGA gain and the clock
+/// source do apply immediately — the gain sliders only doing anything on
+/// `Rf`, see [`sdroxide_types::FobosPort`]'s own doc comment for why.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn settings_fobos_tab(
     ui: &mut egui::Ui,
@@ -5346,11 +5348,7 @@ pub(in crate::app) fn settings_fobos_tab(
                             "— first one found —",
                         );
                         for d in devices {
-                            ui.selectable_value(
-                                &mut cfg.fobos.serial,
-                                d.serial.clone(),
-                                d.label(),
-                            );
+                            ui.selectable_value(&mut cfg.fobos.serial, d.serial.clone(), d.label());
                         }
                     },
                 );
@@ -5453,11 +5451,7 @@ pub(in crate::app) fn settings_fobos_tab(
 
         ui.label("Clock source");
         if ui.checkbox(&mut cfg.fobos.clk_external, "External reference").changed() {
-            push_gain(
-                cmds,
-                FobosConfig::CLK_EXTERNAL_ELEMENT,
-                cfg.fobos.clk_external as u8 as f64,
-            );
+            push_gain(cmds, FobosConfig::CLK_EXTERNAL_ELEMENT, cfg.fobos.clk_external as u8 as f64);
         }
         ui.end_row();
 
@@ -5493,8 +5487,11 @@ pub(in crate::app) fn settings_fobos_tab(
                     );
                 }
                 ui.label(
-                    RichText::new(diversity_cost_note(cfg.fobos.div_taps, cfg.fobos.sample_rate_hz))
-                        .weak(),
+                    RichText::new(diversity_cost_note(
+                        cfg.fobos.div_taps,
+                        cfg.fobos.sample_rate_hz,
+                    ))
+                    .weak(),
                 );
             });
             ui.end_row();
