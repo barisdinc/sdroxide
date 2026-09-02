@@ -650,13 +650,27 @@ pub(crate) struct DecodeProgress {
     /// Fewest sync-word bit errors found, 0..=32; [`u8::MAX`] if no bitstream
     /// was run at all.
     pub sync_bit_errors: u8,
+    /// How many separate positions in the best chip-timing/parity bitstream
+    /// matched the sync word within [`SYNC_MAX_ERRORS`]. A real frame in the
+    /// window shows one or two, at very few errors; a 32-bit pattern matched
+    /// within 3 errors also turns up by chance roughly once every few windows
+    /// on noise, as a lone hit near the full error budget — so this is what
+    /// tells "sync lit, CRC dark" apart from a genuine frame alignment the
+    /// payload demod is then failing.
+    pub sync_matches: u8,
     /// A CRC-valid frame was decoded.
     pub crc_ok: bool,
 }
 
 impl Default for DecodeProgress {
     fn default() -> Self {
-        Self { carrier: false, sync: false, sync_bit_errors: u8::MAX, crc_ok: false }
+        Self {
+            carrier: false,
+            sync: false,
+            sync_bit_errors: u8::MAX,
+            sync_matches: 0,
+            crc_ok: false,
+        }
     }
 }
 
@@ -676,16 +690,42 @@ fn min_sync_distance(bits: &[bool]) -> Option<u8> {
     Some(best as u8)
 }
 
-/// The fewest sync-word bit errors any chip-timing/parity combination of
-/// `iq` (already mixed to one candidate) gets down to — a "how close was
-/// this" that does not need a CRC pass to mean something.
-fn sync_probe(iq: &[Complex32], rate_hz: f64) -> Option<u8> {
+/// Every bit offset in `bits` where [`SYNC_WORD`] matches within
+/// [`SYNC_MAX_ERRORS`], collapsing a run of near-adjacent hits (one real sync
+/// preamble can match at a couple of neighbouring offsets when a chip slips)
+/// into a single count — so the length of the result is "how many distinct
+/// frame alignments look present", the number [`DecodeProgress::sync_matches`]
+/// reports.
+fn sync_positions(bits: &[bool]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    if bits.len() < SYNC_LEN as usize {
+        return out;
+    }
+    let mut window: u32 = 0;
+    for (i, &b) in bits.iter().enumerate() {
+        window = (window << 1) | b as u32;
+        if i + 1 >= SYNC_LEN as usize && (window ^ SYNC_WORD).count_ones() <= SYNC_MAX_ERRORS {
+            let pos = i + 1 - SYNC_LEN as usize;
+            if out.last().is_none_or(|&p| pos - p > 4) {
+                out.push(pos);
+            }
+        }
+    }
+    out
+}
+
+/// Across every chip-timing phase and Manchester parity of `iq` (already mixed
+/// to one candidate): the fewest sync-word bit errors any of them reaches, and
+/// how many distinct sync matches the bitstream that reached it carries. A
+/// "how close was this, and is it one real frame or a chance hit" that does
+/// not need a CRC pass to mean something.
+fn sync_scan(iq: &[Complex32], rate_hz: f64) -> Option<(u8, u8)> {
     let samples_per_chip = rate_hz / CHIP_RATE;
     if samples_per_chip < 2.0 {
         return None;
     }
     let phase_step = (samples_per_chip / TIMING_PHASES as f64).max(1.0);
-    let mut best: Option<u8> = None;
+    let mut best: Option<(u8, u8)> = None;
     for p in 0..TIMING_PHASES {
         let phase = (p as f64 * phase_step) as usize;
         let chips = chip_samples(iq, samples_per_chip, phase);
@@ -694,52 +734,73 @@ fn sync_probe(iq: &[Complex32], rate_hz: f64) -> Option<u8> {
         }
         let flips = chip_flips(&chips);
         for parity in 0..2 {
-            if let Some(d) = min_sync_distance(&data_bits(&flips, parity)) {
-                best = Some(best.map_or(d, |b| b.min(d)));
+            let bits = data_bits(&flips, parity);
+            let Some(d) = min_sync_distance(&bits) else { continue };
+            if best.is_none_or(|(bd, _)| d < bd) {
+                let n = sync_positions(&bits).len().min(u8::MAX as usize) as u8;
+                best = Some((d, n));
             }
         }
     }
     best
 }
 
-/// De-rotate a linear frequency drift of `hz_per_s` out of `iq` (sample rate
-/// `rate_hz`), pivoting on the centre sample so only the *slope* is removed —
-/// the mean offset is left for [`acquire`]'s own grid to find. This is what
-/// lets a frame decode on a station whose LNB (or SDR clock) is still walking
-/// a few Hz a second while it warms up: without it the carrier smears across
-/// the 10.36 s frame and the payload CRC never checks out even though the
-/// sync word matches.
-fn dechirp(iq: &[Complex32], rate_hz: f64, hz_per_s: f64) -> Vec<Complex32> {
-    if hz_per_s == 0.0 || rate_hz <= 0.0 {
+/// De-rotate a frequency drift of `slope` Hz/s plus curvature `accel` Hz/s²
+/// out of `iq` (sample rate `rate_hz`), pivoting on the centre sample so only
+/// the *shape* of the walk is removed — the mean offset is left for
+/// [`acquire`]'s own grid to find. This is what lets a frame decode on a
+/// station whose LNB (or SDR clock) is still walking while it warms up:
+/// without it the carrier smears across the 10.36 s frame and the payload CRC
+/// never checks out even though the sync word matches.
+///
+/// A warming LNB's LO does not drift at a *constant* rate — it curves — so the
+/// `accel` term earns its place over a whole frame even when the last second
+/// of tracker estimates looked linear; a straight-line de-rotation leaves a
+/// residual chirp that is still enough to fail the payload CRC.
+fn dechirp(iq: &[Complex32], rate_hz: f64, slope: f64, accel: f64) -> Vec<Complex32> {
+    if (slope == 0.0 && accel == 0.0) || rate_hz <= 0.0 {
         return iq.to_vec();
     }
-    // Instantaneous frequency `hz_per_s * t` integrates to phase
-    // `PI * hz_per_s * t^2`; `t = (n - n0) / rate`. Multiply by its conjugate.
+    // Instantaneous frequency `slope * t + 0.5 * accel * t^2` integrates to
+    // phase `2*PI * (0.5 * slope * t^2 + accel * t^3 / 6)`; `t = (n - n0) /
+    // rate`. Multiply by its conjugate.
     let n0 = iq.len() as f64 / 2.0;
-    let k = -std::f64::consts::PI * hz_per_s / (rate_hz * rate_hz);
+    let ks = -std::f64::consts::PI * slope / (rate_hz * rate_hz);
+    let ka = -std::f64::consts::PI * accel / (3.0 * rate_hz * rate_hz * rate_hz);
     iq.iter()
         .enumerate()
         .map(|(n, &z)| {
             let d = n as f64 - n0;
-            let ph = k * d * d;
+            let ph = ks * d * d + ka * d * d * d;
             z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
         })
         .collect()
 }
 
-/// Half-width and step, in Hz/s, of the drift grid [`acquire_debug`] tries
-/// around the caller's estimate. Wide enough to bracket a warming LNB, fine
-/// enough that the residual chirp across a frame is a fraction of a bit.
+/// Half-width and step, in Hz/s, of the drift-*rate* grid [`acquire_debug`]
+/// tries around the caller's estimate. Wide enough to bracket a warming LNB,
+/// fine enough that the residual chirp across a frame is a fraction of a bit.
 const DRIFT_GRID_HALF_HZ_S: f64 = 6.0;
 const DRIFT_GRID_STEP_HZ_S: f64 = 1.5;
 
+/// Half-width and step, in Hz/s², of the *curvature* grid tried around the
+/// caller's estimate. `0.0` is always tried first (centre-out), so a station
+/// whose drift really is linear pays exactly the sweep it did before this
+/// second-order term existed; widen the half-width here if a fast-warming LNB
+/// still will not decode and `DRIFT` shows a large curvature.
+const ACCEL_GRID_HALF_HZ_S2: f64 = 3.0;
+const ACCEL_GRID_STEP_HZ_S2: f64 = 3.0;
+
 /// [`acquire`], plus a [`DecodeProgress`] snapshot of how far the pass got and
-/// a small **drift** search around `drift_hz_per_s`: the frame decoder needs
-/// the carrier coherent across a whole 10.36 s frame, which a drifting LNB
-/// breaks, so each drift candidate is de-rotated ([`dechirp`]) before the
-/// ordinary frequency sweep runs on it. `drift_hz_per_s` is the caller's own
-/// estimate (0.0 = "no idea"); the grid is centred on it so a good estimate
-/// keeps the search short.
+/// a small **drift** search around `drift_hz_per_s` / `drift_accel_hz_s2`: the
+/// frame decoder needs the carrier coherent across a whole 10.36 s frame,
+/// which a drifting — and, as it warms, *accelerating* — LNB breaks, so each
+/// candidate is de-rotated ([`dechirp`]) with a trial drift rate and curvature
+/// before the ordinary frequency sweep runs on it. The two arguments are the
+/// caller's own estimates (0.0 = "no idea"); the grid is centred on them, with
+/// zero curvature tried first, so a good estimate keeps the search short and a
+/// linearly-drifting station pays what it did before the curvature term.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn acquire_debug(
     iq: &[Complex32],
     rate_hz: f64,
@@ -747,26 +808,39 @@ pub(crate) fn acquire_debug(
     freq_step_hz: f64,
     demod_rate_hz: f64,
     drift_hz_per_s: f64,
+    drift_accel_hz_s2: f64,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> (Option<Qo100Lock>, DecodeProgress) {
     use std::sync::atomic::Ordering;
 
-    // Drift candidates, centre outward from the estimate.
-    let steps = (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64;
-    for k in 0..=2 * steps {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let d = if k % 2 == 0 { k / 2 } else { -(k / 2 + 1) };
-        let slope = drift_hz_per_s + d as f64 * DRIFT_GRID_STEP_HZ_S;
-        let buf = dechirp(iq, rate_hz, slope);
-        let lock =
-            acquire(&buf, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel);
-        if lock.is_some() {
-            return (
-                lock,
-                DecodeProgress { carrier: true, sync: true, sync_bit_errors: 0, crc_ok: true },
-            );
+    // Curvature outer, drift-rate inner — both centre-outward from the
+    // estimate, so (zero curvature, best rate) is tried first.
+    let s_steps = (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64;
+    let a_steps = (ACCEL_GRID_HALF_HZ_S2 / ACCEL_GRID_STEP_HZ_S2).round() as i64;
+    'grid: for ka in 0..=2 * a_steps {
+        let da = if ka % 2 == 0 { ka / 2 } else { -(ka / 2 + 1) };
+        let accel = drift_accel_hz_s2 + da as f64 * ACCEL_GRID_STEP_HZ_S2;
+        for ks in 0..=2 * s_steps {
+            if cancel.load(Ordering::Relaxed) {
+                break 'grid;
+            }
+            let ds = if ks % 2 == 0 { ks / 2 } else { -(ks / 2 + 1) };
+            let slope = drift_hz_per_s + ds as f64 * DRIFT_GRID_STEP_HZ_S;
+            let buf = dechirp(iq, rate_hz, slope, accel);
+            if let Some(lock) =
+                acquire(&buf, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel)
+            {
+                return (
+                    Some(lock),
+                    DecodeProgress {
+                        carrier: true,
+                        sync: true,
+                        sync_bit_errors: 0,
+                        sync_matches: 1,
+                        crc_ok: true,
+                    },
+                );
+            }
         }
     }
 
@@ -778,13 +852,14 @@ pub(crate) fn acquire_debug(
         let dr = rate_hz / deci as f64;
         let seed = coarse_carrier_hz(iq, rate_hz, search_half_width_hz);
         let mixed = mix_decimate(iq, rate_hz, seed.unwrap_or(0.0), deci);
-        let dist = sync_probe(&mixed, dr);
-        if let Some(d) = dist {
+        if let Some((d, n)) = sync_scan(&mixed, dr) {
             progress.sync_bit_errors = d;
             progress.sync = u32::from(d) <= SYNC_MAX_ERRORS;
+            progress.sync_matches = n;
         }
-        progress.carrier =
-            seed.is_some() || progress.sync || dist.is_some_and(|d| u32::from(d) <= 10);
+        progress.carrier = seed.is_some()
+            || progress.sync
+            || (progress.sync_bit_errors != u8::MAX && progress.sync_bit_errors <= 10);
     }
     (None, progress)
 }
@@ -1172,6 +1247,7 @@ pub(crate) mod tests {
             TEST_STEP,
             crate::controller::DEMOD_RATE_HZ,
             0.0,
+            0.0,
             &std::sync::atomic::AtomicBool::new(false),
         );
         assert!(lock.is_some());
@@ -1179,15 +1255,17 @@ pub(crate) mod tests {
         assert_eq!(p.sync_bit_errors, 0);
     }
 
-    /// Apply a linear chirp of `hz_per_s` to `iq` (the inverse of [`dechirp`]).
-    fn add_chirp(iq: &[Complex32], rate_hz: f64, hz_per_s: f64) -> Vec<Complex32> {
+    /// Apply a frequency chirp of `slope` Hz/s plus curvature `accel` Hz/s² to
+    /// `iq` — the inverse of [`dechirp`].
+    fn add_chirp(iq: &[Complex32], rate_hz: f64, slope: f64, accel: f64) -> Vec<Complex32> {
         let n0 = iq.len() as f64 / 2.0;
-        let k = std::f64::consts::PI * hz_per_s / (rate_hz * rate_hz);
+        let ks = std::f64::consts::PI * slope / (rate_hz * rate_hz);
+        let ka = std::f64::consts::PI * accel / (3.0 * rate_hz * rate_hz * rate_hz);
         iq.iter()
             .enumerate()
             .map(|(n, &z)| {
                 let d = n as f64 - n0;
-                let ph = k * d * d;
+                let ph = ks * d * d + ka * d * d * d;
                 z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
             })
             .collect()
@@ -1200,7 +1278,7 @@ pub(crate) mod tests {
         // drift estimate as the grid centre acquire_debug recovers it.
         let rate = TEST_RATE;
         let clean = synth_signal("CHIRP CASE", rate, 0.0, 0.0, 5);
-        let chirped = add_chirp(&clean, rate, 60.0);
+        let chirped = add_chirp(&clean, rate, 60.0, 0.0);
         let cancel = std::sync::atomic::AtomicBool::new(false);
 
         assert!(
@@ -1216,6 +1294,7 @@ pub(crate) mod tests {
             TEST_STEP,
             crate::controller::DEMOD_RATE_HZ,
             60.0, // the tracker's drift estimate
+            0.0,
             &cancel,
         );
         assert!(lock.is_some() && p.crc_ok, "the drift grid should recover it: {p:?}");
@@ -1223,10 +1302,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_curved_drift_decodes_once_the_curvature_is_de_rotated() {
+        // A carrier whose drift *rate* is itself moving — a warming LNB. Zero
+        // mean slope, pure curvature: near the buffer centre it looks almost
+        // stationary, but the ends smear hundreds of Hz, and a symmetric curve
+        // is exactly what no linear de-rotation or static offset can straighten.
+        // The rate is scaled up here so a single ~10 s synth buffer stands in
+        // for the decoder's real ~24 s window, where a few Hz/s² is enough.
+        let rate = TEST_RATE;
+        let clean = synth_signal("CURVED CASE", rate, 0.0, 0.0, 9);
+        let curved = add_chirp(&clean, rate, 0.0, 40.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let (no_curve, _) = acquire_debug(
+            &curved,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            0.0, // the drift grid alone, no curvature — cannot follow it
+            &cancel,
+        );
+        assert!(no_curve.is_none(), "a rate-only grid cannot straighten a curved drift");
+
+        let (lock, p) = acquire_debug(
+            &curved,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            40.0, // the tracker's curvature estimate
+            &cancel,
+        );
+        assert!(lock.is_some() && p.crc_ok, "the curvature grid should recover it: {p:?}");
+        assert!(lock.unwrap().text.starts_with("CURVED CASE"));
+    }
+
+    #[test]
     fn dechirp_is_the_inverse_of_a_chirp() {
         let rate = TEST_RATE;
         let clean = synth_signal("INVERSE", rate, 30.0, 0.0, 2);
-        let round_trip = dechirp(&add_chirp(&clean, rate, 12.0), rate, 12.0);
+        let round_trip = dechirp(&add_chirp(&clean, rate, 12.0, 4.0), rate, 12.0, 4.0);
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // The de-chirped copy decodes exactly like the original.
         let lock =
@@ -1248,6 +1366,7 @@ pub(crate) mod tests {
             300.0,
             TEST_STEP,
             crate::controller::DEMOD_RATE_HZ,
+            0.0,
             0.0,
             &std::sync::atomic::AtomicBool::new(false),
         );

@@ -116,8 +116,14 @@ pub struct Qo100Status {
     pub est_misses: u64,
     /// Least-squares drift rate of the last stretch of estimates, in Hz/s —
     /// what the frame decoder de-rotates before looking for a frame. 0 until
-    /// there is a long enough run of estimates to fit.
+    /// there is a long enough run of estimates to fit. Reported at the middle
+    /// of the fit window, so it lines up with the decode buffer's own centre.
     pub est_drift_hz_s: f32,
+    /// Curvature of that same fit, in Hz/s² — a warming LNB's drift rate is
+    /// not constant, and this second-order term is de-rotated on top of
+    /// [`Self::est_drift_hz_s`]. 0 until the fit is long enough to mean
+    /// anything.
+    pub est_drift_accel_hz_s2: f32,
 
     // --- AO-40 uncoded decoder progress (only while `decoding`) ---
     /// Whether [`Qo100Settings::decode_telemetry`] is on and the decoder is
@@ -131,6 +137,12 @@ pub struct Qo100Status {
     /// Fewest sync-word bit errors seen in the last decode pass, 0..=32;
     /// [`u8::MAX`] when the pass ran no bit stream at all.
     pub sync_bit_errors: u8,
+    /// How many separate sync-word matches (within the error threshold) the
+    /// last pass's best bitstream carried. One or two, at very few errors, is
+    /// a real frame the payload demod is then failing; a lone match near the
+    /// full error budget is the chance hit a 32-bit pattern makes in a buffer
+    /// this long — which is how "sync lit, CRC dark" should be read.
+    pub sync_matches: u8,
     /// How much of one whole AO-40 frame the rolling buffer currently spans,
     /// 0..1 — the decoder needs a full frame inside one window to have any
     /// chance, and this says how close it is.
