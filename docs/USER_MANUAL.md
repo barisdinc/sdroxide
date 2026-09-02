@@ -15,7 +15,7 @@ or connects to a remote sdroxide server.
 
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
-    - [2.21 QO-100 beacon calibration](#221-qo-100-beacon-calibration)
+    - [2.21 QO-100 beacon plugin](#221-qo-100-beacon-plugin)
 3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX, VDL2)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
@@ -118,9 +118,10 @@ or connects to a remote sdroxide server.
   spectrum as well as its I/Q (a KiwiSDR, a SpyServer, an RX-888), the main
   panadapter keeps widening past the streamed passband and draws those spans
   from the full-band bins. See [§2.8](#28-the-display-and-fft-controls).
-- **QO-100 beacon calibration** — decodes the 10489.750 MHz narrowband beacon,
-  measures how far your LNB has drifted, and writes the converter offset for
-  you. In the **SAT** window's QO-100 tab; see [§2.21](#221-qo-100-beacon-calibration).
+- **QO-100 beacon plugin** — tracks the 10489.750 MHz narrowband beacon,
+  measures how far your LNB is off, and (with AUTO) keeps correcting the
+  converter offset as it drifts. In the **SAT** window's QO-100 tab; see
+  [§2.21](#221-qo-100-beacon-plugin).
 - **Many radio backends:** SoapySDR devices, OpenHPSDR (Hermes/Metis) Ethernet
   SDRs, a TCI server (ExpertSDR3/Thetis), a SmartSDR radio (FlexRadio
   FLEX-6000/8000), RTL-SDR, RX-888, Airspy HF+ and SDRplay RSP receivers over
@@ -1725,7 +1726,7 @@ the correction keeps being applied whether or not the window is open.
 
 The window has two tabs. **SATELLITES** is the picker and the live lock
 described below. **QO-100** is the beacon calibration
-([2.21](#221-qo-100-beacon-calibration)) — a geostationary bird needs no
+([2.21](#221-qo-100-beacon-plugin)) — a geostationary bird needs no
 Doppler, but it does need its LNB offset measured, and that is the whole of
 working it. Either tab carries a dot while its own work is running, and the
 **SAT** button glows for both.
@@ -2446,94 +2447,159 @@ This is the same data `--record-iq` ([12](#12-command-line-reference)) writes,
 in a container other programs can open — `--record-iq` writes the bare samples
 and starts with the program, which is what a headless capture wants.
 
-### 2.21 QO-100 beacon calibration
+### 2.21 QO-100 beacon plugin
 
 The QO-100 (Es'hail-2) narrowband transponder carries a beacon on its lower
-edge, at **10489.750 MHz**, that transmits AO-40 telemetry as 400 baud
-Manchester BPSK. Every ground station receives that beacon through an LNB, whose
-local oscillator is only roughly on frequency and drifts with temperature — so
-the dial and the signal disagree by a few kHz, and by different amounts on a
-cold morning and a warm afternoon. The **QO-100** tab of the **SAT** window
-([2.16](#216-satellite-operation-sat)) decodes the beacon, measures exactly how
-far it is from 10489.750 MHz, and offers to write that figure into the
-converter/LNB offset in one click. It lives there because QO-100 is a
-satellite — a geostationary one, which is why it needs no Doppler correction
-and why its calibration is the only thing it does need.
+edge, at **10489.750 MHz**, transmitted as 400 baud Manchester BPSK. Every
+ground station receives it through an LNB whose local oscillator is only roughly
+on frequency and drifts with temperature — so the dial and the signal disagree
+by a few kHz, and by different amounts on a cold morning and a warm afternoon.
+The **QO-100** tab of the **SAT** window
+([2.16](#216-satellite-operation-sat)) measures exactly where the beacon really
+is, corrects the converter/LNB offset so the dial and the signal agree, and then
+keeps correcting it as the LNB drifts. It lives in the SAT window because
+QO-100 is a satellite — a geostationary one, which is why it needs no Doppler
+correction and why keeping its LNB calibrated is the whole of working it.
 
-**In brief.** With an LNB or converter offset set up in the receiver for the
-QO-100 (Es'hail-2) geostationary satellite, the decoder searches a few kHz
-either side of 10489.750 MHz, locks onto the beacon there, and decodes its
-AO-40 telemetry. Having tuned itself onto the signal to get a clean decode, it
-then works out from the frequency it actually found the beacon on how far the
-LNB or receiver offset is in error, and **APPLY CORRECTION** writes the
-corrected figure back. This is the same task the QO-100 beacon plugin performs
-in SDR Console.
+Everything runs off the raw IQ the hardware is already delivering, so **the main
+dial is never moved** and the plugin keeps working with the receiver parked
+anywhere the beacon is still inside the captured span.
 
 > **Note:** like the skimmers and the ISM decoder, this is a wideband feature.
 > It needs a true IQ source and is unavailable when a CAT radio is feeding
 > demodulated audio.
 
-#### What the page shows
+#### How it works: ON and AUTO
 
-- **ON / OFF** starts the decoder. It reads the raw IQ straight from the
-  hardware, so it works regardless of where the main dial is pointed, as long as
-  the beacon is inside the span the receiver is delivering — turning it on also
-  tunes VFO A to 10489.750 MHz as a convenience, nothing more. Like SCAN and a
-  satellite lock, the **SAT** chip stays lit whenever the decoder is running,
-  window open or not, and the QO-100 tab carries a dot — so a hunt in progress
-  is visible from the other tab as well as from outside the window.
-  It is greyed out only if the receiver's own configuration says 10489.750 MHz
-  is unreachable — the usual cause is that no converter/LNB offset has been set
-  up yet (**Settings ▸ Radio ▸ Converter**).
-- **width ± / −** sets how far either side of 10489.750 MHz the search looks, in
-  5 kHz steps from ±5 to ±50 kHz. Start at the default ±5 kHz; widen it only if
-  the beacon is not found, which means the LNB is further off than usual. A
-  wider search asks the receiver for a wider capture and takes longer to sweep,
-  so it is not free. The demodulator itself always runs at a fixed rate whatever
-  the capture, which keeps that in hand up to a point: the default ±5 kHz sweeps
-  in a fraction of a second and ±25 kHz in a few seconds, both comfortably
-  inside the window they are searching. ±50 kHz takes longer than the window
-  does to fill, so at the widest setting the decoder runs a core flat out and
-  gets through fewer windows than it receives. Widen it to find the beacon, then
-  bring it back down.
-- The **mini waterfall** draws the slice of spectrum being searched, with the
-  measured beacon frequency marked once the decoder locks. It is only a picture:
-  if the receiver is parked on another band the strip is blank and the window
-  says so, but the decoder keeps working.
-- **RECEIVER / TARGET / MEASURED / DRIFT** are the dial frequency now, the
-  10489.750 MHz target, the frequency the beacon was actually found on, and the
-  difference. DRIFT is green within ±200 Hz, amber to ±3 kHz.
-- **TELEMETRY** shows the beacon's own decoded status text. It is there for its
-  own sake and as an independent check: a lock with a valid CRC but garbled text
-  is a warning that no number above would catch.
-- The status line under the strip is the honest measure, the same
-  "attempted vs. succeeded" idea as the ISM decoder's bursts/decoded line: the
-  first search window fills after about 24 seconds, then repeats, and a search
-  that is running but has not found the beacon reads differently from one that
-  never started.
+- **ON** starts the *spectral tracker*. Once a second it looks in the shaded
+  **park** lane of the strip for the beacon's give-away shape — two symmetric
+  lobes with a null between them — and works out where the carrier sits and how
+  far that is from 10489.750 MHz. It reads the beacon's *shape*, never its bits,
+  so it keeps a measurement even where the telemetry will not decode. Nothing is
+  changed yet: ON only measures.
+- **AUTO** closes the loop. With it lit, every clean, steady measurement the
+  tracker makes is applied — a slow, deadbanded, rate-limited nudge to the
+  converter/LNB offset that pulls the beacon back onto 10489.750 MHz and holds
+  it there as the LNB warms up and drifts. A single noisy reading never yanks
+  the receiver; it takes a run of agreeing measurements to move the offset.
+- **TELEMETRY** (optional) additionally runs the AO-40 frame decoder, with a
+  `carrier → sync → CRC` readout of how far each pass got. It is an independent
+  check and shows the beacon's own status text when it locks; it is not needed
+  for calibration and depends heavily on LNB phase-noise — a clean twin-lobe
+  shape can track perfectly while the bits never decode.
 
-#### Applying the correction
+#### Recommended procedure
+
+1. **Get the beacon roughly onto frequency first.** In **Settings ▸ Radio**,
+   set the converter/LNB offset for your own LNB and get it as close as you can,
+   so the beacon lands somewhere near **10489.750 MHz** on the dial. The plugin
+   corrects a residual error of a few kHz to tens of kHz — not a wild guess.
+2. Open the **SAT** window and switch to the **QO-100** tab.
+3. Press **ON**. For a fast first approach, step the **width** value at the top
+   (`−` / `+`, in ±5 kHz clicks up to ±50 kHz) until you can clearly see the
+   beacon's two lobes in the strip. Widen only as far as you need to find it.
+4. **Double-click the middle of the beacon** in the strip. That plants a "the
+   beacon is here" mark — the two lobes with the null between them, centred on
+   the null. Then press **APPLY CORRECTION** at the bottom. The receiver reopens
+   on the corrected offset and the beacon jumps toward the centre.
+5. **Narrow the width back down** (toward **±5 kHz**), double-click the middle of
+   the beacon once more to centre it precisely, and **APPLY CORRECTION** again.
+   Two passes — a coarse one wide, a fine one narrow — get it within a few
+   hundred Hz.
+6. Press **AUTO**. From now on the offset is corrected continuously as the LNB
+   drifts. You can shrink the window to the corner and leave it running in the
+   background — the correction keeps going with the window closed, and the
+   **SAT** chip stays lit and the QO-100 tab keeps its dot while it does.
+
+#### The panel
+
+```
+┌─ SAT ─────────────────────────────────────────────────────────┐
+│  [ SATELLITES • ]  [ QO-100 • ]                               │
+│                                                               │
+│  [ ON ]  [ TELEMETRY ]  [ AUTO ]     width [−] ±25 kHz [+]     │
+│  park [lo −][lo +] +5 … +20 kHz [hi −][hi +]                   │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │  mini waterfall — shaded = park lane,                    │  │
+│  │  dashed line = 10489.750 MHz target,                     │  │
+│  │  double-click the beacon's centre to mark it             │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│  searching / locked — N blocks tried, M locked                │
+│                                                               │
+│  TRACKER   +1.2 kHz   (null 12 dB  sym 0.94  snr 15 dB)       │
+│  DRIFT     -6 Hz/s  -0.4 Hz/s²                                 │
+│  AUTO      -3.19 kHz over 4 corrections   last +80 Hz (7s)     │
+│  RECEIVER  10489.750000 MHz                                    │
+│  TARGET    10489.750000 MHz                                    │
+│  MEASURED  10489.751200 MHz  (tracker)                        │
+│  DRIFT     +1.2 kHz                                            │
+│  CONVERTER OFFSET  -9749920000 Hz                             │
+│  DECODE    ● carrier  ○ sync  ○ CRC    sync 4/32 err ×0       │
+│  TELEMETRY <beacon status text, when the decoder locks>       │
+│                                                               │
+│                 [  APPLY CORRECTION  ]                         │
+└───────────────────────────────────────────────────────────────┘
+```
+
+- **ON / OFF** — start or stop the spectral tracker (see above). Greyed out only
+  when the receiver's configuration says 10489.750 MHz is unreachable — usually
+  because no converter/LNB offset has been set up yet
+  (**Settings ▸ Radio ▸ Converter**). If the current capture simply does not
+  reach the beacon, a **Tune to 10489.750 MHz** button appears.
+- **width `−` / `+`** — how far either side of 10489.750 MHz the AO-40 decoder
+  searches, ±5 kHz to ±50 kHz in 5 kHz steps. Wider costs a wider capture and a
+  slower sweep, so open it only as far as needed to find the beacon, then bring
+  it back to ±5 kHz. It does not affect the spectral tracker, which uses the
+  **park** window instead.
+- **park `lo` / `hi`** — the lane, in +kHz above the dial, that the spectral
+  tracker scans for the twin-lobe shape (shaded on the strip). Park the beacon
+  inside it, clear of the DC spike, before switching ON. With AUTO armed the
+  tracker also reaches down toward the centre so it can follow the beacon there
+  after the loop has corrected it.
+- **mini waterfall** — the slice of spectrum around the beacon, with the target
+  line and, once the decoder locks, the measured frequency marked. Purely a
+  picture: if the receiver is on another band the strip is blank but the plugin
+  keeps working. **Double-click** it to hand-mark the beacon for APPLY.
+- **TRACKER / SHAPE** — where the tracker puts the carrier, and how convincing
+  the shape was (`null` depth, lobe `sym`metry, `snr`).
+- **DRIFT** — the LNB's measured drift rate, and its curvature as it warms.
+- **AUTO** — a running total of what the closed loop has corrected, and when it
+  last acted.
+- **RECEIVER / TARGET / MEASURED / DRIFT** — the dial now, the 10489.750 MHz
+  target, where the beacon was actually found (from a decoder lock or your
+  hand-mark), and the difference. DRIFT is green within ±200 Hz, amber to ±3 kHz.
+- **CONVERTER OFFSET** — the converter/LNB offset currently in force, the number
+  APPLY and AUTO write to.
+- **DECODE** — the AO-40 decoder's progress: `carrier → sync → CRC`, plus
+  `sync N/32 err ×M` (fewest sync-word bit errors, and how many candidate frame
+  alignments were seen — `×0` near the error budget means no real frame, just a
+  chance hit).
+- **TELEMETRY** — the beacon's own decoded status text. A valid CRC with garbled
+  text is a warning no number above would catch.
+- The status line under the strip is the honest "attempted vs. succeeded" count,
+  like the ISM decoder's bursts/decoded line.
+
+#### APPLY CORRECTION
 
 **APPLY CORRECTION** writes the corrected converter offset and reopens the
-receiver — the same brief interruption **Settings ▸ Radio ▸ Apply** makes, so a
-bad reading can never disturb a running receiver for more than that. The button
-stays disabled until the decoder has locked **twice** and the latest of those
-frames carried telemetry text: a 32-bit sync word matched within three bit
-errors and then a 16-bit CRC will pass by pure chance roughly once every couple
-of hours of searching, and one lock is not enough to change a setting on. The
-figure written is the one from that most recent lock. After it is applied, the
-window shows what changed and when.
+receiver — the same brief interruption **Settings ▸ Radio ▸ Apply** makes. It
+uses whichever measurement is current: a decoder lock if the telemetry decoded,
+otherwise the beacon mark you double-clicked on the strip. From a decoder lock
+it stays disabled until there have been **two** locks and the latest carried
+telemetry text — a 32-bit sync within three bit errors plus a 16-bit CRC pass
+by pure chance roughly once every couple of hours, and one lock is not enough to
+change a setting on. After it acts, the window shows what changed and when.
 
-Because the coded frames the beacon alternates with are not decoded, a lock
-lands roughly every 20 seconds rather than every 10 — which is normal and not a
-sign the beacon has gone away.
+Once AUTO is armed you rarely touch APPLY again — it is the manual path for the
+first coarse/fine passes, and for stations where the telemetry never decodes and
+the twin-lobe shape is all you have.
 
 #### Remote and browser clients
 
-The decoder runs on the machine the radio is on. Its readout is not sent to
+The plugin runs on the machine the radio is on. Its readout is not sent to
 remote or browser clients yet, so on those the window opens, the strip draws
 from the shared spectrum, and the status line says the readout is local to the
-receiving station rather than sitting on "starting…".
+receiving station.
 
 ---
 

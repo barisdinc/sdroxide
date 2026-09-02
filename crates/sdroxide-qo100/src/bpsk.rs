@@ -37,6 +37,15 @@
 //! *is* the calibration answer: its frequency offset is exactly how far the
 //! beacon sits from where it was assumed to be.
 //!
+//! Before that sweep, [`coarse_carrier_hz`] takes one look at the block's
+//! power spectrum for the beacon's give-away shape — two lobes with a null
+//! between them at the carrier and another near ±[`CHIP_RATE`] out, left/right
+//! symmetric. When it finds one, the sweep starts there instead of at DC and,
+//! if that estimate is further out than the configured half-width, reaches out
+//! to it — so a station whose LNB has never been calibrated is still found.
+//! The estimate never decides a lock: a wrong one only reorders the grid the
+//! CRC was going to be tried against anyway.
+//!
 //! The differential+Manchester combination is decoded in one pass, without
 //! ever resolving absolute carrier phase: comparing each chip against the one
 //! immediately before it (a delay-and-multiply, not a coherent reference)
@@ -47,6 +56,7 @@
 //! comparisons recovers the original data directly. See the derivation in
 //! this module's tests.
 
+use rustfft::FftPlanner;
 use sdroxide_dsp::Complex32;
 
 /// Chips per second on the air. Manchester encoding sends two of these per
@@ -341,6 +351,196 @@ fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> V
     out
 }
 
+/// A confident twin-lobe estimate ([`coarse_carrier_hz`]) is allowed to pull
+/// [`acquire`]'s sweep this far from the assumed centre even when
+/// `search_half_width_hz` is smaller — generous enough for any real LNB that
+/// has never been calibrated, and capped so a stray estimate can never send
+/// the sweep clear across the capture.
+const ACQ_RANGE_MAX_HZ: f64 = 60_000.0;
+/// Margin kept either side of a seed when it decides how far the sweep reaches.
+const SEED_MARGIN_HZ: f64 = 2_000.0;
+
+/// The dense sub-grid tried right on the spectral seed before the coarse
+/// sweep: `±FINE_SPAN_HZ` in `FINE_STEP_HZ` steps. Fine enough that the
+/// residual carrier error is small next to what the payload CRC can survive,
+/// narrow enough to add only a dozen-odd candidates.
+const FINE_STEP_HZ: f64 = 25.0;
+const FINE_SPAN_HZ: f64 = 250.0;
+
+/// Welch power spectrum of `iq`: a Blackman–Harris window, 50 % overlap, the
+/// mean of every whole segment's periodogram, left in natural FFT order.
+fn welch_psd(iq: &[Complex32], nfft: usize) -> Vec<f32> {
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(nfft);
+    let win = sdroxide_dsp::blackman_harris(nfft);
+    let mut acc = vec![0.0f32; nfft];
+    let mut seg = vec![Complex32::new(0.0, 0.0); nfft];
+    let hop = (nfft / 2).max(1);
+    let mut segments = 0u32;
+    let mut start = 0usize;
+    while start + nfft <= iq.len() {
+        for (s, (&x, &w)) in seg.iter_mut().zip(iq[start..start + nfft].iter().zip(&win)) {
+            *s = x * w;
+        }
+        fft.process(&mut seg);
+        for (a, s) in acc.iter_mut().zip(&seg) {
+            *a += s.norm_sqr();
+        }
+        segments += 1;
+        start += hop;
+    }
+    if segments > 0 {
+        let inv = 1.0 / segments as f32;
+        acc.iter_mut().for_each(|v| *v *= inv);
+    }
+    acc
+}
+
+/// Where the beacon's carrier sits and how convincingly the spectrum said so.
+/// `hz` is relative to the assumed centre (DC).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CarrierEstimate {
+    pub hz: f64,
+    /// Depth of the central null between the two lobes, dB.
+    pub null_depth_db: f32,
+    /// Left/right evenness of the two lobes, 0..1.
+    pub symmetry: f32,
+    /// Lobe level over the scanned band's noise floor, dB.
+    pub snr_db: f32,
+}
+
+/// Scan `[lo_hz, hi_hz]` of `iq`'s power spectrum for the beacon's give-away
+/// shape and return the best match, or `None` when nothing in the band looks
+/// like it.
+///
+/// The beacon is DBPSK + Manchester at 400 baud, so it shows not as a carrier
+/// peak but as a *pair* of lobes with a null between them at the carrier and
+/// another null near ±[`CHIP_RATE`] Hz further out (see the module doc). Every
+/// candidate centre is scored by exactly that shape — two shoulders up, a
+/// notch in the middle, quiet past the outer nulls, left/right symmetric — and
+/// the best is returned only if it clears every part of that test by a margin.
+/// A bare carrier, an SSB signal or noise all fail it. Anything in the band
+/// that is *not* two symmetric lobes is simply not what wins.
+pub(crate) fn estimate_carrier(
+    iq: &[Complex32],
+    rate_hz: f64,
+    lo_hz: f64,
+    hi_hz: f64,
+) -> Option<CarrierEstimate> {
+    if rate_hz <= 0.0 || hi_hz - lo_hz < 1_500.0 {
+        return None;
+    }
+    // ~15–25 Hz bins: fine enough to resolve the ±CHIP_RATE null structure,
+    // coarse enough that even a short buffer still averages many segments.
+    let nfft = ((rate_hz / 22.0).round() as usize).clamp(512, 32_768).next_power_of_two();
+    if iq.len() < nfft * 2 {
+        return None;
+    }
+    let psd = welch_psd(iq, nfft);
+    let bin_hz = rate_hz / nfft as f64;
+    let edge = rate_hz * 0.47;
+    let (lo, hi) = (lo_hz.max(-edge), hi_hz.min(edge));
+
+    // Linear PSD at a signed frequency, nearest bin, wrapping natural FFT
+    // order; `None` past the transform's own edge.
+    let at = |f: f64| -> Option<f32> {
+        let k = (f / bin_hz).round() as i64;
+        let k = if k < 0 { k + nfft as i64 } else { k };
+        (0..nfft as i64).contains(&k).then(|| psd[k as usize])
+    };
+    // Mean linear PSD over `c ± [lo, hi]`, both sides together.
+    let band_mean = |c: f64, blo: f64, bhi: f64| -> Option<f32> {
+        let (mut sum, mut n) = (0.0f32, 0u32);
+        let mut d = blo;
+        while d <= bhi {
+            if let (Some(a), Some(b)) = (at(c + d), at(c - d)) {
+                sum += a + b;
+                n += 2;
+            }
+            d += bin_hz;
+        }
+        (n > 0).then(|| sum / n as f32)
+    };
+
+    // A robust noise floor for the SNR gate: the median across the scanned
+    // band, which the beacon's own two lobes cannot lift far.
+    let mut span: Vec<f32> = Vec::new();
+    let mut f = lo;
+    while f <= hi {
+        if let Some(p) = at(f) {
+            span.push(p);
+        }
+        f += bin_hz;
+    }
+    if span.len() < 32 {
+        return None;
+    }
+    span.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = span[span.len() / 2].max(1e-20);
+    let db = |x: f32| 10.0 * (x.max(1e-20) as f64).log10();
+
+    let mut best: Option<(f64, CarrierEstimate)> = None; // (score, est)
+    let mut fc = lo;
+    while fc <= hi {
+        if let (Some(lobe), Some(notch), Some(outer)) = (
+            band_mean(fc, 200.0, 600.0),
+            band_mean(fc, 0.0, 60.0),
+            band_mean(fc, CHIP_RATE + 200.0, CHIP_RATE + 700.0),
+        ) {
+            let null_depth = db(lobe) - db(notch);
+            let lobe_excess = db(lobe) - db(outer);
+            let snr = db(lobe) - db(floor);
+
+            // Left/right evenness across the lobe band, 1.0 = perfectly even.
+            let (mut asym, mut m) = (0.0f64, 0u32);
+            let mut d = 200.0;
+            while d <= 600.0 {
+                if let (Some(a), Some(b)) = (at(fc + d), at(fc - d)) {
+                    let (a, b) = (a as f64, b as f64);
+                    if a + b > 0.0 {
+                        asym += (a - b).abs() / (a + b);
+                        m += 1;
+                    }
+                }
+                d += bin_hz;
+            }
+            let sym = if m > 0 { 1.0 - asym / m as f64 } else { 0.0 };
+
+            if null_depth >= 2.5 && lobe_excess >= 3.0 && snr >= 3.0 && sym >= 0.55 {
+                let score =
+                    null_depth.min(12.0) + lobe_excess.min(12.0) + snr.min(12.0) + 8.0 * sym;
+                if best.is_none_or(|(s, _)| score > s) {
+                    best = Some((
+                        score,
+                        CarrierEstimate {
+                            hz: fc,
+                            null_depth_db: null_depth as f32,
+                            symmetry: sym as f32,
+                            snr_db: snr as f32,
+                        },
+                    ));
+                }
+            }
+        }
+        fc += bin_hz;
+    }
+    best.map(|(_, e)| e)
+}
+
+/// A coarse carrier estimate across `±search_half_width_hz` (plus a little), in
+/// Hz relative to the assumed centre — the seed [`acquire`] starts its CRC
+/// sweep from. `None` when nothing beacon-shaped is in range.
+pub(crate) fn coarse_carrier_hz(
+    iq: &[Complex32],
+    rate_hz: f64,
+    search_half_width_hz: f64,
+) -> Option<f64> {
+    if search_half_width_hz <= 0.0 {
+        return None;
+    }
+    let reach = (search_half_width_hz + 1_500.0).min(rate_hz * 0.47);
+    estimate_carrier(iq, rate_hz, -reach, reach).map(|e| e.hz)
+}
+
 /// Search `iq` (complex baseband, `rate_hz` samples/s, the beacon assumed to
 /// sit somewhere within `±search_half_width_hz` of DC) for one CRC-valid
 /// AO-40 uncoded frame, stepping the candidate frequency by `freq_step_hz`.
@@ -356,11 +556,15 @@ fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> V
 /// search width, so the total grew with the *square* of the width and the
 /// widest settings ran many times slower than real time.
 ///
-/// Candidates are tried from the centre outward, so a beacon near the assumed
-/// frequency — the common case for a roughly-calibrated station — is found
-/// without walking the whole grid first. `cancel` is polled between
-/// candidates so the engine can drop the controller (turning the decoder off,
-/// or changing the search width) without waiting out a search in progress.
+/// Candidates are tried outward from [`coarse_carrier_hz`]'s spectral seed
+/// when it found one, else from the centre, so a beacon near where it is
+/// expected — the common case for a roughly-calibrated station — is found
+/// without walking the whole grid first. A seed past `search_half_width_hz`
+/// also widens the grid out to it (capped at [`ACQ_RANGE_MAX_HZ`] and
+/// Nyquist), which is what lets an uncalibrated station be found at all.
+/// `cancel` is polled between candidates so the engine can drop the
+/// controller (turning the decoder off, or changing the search width) without
+/// waiting out a search in progress.
 ///
 /// `iq` needs to span at least one whole frame (`FRAME_BITS` bits plus the
 /// sync word, [`BAUD`] bits/s) for a frame to have any chance of falling
@@ -381,14 +585,48 @@ pub fn acquire(
     }
     let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
     let dr = rate_hz / deci as f64;
-    let steps = (search_half_width_hz / freq_step_hz).round() as i64;
-    // 0, +1, -1, +2, -2, … — centre outward.
-    let order = (0..=2 * steps).map(|i| if i % 2 == 0 { i / 2 } else { -(i / 2 + 1) });
-    for step in order {
+
+    // The spectral seed, and how far it lets the grid reach: never narrower
+    // than the configured half-width, no wider than a confident seed needs
+    // (plus a margin), and never past a sane cap or Nyquist.
+    let seed_hz = coarse_carrier_hz(iq, rate_hz, search_half_width_hz);
+    let reach_hz = match seed_hz {
+        Some(s) => (s.abs() + SEED_MARGIN_HZ)
+            .min(ACQ_RANGE_MAX_HZ)
+            .min(rate_hz * 0.47)
+            .max(search_half_width_hz),
+        None => search_half_width_hz,
+    };
+    let steps = (reach_hz / freq_step_hz).round().max(0.0) as i64;
+    let seed_step = seed_hz.map(|s| (s / freq_step_hz).round() as i64).unwrap_or(0);
+
+    // The candidate mix-down frequencies, in order.
+    //
+    // First — when the spectrum gave a confident seed — a *dense* sweep right
+    // on it: the coarse `freq_step_hz` grid leaves a residual carrier error of
+    // up to half a step, which the chip detector tolerates for the sync word
+    // but which lifts the payload bit-error rate enough that the CRC over 514
+    // bytes almost never checks out. A few Hz of residual instead of ~75 is
+    // what turns "carrier + sync, no CRC" into a decode.
+    let mut freqs: Vec<f64> = Vec::new();
+    if let Some(s) = seed_hz {
+        let fine = (FINE_SPAN_HZ / FINE_STEP_HZ).round() as i64;
+        for k in 0..=2 * fine {
+            let d = if k % 2 == 0 { k / 2 } else { -(k / 2 + 1) };
+            freqs.push(s + d as f64 * FINE_STEP_HZ);
+        }
+    }
+    // Then the full coarse grid, ordered by distance from the seed step (ties
+    // to the high side, as the plain centre-out sweep did). With no seed this
+    // is exactly `0, +1, -1, +2, -2, …` from DC.
+    let mut coarse: Vec<i64> = (-steps..=steps).collect();
+    coarse.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
+    freqs.extend(coarse.iter().map(|&s| s as f64 * freq_step_hz));
+
+    for coarse_hz in freqs {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let coarse_hz = step as f64 * freq_step_hz;
         let mixed = mix_decimate(iq, rate_hz, coarse_hz, deci);
         if let Some(cm) = try_frequency(&mixed, dr) {
             let offset_hz = coarse_hz + refine_offset_hz(&mixed, dr, &cm);
@@ -396,6 +634,234 @@ pub fn acquire(
         }
     }
     None
+}
+
+/// How far the last [`acquire_debug`] pass got, for the operator's
+/// step-by-step decoder readout. None of it gates anything — pure
+/// instrumentation, so a missing stage points straight at where the chain
+/// breaks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DecodeProgress {
+    /// The pass had chip-rate structure to work on — a twin-lobe estimate
+    /// landed, or the sync correlator found something close.
+    pub carrier: bool,
+    /// The 32-bit AO-40 sync word matched within [`SYNC_MAX_ERRORS`] somewhere.
+    pub sync: bool,
+    /// Fewest sync-word bit errors found, 0..=32; [`u8::MAX`] if no bitstream
+    /// was run at all.
+    pub sync_bit_errors: u8,
+    /// How many separate positions in the best chip-timing/parity bitstream
+    /// matched the sync word within [`SYNC_MAX_ERRORS`]. A real frame in the
+    /// window shows one or two, at very few errors; a 32-bit pattern matched
+    /// within 3 errors also turns up by chance roughly once every few windows
+    /// on noise, as a lone hit near the full error budget — so this is what
+    /// tells "sync lit, CRC dark" apart from a genuine frame alignment the
+    /// payload demod is then failing.
+    pub sync_matches: u8,
+    /// A CRC-valid frame was decoded.
+    pub crc_ok: bool,
+}
+
+impl Default for DecodeProgress {
+    fn default() -> Self {
+        Self {
+            carrier: false,
+            sync: false,
+            sync_bit_errors: u8::MAX,
+            sync_matches: 0,
+            crc_ok: false,
+        }
+    }
+}
+
+/// Fewest bit errors between [`SYNC_WORD`] and any 32-bit window of `bits`.
+fn min_sync_distance(bits: &[bool]) -> Option<u8> {
+    if bits.len() < SYNC_LEN as usize {
+        return None;
+    }
+    let mut window: u32 = 0;
+    let mut best = SYNC_LEN;
+    for (i, &b) in bits.iter().enumerate() {
+        window = (window << 1) | b as u32;
+        if i + 1 >= SYNC_LEN as usize {
+            best = best.min((window ^ SYNC_WORD).count_ones());
+        }
+    }
+    Some(best as u8)
+}
+
+/// Every bit offset in `bits` where [`SYNC_WORD`] matches within
+/// [`SYNC_MAX_ERRORS`], collapsing a run of near-adjacent hits (one real sync
+/// preamble can match at a couple of neighbouring offsets when a chip slips)
+/// into a single count — so the length of the result is "how many distinct
+/// frame alignments look present", the number [`DecodeProgress::sync_matches`]
+/// reports.
+fn sync_positions(bits: &[bool]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    if bits.len() < SYNC_LEN as usize {
+        return out;
+    }
+    let mut window: u32 = 0;
+    for (i, &b) in bits.iter().enumerate() {
+        window = (window << 1) | b as u32;
+        if i + 1 >= SYNC_LEN as usize && (window ^ SYNC_WORD).count_ones() <= SYNC_MAX_ERRORS {
+            let pos = i + 1 - SYNC_LEN as usize;
+            if out.last().is_none_or(|&p| pos - p > 4) {
+                out.push(pos);
+            }
+        }
+    }
+    out
+}
+
+/// Across every chip-timing phase and Manchester parity of `iq` (already mixed
+/// to one candidate): the fewest sync-word bit errors any of them reaches, and
+/// how many distinct sync matches the bitstream that reached it carries. A
+/// "how close was this, and is it one real frame or a chance hit" that does
+/// not need a CRC pass to mean something.
+fn sync_scan(iq: &[Complex32], rate_hz: f64) -> Option<(u8, u8)> {
+    let samples_per_chip = rate_hz / CHIP_RATE;
+    if samples_per_chip < 2.0 {
+        return None;
+    }
+    let phase_step = (samples_per_chip / TIMING_PHASES as f64).max(1.0);
+    let mut best: Option<(u8, u8)> = None;
+    for p in 0..TIMING_PHASES {
+        let phase = (p as f64 * phase_step) as usize;
+        let chips = chip_samples(iq, samples_per_chip, phase);
+        if chips.len() < 3 {
+            continue;
+        }
+        let flips = chip_flips(&chips);
+        for parity in 0..2 {
+            let bits = data_bits(&flips, parity);
+            let Some(d) = min_sync_distance(&bits) else { continue };
+            if best.is_none_or(|(bd, _)| d < bd) {
+                let n = sync_positions(&bits).len().min(u8::MAX as usize) as u8;
+                best = Some((d, n));
+            }
+        }
+    }
+    best
+}
+
+/// De-rotate a frequency drift of `slope` Hz/s plus curvature `accel` Hz/s²
+/// out of `iq` (sample rate `rate_hz`), pivoting on the centre sample so only
+/// the *shape* of the walk is removed — the mean offset is left for
+/// [`acquire`]'s own grid to find. This is what lets a frame decode on a
+/// station whose LNB (or SDR clock) is still walking while it warms up:
+/// without it the carrier smears across the 10.36 s frame and the payload CRC
+/// never checks out even though the sync word matches.
+///
+/// A warming LNB's LO does not drift at a *constant* rate — it curves — so the
+/// `accel` term earns its place over a whole frame even when the last second
+/// of tracker estimates looked linear; a straight-line de-rotation leaves a
+/// residual chirp that is still enough to fail the payload CRC.
+fn dechirp(iq: &[Complex32], rate_hz: f64, slope: f64, accel: f64) -> Vec<Complex32> {
+    if (slope == 0.0 && accel == 0.0) || rate_hz <= 0.0 {
+        return iq.to_vec();
+    }
+    // Instantaneous frequency `slope * t + 0.5 * accel * t^2` integrates to
+    // phase `2*PI * (0.5 * slope * t^2 + accel * t^3 / 6)`; `t = (n - n0) /
+    // rate`. Multiply by its conjugate.
+    let n0 = iq.len() as f64 / 2.0;
+    let ks = -std::f64::consts::PI * slope / (rate_hz * rate_hz);
+    let ka = -std::f64::consts::PI * accel / (3.0 * rate_hz * rate_hz * rate_hz);
+    iq.iter()
+        .enumerate()
+        .map(|(n, &z)| {
+            let d = n as f64 - n0;
+            let ph = ks * d * d + ka * d * d * d;
+            z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
+        })
+        .collect()
+}
+
+/// Half-width and step, in Hz/s, of the drift-*rate* grid [`acquire_debug`]
+/// tries around the caller's estimate. Wide enough to bracket a warming LNB,
+/// fine enough that the residual chirp across a frame is a fraction of a bit.
+const DRIFT_GRID_HALF_HZ_S: f64 = 6.0;
+const DRIFT_GRID_STEP_HZ_S: f64 = 1.5;
+
+/// Half-width and step, in Hz/s², of the *curvature* grid tried around the
+/// caller's estimate. `0.0` is always tried first (centre-out), so a station
+/// whose drift really is linear pays exactly the sweep it did before this
+/// second-order term existed; widen the half-width here if a fast-warming LNB
+/// still will not decode and `DRIFT` shows a large curvature.
+const ACCEL_GRID_HALF_HZ_S2: f64 = 3.0;
+const ACCEL_GRID_STEP_HZ_S2: f64 = 3.0;
+
+/// [`acquire`], plus a [`DecodeProgress`] snapshot of how far the pass got and
+/// a small **drift** search around `drift_hz_per_s` / `drift_accel_hz_s2`: the
+/// frame decoder needs the carrier coherent across a whole 10.36 s frame,
+/// which a drifting — and, as it warms, *accelerating* — LNB breaks, so each
+/// candidate is de-rotated ([`dechirp`]) with a trial drift rate and curvature
+/// before the ordinary frequency sweep runs on it. The two arguments are the
+/// caller's own estimates (0.0 = "no idea"); the grid is centred on them, with
+/// zero curvature tried first, so a good estimate keeps the search short and a
+/// linearly-drifting station pays what it did before the curvature term.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn acquire_debug(
+    iq: &[Complex32],
+    rate_hz: f64,
+    search_half_width_hz: f64,
+    freq_step_hz: f64,
+    demod_rate_hz: f64,
+    drift_hz_per_s: f64,
+    drift_accel_hz_s2: f64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> (Option<Qo100Lock>, DecodeProgress) {
+    use std::sync::atomic::Ordering;
+
+    // Curvature outer, drift-rate inner — both centre-outward from the
+    // estimate, so (zero curvature, best rate) is tried first.
+    let s_steps = (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64;
+    let a_steps = (ACCEL_GRID_HALF_HZ_S2 / ACCEL_GRID_STEP_HZ_S2).round() as i64;
+    'grid: for ka in 0..=2 * a_steps {
+        let da = if ka % 2 == 0 { ka / 2 } else { -(ka / 2 + 1) };
+        let accel = drift_accel_hz_s2 + da as f64 * ACCEL_GRID_STEP_HZ_S2;
+        for ks in 0..=2 * s_steps {
+            if cancel.load(Ordering::Relaxed) {
+                break 'grid;
+            }
+            let ds = if ks % 2 == 0 { ks / 2 } else { -(ks / 2 + 1) };
+            let slope = drift_hz_per_s + ds as f64 * DRIFT_GRID_STEP_HZ_S;
+            let buf = dechirp(iq, rate_hz, slope, accel);
+            if let Some(lock) =
+                acquire(&buf, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel)
+            {
+                return (
+                    Some(lock),
+                    DecodeProgress {
+                        carrier: true,
+                        sync: true,
+                        sync_bit_errors: 0,
+                        sync_matches: 1,
+                        crc_ok: true,
+                    },
+                );
+            }
+        }
+    }
+
+    // Nothing decoded at any drift — probe the un-dechirped buffer for how far
+    // it got, so the readout still says something.
+    let mut progress = DecodeProgress::default();
+    if rate_hz > 0.0 && demod_rate_hz > 0.0 {
+        let deci = (rate_hz / demod_rate_hz).round().max(1.0) as usize;
+        let dr = rate_hz / deci as f64;
+        let seed = coarse_carrier_hz(iq, rate_hz, search_half_width_hz);
+        let mixed = mix_decimate(iq, rate_hz, seed.unwrap_or(0.0), deci);
+        if let Some((d, n)) = sync_scan(&mixed, dr) {
+            progress.sync_bit_errors = d;
+            progress.sync = u32::from(d) <= SYNC_MAX_ERRORS;
+            progress.sync_matches = n;
+        }
+        progress.carrier = seed.is_some()
+            || progress.sync
+            || (progress.sync_bit_errors != u8::MAX && progress.sync_bit_errors <= 10);
+    }
+    (None, progress)
 }
 
 // `pub(crate)` so `controller`'s own test module can build a real on-air frame
@@ -667,5 +1133,245 @@ pub(crate) mod tests {
     fn the_demod_tolerates_a_realistic_residual_frequency_error_unaided() {
         let iq = synth_signal("CAPTURE RANGE", TEST_RATE, 100.0, 0.0, 1);
         assert!(try_frequency(&iq, TEST_RATE).is_some());
+    }
+
+    /// Stack `copies` of one synthesized frame end to end — a longer buffer so
+    /// [`welch_psd`] has several segments to average, like the worker's
+    /// rolling window gives it.
+    fn stacked(
+        text: &str,
+        rate_hz: f64,
+        offset_hz: f64,
+        noise: f32,
+        seed: u64,
+        copies: usize,
+    ) -> Vec<Complex32> {
+        let one = synth_signal(text, rate_hz, offset_hz, noise, seed);
+        let mut out = Vec::with_capacity(one.len() * copies);
+        for _ in 0..copies {
+            out.extend_from_slice(&one);
+        }
+        out
+    }
+
+    #[test]
+    fn the_coarse_estimator_reads_the_carrier_off_the_twin_lobes() {
+        // A real Manchester beacon 4 kHz off centre, captured wide enough to
+        // see both lobes and a stretch of clean floor either side.
+        let iq = stacked("COARSE EST", 20_000.0, 4_000.0, 0.05, 7, 3);
+        let est = coarse_carrier_hz(&iq, 20_000.0, 8_000.0).expect("the twin lobes should be seen");
+        assert!((est - 4_000.0).abs() <= 200.0, "estimated {est}");
+    }
+
+    #[test]
+    fn the_coarse_estimator_declines_on_noise_and_on_a_bare_carrier() {
+        let n = (20_000.0f64 * 6.0) as usize;
+
+        let mut rng = TestRng::new(41);
+        let noise: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+        assert!(coarse_carrier_hz(&noise, 20_000.0, 8_000.0).is_none(), "noise is not a beacon");
+
+        // A plain unmodulated carrier 3 kHz off: a peak, not two lobes with a
+        // null — must be rejected, or it would seed the search wrong.
+        let tone: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let ph = std::f64::consts::TAU * 3_000.0 * i as f64 / 20_000.0;
+                Complex32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        assert!(
+            coarse_carrier_hz(&tone, 20_000.0, 8_000.0).is_none(),
+            "a bare carrier is not a beacon"
+        );
+    }
+
+    /// The acquisition-range win: a beacon sitting outside the configured
+    /// half-width is out of reach of the plain centre-out sweep, but the
+    /// spectral seed pulls the grid out to it and it still locks.
+    #[test]
+    fn a_seed_pulls_the_search_past_the_configured_half_width() {
+        // ±8 kHz width, captured 2.5× wide (the engine's rule); beacon at
+        // 9 kHz — 1 kHz beyond the width, well inside the capture.
+        let rate = 20_000.0;
+        let iq = stacked("OUT OF WIDTH", rate, 9_000.0, 0.02, 11, 3);
+        let lock = acq(&iq, rate, 8_000.0).expect("the seed should extend the reach to it");
+        assert!((lock.offset_hz - 9_000.0).abs() <= 2.0, "found {}", lock.offset_hz);
+        assert!(lock.text.starts_with("OUT OF WIDTH"), "{:?}", lock.text);
+    }
+
+    #[test]
+    fn the_coarse_estimator_needs_a_buffer_worth_averaging() {
+        // Fewer than two FFT segments' worth of samples: no estimate at all,
+        // so `acquire` just falls back to the plain centre-out sweep.
+        let short = synth_signal("TOO SHORT", TEST_RATE, 40.0, 0.0, 1);
+        assert!(coarse_carrier_hz(&short[..1024], TEST_RATE, 150.0).is_none());
+    }
+
+    /// A seed near the true offset must not cost the plain sweep its
+    /// precision: a narrow-width search still lands on the exact drift.
+    #[test]
+    fn a_seed_does_not_disturb_a_narrow_width_result() {
+        let iq = synth_signal("SEEDED NARROW", TEST_RATE, 91.0, 0.02, 2);
+        let lock = acq(&iq, TEST_RATE, 150.0).expect("still locks");
+        assert!((lock.offset_hz - 91.0).abs() <= 1.0, "found {}", lock.offset_hz);
+        assert!(lock.text.starts_with("SEEDED NARROW"));
+    }
+
+    #[test]
+    fn estimate_carrier_finds_a_beacon_parked_in_a_positive_window() {
+        // Beacon parked at +12 kHz; a +5..+20 kHz window must find it and
+        // report a healthy null and symmetry.
+        let iq = stacked("PARKED", 60_000.0, 12_000.0, 0.05, 3, 3);
+        let e =
+            estimate_carrier(&iq, 60_000.0, 5_000.0, 20_000.0).expect("twin lobes in the window");
+        assert!((e.hz - 12_000.0).abs() <= 250.0, "hz {}", e.hz);
+        assert!(e.null_depth_db >= 2.5 && e.symmetry >= 0.55 && e.snr_db >= 3.0, "{e:?}");
+    }
+
+    #[test]
+    fn estimate_carrier_ignores_a_beacon_outside_the_window() {
+        // A real beacon at +2 kHz, but the window starts at +6 kHz.
+        let iq = stacked("OUTSIDE", 60_000.0, 2_000.0, 0.02, 4, 3);
+        assert!(estimate_carrier(&iq, 60_000.0, 6_000.0, 20_000.0).is_none());
+    }
+
+    #[test]
+    fn acquire_debug_lights_every_stage_on_a_clean_frame() {
+        let iq = synth_signal("PROGRESS", TEST_RATE, 40.0, 0.0, 1);
+        let (lock, p) = acquire_debug(
+            &iq,
+            TEST_RATE,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            0.0,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(lock.is_some());
+        assert!(p.carrier && p.sync && p.crc_ok, "{p:?}");
+        assert_eq!(p.sync_bit_errors, 0);
+    }
+
+    /// Apply a frequency chirp of `slope` Hz/s plus curvature `accel` Hz/s² to
+    /// `iq` — the inverse of [`dechirp`].
+    fn add_chirp(iq: &[Complex32], rate_hz: f64, slope: f64, accel: f64) -> Vec<Complex32> {
+        let n0 = iq.len() as f64 / 2.0;
+        let ks = std::f64::consts::PI * slope / (rate_hz * rate_hz);
+        let ka = std::f64::consts::PI * accel / (3.0 * rate_hz * rate_hz * rate_hz);
+        iq.iter()
+            .enumerate()
+            .map(|(n, &z)| {
+                let d = n as f64 - n0;
+                let ph = ks * d * d + ka * d * d * d;
+                z * Complex32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chirped_frame_decodes_once_the_drift_is_de_rotated() {
+        // A carrier walking 60 Hz/s across the frame — a warming LNB. Far past
+        // what the straight chip detector tolerates, but with the tracker's
+        // drift estimate as the grid centre acquire_debug recovers it.
+        let rate = TEST_RATE;
+        let clean = synth_signal("CHIRP CASE", rate, 0.0, 0.0, 5);
+        let chirped = add_chirp(&clean, rate, 60.0, 0.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(
+            acquire(&chirped, rate, 300.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .is_none(),
+            "a straight sweep cannot follow a 60 Hz/s chirp"
+        );
+
+        let (lock, p) = acquire_debug(
+            &chirped,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            60.0, // the tracker's drift estimate
+            0.0,
+            &cancel,
+        );
+        assert!(lock.is_some() && p.crc_ok, "the drift grid should recover it: {p:?}");
+        assert!(lock.unwrap().text.starts_with("CHIRP CASE"));
+    }
+
+    #[test]
+    fn a_curved_drift_decodes_once_the_curvature_is_de_rotated() {
+        // A carrier whose drift *rate* is itself moving — a warming LNB. Zero
+        // mean slope, pure curvature: near the buffer centre it looks almost
+        // stationary, but the ends smear hundreds of Hz, and a symmetric curve
+        // is exactly what no linear de-rotation or static offset can straighten.
+        // The rate is scaled up here so a single ~10 s synth buffer stands in
+        // for the decoder's real ~24 s window, where a few Hz/s² is enough.
+        let rate = TEST_RATE;
+        let clean = synth_signal("CURVED CASE", rate, 0.0, 0.0, 9);
+        let curved = add_chirp(&clean, rate, 0.0, 40.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let (no_curve, _) = acquire_debug(
+            &curved,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            0.0, // the drift grid alone, no curvature — cannot follow it
+            &cancel,
+        );
+        assert!(no_curve.is_none(), "a rate-only grid cannot straighten a curved drift");
+
+        let (lock, p) = acquire_debug(
+            &curved,
+            rate,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            40.0, // the tracker's curvature estimate
+            &cancel,
+        );
+        assert!(lock.is_some() && p.crc_ok, "the curvature grid should recover it: {p:?}");
+        assert!(lock.unwrap().text.starts_with("CURVED CASE"));
+    }
+
+    #[test]
+    fn dechirp_is_the_inverse_of_a_chirp() {
+        let rate = TEST_RATE;
+        let clean = synth_signal("INVERSE", rate, 30.0, 0.0, 2);
+        let round_trip = dechirp(&add_chirp(&clean, rate, 12.0, 4.0), rate, 12.0, 4.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // The de-chirped copy decodes exactly like the original.
+        let lock =
+            acquire(&round_trip, rate, 300.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .expect("round-tripped frame still decodes");
+        assert!((lock.offset_hz - 30.0).abs() <= 1.0, "offset {}", lock.offset_hz);
+    }
+
+    #[test]
+    fn acquire_debug_on_noise_reports_no_crc_and_ran_a_probe() {
+        let mut rng = TestRng::new(9);
+        let n = (TEST_RATE * 12.0) as usize;
+        let noise: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+        let (lock, p) = acquire_debug(
+            &noise,
+            TEST_RATE,
+            300.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            0.0,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(lock.is_none());
+        assert!(!p.crc_ok);
+        assert_ne!(p.sync_bit_errors, u8::MAX, "the sync probe should still have run");
     }
 }
