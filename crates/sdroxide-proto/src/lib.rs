@@ -1080,7 +1080,16 @@ use sdroxide_types::{
 /// v119 peer handed one with a list on the end reads the tail of every one of
 /// those messages out of step — the same not-survivable addition every config
 /// field before it made (issue #278).
-pub const PROTO_VERSION: u16 = 120;
+///
+/// v121: where the antenna is — [`sdroxide_types::RadioConfig`] gains
+/// `rx_site`, which says whether this radio listens on the station's own
+/// antenna or on somebody else's, and where that one is. Reception reports are
+/// posted from it rather than from the operator's locator (issue #284). Same
+/// not-survivable shape change as every config field before it: `RadioConfig`
+/// rides `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole, so a
+/// v120 peer handed one with an enum on the end reads the tail of every one of
+/// those messages out of step.
+pub const PROTO_VERSION: u16 = 121;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1957,6 +1966,9 @@ mod tests {
 
         let cfg = RadioConfig {
             backend: Backend::RtlSdr,
+            // The other enum with a payload on one variant only, and the last
+            // field in the struct — so a slip anywhere above it lands here.
+            rx_site: sdroxide_types::RxSite::Elsewhere("DO30db".into()),
             converter_offset_hz: 125_000_000.0,
             // The transmit converter is an enum with a payload on one variant
             // only — the shape a self-describing format forgives and postcard

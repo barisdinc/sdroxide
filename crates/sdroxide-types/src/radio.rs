@@ -6082,6 +6082,50 @@ impl FobosConfig {
     ];
 }
 
+/// Where the antenna this radio listens on actually is.
+///
+/// The station's locator says where the *operator* is, and for a radio in the
+/// shack that is also where the antenna is. It is not where a public KiwiSDR or
+/// SpyServer is: issue #284, where an online receiver in Australia taken in a
+/// tab in Europe reported 2 m FT8 decodes as an intercontinental opening,
+/// because everything heard was still posted from the operator's own square.
+///
+/// So a radio says which. Reception reports — PSK Reporter, WSPRnet, FreeDV
+/// Reporter — and the ADS-B receiver position are taken from here rather than
+/// from [`crate::DigiConfig::my_grid`].
+///
+/// Externally tagged (serde's default shape), like [`ConverterTx`] above and
+/// for the same reason: this config crosses the remote link as postcard, which
+/// is not self-describing and refuses an internally or adjacently tagged enum
+/// outright.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RxSite {
+    /// The antenna is the station's own, so the operator's locator describes
+    /// it. The default, and what every radio configured before this existed
+    /// gets — which is right, because until public receivers could be taken in
+    /// a tab it was the only possibility.
+    #[default]
+    Station,
+    /// Somewhere else, at this Maidenhead locator: an online receiver, or the
+    /// operator's own set on a hilltop.
+    ///
+    /// **Empty means somewhere else and nobody knows where** — a directory
+    /// entry that published no position. Nothing is reported then, because a
+    /// report has to say where it was heard and there is no honest answer.
+    Elsewhere(String),
+}
+
+impl RxSite {
+    /// What the settings dialog calls this.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RxSite::Station => "At the station",
+            RxSite::Elsewhere(_) => "Somewhere else",
+        }
+    }
+}
+
 /// Tuning ranges an operator stated for an interface this radio is not on at
 /// the moment.
 ///
@@ -6227,6 +6271,12 @@ pub struct RadioConfig {
     /// `Command::SetRadioConfig` whole, so a peer one field short reads the
     /// tail of every one of them out of step).
     pub fobos: FobosConfig,
+    /// Where this radio's antenna is — see [`RxSite`]. Appended after `fobos`,
+    /// for the same reason as every field above it: the layout is positional,
+    /// so a new block goes on the end and nowhere else, and `RadioConfig` rides
+    /// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole (issue
+    /// #284).
+    pub rx_site: RxSite,
 }
 
 impl RadioConfig {
@@ -6264,7 +6314,30 @@ impl RadioConfig {
             self.freq_ranges_rx = p.rx;
             self.freq_ranges_tx = p.tx;
         }
+        // The antenna's whereabouts belong to the receiver being left, not to
+        // the tab: a KiwiSDR in Alberta swapped for the transceiver in the
+        // shack must not go on posting the shack's decodes from Alberta. Back
+        // to the station, which is the only thing that can be assumed about a
+        // device that has just been plugged in. Picking a public receiver from
+        // the directory sets it again afterwards — `PublicSdrEntry::radio_config`
+        // calls this first and states the site second, in that order.
+        self.rx_site = RxSite::Station;
         self.backend = backend;
+    }
+
+    /// The Maidenhead locator receptions through this radio are reported under,
+    /// given the station's own — or `None` when the antenna is somebody else's
+    /// and the directory did not say where it is.
+    ///
+    /// `None` is not "fall back on the operator's square": that is exactly the
+    /// wrong answer, and the one issue #284 was about. A caller with nothing to
+    /// report from reports nothing.
+    pub fn report_grid<'a>(&'a self, station_grid: &'a str) -> Option<&'a str> {
+        match &self.rx_site {
+            RxSite::Station => Some(station_grid.trim()),
+            RxSite::Elsewhere(g) if !g.trim().is_empty() => Some(g.trim()),
+            RxSite::Elsewhere(_) => None,
+        }
     }
 }
 

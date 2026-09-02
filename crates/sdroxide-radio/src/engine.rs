@@ -3346,7 +3346,7 @@ fn engine_thread(
     if !engine.primary {
         engine.spots.stand_down();
     }
-    engine.spots.set_operator(&engine.digi_config.my_call, &engine.digi_config.my_grid);
+    engine.spots.set_operator(&engine.digi_config.my_call, &engine.report_grid());
     engine.net_cfg = sdroxide_config::load_network_config();
     // Hand the persisted account to the mailbox. Without this the manager keeps
     // the defaults it was built with and every session refuses with "set a
@@ -7265,8 +7265,8 @@ impl Engine {
                 self.mark_shared_store_write();
                 // The network features report the same operator identity, so a
                 // callsign or grid edit reaches them from here.
-                self.spots.set_operator(&self.digi_config.my_call, &self.digi_config.my_grid);
-                // ...and so does the ADS-B lane, which needs the operator's own
+                self.spots.set_operator(&self.digi_config.my_call, &self.report_grid());
+                // ...and so does the ADS-B lane, which needs the receiver's own
                 // position to place an aircraft on the ground.
                 self.sync_adsb_home();
                 self.emit_digi_status();
@@ -7998,6 +7998,12 @@ impl Engine {
                 // failed save leaves them on the configuration the radio is
                 // really running, not the one that got away.
                 self.emit_radio_config();
+                // Where the antenna is lives in this file, and it is what
+                // receptions are reported from — so an operator who has just
+                // taken a receiver on the other side of the world has moved the
+                // square every report goes out under (issue #284).
+                self.spots.set_operator(&self.digi_config.my_call, &self.report_grid());
+                self.sync_adsb_home();
                 if reopen {
                     self.reopen_source();
                 }
@@ -8724,9 +8730,35 @@ impl Engine {
     /// A surface position squitter has no globally-unambiguous decode, so an
     /// aircraft on a taxiway can only be placed against a reference — and until
     /// it has been heard airborne, ours is the only one there is.
+    /// The Maidenhead locator this radio's receptions are reported under, and
+    /// the position its ADS-B lane places aircraft against.
+    ///
+    /// The station's own square when the antenna is in the shack, and the
+    /// receiver's when it is not — a public KiwiSDR or SpyServer taken in this
+    /// tab is somebody else's antenna on another continent, and reporting what
+    /// it hears from the operator's square is how issue #284 turned a local
+    /// 2 m signal into a Europe-Australia opening.
+    ///
+    /// Empty means there is nothing honest to say: an online receiver whose
+    /// directory published no position at all. Every reporting feed already
+    /// treats an empty locator as "do not start" — see
+    /// `SpotManager::rebuild_psk_upload` — so nothing has to be refused twice.
+    ///
+    /// Read from the store rather than cached: it is the same file the settings
+    /// dialog writes, and this runs at the handful of moments the identity can
+    /// change, never per block.
+    fn report_grid(&self) -> String {
+        self.store
+            .load_radio_config()
+            .report_grid(&self.digi_config.my_grid)
+            .unwrap_or_default()
+            .to_string()
+    }
+
     fn sync_adsb_home(&mut self) {
-        let grid = self.digi_config.my_grid.trim();
-        let home = (!grid.is_empty()).then(|| sdroxide_types::grid_to_latlon(grid)).flatten();
+        let grid = self.report_grid();
+        let home =
+            (!grid.is_empty()).then(|| sdroxide_types::grid_to_latlon(grid.trim())).flatten();
         if home == self.adsb_home {
             return;
         }
@@ -11617,7 +11649,7 @@ impl Engine {
             if let Some(d) = self.digi.as_mut() {
                 d.set_config(self.digi_config.clone());
             }
-            self.spots.set_operator(&self.digi_config.my_call, &self.digi_config.my_grid);
+            self.spots.set_operator(&self.digi_config.my_call, &self.report_grid());
             self.emit_digi_status();
         }
     }

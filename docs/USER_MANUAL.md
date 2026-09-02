@@ -5732,6 +5732,28 @@ with it. That matters most when a tab is pointed at a public receiver
 brings a range of its own: the transceiver that was in the tab gets its own
 ranges back when you switch the interface back to it.
 
+**Antenna is**, the last row of the block, says where this radio actually
+listens from. *At the station* — the default — means the antenna is yours, so
+your own locator (**My grid**,
+[3.2.1](#321-one-time-setup-your-callsign-and-grid)) describes it. *Somewhere else*
+takes a Maidenhead locator beside it, and everything this radio hears is then
+reported from **that** square: PSK Reporter, WSPRnet and FreeDV Reporter, and
+the position ADS-B places aircraft against.
+
+Set it for an online receiver, or for your own set up on a hilltop — anything
+whose antenna is not where you are. Picking a receiver under **PUBLIC SDR**
+fills it in for you from the directory
+([15.21](#1521-public-sdrs-on-the-internet-kiwisdr--web-888-spyserver)).
+
+Left *Somewhere else* with the locator empty — which is what a directory entry
+that publishes no position gives you — **nothing this radio hears is reported at
+all**. That is deliberate: a report has to say where it was heard, and reporting
+somebody else's antenna from your own square is worse than not reporting it.
+
+Like the ranges above, it belongs to the interface it was typed for: changing
+**Radio interface** puts it back to *At the station*, because where the antenna
+was belonged to the receiver you have just left.
+
 #### 6.2.1 SoapySDR devices
 
 ![The Radio tab with the SoapySDR interface selected](images/settings-radio-soapysdr.jpg)
@@ -9624,6 +9646,15 @@ filters, the world map — is [§10.1](#101-spot-feeds-dx-cluster-pota-sota-psk-
 FreeDV Reporter is a spot source too, but has its own tab —
 [6.6](#66-freedv-freedv-reporter).
 
+**Where your reports say you heard it.** Every network above that you *upload*
+to — PSK Reporter, WSPRnet, FreeDV Reporter — is told a locator, and that
+locator is your own only while the antenna is yours. A radio pointed at an
+online receiver reports from **the receiver's** square instead, and one whose
+receiver publishes no position reports nothing at all. That is the **Antenna
+is** row on Settings → Radio
+([6.2](#62-radio-choosing-and-configuring-the-rig)); it is filled in for you
+when you take a receiver under **PUBLIC SDR**.
+
 
 **WSPRnet.** Two independent halves, both using the callsign and grid from the
 General tab:
@@ -13304,6 +13335,31 @@ own decimation ladder, and **I/Q bandwidth**'s neighbour in Settings → Radio
 picks which. Stage 0 is the widest the server offers, and is the default. As
 with a KiwiSDR, the main panadapter can be zoomed out to cover the whole of it
 ([§2.8](#28-the-display-and-fft-controls)).
+
+#### Where your reports come from
+
+Everything you hear through one of these receivers was heard **at its antenna,
+not at yours**. So taking one also moves the locator sdroxide reports from:
+PSK Reporter, WSPRnet and FreeDV Reporter are all told the *receiver's* square,
+and the ADS-B lane places aircraft against it too. Without that, an online
+receiver in Australia opened from a European shack turns every local 2 m signal
+it hears into an intercontinental opening in somebody else's database.
+
+The directories publish a position for most receivers — a KiwiSDR states a
+locator outright, a SpyServer states latitude and longitude — and sdroxide takes
+it from there when you pick one. The confirmation says which square it will
+report from.
+
+Some publish none. Then nothing that receiver hears is reported at all, which
+is the only honest answer available; the note under Settings → Radio says so.
+Fill the locator in there if you know where the receiver is.
+
+**Settings → Radio → Antenna is** is where all this lives, per radio: *At the
+station* (the default — your own locator describes your own antenna) or
+*Somewhere else* with a locator beside it. It is not only for public receivers:
+set it for your own receiver on a hilltop, or any radio whose antenna is not
+where you are. Switching the **Radio interface** puts it back to *At the
+station*, because where the antenna was belonged to the receiver you just left.
 
 #### Adding one by hand
 

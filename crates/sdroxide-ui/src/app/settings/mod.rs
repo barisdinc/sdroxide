@@ -161,6 +161,9 @@ pub(in crate::app) struct SettingsIo<'a> {
     /// The RX and TX tuning ranges as typed, buffered until Apply — see
     /// `SdroxideApp::range_edit`.
     ranges: &'a mut Option<(String, String)>,
+    /// Where the antenna is, buffered until Apply — see
+    /// `SdroxideApp::rx_site_edit`.
+    rx_site: &'a mut Option<sdroxide_types::RxSite>,
     audio_pick: &'a mut Option<(bool, Option<String>)>,
     hpsdr_discover: &'a mut bool,
     /// Re-enumerate the USB bus for RTL-SDR dongles. Cheap and non-invasive —
@@ -763,6 +766,7 @@ impl SdroxideApp {
             // radio is still on the old one, and the box should say so.
             self.converter_edit_hz = None;
             self.range_edit = None;
+            self.rx_site_edit = None;
             // The next open starts at the tab bar, not wherever the window was
             // last scrolled to — the offset is one shared egui memory for all
             // the tabs, and it outlives the process.
@@ -885,6 +889,7 @@ impl SdroxideApp {
         let mut radio_edit = self.radio_cfg.clone();
         let mut converter_hz = self.converter_edit_hz;
         let mut ranges = self.range_edit.clone();
+        let mut rx_site = self.rx_site_edit.clone();
         let mut ui_edit = self.ui_settings;
         // Only where the engine is in this process: see `SettingsIo`.
         let owns_server = !self.ctrl.engine_is_remote();
@@ -1010,6 +1015,7 @@ impl SdroxideApp {
                             local_engine: owns_server,
                             converter_hz: &mut converter_hz,
                             ranges: &mut ranges,
+                            rx_site: &mut rx_site,
                             audio_pick: &mut audio_pick,
                             hpsdr_discover: &mut hpsdr_discover,
                             rtlsdr_rescan: &mut rtlsdr_rescan,
@@ -1404,6 +1410,16 @@ impl SdroxideApp {
             if let (Some(cfg), Some(hz)) = (radio_edit.as_mut(), converter_hz) {
                 cfg.converter_offset_hz = hz;
             }
+            if let (Some(cfg), Some(site)) = (radio_edit.as_mut(), rx_site.as_ref()) {
+                // Trimmed on the way in, so a stray space is not the difference
+                // between a locator and "somewhere, nobody knows where".
+                cfg.rx_site = match site {
+                    sdroxide_types::RxSite::Elsewhere(g) => {
+                        sdroxide_types::RxSite::Elsewhere(g.trim().to_string())
+                    }
+                    other => other.clone(),
+                };
+            }
             if let (Some(cfg), Some((rx, tx))) = (radio_edit.as_mut(), ranges.as_ref()) {
                 // Anything that doesn't parse leaves that direction as it was:
                 // the box is showing the operator why in red, and applying half
@@ -1461,6 +1477,7 @@ impl SdroxideApp {
         }
         self.converter_edit_hz = converter_hz;
         self.range_edit = ranges;
+        self.rx_site_edit = rx_site;
         if radio_edit != self.radio_cfg {
             if let Some(cfg) = &radio_edit {
                 self.ctrl.set_radio_config(cfg.clone());
@@ -1784,6 +1801,7 @@ impl SdroxideApp {
                         sdroxide_types::format_freq_ranges(&cfg.freq_ranges_tx),
                     )
                 });
+                let site = io.rx_site.get_or_insert_with(|| cfg.rx_site.clone());
                 egui::Grid::new("iface-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     ui.label(RichText::new("Radio interface").strong());
                     // Switching the far end's interface is allowed: the device
@@ -1813,6 +1831,12 @@ impl SdroxideApp {
                                 sdroxide_types::format_freq_ranges(&cfg.freq_ranges_rx),
                                 sdroxide_types::format_freq_ranges(&cfg.freq_ranges_tx),
                             );
+                            // Same reseed for the same reason: `set_backend`
+                            // has just put the antenna back at the station,
+                            // because where it was belonged to the receiver
+                            // being left. The box has to show that, or Apply
+                            // would write the old receiver's square back.
+                            *site = cfg.rx_site.clone();
                         }
                     } else {
                         ui.label(backend.label()).on_hover_text(
@@ -1984,7 +2008,82 @@ impl SdroxideApp {
                          transmitter.\n\nTakes effect on Apply.",
                     );
                     ui.end_row();
+
+                    // Where the antenna is. The station's locator answers that
+                    // for a radio in the shack and answers it wrongly for an
+                    // online receiver — issue #284, where a KiwiSDR in
+                    // Australia taken in a European tab posted every 2 m decode
+                    // as an intercontinental opening, because the reports went
+                    // out from the operator's square.
+                    ui.label(RichText::new("Antenna is").strong());
+                    ui.horizontal(|ui| {
+                        use sdroxide_types::RxSite;
+                        egui::ComboBox::from_id_salt("rx-site")
+                            .selected_text(site.label())
+                            .show_styled(ui, |ui| {
+                                for opt in [RxSite::Station, RxSite::Elsewhere(String::new())] {
+                                    // On the *kind*, so picking "somewhere
+                                    // else" again does not wipe the locator
+                                    // already typed beside it.
+                                    let on = std::mem::discriminant(&opt)
+                                        == std::mem::discriminant(&*site);
+                                    if ui.selectable_label(on, opt.label()).clicked() && !on {
+                                        *site = opt;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Where this radio listens from.\n\nAt the station: the antenna \
+                                 is yours, so your own locator says where it is. The default, \
+                                 and right for everything in the shack.\n\nSomewhere else: an \
+                                 online receiver, or your own set up on a hilltop. What it hears \
+                                 is reported to PSK Reporter, WSPRnet and FreeDV Reporter from \
+                                 the locator beside this, never from yours — and ADS-B places \
+                                 aircraft against it too.\n\nPicking a receiver under \
+                                 \"Public SDRs\" fills this in for you.\n\nTakes effect on \
+                                 Apply.",
+                            );
+                        if let RxSite::Elsewhere(g) = site {
+                            ui.add(
+                                egui::TextEdit::singleline(g)
+                                    .desired_width(90.0)
+                                    .hint_text("locator"),
+                            )
+                            .on_hover_text(
+                                "The receiver's Maidenhead locator — JN88ec, DO30db. Four or \
+                                 six characters.\n\nLeave it empty if you do not know where \
+                                 the receiver is: nothing is then reported at all, which is the \
+                                 only honest answer. Reporting from your own square would put \
+                                 somebody else's reception on the wrong continent.",
+                            );
+                        }
+                    });
+                    ui.end_row();
                 });
+                if let sdroxide_types::RxSite::Elsewhere(g) = &*site {
+                    let g = g.trim();
+                    ui.label(
+                        RichText::new(if g.is_empty() {
+                            "The antenna is somewhere else and no locator is set, so nothing \
+                             this radio hears is reported to PSK Reporter, WSPRnet or FreeDV \
+                             Reporter. Type the receiver's locator above to report from it."
+                                .to_string()
+                        } else if sdroxide_types::grid_to_latlon(g).is_some() {
+                            format!(
+                                "Receptions through this radio are reported from {g}, not from \
+                                 your own locator."
+                            )
+                        } else {
+                            format!(
+                                "{g} is not a Maidenhead locator, so nothing this radio hears is \
+                                 reported. Four or six characters: two letters, two digits, and \
+                                 optionally two more letters."
+                            )
+                        })
+                        .weak(),
+                    );
+                }
                 // The two range boxes are the only megahertz on a tab whose
                 // other frequency field is hertz, so the example says the same
                 // range both ways rather than leaving anyone to count zeros.

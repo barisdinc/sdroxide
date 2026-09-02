@@ -286,6 +286,12 @@ pub struct SdroxideApp {
     /// a half-typed range and never a limit the radio is briefly held to.
     /// `None` = not being edited.
     range_edit: Option<(String, String)>,
+    /// Where this radio's antenna is, being edited on the Radio tab. Buffered
+    /// until Apply for the same reason as the two above: it decides the square
+    /// every reception report goes out under, and a locator half-typed into
+    /// `radio.json` would be a square somewhere else entirely. `None` = not
+    /// being edited.
+    rx_site_edit: Option<sdroxide_types::RxSite>,
     serial_ports: Vec<String>,
     /// HPSDR devices found by the last "Discover" scan in the settings dialog.
     hpsdr_devices: Vec<sdroxide_types::HpsdrDevice>,
@@ -1147,6 +1153,7 @@ impl SdroxideApp {
             radio_cfg: None,
             converter_edit_hz: None,
             range_edit: None,
+            rx_site_edit: None,
             serial_ports: Vec::new(),
             hpsdr_devices: Vec::new(),
             rtlsdr_devices: Vec::new(),

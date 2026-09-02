@@ -603,6 +603,11 @@ impl SdroxideApp {
                 // reseeded when the interface picker is used.
                 self.radio_cfg = Some(cfg.clone());
                 self.range_edit = None;
+                // ...and the same for where the antenna is, which the entry has
+                // just written: a dialog still showing "at the station" would
+                // put every reception report back in the operator's own square
+                // (issue #284).
+                self.rx_site_edit = None;
                 self.ctrl.set_radio_config(cfg);
                 self.ctrl.reopen_source();
                 // A tab named after the transceiver that used to be in it,
@@ -614,7 +619,15 @@ impl SdroxideApp {
                 // confirmation says the rename is coming.
                 self.radio_tab_requests
                     .push(RadioTabRequest::Rename { id: self.radio_id, name: entry.name.clone() });
-                self.show_notice(format!("Pointing this radio at {}…", entry.name));
+                // Where reports now go out from is worth one clause: it has
+                // changed under the operator, and silently getting it wrong is
+                // what issue #284 was.
+                let site = match entry.locator().as_str() {
+                    "" => " Its position is not published, so nothing it hears will be reported."
+                        .to_string(),
+                    g => format!(" Receptions will be reported from {g}."),
+                };
+                self.show_notice(format!("Pointing this radio at {}…{site}", entry.name));
                 self.show_public_sdrs = false;
             }
             PickAction::NewRadio => {
