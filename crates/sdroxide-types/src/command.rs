@@ -933,4 +933,11 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     SetDigiPresets(Vec<crate::DigiPreset>),
+
+    /// Controlled-envelope SSB: how hard voice is driven into the envelope
+    /// processor, in decibels, 0 being off (issue #283). Clamped to
+    /// `0..=`[`crate::CESSB_MAX_DB`], and ignored by every mode but USB and LSB.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetCessb(f32),
 }

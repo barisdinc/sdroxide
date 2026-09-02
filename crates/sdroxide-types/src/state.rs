@@ -150,7 +150,32 @@ pub struct TxState {
     /// acknowledgement and can grey out transmit for the right reason. Matching
     /// on a human-readable string would break the moment the wording changed.
     pub swr_tripped: Option<f32>,
+    /// Controlled-envelope SSB: how hard the voice is driven into the envelope
+    /// processor, in decibels. Zero is off, and off is the default.
+    ///
+    /// One number rather than a switch and a level, because that is the control
+    /// it is: the processor with nothing driven into it cannot do anything, so
+    /// "how much" already answers "whether". Voice single sideband only — the
+    /// engine applies it to USB and LSB and to nothing else, since every
+    /// digital mode carries its information in the envelope this would be
+    /// flattening (issue #283).
+    ///
+    /// Clamped by the engine to `0..=`[`crate::CESSB_MAX_DB`], so a client that
+    /// sends a wild figure gets a sane one back.
+    #[serde(default)]
+    pub cessb_db: f32,
 }
+
+/// The most controlled-envelope compression the control offers, in decibels.
+///
+/// Beyond this the clipper is doing more than controlling an envelope: speech
+/// driven fifteen decibels into a limiter sounds like speech driven fifteen
+/// decibels into a limiter, whatever is done about its bandwidth afterwards.
+///
+/// Here rather than in the DSP crate so there is one number: the engine clamps
+/// to it, the settings slider offers exactly this range, and the processor
+/// itself clamps to it again — none of the three can come to disagree.
+pub const CESSB_MAX_DB: f32 = 12.0;
 
 /// The range a configured SWR limit is clamped to, wherever it arrives from.
 ///

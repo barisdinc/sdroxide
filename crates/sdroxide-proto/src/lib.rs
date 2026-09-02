@@ -1110,7 +1110,13 @@ use sdroxide_types::{
 /// The config rides `ServerMsg::StationConfig` whole, so a v123 peer handed one
 /// with a list on the end reads the tail of it out of step; the command is
 /// appended last, so no surviving discriminant moved.
-pub const PROTO_VERSION: u16 = 124;
+///
+/// v125: controlled-envelope SSB — [`sdroxide_types::TxState`] gains
+/// `cessb_db`, and [`sdroxide_types::Command`] gains `SetCessb` to move it
+/// (issue #283). `TxState` sits in the middle of `RadioState`, which travels
+/// whole on every change, so a v124 peer desynchronises on everything after it;
+/// the command is appended last, so no surviving discriminant moved.
+pub const PROTO_VERSION: u16 = 125;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

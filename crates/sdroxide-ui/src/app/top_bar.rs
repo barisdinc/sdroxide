@@ -3641,6 +3641,30 @@ impl SdroxideApp {
         }
     }
 
+    /// Controlled-envelope SSB: label + rail, in decibels of compression.
+    ///
+    /// A single number, because that is the control: with nothing driven into
+    /// the envelope processor it cannot do anything, so "how much" already
+    /// answers "whether", and there is no switch to leave in the wrong position.
+    fn tx_cessb(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut db = self.state.tx.cessb_db;
+        ui.label("CESSB").on_hover_text(
+            "Controlled-envelope SSB: more average power for the same peak, without splatter.              Three or four decibels of apparent loudness at the far end. 0 is off.",
+        );
+        if crate::chrome::slider(
+            ui,
+            Slider::new(&mut db, 0.0..=sdroxide_types::CESSB_MAX_DB)
+                .show_value(true)
+                .custom_formatter(
+                    |v, _| if v < 0.05 { "off".into() } else { format!("{v:.0} dB") },
+                ),
+        )
+        .changed()
+        {
+            cmds.push(Command::SetCessb(db));
+        }
+    }
+
     /// The Mic gain as a vertical rail with its label above — the whole
     /// control costs the condensed TX box [`TX_MIC_COL_W`] of width instead of
     /// a third slider row's worth.
@@ -3800,6 +3824,14 @@ impl SdroxideApp {
             }
             if level {
                 self.tx_digi_level(ui, cmds);
+            }
+            // Voice single sideband only. Every digital mode carries its
+            // information in the very envelope this processor flattens, so
+            // there is nothing for it to do in one — and a control that is
+            // present but inert is a control an operator will spend an evening
+            // turning up.
+            if matches!(self.state.rx[0].mode, Mode::Usb | Mode::Lsb) {
+                self.tx_cessb(ui, cmds);
             }
         });
     }

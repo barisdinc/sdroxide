@@ -1278,6 +1278,35 @@ being unity. In every other digital mode it does nothing at all — the burst is
 synthesized and the microphone is discarded — which is why the rail becomes
 **TX audio** there.
 
+**CESSB — more average power for the same peak.** The **CESSB** rail in the TX
+menu (voice USB and LSB only) is *controlled-envelope single sideband*, David
+Hershberger W9GR's 2014 technique. The thing an amplifier runs out of is the
+**envelope** — the magnitude of the sideband signal — and that is not the audio
+waveform, so a limiter on the microphone does not limit what the amplifier sees.
+The envelope of clipped speech overshoots by a long way, an SSB transmitter has
+to be backed off for peaks nobody hears, and the average power reaching the far
+end is a fraction of the transmitter's rating.
+
+CESSB works on the envelope directly: it clips it, filters the resulting
+splatter away, and then removes the peaks the filter put back by subtracting a
+band-limited copy of the excess — a subtraction rather than a gain, which is
+what keeps the transmission inside your own filter instead of spreading it to
+twice the width. The measured result here is about **3.8 dB more average power
+at the same peak** at 9 dB of compression, with out-of-band energy at the
+arithmetic's own floor.
+
+The control is one number: how many decibels the voice is driven into the
+processor, **0 being off**, which is where it starts. 6 dB is a sensible first
+try and 9 dB is about as far as most voices want to go — past that it starts to
+sound like a processor rather than like you. It is set by ear, remembered per
+radio, and it does not touch Drive: what leaves the processor is still held at
+full scale, so your power setting means what it did before.
+
+It applies where sdroxide makes the sideband itself — an HPSDR board or Hermes
+Lite 2, a Pluto, a LimeSDR, a SoapySDR device. A transceiver that modulates the
+audio from its own sound card is making the envelope in its own DSP, where this
+cannot reach it.
+
 ### 2.11 Voice keyer
 
 The **▶** button in the Transmit module opens the **voice keyer**: ten recorded

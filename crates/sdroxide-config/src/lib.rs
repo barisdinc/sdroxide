@@ -1143,6 +1143,13 @@ pub struct Session {
     pub tune_drive: f32,
     /// Mic gain, 0.0..=1.0.
     pub mic_gain: f32,
+    /// Controlled-envelope SSB compression, in decibels; 0 is off.
+    ///
+    /// Here with the mic gain and the EQ rather than in `config.toml`, because
+    /// it is the same kind of setting: something set by ear at the radio, per
+    /// radio, and expected to still be there next time.
+    #[serde(default)]
+    pub cessb_db: f32,
     /// Transmit parametric EQ (voice modes only). Absent in a session written
     /// before this existed, in which case `#[serde(default)]` above gives it
     /// [`sdroxide_types::TxEqState::default`], disabled and flat.
@@ -1247,6 +1254,7 @@ impl Default for Session {
             drive: radio.tx.drive,
             tune_drive: radio.tx.tune_drive,
             mic_gain: radio.tx.mic_gain,
+            cessb_db: radio.tx.cessb_db,
             tx_eq: radio.tx.eq,
             squelch_db: radio.rx[0].squelch_db,
             noise_reduction: radio.rx[0].noise_reduction,
@@ -2130,6 +2138,7 @@ mod tests {
             drive: 0.4,
             tune_drive: 0.2,
             mic_gain: 0.6,
+            cessb_db: 6.0,
             tx_eq: sdroxide_types::TxEqState {
                 enabled: true,
                 low: sdroxide_types::TxEqBand { freq_hz: 250.0, gain_db: -3.0, q: 0.8 },

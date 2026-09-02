@@ -23,10 +23,10 @@ use sdroxide_digi::{
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
-    AdcMeter, Agc, AutoNotch, Binaural, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator, Duc,
-    Modulator, MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr, SpectralNr,
-    SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target, make_demod,
-    make_modulator,
+    AdcMeter, Agc, AutoNotch, Binaural, Cessb, DcBlock, Ddc, Decimator, DeepFilterNr, Demodulator,
+    Duc, Modulator, MonoResampler, Nco, NeuralNr, NoiseBlanker, ParametricEq, SpecBleachNr,
+    SpectralNr, SpectrumAnalyzer, StereoResampler, SubToneGen, ToneBurst, channel_target,
+    make_demod, make_modulator,
 };
 use sdroxide_ism::{IsmAction, IsmController};
 use sdroxide_qo100::Qo100Controller;
@@ -1340,6 +1340,14 @@ impl StereoMixer {
 /// [`apply_tx_eq`].
 struct TxChain {
     modulator: Option<Box<dyn Modulator>>,
+    /// Controlled-envelope SSB, present only on the two voice sidebands.
+    ///
+    /// A digital mode never gets one. FT8, PSK, SSTV and the rest carry their
+    /// information in the very envelope this flattens, and "compressing" one is
+    /// not compression, it is distortion of the thing being sent — so the
+    /// processor is not built at all rather than being built and left switched
+    /// off, which is a state something could later get wrong (issue #283).
+    cessb: Option<Cessb>,
     dc: DcBlock,
     duc: Duc,
     /// The DUC's output rate — what `sat_nco` has to be programmed against.
@@ -1619,6 +1627,8 @@ impl TxChain {
     fn new(mode: Mode, tx_rate: f64, passband: (f32, f32)) -> Self {
         TxChain {
             modulator: make_modulator(mode, 48_000.0, passband),
+            cessb: matches!(mode, Mode::Usb | Mode::Lsb)
+                .then(|| Cessb::new(48_000.0, passband.0, passband.1)),
             dc: DcBlock::new(100.0, 48_000.0),
             duc: Duc::new(48_000.0, tx_rate),
             tx_rate,
@@ -3090,6 +3100,7 @@ fn engine_thread(
         state.tx.drive = s.drive;
         state.tx.tune_drive = s.tune_drive;
         state.tx.mic_gain = s.mic_gain;
+        state.tx.cessb_db = s.cessb_db.clamp(0.0, sdroxide_types::CESSB_MAX_DB);
         // Clamped on the way in: `session.json` is a file, and an out-of-range
         // corner frequency or Q from a hand edit would reach the filter design.
         state.tx.eq = s.tx_eq.clamped();
@@ -6704,6 +6715,13 @@ impl Engine {
                     if let Some(m) = self.tx.as_mut().and_then(|tx| tx.modulator.as_mut()) {
                         m.set_filter(lo, hi);
                     }
+                    // The envelope processor filters against the same passband
+                    // and has to be told at the same moment: a correction
+                    // band-limited to the width the operator has just left
+                    // would be one the transmission no longer fits inside.
+                    if let Some(c) = self.tx.as_mut().and_then(|tx| tx.cessb.as_mut()) {
+                        c.set_filter(lo, hi);
+                    }
                     // And on a radio that does its own filtering, the width the
                     // operator just set belongs to the radio.
                     self.push_control_filter();
@@ -8046,6 +8064,16 @@ impl Engine {
                 // lockout all key off `state.band`.
                 self.state.band = Band::containing(self.state.active_freq_hz());
                 self.emit_station_config();
+            }
+            SetCessb(db) => {
+                let db = db.clamp(0.0, sdroxide_types::CESSB_MAX_DB);
+                if self.state.tx.cessb_db == db {
+                    return;
+                }
+                self.state.tx.cessb_db = db;
+                // Live: the processor reads the figure at the top of every
+                // transmit block, so an operator can hear the difference on the
+                // air rather than having to unkey and key again to try it.
             }
             SetDigiPresets(presets) => {
                 // Sorted and de-duplicated on the way in, so the picker never
@@ -11809,6 +11837,7 @@ impl Engine {
             drive: self.state.tx.drive,
             tune_drive: self.state.tx.tune_drive,
             mic_gain: self.state.tx.mic_gain,
+            cessb_db: self.state.tx.cessb_db,
             tx_eq: self.state.tx.eq,
             squelch_db: self.state.rx[0].squelch_db,
             noise_reduction: self.state.rx[0].noise_reduction,
@@ -13668,6 +13697,7 @@ impl Engine {
         // Read before the chain is borrowed: it asks the *source* what ceiling
         // the converter in front of the radio imposes.
         let drive = self.tx_drive();
+        let cessb_db = self.state.tx.cessb_db;
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         tx.mod_buf.clear();
@@ -13732,6 +13762,19 @@ impl Engine {
             }
             let modulator = tx.modulator.as_mut().expect("checked above");
             modulator.process(&audio, &mut tx.mod_buf);
+            // Controlled-envelope SSB, between the modulator and the drive
+            // control. Here because it works on the *envelope* — the thing the
+            // amplifier runs out of — which does not exist until the sideband
+            // has been made, and because what it hands on is already held at
+            // full scale, so the operator's drive setting still means what it
+            // said. Only on the two voice sidebands, and only when they asked
+            // for it: `cessb` is `None` on every other mode.
+            if let Some(c) = tx.cessb.as_mut() {
+                c.set_compression_db(cessb_db);
+                if c.active() {
+                    c.process(&mut tx.mod_buf);
+                }
+            }
             for z in &mut tx.mod_buf {
                 *z *= drive;
                 // Hard limiter: digital full scale is the ceiling.
