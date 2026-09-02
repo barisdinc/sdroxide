@@ -8,6 +8,18 @@ pub enum Vfo {
     B,
 }
 
+impl Vfo {
+    /// 0 for A, 1 for B — for the per-VFO arrays the engine keeps alongside the
+    /// two dials (the mode each one was left in, and its filter).
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Vfo::A => 0,
+            Vfo::B => 1,
+        }
+    }
+}
+
 /// Receiver slot: the main receiver or the sub receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RxId {

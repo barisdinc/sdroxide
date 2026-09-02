@@ -322,11 +322,19 @@ The **VFO** module has:
 - **SPLIT** — transmit on one VFO and receive on the other.
 - **SUB** — enable a second receiver, routed to the right ear.
 
-Both VFOs and which of the two was selected are remembered per radio in
-`session.json`, so a station left listening on B — or set up for split, with the
-other VFO on the DX's transmit frequency — comes back the same way at the next
-start rather than with B collapsed onto A. `--freq` still overrides the dial for
-a run, and it moves whichever VFO was active.
+**Each VFO keeps its own mode**, and its own filter width with it. A VFO is a
+whole listening position rather than just a number — CW on A while B sits on an
+SSB net is what the pair is for — so switching between them puts the receiver
+into the mode that VFO was left in, exactly as the A/B button on a transceiver
+does. Swap and Copy A to B move the mode along with the frequency: after a swap
+each VFO holds what the other one had, and after a copy B is A in every respect.
+
+Both VFOs, the mode each was left in, and which of the two was selected are
+remembered per radio in `session.json`, so a station left listening on B — or set
+up for split, with the other VFO on the DX's transmit frequency — comes back the
+same way at the next start rather than with B collapsed onto A. `--freq` and
+`--mode` still override the dial and the mode for a run, and they apply to
+whichever VFO was active.
 
 The sub-receiver tunes **independently of A/B**: swapping VFOs or turning the
 dial leaves it where you parked it. Switching it on reveals a **SUB module** in

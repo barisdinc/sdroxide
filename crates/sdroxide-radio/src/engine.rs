@@ -1874,6 +1874,27 @@ impl ZoomLane {
     }
 }
 
+/// The listening position a VFO keeps while the other one is in use: the mode
+/// it was left in and the passband that went with it.
+///
+/// The filter travels with the mode because it belongs to it — selecting a mode
+/// installs that mode's default width, so a VFO restored on its mode alone
+/// would come back with a passband the operator had already narrowed and lost.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VfoMemory {
+    mode: Mode,
+    filter_lo: f32,
+    filter_hi: f32,
+}
+
+impl VfoMemory {
+    /// What the receiver is listening in right now, ready to be shelved under
+    /// the VFO that is being left.
+    fn of(rx: &RxState) -> VfoMemory {
+        VfoMemory { mode: rx.mode, filter_lo: rx.filter_lo, filter_hi: rx.filter_hi }
+    }
+}
+
 struct Engine {
     source: Box<dyn IqSource>,
     caps: DeviceCaps,
@@ -2464,6 +2485,16 @@ struct Engine {
     /// refuses puts the dial back here rather than leaving the operator on a
     /// frequency the radio cannot receive (see [`Engine::tune_refused`]).
     good_vfo_hz: f64,
+    /// What each VFO was left listening in, indexed by [`Vfo::index`]: the mode
+    /// and the passband that went with it.
+    ///
+    /// A VFO is a whole listening position, not just a number — CW on A while B
+    /// sits on an SSB net is the reason the radio has two of them (issue #286),
+    /// and every transceiver with an A/B pair remembers the mode with the
+    /// frequency. Kept here rather than in [`RadioState`] because only the
+    /// *active* one is ever in force: the receiver has one mode, the state
+    /// carries it, and this is the shelf the other one waits on.
+    vfo_memory: [VfoMemory; 2],
     /// Network cockpit: owns the spot feeds (DX cluster / POTA / SOTA / PSK)
     /// and the lookup/upload worker threads. The engine only drains it.
     spots: sdroxide_net::SpotManager,
@@ -3073,6 +3104,11 @@ fn engine_thread(
     let want_gains =
         session.as_ref().map(|s| (s.gains.clone(), s.tx_gains.clone())).unwrap_or_default();
     let band_antenna = session.as_ref().map(|s| s.band_antenna.clone()).unwrap_or_default();
+    // Taken before the state is moved into the engine. Both VFOs open on the
+    // mode the receiver came up in — the command line's, the session's, or the
+    // default — and the *inactive* one is then given back the mode it was
+    // actually left in, just below.
+    let initial_vfo_memory = VfoMemory::of(&state.rx[0]);
 
     let mut engine = Engine {
         // Out of declaration order on purpose: literal fields are evaluated
@@ -3275,6 +3311,9 @@ fn engine_thread(
         retry_every: RETRY_FIRST,
         // Where the source opened, which is by definition a frequency it took.
         good_vfo_hz: source_center_hz,
+        // Both VFOs start on the mode the receiver came up in; the remembered
+        // pair is folded in below, once the engine owns them.
+        vfo_memory: [initial_vfo_memory; 2],
         spots: sdroxide_net::SpotManager::new(),
         winlink: open_mailbox(&sdroxide_types::WinlinkConfig::default()),
         kiss: None,
@@ -3413,6 +3452,20 @@ fn engine_thread(
     // block, not on the first change: the mode came out of the session, and a
     // panadapter pairing whose receiver offset depends on it would otherwise
     // open on the wrong intermediate frequency.
+    // The mode the *inactive* VFO was left in. The active one is already in
+    // force — it came from `--mode`, from the session, or from the default, and
+    // whichever it was outranks this — so only the other slot is filled in.
+    // Nothing is applied to the receiver here: this is the shelf, and it is read
+    // the first time the operator switches VFO (issue #286).
+    if let Some(modes) = engine.session.as_ref().and_then(|s| s.vfo_modes) {
+        let idle = 1 - engine.state.active_vfo.index();
+        engine.vfo_memory[idle].mode = modes[idle];
+        let (lo, hi) = modes[idle].default_filter_at(match idle {
+            0 => engine.state.vfo_a_hz,
+            _ => engine.state.vfo_b_hz,
+        });
+        (engine.vfo_memory[idle].filter_lo, engine.vfo_memory[idle].filter_hi) = (lo, hi);
+    }
     engine.push_rx_mode();
     engine.keep_vfo_in_span();
     engine.update_tuning();
@@ -6558,19 +6611,41 @@ impl Engine {
                 self.update_tuning();
             }
             SelectVfo(v) => {
+                // The mode goes with the VFO. Shelve what the one being left
+                // was listening in, and put the receiver into what the one
+                // being taken up was left in (issue #286).
+                self.shelve_vfo_mode();
                 self.state.active_vfo = v;
+                self.recall_vfo_mode();
                 self.state.band = Band::containing(self.state.active_freq_hz());
                 self.follow_dial();
                 self.update_tuning();
             }
             SwapVfos => {
+                // A swap exchanges the whole listening position, not just the
+                // two numbers: A's mode and passband go to B along with its
+                // dial. The active VFO does not change, so what it is now
+                // holding is the *other* one's setup, and the receiver has to
+                // be put into it.
+                self.shelve_vfo_mode();
                 std::mem::swap(&mut self.state.vfo_a_hz, &mut self.state.vfo_b_hz);
+                self.vfo_memory.swap(0, 1);
+                self.recall_vfo_mode();
                 self.state.band = Band::containing(self.state.active_freq_hz());
                 self.follow_dial();
                 self.update_tuning();
             }
             CopyAtoB => {
                 self.state.vfo_b_hz = self.state.vfo_a_hz;
+                // A=B copies the position, mode included — otherwise the VFO
+                // that was just made a duplicate of A would listen to A's
+                // frequency in something else.
+                self.shelve_vfo_mode();
+                self.vfo_memory[Vfo::B.index()] = self.vfo_memory[Vfo::A.index()];
+                // A no-op while A is the active VFO, and the whole point of the
+                // call while B is: the receiver has just been moved onto A's
+                // frequency and has to hear it in A's mode.
+                self.recall_vfo_mode();
                 self.update_tuning();
             }
             SetSplit(on) => self.state.split = on,
@@ -10457,6 +10532,47 @@ impl Engine {
         self.update_tuning();
     }
 
+    /// Record what the active VFO is listening in, so taking up the other one
+    /// can leave it there.
+    ///
+    /// Called on the way *out* of a VFO rather than on every mode change: the
+    /// only thing that has to be true is that the shelf is current at the
+    /// moment it is read, and one call at the switch beats instrumenting every
+    /// path that can change a mode or a filter width — the mode buttons, a band
+    /// stack recall, a memory, the scanner, rigctld, a remote client, the rig's
+    /// own knob.
+    fn shelve_vfo_mode(&mut self) {
+        self.vfo_memory[self.state.active_vfo.index()] = VfoMemory::of(&self.state.rx[0]);
+    }
+
+    /// Put the main receiver into the mode and passband the now-active VFO was
+    /// left in.
+    ///
+    /// Goes through [`Self::set_rx_mode`] so a mode change here is the same
+    /// mode change as any other: the CAT rig is commanded, the digital lane
+    /// follows, a keyer message in flight is stopped. The filter is restored
+    /// afterwards because selecting a mode installs that mode's default width,
+    /// which would otherwise throw away a passband the operator had narrowed.
+    fn recall_vfo_mode(&mut self) {
+        let want = self.vfo_memory[self.state.active_vfo.index()];
+        if want.mode != self.state.rx[0].mode {
+            self.set_rx_mode(RxId::Main, want.mode);
+        }
+        let r = &mut self.state.rx[0];
+        if (r.filter_lo, r.filter_hi) == (want.filter_lo, want.filter_hi) {
+            return;
+        }
+        (r.filter_lo, r.filter_hi) = (want.filter_lo, want.filter_hi);
+        let snapshot = *r;
+        if let Some(d) = self.main.as_mut().and_then(|c| c.demod.as_mut()) {
+            d.set_filter(snapshot.filter_lo, snapshot.filter_hi);
+        }
+        // The rig does the filtering on a CAT link, so its width has to follow
+        // too — exactly as `set_rx_mode` does for the mode it commands.
+        // Self-guarded, and a no-op on every front end that filters here.
+        self.push_control_filter();
+    }
+
     fn set_rx_mode(&mut self, rx: RxId, mode: Mode) {
         // APRS is a channel, not a band, and which channel is a property of
         // the operator's region: 144.800 in Region 1, 144.390 in the Americas,
@@ -11640,6 +11756,15 @@ impl Engine {
             vfo_b_hz: Some(self.state.vfo_b_hz),
             active_vfo: self.state.active_vfo,
             mode: self.state.rx[0].mode,
+            // The shelf is only current for the VFO that is *not* in use, so
+            // the live mode is written into the active slot on the way past
+            // rather than shelved here — `save_session` is called from a timer
+            // and from `Drop`, and neither is a VFO change.
+            vfo_modes: Some({
+                let mut m = [self.vfo_memory[0].mode, self.vfo_memory[1].mode];
+                m[self.state.active_vfo.index()] = self.state.rx[0].mode;
+                m
+            }),
             antenna_rx: keep(&self.state.antenna_rx).or_else(|| saved.antenna_rx.clone()),
             antenna_tx: keep(&self.state.antenna_tx).or_else(|| saved.antenna_tx.clone()),
             volume: self.state.rx[0].volume,

@@ -1109,8 +1109,18 @@ pub struct Session {
     /// dials, so a station left listening on B comes back listening on B rather
     /// than silently on A's frequency.
     pub active_vfo: sdroxide_types::Vfo,
-    /// Mode of the main receiver.
+    /// Mode of the main receiver — which is the mode of whichever VFO was
+    /// active, and the one `--mode` overrides.
     pub mode: sdroxide_types::Mode,
+    /// The mode each VFO was left in, `[A, B]`.
+    ///
+    /// A VFO is a whole listening position and not just a dial: CW on A while B
+    /// sits on an SSB net is what the pair is for (issue #286), and a station
+    /// that came back with both of them in yesterday's active mode had lost
+    /// half of its setup. `None` in a session written before this was
+    /// remembered, and on a first run — both then come up in
+    /// [`Self::mode`], which is where they used to be anyway.
+    pub vfo_modes: Option<[sdroxide_types::Mode; 2]>,
     /// RX antenna port, as the device names it ("LNAH", "TX/RX"). `None` on a
     /// front end that has no antenna to choose, and on every session written
     /// before this was remembered.
@@ -1225,6 +1235,9 @@ impl Default for Session {
             vfo_b_hz: None,
             active_vfo: sdroxide_types::Vfo::A,
             mode,
+            // No mode of its own for either VFO until one has been used, for
+            // the same reason B has no dial of its own above.
+            vfo_modes: None,
             antenna_rx: None,
             antenna_tx: None,
             volume: radio.rx[0].volume,
