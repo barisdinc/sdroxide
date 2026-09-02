@@ -632,7 +632,7 @@ impl SdroxideApp {
         self.sstv.ensure_preview(dims, &ctx);
         crate::repaint::after_ms(&ctx, 120);
 
-        let st = self.sstv.status;
+        let st = self.sstv.status.clone();
         let (signal, tx_active, progress) = if rifp {
             (self.sstv.rifp.signal, self.sstv.rifp.tx_active, self.sstv.rifp.tx_progress)
         } else {
@@ -756,6 +756,26 @@ impl SdroxideApp {
                                     ui.label(RichText::new("listening…").size(10.0).weak());
                                 }
 
+                                // Who sent it. The FSK ID arrives in tones a
+                                // fraction of a second after the picture, which
+                                // is exactly when the operator is looking at the
+                                // frame and wondering whose it is — and unlike a
+                                // banner drawn into the image, this is the
+                                // station's own machine-readable identification.
+                                if let Some(id) = st.rx_id.as_deref() {
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new(format!("ID {id}"))
+                                            .size(11.0)
+                                            .strong()
+                                            .color(crate::theme::CYAN_DIM()),
+                                    )
+                                    .on_hover_text(
+                                        "The callsign the last station sent as an FSK ID after \
+                                         its picture.",
+                                    );
+                                }
+
                                 ui.add_space(12.0);
                                 ui.separator();
                                 ui.label(RichText::new("TX slant").size(10.0).weak()).on_hover_text(
@@ -779,6 +799,29 @@ impl SdroxideApp {
                                         .clicked()
                                     {
                                         self.digi_cfg_edit.sstv_tx_ppm = 0.0;
+                                        cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
+                                    }
+                                    ui.separator();
+                                    // The callsign in tones after the picture.
+                                    // Beside the slant trim rather than in the
+                                    // banner window: the banner identifies the
+                                    // station to a person looking at the
+                                    // picture, this identifies it to the
+                                    // repeater decoding it, and the two are set
+                                    // for different reasons.
+                                    if crate::chrome::checkbox(
+                                        ui,
+                                        &mut self.digi_cfg_edit.sstv_fsk_id,
+                                        "FSK ID",
+                                    )
+                                    .on_hover_text(
+                                        "Send your callsign in tones after each picture — the \
+                                         identification SSTV repeaters and other programs read. \
+                                         Adds about 2.5 seconds, and sends nothing at all until \
+                                         you have set a callsign.",
+                                    )
+                                    .changed()
+                                    {
                                         cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
                                     }
                                 });

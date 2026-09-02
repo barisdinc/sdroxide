@@ -1213,6 +1213,19 @@ pub struct DigiConfig {
     /// (−) the image time-scale to null out slant against a receiver whose sound-
     /// card clock differs from this station's. 0 = no correction.
     pub sstv_tx_ppm: f32,
+    /// Send the station's callsign in tones after every picture — the FSK ID
+    /// that every SSTV program and unattended repeater reads (issue #287).
+    ///
+    /// A banner printed into the picture identifies the station to a *person*;
+    /// this identifies it to a *machine*, which is what a repeater needs before
+    /// it can log or announce who sent the frame. It costs about two and a half
+    /// seconds after a transmission that has already taken a minute or two.
+    ///
+    /// Nothing is sent when there is no callsign in
+    /// [`my_call`](Self::my_call), so a station that has not set one transmits
+    /// exactly what it always did.
+    #[serde(default = "yes")]
+    pub sstv_fsk_id: bool,
 
     // ── The banner across the top of every transmitted picture ──
     //
@@ -1830,6 +1843,7 @@ impl Default for DigiConfig {
             tx_watchdog_min: 6,
             max_tx_repeats: 10,
             sstv_tx_ppm: 0.0,
+            sstv_fsk_id: true,
             sstv_banner: true,
             sstv_banner_left: sstv_default_banner_left(),
             sstv_banner_right: sstv_default_banner_right(),

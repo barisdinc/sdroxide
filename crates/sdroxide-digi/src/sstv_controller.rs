@@ -35,6 +35,9 @@ pub struct SstvController {
     rx_h: u16,
     rx_active: bool,
     detected: Option<SstvMode>,
+    /// The callsign the last station sent in its FSK ID, held until another one
+    /// does. It arrives after the picture, so it cannot travel with it.
+    rx_id: Option<String>,
     image_id: u32,
 
     // TX
@@ -67,6 +70,7 @@ impl SstvController {
             rx_h: 0,
             rx_active: false,
             detected: None,
+            rx_id: None,
             image_id: 0,
             tx: None,
             tx_mode: SstvMode::Martin1,
@@ -93,6 +97,7 @@ impl SstvController {
             detected: self.detected,
             progress,
             signal: self.rx.level(),
+            rx_id: self.rx_id.clone(),
         }
     }
 
@@ -165,6 +170,14 @@ impl DigiEngine for SstvController {
                         self.rx_image[row..row + rgb.len()].copy_from_slice(&rgb);
                     }
                     self.queued.push(DigiAction::SstvLine { image_id: self.image_id, y, rgb });
+                    self.status_dirty = true;
+                }
+                SstvEvent::FskId(id) => {
+                    // A station identifying itself. Worth keeping even with no
+                    // picture behind it: a receiver tuned in halfway through a
+                    // transmission gets no VIS and no whole frame, and the
+                    // callsign at the end is then the only thing that arrives.
+                    self.rx_id = Some(id);
                     self.status_dirty = true;
                 }
                 SstvEvent::ImageComplete => {
@@ -274,7 +287,13 @@ impl DigiEngine for SstvController {
 
     fn set_sstv_image(&mut self, mode: SstvMode, rgb: Vec<u8>, w: u16, h: u16) {
         self.tx_mode = mode;
-        self.tx = Some(SstvTx::new(mode, &rgb, w, h, OUT_RATE, self.cfg.sstv_tx_ppm));
+        let tx = SstvTx::new(mode, &rgb, w, h, OUT_RATE, self.cfg.sstv_tx_ppm);
+        // The callsign in tones after the picture, for the repeaters and the
+        // programs that read one (issue #287). A station that has not set a
+        // callsign sends nothing extra — `with_fsk_id` takes an empty string as
+        // "no ID" rather than transmitting a header with nothing in it.
+        let id = if self.cfg.sstv_fsk_id { self.cfg.my_call.trim() } else { "" };
+        self.tx = Some(tx.with_fsk_id(id));
         self.status_dirty = true;
     }
 }

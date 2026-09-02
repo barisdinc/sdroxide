@@ -3485,6 +3485,16 @@ one of the two.
   test picture decodes straight on the far end; **0** resets it. It applies to
   the next transmission and is persisted. (Received pictures are auto-deslanted
   by sdroxide, so this is only for the transmit direction.)
+- **FSK ID** sends your callsign as tones for about two and a half seconds after
+  each picture, in the format MMSSTV published and every SSTV program and
+  unattended repeater reads. This is the identification a *machine* can act on:
+  a repeater logs and announces the station that just sent, which no banner
+  drawn into the picture can give it. It is on by default and sends nothing at
+  all until you have set a callsign ([§6.1](#61-general-station-audio-and-remote-access)).
+  sdroxide reads them too — a callsign heard this way appears as **ID** beside
+  the mode readout, and stays there until another station sends one. A receiver
+  that tuned in halfway through a picture still gets it, because the ID does not
+  depend on having caught the header.
 
 > **Note:** SSTV decode/encode runs in the server engine, so the panel works the
 > same in the native app and the browser client. RX quality depends on signal

@@ -1096,7 +1096,13 @@ use sdroxide_types::{
 /// its check sequence alone. The struct rides `ServerMsg::Vdl2Status` whole and
 /// is re-sent a couple of times a second, so a v121 peer would read the tail of
 /// every one of them out of step.
-pub const PROTO_VERSION: u16 = 122;
+///
+/// v123: who sent the picture — [`sdroxide_types::SstvStatus`] gains `rx_id`,
+/// the callsign a station sent as an FSK ID after its transmission (issue
+/// #287). The struct rides `ServerMsg::SstvStatus` whole and is re-sent several
+/// times a second while the mode is up, so a v122 peer handed one with an
+/// option on the end reads the tail of every one of them out of step.
+pub const PROTO_VERSION: u16 = 123;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1627,6 +1633,9 @@ mod tests {
             ServerMsg::SstvStatus(SstvStatus {
                 tx_mode: SstvMode::Robot36,
                 detected: Some(SstvMode::Scottie2),
+                // The FSK ID a station sent after its picture, which travels
+                // as a whole string rather than a code — it is a callsign.
+                rx_id: Some("OE1XYZ".to_string()),
                 ..SstvStatus::default()
             }),
         ];
