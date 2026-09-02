@@ -63,6 +63,7 @@ pub use demod::{ComplexDcBlock, DcBlock, Demodulator, channel_target, make_demod
 pub use dfnr::DeepFilterNr;
 pub use diversity::{Diversity, DiversityMode};
 pub use eq::ParametricEq;
+pub use fec::{ConvCode, viterbi_soft};
 pub use fir::{ComplexFir, RealFir, bandpass_taps};
 pub use fsq::{FsqRx, FsqTx};
 pub use fsq_image::{FsqImageRx, FsqImageTx, IMG_H as FSQ_IMG_H, IMG_W as FSQ_IMG_W};
