@@ -3537,6 +3537,16 @@ one already in progress: press **START** to begin recording mid-chart, and
 **STOP** to end it and save. Turn **AUTO STOP** off to record straight through a
 station sending several charts back to back.
 
+A stop tone is five seconds long and it is the first thing a fade takes, so
+AUTO START does not wait for one: while a chart is being drawn sdroxide also
+listens for the *next* transmission — its start tone, and failing that the
+thirty seconds of phasing signal behind it, which is far too long to miss. When
+one turns up the page in progress is saved and the new one is phased from the
+top, so a station sending chart after chart gives you one straight page each
+rather than one endless page with every chart after the first shifted sideways.
+Turning AUTO START off turns that off too: the capture then runs until you press
+STOP, which is what an operator recording a continuous transmission wants.
+
 **Geometry.** Nothing in the signal states the line rate, so:
 
 - **LPM** — lines per minute. **120** is what essentially every weather service
