@@ -300,6 +300,8 @@ impl Worker {
             st.header_bad += n.header_bad + n.length_insane;
             st.rs_fail += n.rs_fail;
             st.rs_corrected += n.rs_corrected;
+            st.hdlc_bad += n.hdlc_bad;
+            st.fec_bypassed += n.fec_bypassed;
             st.fcs_bad += n.fcs_bad;
             st.frames += n.frames;
             st.multiblock += n.multiblock;

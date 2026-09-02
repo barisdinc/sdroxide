@@ -1089,7 +1089,14 @@ use sdroxide_types::{
 /// rides `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole, so a
 /// v120 peer handed one with an enum on the end reads the tail of every one of
 /// those messages out of step.
-pub const PROTO_VERSION: u16 = 121;
+///
+/// v122: the VDL2 decoder's two new counters (issue #265).
+/// [`sdroxide_types::Vdl2Status`] gains `hdlc_bad` and `fec_bypassed`, which
+/// say whether the data field unwrapped and whether the frame came through on
+/// its check sequence alone. The struct rides `ServerMsg::Vdl2Status` whole and
+/// is re-sent a couple of times a second, so a v121 peer would read the tail of
+/// every one of them out of step.
+pub const PROTO_VERSION: u16 = 122;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

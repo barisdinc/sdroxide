@@ -295,8 +295,18 @@ impl<'a> SymbolReader<'a> {
         }
     }
 
-    /// The next symbol's three bits, least significant first, or `None` past
-    /// the end of what the buffer can be filtered over.
+    /// The next symbol's three bits, **most significant first**, or `None`
+    /// past the end of what the buffer can be filtered over.
+    ///
+    /// Which end of the symbol goes first is not a detail: it decides every bit
+    /// of the header and every octet of the frame, and reading it backwards
+    /// produces a bit stream that is perfectly self-consistent and means
+    /// nothing. It was backwards until issue #265 — the transmitter in
+    /// `crate::tx` packed symbols the same way round, so the two agreed with
+    /// each other and with nothing on the air. Measured against a recording:
+    /// most-significant-first makes the header's parity check out with **no
+    /// correction** on every burst in it, and least-significant-first needs a
+    /// repair on every one and yields lengths that are nonsense.
     pub fn next_symbol(&mut self) -> Option<[u8; 3]> {
         self.pos += self.sps;
         if self.pos.floor() as usize + self.rrc.half() + 1 >= self.iq.len() {
@@ -323,7 +333,7 @@ impl<'a> SymbolReader<'a> {
 
         let k = (kr as i32 & 7) as usize;
         let v = GRAY[k];
-        Some([v & 1, (v >> 1) & 1, (v >> 2) & 1])
+        Some([(v >> 2) & 1, (v >> 1) & 1, v & 1])
     }
 
     /// Read `n` symbols' worth of bits, stopping early at the end of the burst.

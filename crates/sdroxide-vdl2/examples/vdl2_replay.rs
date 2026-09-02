@@ -19,7 +19,11 @@
 //! - **bursts, no syncs** — something is arriving and it is not VDL2.
 //! - **syncs, no headers** — it *is* VDL2 and the bits are being read wrongly.
 //!   A decoder problem, not a propagation one.
-//! - **headers, Reed-Solomon failures** — real frames, arriving damaged.
+//! - **headers, HDLC bad** — the header reads and the data field does not
+//!   unwrap as a flagged, bit-stuffed frame. A decoder problem.
+//! - **headers, Reed-Solomon failures** — real frames, arriving damaged. Note
+//!   that a failure here is not fatal: the block is tried uncorrected too and
+//!   the frame check sequence decides, which is what **FEC bypassed** counts.
 //! - **Reed-Solomon good, frame check bad** — the error correction is fine and
 //!   something above it is not, which is this decoder's fault and not the
 //!   band's. On a real recording this figure is the sharpest evidence there is.
@@ -118,7 +122,8 @@ fn main() {
         let c = *rx.counters();
         println!(
             "{:.3} MHz  {:.2} sps  floor {:6.1} dBFS  bursts {:4}  syncs {:5}  headers {:4} \
-             (bad {:3}, insane {:3})  RS ok {:4} fail {:4} fixed {:4}  bad FCS {:3}  frames {:3}",
+             (bad {:3}, insane {:3})  RS ok {:4} fail {:4} fixed {:4}  HDLC bad {:3}  \
+             bad FCS {:3}  frames {:3} (FEC bypassed {:3})",
             ch.center_hz / 1e6,
             rx.samples_per_symbol(),
             rx.floor_dbfs(),
@@ -130,8 +135,10 @@ fn main() {
             c.rs_ok,
             c.rs_fail,
             c.rs_corrected,
+            c.hdlc_bad,
             c.fcs_bad,
             c.frames,
+            c.fec_bypassed,
         );
         total.add(&c);
         for d in &out {
@@ -193,6 +200,8 @@ struct Totals {
     headers: u64,
     rs_ok: u64,
     rs_fail: u64,
+    hdlc_bad: u64,
+    fec_bypassed: u64,
     fcs_bad: u64,
     frames: u64,
 }
@@ -204,6 +213,8 @@ impl Totals {
         self.headers += c.header_ok;
         self.rs_ok += c.rs_ok;
         self.rs_fail += c.rs_fail;
+        self.hdlc_bad += c.hdlc_bad;
+        self.fec_bypassed += c.fec_bypassed;
         self.fcs_bad += c.fcs_bad;
         self.frames += c.frames;
     }
@@ -227,6 +238,13 @@ impl Totals {
                  bits are being read wrongly — a decoder problem, not a propagation one.",
                 self.syncs
             );
+        } else if self.frames == 0 && self.hdlc_bad > 0 {
+            println!(
+                "{} headers and no frames, {} of them holding no HDLC frame. The header is \
+                 being read and the data field is not — a decoder problem, not a propagation \
+                 one.",
+                self.headers, self.hdlc_bad
+            );
         } else if self.frames == 0 && self.rs_fail > 0 {
             println!(
                 "{} headers, {} Reed-Solomon failures and no frames. Real transmissions \
@@ -242,9 +260,9 @@ impl Totals {
             );
         } else {
             println!(
-                "{} frames from {} bursts. Reed-Solomon repaired {} blocks and refused {}; \
-                 {} frames failed their check sequence.",
-                self.frames, self.bursts, self.rs_ok, self.rs_fail, self.fcs_bad
+                "{} frames from {} bursts. Reed-Solomon repaired {} blocks and refused {} — \
+                 {} of the frames came through on their check sequence alone; {} failed it.",
+                self.frames, self.bursts, self.rs_ok, self.rs_fail, self.fec_bypassed, self.fcs_bad
             );
         }
     }

@@ -124,13 +124,14 @@ impl SdroxideApp {
             ui.separator();
             slot(ui, 70.0, &format!("{} frames", count(st.frames)), theme::CYAN());
             slot(ui, 70.0, &format!("{} bursts", count(st.bursts)), theme::gray(150));
-            // These three are the diagnosis, in the order the chain fails in.
-            // Bursts without syncs is a channel busy with something else;
-            // syncs without headers is a decoder problem; a good Reed-Solomon
-            // block with a bad frame check is this decoder misreading a frame
-            // the radio path delivered intact.
+            // These are the diagnosis, in the order the chain fails in. Bursts
+            // without syncs is a channel busy with something else; syncs
+            // without headers is a decoder problem; headers without frames,
+            // with this climbing, is a decoder problem one layer further in;
+            // and a bad frame check is this decoder misreading a frame the
+            // radio path delivered intact.
             slot(ui, 62.0, &format!("{} sync", count(st.syncs)), theme::gray(120));
-            slot(ui, 72.0, &format!("{} RS fix", count(st.rs_corrected)), theme::gray(120));
+            slot(ui, 76.0, &format!("{} HDLC bad", count(st.hdlc_bad)), theme::gray(120));
             slot(ui, 68.0, &format!("{} bad FCS", count(st.fcs_bad)), theme::gray(120));
 
             if st.window_rate_hz > 0.0 {

@@ -534,8 +534,23 @@ pub struct Vdl2Status {
     pub headers: u64,
     pub header_bad: u64,
     /// Reed–Solomon blocks the decoder could not repair, and symbols it did.
+    ///
+    /// On real traffic `rs_fail` is currently *every* block: the code's
+    /// parameters as implemented do not fit what is on the air, and the frame
+    /// check sequence is what admits a frame instead — see
+    /// `sdroxide_vdl2::channel` and issue #265. So a large number here is
+    /// expected and is not, on its own, evidence of a weak signal.
     pub rs_fail: u64,
     pub rs_corrected: u64,
+    /// Data fields that did not unwrap as an HDLC frame: no flags, an abort, or
+    /// a destuffed length that is not a whole number of octets. Headers being
+    /// read while this climbs is a decoder problem one layer in, not a
+    /// propagation one.
+    pub hdlc_bad: u64,
+    /// Frames the Reed–Solomon layer refused and the frame check sequence then
+    /// accepted. Every frame, at the moment; the day it is not, the FEC has
+    /// started earning its place.
+    pub fec_bypassed: u64,
     /// Frames whose Reed–Solomon came out clean and whose frame check sequence
     /// then did not. The sharpest single signal that something above the FEC is
     /// wrong rather than the radio path.

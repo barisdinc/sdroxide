@@ -14,6 +14,18 @@
 //!
 //! Cross-checked against `szpajder/dumpvdl2`'s behaviour; no code is taken from
 //! it.
+//!
+//! # Verified against a recording
+//!
+//! Issue #265 contributed 24 seconds of 2.4 Msps baseband centred on
+//! 136.8135 MHz, and it is the only external evidence this decoder has. It
+//! settled three things the standard's text alone had left wrong or unproven:
+//! a D8PSK symbol's three bits come out **most significant first**; the data
+//! field is an ordinary **HDLC frame** — `0x7E` flags and bit stuffing — whose
+//! length in bits is what the transmission header states; and the
+//! Reed-Solomon parameters in [`rs`] fit nothing on the air, so that layer is
+//! advisory and the frame check sequence is what admits a frame. See
+//! `tests/real_burst.rs`, which carries two of those transmissions.
 
 pub mod acars;
 pub mod avlc;
@@ -22,6 +34,7 @@ pub mod channel;
 mod controller;
 pub mod demod;
 pub mod gate;
+pub mod hdlc;
 pub mod header;
 pub mod plan;
 pub mod rs;

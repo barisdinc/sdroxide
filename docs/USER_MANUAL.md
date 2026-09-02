@@ -4529,9 +4529,18 @@ in, and the first one that stops counting names the problem:
 | --- | --- |
 | no **bursts** | Nothing is rising above the noise. The aerial, or a receiver that is not looking here. |
 | bursts but no **sync** | Something is on these channels and it is not VDL2. |
-| sync but no frames, with **bad FCS** low | Real VDL2 arriving too damaged to repair — a weak signal or the wrong aerial. |
-| **bad FCS** climbing with frames | The error correction is working and something above it is not. That is SDRoxide's fault rather than the band's, and worth reporting. |
-| **RS fix** climbing | How many symbols the error correction is having to repair. A handful is healthy; a channel repairing several per frame is at the edge. |
+| sync but no frames, with **HDLC bad** climbing | The transmission header is being read and the frame inside it is not. That is SDRoxide's fault rather than the band's, and worth reporting. |
+| sync but no frames, with both low | Real VDL2 arriving too damaged to decode — a weak signal or the wrong aerial. |
+| **bad FCS** climbing with frames | Frames arriving damaged. A few among many is ordinary at the edge of coverage. |
+
+One thing not to read too much into: SDRoxide's Reed-Solomon parameters do not
+match what is actually on the air, so the error correction repairs nothing and
+every frame you see arrived intact and passed its own check sequence. That is
+why there is no "blocks repaired" counter to watch. It costs the marginal
+frames a stronger receiver would have rescued; it costs nothing in wrong ones,
+because the check sequence is what admits a frame either way. If you have a
+recording of a band SDRoxide decodes poorly, that is the thing most likely to
+fix it.
 
 #### Setup
 
@@ -4548,8 +4557,8 @@ in, and the first one that stops counting names the problem:
 
 #### What is decoded, and what is not
 
-**The link layer, in full.** Every AVLC frame that arrives is checked, repaired
-where the Reed-Solomon coding can, and shown with its addresses and type.
+**The link layer, in full.** Every AVLC frame that arrives is checked against
+its own frame check sequence and shown with its addresses and type.
 
 **ACARS, in full.** The registration, flight identification, label, block,
 sequence number and text. This is where nearly all the readable content is.
@@ -4586,8 +4595,14 @@ station is given a carrier offset, a symbol clock error and a fractional arrival
 time of its own, because a transmitter that is exactly right is the one case
 that proves nothing.
 
-It proves the whole chain works. It does not prove the decoder works on the air,
-because the transmitter and the receiver were written by the same hand.
+It proves the whole chain works. It does not prove the decoder works on the
+air, because the transmitter and the receiver were written by the same hand —
+and for most of 2026 they were wrong together, agreeing about the bit order
+inside a symbol and about the frame's HDLC wrapper while decoding nothing real
+at all (issue #265). What settled it was a listener's recording, and two of the
+transmissions from it now sit in the test suite. If you have an aerial that
+hears VDL2 well, a minute of `--record-iq` is the single most useful thing you
+can contribute.
 
 #### If nothing is decoding
 
