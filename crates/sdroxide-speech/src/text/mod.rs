@@ -123,6 +123,7 @@ impl<'a> Speaker<'a> {
             Mode::Digu => "digital upper",
             Mode::Digl => "digital lower",
             Mode::Dsb => "D S B",
+            Mode::Isb => "I S B",
             Mode::Spec => "spectrum",
             Mode::Ft8 => "F T eight",
             Mode::Ft4 => "F T four",

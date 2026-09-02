@@ -1066,7 +1066,14 @@ use sdroxide_types::{
 /// existed, because JSON is self-describing; postcard is not, so it rescues
 /// nothing on the wire. The handshake's equality test is what stops that
 /// before a frame is exchanged.
-pub const PROTO_VERSION: u16 = 118;
+///
+/// v119: independent sideband — [`sdroxide_types::Mode::Isb`], appended to the
+/// end of `Mode` so no existing discriminant moves. Nothing in the message set
+/// changed shape, and that is exactly why the bump is needed: postcard decodes
+/// a discriminant it has never heard of as an error, so a v118 client handed a
+/// `RadioState` whose mode is 36 fails the whole frame rather than one field.
+/// The handshake refuses the pairing instead (issue #280).
+pub const PROTO_VERSION: u16 = 119;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

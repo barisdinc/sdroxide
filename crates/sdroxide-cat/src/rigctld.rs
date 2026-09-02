@@ -58,6 +58,9 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Cw => "CW",
         Mode::Am | Mode::Sam | Mode::Drm => "AM",
         Mode::Dsb => "DSB",
+        // Hamlib has no independent-sideband mode; AM is what a rig asked to
+        // pass both sidebands would be put into anyway.
+        Mode::Isb => "AM",
         Mode::Nfm => "FM",
         // No rig has an ADS-B mode and none ever will: the dial is at
         // 1090 MHz. Grouped with FM so nothing downstream has to special-case

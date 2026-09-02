@@ -124,6 +124,10 @@ pub fn to_hamlib_mode(m: Mode) -> &'static str {
         Mode::Digu => "PKTUSB",
         Mode::Digl => "PKTLSB",
         Mode::Dsb => "DSB",
+        // Hamlib has no independent-sideband mode. AM is the nearest true
+        // statement about the signal — carrier on the dial, both sidebands
+        // wanted — and it is the setting an outboard decoder would want.
+        Mode::Isb => "AM",
         Mode::Spec => "SPEC",
         Mode::Rtty => "RTTY",
         Mode::Ft8

@@ -42,7 +42,8 @@ or connects to a remote sdroxide server.
   selectable waterfall colour schemes (including an Icom-style palette).
 - **Dual VFO (A/B)** with split operation, VFO swap/copy, and an independently
   tunable sub-receiver with its own mode and filter.
-- **All the common modes:** LSB, USB, CW, AM, SAM, NFM, WFM, DRM, DIGU, DIGL, DSB, a
+- **All the common modes:** LSB, USB, CW, AM, SAM, NFM, WFM, DRM, DIGU, DIGL, DSB,
+  **ISB** (independent sideband — two services on one carrier, one in each ear), a
   spectrum-only mode (SPEC), the automatic digital modes **FT8**, **FT4** and
   **FT2**, the
   keyboard modes **PSK31**, **RTTY**, **Olivia**, **THOR** and **FSQ**, the image
@@ -297,7 +298,7 @@ popup with three rows:
   [§2.15](#215-band-conditions). In a digital mode, the bands where that mode
   has a standard calling frequency carry a cyan underline; see
   [§3.1](#31-general-considerations).
-- **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB SPEC`.
+- **MODE:** `LSB USB CW AM SAM NFM WFM DRM DIGU DIGL DSB ISB SPEC`.
 - **DIGITAL:** `FT8 FT4 PSK RTTY RTTY-FM OLIVIA THOR FSQ HELL SSTV SSTV-FM NAVTEX RIFP RFPAINT RADE` (see
   [Digital modes](#3-digital-modes)).
 
@@ -657,7 +658,7 @@ panadapter: two vertical grip lines mark the filter's low and high edges (they
 brighten to orange when you can grab them). Drag an edge to widen or narrow the
 passband. The grips work on both the spectrum and the waterfall.
 
-In **AM, SAM, DSB and the FM modes** the two edges move together: the passband
+In **AM, SAM, DSB, ISB and the FM modes** the two edges move together: the passband
 is a channel carved out about the carrier, both halves carry the same signal,
 and narrowing one alone would throw away half the audio while letting the
 interference on the other side straight through. So whichever grip you take
@@ -665,6 +666,20 @@ sets the half width and the other edge mirrors it — which is also why every
 filter preset these modes offer is symmetric. In SSB, CW and the data modes the
 passband sits to one side of the carrier by definition and each edge stays
 yours to place on its own.
+
+**ISB** is the odd one in that list. Its two edges move together like AM's, but
+what they set is the width of *each* sideband rather than of one shared
+channel — the preset marked 2.7k gives you 2.7 kHz on each side, so 5.4 kHz of
+spectrum. The two sidebands are separate transmissions and are demodulated
+separately: the **lower goes to your left ear and the upper to your right**, the
+way they sit on the waterfall, and the **ST** indicator lights to say the two
+ears really are carrying different things. A residual carrier on the dial is
+notched out rather than let through as a hum in both. Noise reduction and the
+auto-notch turn ISB back into mono for as long as they are on, for the same
+reason they do to WFM stereo: they run on one channel of the pair and the delay
+would collapse the other into a comb filter. ISB is receive only — transmitting
+it needs two modulators feeding one linear amplifier, which is a station rather
+than a setting.
 
 The volume, AGC mode and manual gain, the squelch, the noise reduction and the
 decimation are remembered in `session.json` and restored the next time you
@@ -12009,7 +12024,7 @@ sends them.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left, or 14,200,000 on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC or a moderate value). |
-| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B, VDL2). Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, ISB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B, VDL2). Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (LNAH, TX/RX — `--probe` lists them). Default: the port the last session was left on, and failing that whatever the driver selects. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (BAND1, BAND2). |
 | `--server` | Run as a server (web client + WebSocket streaming backend). |
@@ -13339,6 +13354,7 @@ using. Bind them under **Speech** on the Controls tab:
 | NFM / WFM | Narrow / wide FM. WFM decodes broadcast stereo and RDS/RBDS automatically. |
 | DIGU / DIGL | Data over USB / LSB (general digital). |
 | DSB | Double sideband. |
+| ISB | Independent sideband: two *different* signals on one carrier, one on each sideband — a broadcaster's two language services, or voice on one side and a teleprinter on the other. The lower sideband goes to your left ear and the upper to your right, so both can be listened to at once (or one recorded while the other is read). Receive only. |
 | DRM | Digital Radio Mondiale — digital shortwave broadcasting. Receive only; decodes the programme audio, the station label and its scrolling text. See [2.19](#219-drm-digital-radio-mondiale). |
 | SPEC | Spectrum only (no demodulation). |
 | FT8 / FT4 | Automatic digital modes with decoding, QSO sequencing, and logging. |

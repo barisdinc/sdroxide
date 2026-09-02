@@ -718,3 +718,68 @@ fn wfm_needs_the_front_end_dc_blocker() {
          {offset_p:.3} offset, {blocked_p:.3} blocked"
     );
 }
+
+/// Independent sideband: two different signals on one carrier, and the whole
+/// point is that each ends up in its own ear (issue #280).
+///
+/// The test signal is what an ISB transmission is — a tone 1000 Hz *below* the
+/// carrier and a different one 1800 Hz above it, both at once. A USB or LSB
+/// demodulator produces one of them; this one has to produce both, in the
+/// right ears, with the wrong sideband well down in each.
+#[test]
+fn isb_puts_each_sideband_in_its_own_ear() {
+    let rate = channel_target(Mode::Isb);
+    let n = 24_000;
+    // Two independent services on one carrier.
+    let lower = tone(rate, -1000.0, 0.4, n);
+    let upper = tone(rate, 1800.0, 0.4, n);
+    let iq: Vec<C32> = lower.iter().zip(&upper).map(|(a, b)| a + b).collect();
+
+    let mut demod = make_demod(Mode::Isb, rate).expect("ISB has a demodulator");
+    let mut mid = Vec::new();
+    let mut side = Vec::new();
+    demod.process(&iq, &mut mid);
+    assert!(demod.take_side(&mut side), "ISB is two channels, not one");
+    assert_eq!(mid.len(), side.len(), "the difference has to match the sum sample for sample");
+
+    // The matrix the engine applies at the speakers.
+    let left: Vec<f32> = mid.iter().zip(&side).map(|(m, s)| m + s).collect();
+    let right: Vec<f32> = mid.iter().zip(&side).map(|(m, s)| m - s).collect();
+    // Skip the filter's settling time.
+    let skip = 4000;
+    let (l, r) = (&left[skip..], &right[skip..]);
+
+    let l_lower = goertzel(l, 1000.0, rate);
+    let l_upper = goertzel(l, 1800.0, rate);
+    let r_lower = goertzel(r, 1000.0, rate);
+    let r_upper = goertzel(r, 1800.0, rate);
+
+    // Lower sideband on the left, upper on the right — the way they sit on the
+    // waterfall.
+    let sep_l = 10.0 * (l_lower / l_upper.max(1e-12)).log10();
+    let sep_r = 10.0 * (r_upper / r_lower.max(1e-12)).log10();
+    assert!(sep_l > 30.0, "the left ear should be the lower sideband, separation {sep_l:.1} dB");
+    assert!(sep_r > 30.0, "the right ear should be the upper sideband, separation {sep_r:.1} dB");
+    // And both are actually there — a channel of silence would pass the two
+    // ratios above on noise alone.
+    assert!(l_lower > 1e-3, "nothing in the left ear: {l_lower:e}");
+    assert!(r_upper > 1e-3, "nothing in the right ear: {r_upper:e}");
+}
+
+/// The residual carrier an ISB transmission still carries is not audio: it
+/// belongs to neither service and would sit as a hum in both ears.
+#[test]
+fn isb_keeps_clear_of_the_carrier() {
+    let rate = channel_target(Mode::Isb);
+    let n = 24_000;
+    // A carrier on the dial and nothing else.
+    let iq = tone(rate, 0.0, 0.5, n);
+    let mut demod = make_demod(Mode::Isb, rate).expect("ISB has a demodulator");
+    let mut mid = Vec::new();
+    let mut side = Vec::new();
+    demod.process(&iq, &mut mid);
+    demod.take_side(&mut side);
+    let left: Vec<f32> = mid.iter().zip(&side).map(|(m, s)| m + s).collect();
+    let peak = left[4000..].iter().fold(0.0f32, |a, b| a.max(b.abs()));
+    assert!(peak < 0.02, "the carrier reached the audio at {peak:.4}");
+}

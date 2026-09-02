@@ -204,6 +204,24 @@ pub enum Mode {
     /// listened to while it runs. Appended for the same reason as
     /// [`Mode::Hell`].
     Vdl2,
+    /// Independent sideband — two different signals on one carrier, the lower
+    /// sideband carrying one and the upper another.
+    ///
+    /// Still on the air: broadcasters send two language services on one
+    /// transmitter, and utility stations pair voice on one sideband with a
+    /// teleprinter on the other. Demodulating it as USB or LSB gets one of the
+    /// two and calls the other interference; there is no single audio signal to
+    /// produce, which is why this is a mode rather than a filter setting.
+    ///
+    /// Both sidebands are demodulated and handed to the *ears*: lower on the
+    /// left, upper on the right, the way they sit on the waterfall. That rides
+    /// the same mid/side path WFM stereo uses ([`crate::Mode::stereo_audio`]),
+    /// so nothing downstream needs to know there are two of them.
+    ///
+    /// Receive only. Independent-sideband transmit is a linear-amplifier
+    /// arrangement with two modulators, and no radio sdroxide drives has one.
+    /// Appended for the same reason as [`Mode::Hell`] (issue #280).
+    Isb,
 }
 
 /// The bands on which analog SSTV rides the lower sideband, as (low, high) Hz.
@@ -218,7 +236,7 @@ const SSTV_LSB_BANDS: [(f64, f64); 3] =
 impl Mode {
     /// Every mode, in the order they cycle and appear in the picker — which is
     /// deliberately *not* the enum's declaration order (see [`Mode::Hell`]).
-    pub const ALL: [Mode; 36] = [
+    pub const ALL: [Mode; 37] = [
         Mode::Lsb,
         Mode::Usb,
         Mode::Cw,
@@ -232,6 +250,7 @@ impl Mode {
         Mode::Digu,
         Mode::Digl,
         Mode::Dsb,
+        Mode::Isb,
         Mode::Spec,
         Mode::Ft8,
         Mode::Ft4,
@@ -557,7 +576,10 @@ impl Mode {
         // service belongs to coast stations, and an amateur transmitting on it
         // would be putting false safety information on a distress-adjacent
         // channel.
-        matches!(self, Mode::Wefax | Mode::Adsb | Mode::Navtex | Mode::Vdl2)
+        // ISB is receive-only by capability: transmitting it wants two
+        // modulators driving one linear amplifier, and no radio sdroxide
+        // drives is wired that way.
+        matches!(self, Mode::Wefax | Mode::Adsb | Mode::Navtex | Mode::Vdl2 | Mode::Isb)
     }
 
     /// True for Hellschreiber. Forks the digi panel to the scrolling raster UI:
@@ -627,6 +649,7 @@ impl Mode {
             Mode::Drm => "DRM",
             Mode::Adsb => "ADS-B",
             Mode::Vdl2 => "VDL2",
+            Mode::Isb => "ISB",
         }
     }
 
@@ -660,6 +683,10 @@ impl Mode {
             Mode::Digu => (200.0, 3200.0),
             Mode::Digl => (-3200.0, -200.0),
             Mode::Dsb => (-2850.0, 2850.0),
+            // Both sidebands, drawn as one passband: the edges are the outer
+            // ones, and the demodulator keeps its own gap either side of the
+            // carrier (see `IsbDemod`).
+            Mode::Isb => (-2850.0, 2850.0),
             Mode::Spec => (-5000.0, 5000.0),
             // FT8/FT4 occupy the whole USB audio passband (tones 0..~3500 Hz).
             // PSK/RTTY/Olivia/Thor/FSQ/Hell do the same (the modem filters
@@ -828,7 +855,10 @@ impl Mode {
             Mode::Cw => C::Cw,
             // DRM sits on the dial like AM does, and a receiver with an
             // I.F. output offers no separate DRM setting to differ from.
-            Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => C::Am,
+            // ISB joins them for the same reason DSB does: the carrier is on
+            // the dial and a rig with an I.F. output has no separate setting
+            // for it.
+            Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm | Mode::Isb => C::Am,
             // WFM is FM's carrier position too; a rig with an I.F. output has
             // no such mode, so nothing here is lost by grouping them.
             // ADS-B joins them for the same reason WFM does: no radio with an
@@ -952,6 +982,10 @@ impl Mode {
             Mode::Am
                 | Mode::Sam
                 | Mode::Dsb
+                // Both sidebands, always the same width: dragging one edge
+                // has to move the other, or one ear ends up wider than the
+                // other with nothing on screen saying so.
+                | Mode::Isb
                 | Mode::Nfm
                 | Mode::Wfm
                 | Mode::SstvFm
@@ -985,6 +1019,16 @@ impl Mode {
             Mode::Am | Mode::Sam => {
                 &[("6k", -3000.0, 3000.0), ("10k", -5000.0, 5000.0), ("16k", -8000.0, 8000.0)]
             }
+            // Both sidebands at once, so the label is the width of *each* one
+            // — an ISB channel described as "2.7 kHz per sideband" is 5.4 kHz
+            // of spectrum, and calling it 5.4k would read as half of what the
+            // operator gets in either ear.
+            Mode::Isb => &[
+                ("1.8k", -2000.0, 2000.0),
+                ("2.4k", -2600.0, 2600.0),
+                ("2.7k", -2850.0, 2850.0),
+                ("3.3k", -3400.0, 3400.0),
+            ],
             // VHF SSTV joins NFM rather than packet's wider pair: it is a voice
             // channel with a picture on it, and the deviation is a voice
             // channel's.
@@ -1515,6 +1559,7 @@ mod tests {
             (Mode::RttyFm, 33),
             (Mode::Navtex, 34),
             (Mode::Vdl2, 35),
+            (Mode::Isb, 36),
         ];
         for (mode, index) in pinned {
             assert_eq!(mode as u8, index, "{} moved", mode.label());
@@ -1559,7 +1604,7 @@ mod tests {
         // `Mode::ALL`'s length is checked by the array type; what needs
         // checking is that it is a permutation of the enum, with nothing
         // dropped and nothing listed twice.
-        let last = Mode::Vdl2 as u8;
+        let last = Mode::Isb as u8;
         for i in 0..=last {
             let present = Mode::ALL.iter().filter(|m| **m as u8 == i).count();
             assert_eq!(present, 1, "discriminant {i} appears {present} times in Mode::ALL");

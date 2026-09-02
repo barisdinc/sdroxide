@@ -58,6 +58,11 @@ pub fn make_modulator(mode: Mode, rate: f64, passband: (f32, f32)) -> Option<Box
         | Mode::PacketHf
         | Mode::Rade => Some(Box::new(SsbMod::new(rate, lo, hi))),
         Mode::Am | Mode::Sam | Mode::Dsb => Some(Box::new(AmMod::new(rate))),
+        // ISB is receive only: transmitting it wants two modulators feeding
+        // one linear amplifier, which is a station, not a setting. No
+        // modulator means the transmit gate refuses the over rather than
+        // putting something else on the air under an ISB label.
+        Mode::Isb => None,
         // VHF SSTV modulates the carrier through the voice FM path — see the
         // demodulator, which is its other half: the picture goes into an FM
         // transmitter exactly as speech would.

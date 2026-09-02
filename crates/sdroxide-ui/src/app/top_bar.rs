@@ -5426,6 +5426,7 @@ fn band_mode_menu(
             Mode::Digu,
             Mode::Digl,
             Mode::Dsb,
+            Mode::Isb,
             Mode::Spec,
         ] {
             if crate::chrome::chip(ui, mode == m, m.label()).clicked() {

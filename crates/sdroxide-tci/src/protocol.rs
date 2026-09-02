@@ -326,6 +326,9 @@ pub fn mode_to_tci(mode: Mode) -> &'static str {
         | Mode::Rade => "digu",
         Mode::Digl => "digl",
         Mode::Dsb => "dsb",
+        // TCI has no independent-sideband modulation; both sidebands is what
+        // DSB asks the radio for, which is the filter this wants.
+        Mode::Isb => "dsb",
         Mode::Spec => "usb",
     }
 }

@@ -574,7 +574,13 @@ fn dfnr_available(slot: &mut Option<Box<DeepFilterNr>>, failed: &mut bool) -> bo
 /// into a comb filter with a randomly wandering image. They are HF speech tools
 /// that buy nothing on a broadcast signal, so stereo simply yields to them.
 fn stereo_allowed(rx: &RxState) -> bool {
-    rx.wfm_stereo && !rx.auto_notch && !rx.noise_reduction.is_on()
+    // ISB is not a decode and has no pilot to lose: the two sidebands carry
+    // two different transmissions and putting one in each ear *is* the mode,
+    // so the WFM stereo switch does not gate it. The latency rule above still
+    // does — with NR or the notch running the matrix would comb, and half of
+    // an ISB pair through a comb filter is worse than the two summed.
+    let wanted = rx.wfm_stereo || rx.mode == Mode::Isb;
+    wanted && !rx.auto_notch && !rx.noise_reduction.is_on()
 }
 
 /// One receiver: DDC → demod → AGC → volume → resample to the device rate.
@@ -13959,7 +13965,7 @@ fn rig_mode_class(m: Mode) -> u8 {
         | Mode::Spec => 1,
         // DRM sits on the dial in a channel about as wide as AM's, and a
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
-        Mode::Am | Mode::Sam | Mode::Dsb | Mode::Drm => 2,
+        Mode::Am | Mode::Sam | Mode::Dsb | Mode::Isb | Mode::Drm => 2,
         Mode::Cw => 3,
         // RIFP, VHF packet, APRS, VHF SSTV and VHF RTTY are data on an FM
         // carrier, so a rig reporting plain FM is still where we left it.

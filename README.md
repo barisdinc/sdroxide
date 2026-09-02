@@ -57,7 +57,8 @@ One binary, three ways to run it:
   switched.
 - **Modes** — SSB (USB/LSB), CW, AM, SAM, NFM (with **CTCSS/DCS** decoding and
   tone squelch), WFM (with broadcast
-  pilot-tone **stereo** and **RDS/RBDS**), DSB, DIGU/DIGL, a
+  pilot-tone **stereo** and **RDS/RBDS**), DSB, **ISB** (independent sideband —
+  the two sidebands are two different transmissions, one to each ear), DIGU/DIGL, a
   spectrum-only mode, **FT8/FT4/FT2**, **JS8** (all four speeds, with directed
   messaging, heartbeats and multi-frame free text), the keyboard modes
   **PSK31**, **RTTY**,
@@ -1470,7 +1471,7 @@ way.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left; `14200000` on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC / moderate). |
-| `--mode <MODE>` | Initial mode: `USB LSB CW AM SAM NFM WFM DIGU DIGL DSB SPEC FT8 FT4 FT2 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP WEFAX RFPAINT RADE ADS-B VDL2`. Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode: `USB LSB CW AM SAM NFM WFM DIGU DIGL DSB ISB SPEC FT8 FT4 FT2 PSK RTTY OLIVIA THOR FSQ HELL SSTV RIFP WEFAX RFPAINT RADE ADS-B VDL2`. Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (`LNAH`, `TX/RX`; see `--probe`). Default: the port the last session was left on. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (`BAND1`, `BAND2`). |
 | `--server` | Run as a server: HTTP web client + WebSocket streaming backend. |
