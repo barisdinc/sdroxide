@@ -117,7 +117,9 @@ fn devices_locked(api: &ffi::Api) -> Result<Vec<ffi::DeviceT>> {
     let err = unsafe { (api.get_devices)(devs.as_mut_ptr(), &mut n, ffi::MAX_DEVICES as u32) };
     unsafe { (api.unlock_device_api)() };
     if err != ffi::ERR_SUCCESS {
-        return Err(Error::from_status(api, "GetDevices", err));
+        // `sdrplay_api_Fail` is all the library says, and on Linux the usual
+        // reason is one it cannot see: the kernel has the receiver.
+        return Err(Error::from_status(api, "GetDevices", err).with_host_hint());
     }
     Ok(devs[..(n as usize).min(ffi::MAX_DEVICES)]
         .iter()
@@ -195,7 +197,7 @@ pub(crate) fn select(
         let mut n: u32 = 0;
         let err = unsafe { (api.get_devices)(devs.as_mut_ptr(), &mut n, ffi::MAX_DEVICES as u32) };
         if err != ffi::ERR_SUCCESS {
-            return Err(Error::from_status(&api, "GetDevices", err));
+            return Err(Error::from_status(&api, "GetDevices", err).with_host_hint());
         }
         let want = serial.trim();
         let mut dev = *devs[..(n as usize).min(ffi::MAX_DEVICES)]
@@ -213,6 +215,7 @@ pub(crate) fn select(
                          receiver in Settings → Radio"
                     )
                 })
+                .with_host_hint()
             })?;
 
         let model = SdrPlayModel::from_hw_ver(dev.hw_ver);

@@ -29,6 +29,7 @@ mod device;
 mod error;
 mod ffi;
 mod handle;
+mod linux;
 mod pair;
 mod stream;
 

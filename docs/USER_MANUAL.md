@@ -7238,6 +7238,25 @@ at runtime, so every build has this backend, and `sdroxide --probe` tells you
 which piece is missing when the device list stays empty: the library, the
 service, or the device.
 
+**On Linux, an RSP1 needs one more thing.** The original RSP1 is a Mirics
+MSi2500 and enumerates as USB `1df7:2500`, which is exactly what the kernel's
+own in-tree `msi2500` driver binds to — so on a stock Ubuntu (or Mint, or
+Debian) the kernel claims the receiver before the SDRplay service ever sees it,
+and the service reports no device however plainly the RSP is plugged in. The
+RSPs after it use other product ids and are not affected, which is why this is
+an RSP1 story, and why the same receiver works on a Mac and not here. SDR Oxide
+looks for this and names it in the error, and the fix is to keep those drivers
+out of the way — put
+
+```
+blacklist sdr_msi3101
+blacklist msi001
+blacklist msi2500
+```
+
+in `/etc/modprobe.d/blacklist.conf`, run `sudo rmmod msi001 msi2500`, then
+unplug the receiver and plug it back in.
+
 - **Receiver** — which RSP to open, by the serial the API reports. **Rescan**
   asks the service for its device list; nothing is opened, so it is safe while
   receiving.
