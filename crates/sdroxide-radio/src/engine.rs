@@ -6591,7 +6591,18 @@ impl Engine {
                 self.stop_scan_for_operator();
                 self.change_band(band);
             }
-            SetMode { rx, mode } => self.set_rx_mode(rx, mode),
+            SetMode { rx, mode } => {
+                // Decided before the mode is applied, because knowing whether
+                // this is a change at all means asking what is being left, and
+                // applied after it, because the dial push is mode-aware: the
+                // sidetone offset a self-keying rig sits on, the sideband the
+                // audio-mode window hangs off, the digital lane's own centre.
+                let convention = self.conventional_dial_for(rx, mode);
+                self.set_rx_mode(rx, mode);
+                if let Some(hz) = convention {
+                    self.tune_to_conventional_dial(hz);
+                }
+            }
             SetFilter { rx, lo, hi } => {
                 let (lo, hi) = (lo.min(hi), lo.max(hi));
                 let r = &mut self.state.rx[rx.index()];
@@ -8617,7 +8628,12 @@ impl Engine {
                 self.state.sample_rate / 1e6
             ));
         }
-        if !self.caps.can_rx_hz(sdroxide_types::ADSB_FREQ_HZ) {
+        // `may_rx_hz`, not `can_rx_hz`: publishing a tuning range is optional
+        // and plenty of drivers never do, so an empty list means "this driver
+        // didn't say" rather than "this radio tunes nowhere". Reading silence as
+        // a refusal here told an SXceiver — which publishes none — that it
+        // cannot reach 1090 MHz, and stood the lane down on a receiver that can.
+        if !self.caps.may_rx_hz(sdroxide_types::ADSB_FREQ_HZ) {
             return Some("this receiver does not tune to 1090 MHz".to_string());
         }
         let rate = Ddc::rate_for(self.state.sample_rate, self.adsb_target_rate_hz());
@@ -8844,7 +8860,8 @@ impl Engine {
                 self.state.sample_rate / 1e3
             ));
         }
-        if !self.caps.can_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ) {
+        // Silence is not a refusal; see the same check in `adsb_unavailable`.
+        if !self.caps.may_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ) {
             return Some("this receiver does not tune to 136.8 MHz".to_string());
         }
         let rate = Ddc::rate_for(self.state.sample_rate, self.vdl2_target_rate_hz());
@@ -10358,6 +10375,88 @@ impl Engine {
         }
     }
 
+    /// The conventional-dial rule for the slot-based modes: selecting FT8, FT4,
+    /// FT2, JS8 or WSPR asks for the frequency that band's convention agrees
+    /// on. `None` when the dial is to be left exactly where it is.
+    ///
+    /// These modes are worked on one dial per band and decoded in lockstep with
+    /// everyone else on it. A receiver a few kilohertz off is not off-centre,
+    /// it is deaf — and each of them keeps its *own* dial (20 m is 14.074 for
+    /// FT8, 14.080 for FT4, 14.084 for FT2, 14.078 for JS8 and 14.095600 for
+    /// WSPR), so arriving from a neighbouring mode is a move too. Selecting the
+    /// mode is therefore worth acting on, exactly as APRS, ADS-B and VDL2
+    /// already are in [`Self::set_rx_mode`].
+    ///
+    /// Deliberately *not* part of `set_rx_mode`. A band-stack recall, a memory
+    /// channel and a scanner step each carry a dial of their own and set the
+    /// mode as part of applying it: a memory stored on an off-plan FT8 net has
+    /// to come back on the frequency it was stored with, not on the one the
+    /// convention would have picked. This is asked on the `SetMode` command
+    /// alone — the mode buttons, the keyboard shortcut, a remote client,
+    /// rigctld — and on nothing else.
+    ///
+    /// Four guards beyond that:
+    ///
+    /// * the main receiver only, because the sub receiver does not own the dial;
+    /// * a real mode change, so re-selecting the mode you are already in is not
+    ///   a way to lose the frequency you tuned;
+    /// * a dial not already on one of *this* mode's conventional frequencies,
+    ///   so an operator sitting in FT8's DXpedition window keeps it, and so does
+    ///   anyone who moves off frequency and back within the mode;
+    /// * a band this mode has a convention in at all. Selecting FT8 on 11 m or
+    ///   inside a broadcast band leaves the dial where it is: the rule moves a
+    ///   receiver to the right spot in the band it is already on, it does not
+    ///   decide which band the operator wanted.
+    fn conventional_dial_for(&self, rx: RxId, mode: Mode) -> Option<f64> {
+        if rx != RxId::Main || self.state.rx[0].mode == mode {
+            return None;
+        }
+        // `is_slotted` is FT8/FT4/FT2/JS8. WSPR is slotted too and is kept out
+        // of that predicate for reasons of its own (see its docs), but it is a
+        // one-frequency-per-band mode by exactly the same argument.
+        if !(mode.is_slotted() || mode.is_wspr()) {
+            return None;
+        }
+        let dial = self.state.active_freq_hz();
+        if sdroxide_types::digi_channels(mode).iter().any(|c| (c.dial_hz - dial).abs() < 1.0) {
+            return None;
+        }
+        let here = sdroxide_types::digi_channels_in(mode, Band::containing(dial));
+        // The plain calling frequency, which is the one with no note — the same
+        // choice the band buttons already make. Not simply the lowest: FT8's
+        // DXpedition dial is *below* the calling one on five bands, and dropping
+        // an operator into a Fox/Hound window would be a trap.
+        let hz = here.iter().find(|c| c.note.is_empty()).or_else(|| here.first())?.dial_hz;
+        // `may_rx_hz`, not `can_rx_hz`: a driver that publishes no tuning range
+        // has said nothing about where it tunes, not "nowhere".
+        self.caps.may_rx_hz(hz).then_some(hz)
+    }
+
+    /// Put the active VFO on `hz` — the frequency [`Self::conventional_dial_for`]
+    /// asked for, applied once the mode it belongs to is in place.
+    ///
+    /// Said out loud rather than done silently: along with the APRS, ADS-B and
+    /// VDL2 rules this is one of the few times a mode selection moves the dial,
+    /// and an operator who did not expect it should be able to find out why.
+    fn tune_to_conventional_dial(&mut self, hz: f64) {
+        info!(
+            from = self.state.active_freq_hz(),
+            to = hz,
+            mode = self.state.rx[0].mode.label(),
+            "the mode has one agreed dial in this band; tuning to it"
+        );
+        match self.state.active_vfo {
+            Vfo::A => self.state.vfo_a_hz = hz,
+            Vfo::B => self.state.vfo_b_hz = hz,
+        }
+        self.state.band = Band::containing(hz);
+        // `follow_dial` moves an IQ front end's LO if the new dial left the
+        // span; `update_tuning` is what carries a dial to a CAT rig, which
+        // `follow_dial` deliberately does not do.
+        self.follow_dial();
+        self.update_tuning();
+    }
+
     fn set_rx_mode(&mut self, rx: RxId, mode: Mode) {
         // APRS is a channel, not a band, and which channel is a property of
         // the operator's region: 144.800 in Region 1, 144.390 in the Americas,
@@ -10382,6 +10481,11 @@ impl Engine {
             }
             self.state.band = Band::containing(hz);
             self.follow_dial();
+            // `follow_dial` moves an IQ front end's LO and stops there; a
+            // transceiver on a sound card is only ever told its dial by
+            // `update_tuning`, and without this the state moved to the channel
+            // while the radio stayed on the frequency it was already on.
+            self.update_tuning();
         }
         // ADS-B is a channel too, and a far more absolute one: there is exactly
         // one worldwide, the receiver has to be on it, and nothing else can be
@@ -10394,7 +10498,7 @@ impl Engine {
         if rx == RxId::Main
             && mode.is_adsb()
             && !self.state.rx[0].mode.is_adsb()
-            && self.caps.can_rx_hz(sdroxide_types::ADSB_FREQ_HZ)
+            && self.caps.may_rx_hz(sdroxide_types::ADSB_FREQ_HZ)
             && !sdroxide_adsb::window_covers(self.state.center_hz, self.state.sample_rate)
         {
             let hz = sdroxide_types::ADSB_FREQ_HZ;
@@ -10404,6 +10508,8 @@ impl Engine {
             }
             self.state.band = Band::containing(hz);
             self.follow_dial();
+            // See the APRS block above for why `follow_dial` is not enough.
+            self.update_tuning();
         }
         // VDL2 is the same argument with one difference: the channels are a
         // group rather than a point, so "already inside the window" is asked of
@@ -10412,7 +10518,7 @@ impl Engine {
         if rx == RxId::Main
             && mode.is_vdl2()
             && !self.state.rx[0].mode.is_vdl2()
-            && self.caps.can_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ)
+            && self.caps.may_rx_hz(sdroxide_types::VDL2_PLAN_CENTER_HZ)
             && !sdroxide_vdl2::window_covers(self.state.center_hz, self.state.sample_rate)
         {
             let hz = sdroxide_types::VDL2_PLAN_CENTER_HZ;
@@ -10422,6 +10528,8 @@ impl Engine {
             }
             self.state.band = Band::containing(hz);
             self.follow_dial();
+            // See the APRS block above for why `follow_dial` is not enough.
+            self.update_tuning();
         }
         // Changing modes under a running keyer message would leave it playing
         // into a transmit chain that has just been rebuilt (or into a digital

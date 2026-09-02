@@ -2567,6 +2567,36 @@ FM for VHF packet, APRS and RIFP, where the same control is the deviation
 instead. All of it lives in `digi.json`
 ([13](#13-configuration-files)).
 
+#### Choosing a slotted mode tunes the radio
+
+FT8, FT4, FT2, JS8 and WSPR are worked on **one dial frequency per band**, in
+lockstep with everyone else on it — a receiver a few kilohertz off is not
+off-centre, it is deaf — and each of them keeps its own. On 20 m that is 14.074,
+14.080, 14.084, 14.078 and 14.095600 respectively, so even arriving from the
+mode next door is a move. Picking one of them from the DIGITAL row therefore
+tunes the dial to that band's agreed frequency, the same way APRS, ADS-B and
+VDL2 already do ([3.12](#312-aprs), [3.13](#313-ads-b-aircraft-on-1090-mhz),
+[3.15](#315-vdl2-what-the-aircraft-are-saying)).
+
+It moves the dial only when it has to, and only inside the band you are already
+on:
+
+- **already on one of that mode's own frequencies?** Left alone. The DXpedition
+  (Fox/Hound) window you deliberately tuned survives the mode change, and so
+  does any move you make once you are in the mode.
+- **the band has no convention for the mode?** Left alone — 60 m for FT8, or
+  anywhere off the amateur bands. The rule puts you on the right spot in the
+  band you are on; it does not decide which band you wanted. Press a band button
+  first.
+- **recalling a memory or a band-stack entry?** Left alone. Those carry a
+  frequency of their own and it wins, so a memory stored on an off-plan FT8 net
+  comes back on the frequency you stored it with.
+
+Every other mode leaves the dial exactly where you put it. PSK31, RTTY, Olivia,
+THOR, SSTV and the rest are worked across a sub-band rather than on one spot, so
+a frequency you chose inside it is a frequency you meant. The button below is
+how those reach a convention — by asking.
+
 #### The agreed frequencies for a mode
 
 Every mode with a convention of its own carries a **⇵** button in its operating
@@ -2613,6 +2643,11 @@ not stop you.
 sequencing, a world map, a transcript, and automatic logging. Choose one from
 the DIGITAL row ([3.1](#31-general-considerations)) and the operating panel
 appears in the lower part of the window.
+
+Choosing one also puts the **dial** on that band's agreed frequency — 14.074,
+14.080 and 14.084 on 20 m — because these are worked on one spot per band and a
+receiver anywhere else decodes nothing. When it does that and when it leaves
+your dial alone is in [3.1](#31-general-considerations).
 
 The three are the same protocol at three speeds — same message format, same
 error-correcting code, same panel, same logbook. Only the clock and the
@@ -3645,7 +3680,9 @@ tones in the same 79-symbol frame — but carries a conversation instead of a
 contest exchange: free text, questions you can ask another station, and a
 periodic "I am here" heartbeat. Because it is slotted like FT8 it decodes far
 below the noise floor, and because it is a conversation it is slow. A sentence
-takes about a minute. That is the trade.
+takes about a minute. That is the trade. Selecting it puts the dial on the
+band's JS8 frequency — 14.078 on 20 m, and the traffic in the 3 kHz above it
+([3.1](#31-general-considerations)).
 
 **Speeds.** Four of them, on buttons in the panel header:
 
@@ -3826,8 +3863,9 @@ nothing else, sent in a two-minute slot. It decodes about ten decibels below
 FT8 — well under the noise — and what comes out of it is a measurement of a
 path, not a message anybody sent you.
 
-The dial goes to the band's WSPR frequency (14.095 600 MHz on 20 m, and so on);
-every transmission in the world sits in the 200 Hz window 1400–1600 Hz above it.
+Selecting the mode puts the dial on the band's WSPR frequency (14.095 600 MHz on
+20 m, and so on — [3.1](#31-general-considerations)); every transmission in the
+world sits in the 200 Hz window 1400–1600 Hz above it.
 The receiver's passband is narrowed to that window on purpose: with signals this
 weak, letting the QRSS beacons just below it work the AGC would cost you
 decodes.
