@@ -286,6 +286,21 @@ impl DeviceCaps {
         self.freq_ranges_rx.is_empty() || self.can_rx_hz(hz)
     }
 
+    /// Whether any part of `lo..=hi` is receivable — inside a published range,
+    /// or anywhere at all on a device that publishes none.
+    ///
+    /// The band-button rule (issue #272). Asking whether the band's *edges* are
+    /// reachable is not the same question and gets a band wrong whenever the
+    /// radio reaches into it without reaching either end of it: a receiver
+    /// published as 50.1–51 MHz covers most of 6 m and answers "no" to both
+    /// 50.000 and 52.000. What matters for offering a band is whether there is
+    /// anything in it to tune to.
+    pub fn may_rx_span(&self, lo: f64, hi: f64) -> bool {
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        self.freq_ranges_rx.is_empty()
+            || self.freq_ranges_rx.iter().any(|&(a, b)| b >= lo && a <= hi)
+    }
+
     /// Whether transmitting here is permitted, by the same rule as
     /// [`Self::may_rx_hz`]: a driver that publishes no transmit range is taken
     /// at its word rather than silenced.
@@ -319,6 +334,35 @@ mod tests {
             assert!(!silent.can_rx_hz(hz));
             assert!(!silent.can_tx_hz(hz));
         }
+    }
+
+    /// A band is offered when the radio reaches *into* it, which is not the
+    /// same question as whether either of its edges is reachable — issue #272.
+    #[test]
+    fn a_band_is_reachable_when_it_overlaps_the_range() {
+        let (m6_lo, m6_hi) = (50_000_000.0, 52_000_000.0);
+        // Well inside the band and touching neither edge: both edge tests say
+        // no, and the radio plainly has the band.
+        let sliver = DeviceCaps {
+            rx_channels: 1,
+            freq_ranges_rx: vec![(50_100_000.0, 51_000_000.0)],
+            ..Default::default()
+        };
+        assert!(!sliver.may_rx_hz(m6_lo) && !sliver.may_rx_hz(m6_hi), "neither edge");
+        assert!(sliver.may_rx_span(m6_lo, m6_hi), "but the band is there");
+
+        // An HF-only receive range, which is the fault as reported: 6 m really
+        // is out of reach and the button really should be dead.
+        let hf = DeviceCaps {
+            rx_channels: 1,
+            freq_ranges_rx: vec![(0.0, 30_000_000.0)],
+            ..Default::default()
+        };
+        assert!(!hf.may_rx_span(m6_lo, m6_hi));
+        assert!(hf.may_rx_span(14_000_000.0, 14_350_000.0), "20 m still works");
+
+        // Silence is still "the driver didn't say", here as everywhere.
+        assert!(DeviceCaps::default().may_rx_span(m6_lo, m6_hi));
     }
 
     /// A device that does publish its ranges is held to them.

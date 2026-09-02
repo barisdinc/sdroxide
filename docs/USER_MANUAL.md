@@ -5622,6 +5622,13 @@ and `144.0-144.035` are both fine. An entry that doesn't parse is named in red
 under the box, and the ranges take effect on **Apply / reconnect** like the
 offset.
 
+A band that falls entirely outside the receive range in force gets a greyed-out
+button in the band/mode menu; hover it and it names the range and says whether
+that range came from this box or from the device, which is the difference
+between something you can widen and something you cannot. A band the radio
+reaches only *part* of keeps its button — a receiver that covers 50.1–51 MHz has
+6 m, whatever its edges say.
+
 Leave both empty — the default — and sdroxide uses whatever the device says
 about itself. There are two reasons to fill them in:
 

@@ -2253,9 +2253,10 @@ impl SdroxideApp {
         // and it opens on every layout, so it is the one that has to be held
         // inside the screen in both directions rather than hang off it.
         let (state, caps) = (&self.state, &self.caps);
+        let stated = self.radio_cfg.as_ref().is_some_and(|c| !c.freq_ranges_rx.is_empty());
         let (conditions, daylight) = (self.band_conditions.as_ref(), self.daylight);
         crate::chrome::fading_menu_popup(ui, &btn, &mut self.mode_popup_since, |ui| {
-            band_mode_menu(ui, mode, state, caps.as_ref(), conditions, daylight, cmds);
+            band_mode_menu(ui, mode, state, caps.as_ref(), stated, conditions, daylight, cmds);
         });
     }
 
@@ -5276,6 +5277,32 @@ fn system_rows_w(ui: &egui::Ui) -> f32 {
         + 2.0 * crate::chrome::MODULE_MARGIN_X
 }
 
+/// Why a band chip is greyed out, in the operator's terms.
+///
+/// The answer is always the same shape — the band is outside what this radio
+/// receives — but the *remedy* is not: a range typed on the Radio page is one
+/// the operator can widen or clear, while one the device published is a fact
+/// about the hardware. Issue #272 was the version of this with no message at
+/// all, where a stale receive range left over from another interface greyed out
+/// the one band above HF a transceiver had.
+fn disabled_band_reason(band: Band, caps: Option<&DeviceCaps>, stated: bool) -> String {
+    let ranges = caps
+        .map(|c| sdroxide_types::format_freq_ranges(&c.freq_ranges_rx))
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "nothing".to_string());
+    format!(
+        "{} is outside what this radio receives ({ranges} MHz).\n\n{}",
+        band.label(),
+        if stated {
+            "That range was typed in Settings \u{25b8} Radio \u{25b8} RX range, not reported by \
+             the radio. Widen it, or empty the box to use whatever the device says about itself."
+        } else {
+            "That is what the device reports about itself. If the radio does cover this band, \
+             state its real range in Settings \u{25b8} Radio \u{25b8} RX range."
+        }
+    )
+}
+
 /// The band + mode + digital chip rows: the body of the band/mode popup.
 ///
 /// A free function taking the state it draws from, rather than a method, so a
@@ -5286,6 +5313,10 @@ fn band_mode_menu(
     mode: Mode,
     state: &RadioState,
     caps: Option<&DeviceCaps>,
+    // Whether the receive range in force was typed on the Radio page rather
+    // than published by the device — the two want different advice when a band
+    // turns out to be unreachable, and only the caller knows which it is.
+    ranges_stated: bool,
     // Passed in rather than read off the app, so the layout test above can
     // still build this menu without one. `None` is the normal state until the
     // solar window has been opened once, and colours nothing.
@@ -5322,12 +5353,13 @@ fn band_mode_menu(
                 None => None,
             };
             // A radio that publishes no tuning range keeps every band button:
-            // `may_rx_hz` reads an empty range list as "the driver didn't say",
-            // and greying out the whole bar would be a worse guess than
-            // offering a band the radio turns out not to reach.
-            let enabled = caps.is_none_or(|c| {
-                b.edges().is_none_or(|(lo, hi)| c.may_rx_hz(lo) || c.may_rx_hz(hi))
-            });
+            // `may_rx_span` reads an empty range list as "the driver didn't
+            // say", and greying out the whole bar would be a worse guess than
+            // offering a band the radio turns out not to reach. Any *overlap*
+            // is enough — a receiver that reaches into the band without
+            // reaching either end of it still has the band (issue #272).
+            let enabled =
+                caps.is_none_or(|c| b.edges().is_none_or(|(lo, hi)| c.may_rx_span(lo, hi)));
             let active = match std_hz {
                 Some(hz) => (state.active_freq_hz() - hz).abs() < 500.0,
                 None => state.band == b,
@@ -5357,6 +5389,15 @@ fn band_mode_menu(
                     if daylight { "daytime" } else { "night" },
                 )),
                 None => resp,
+            };
+            // A chip that cannot be pressed has to say why. A band greyed out
+            // with no explanation is what issue #272 was: an HF-plus-6 m
+            // transceiver whose receive range said HF, and one dead button with
+            // nothing on screen naming the range or where it came from.
+            let resp = if enabled {
+                resp
+            } else {
+                resp.on_disabled_hover_text(disabled_band_reason(b, caps, ranges_stated))
             };
             if resp.clicked() {
                 match digi_hz {
@@ -6681,7 +6722,16 @@ mod tests {
             let btn = crate::chrome::chip(ui, false, "20m · USB");
             let id = egui::Popup::default_response_id(&btn);
             crate::chrome::menu_popup(ui, &btn, |ui| {
-                band_mode_menu(ui, state.rx[0].mode, &state, None, None, true, &mut Vec::new());
+                band_mode_menu(
+                    ui,
+                    state.rx[0].mode,
+                    &state,
+                    None,
+                    false,
+                    None,
+                    true,
+                    &mut Vec::new(),
+                );
             });
             id
         };

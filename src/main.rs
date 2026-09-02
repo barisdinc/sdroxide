@@ -30,9 +30,7 @@ mod tci_source;
 use anyhow::{Context, bail};
 use clap::Parser;
 use sdroxide_config::Settings;
-use sdroxide_radio::{
-    ConvertedSource, FileSource, IqSource, SigGenSource, override_caps_ranges, shift_caps,
-};
+use sdroxide_radio::{ConvertedSource, FileSource, IqSource, SigGenSource, override_caps_ranges};
 #[cfg(feature = "soapy")]
 use sdroxide_radio::{DeviceInfo, SoapyDevice, enumerate_devices};
 use sdroxide_types::{Backend, DeviceCaps, FobosPort, IcomNetConfig, RadioConfig};
