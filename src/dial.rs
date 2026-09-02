@@ -8,6 +8,27 @@
 //! why this lives on its own, where it can be tested without a serial port or a
 //! socket.
 
+use std::time::{Duration, Instant};
+
+/// How long a frequency this end has just commanded outranks the one the radio
+/// reports.
+///
+/// Every CAT link here is polled, so a read of the dial that went out a moment
+/// before the operator picked a new frequency is answered *after* the write
+/// that moved it — carrying the frequency the radio was on a moment ago. Folded
+/// in, that snaps the dial straight back off the band the operator has just
+/// chosen, and the only way through is to click again and hope the timing falls
+/// differently: the reported symptom of issue #285, where changing band for FT8
+/// took three to five attempts and landed on frequencies nobody asked for
+/// (each failed attempt also writing the wrong entry into the band stack).
+///
+/// Long enough to cover several poll periods on a LAN or WiFi link, and no
+/// longer: a radio that will not go where it was told has to be allowed to win,
+/// or the two stay out of step for the rest of the session. In practice the
+/// guard lifts on the radio's own echo of the new frequency, one poll later —
+/// the timeout is only reached when the radio never confirms.
+const FREQ_SETTLE: Duration = Duration::from_millis(1000);
+
 /// Where the rig's dial has to be, and who currently owns it.
 ///
 /// A CAT rig has exactly one frequency control and no DDC behind it, so the VFO,
@@ -28,6 +49,9 @@ pub(crate) struct Dial {
     /// The frequency the last over parked the dial on, until the rig has
     /// reported something else. See [`Self::report`].
     stale_tx: Option<f64>,
+    /// The dial frequency this end last commanded, and when, until the rig has
+    /// confirmed it or [`FREQ_SETTLE`] has run out. See [`Self::report`].
+    commanded: Option<(f64, Instant)>,
 }
 
 impl Dial {
@@ -46,7 +70,7 @@ impl Dial {
     /// cleared to use; [`Self::end_tx`] picks the new VFO up on unkey.
     pub(crate) fn set_vfo(&mut self, hz: f64) -> Option<f64> {
         self.vfo = hz;
-        self.tx.is_none().then(|| self.rx_hz())
+        self.commanding()
     }
 
     /// Change the RIT offset (0 = RIT off). Same deferral as [`Self::set_vfo`].
@@ -55,7 +79,23 @@ impl Dial {
             return None;
         }
         self.rit = hz;
-        self.tx.is_none().then(|| self.rx_hz())
+        self.commanding()
+    }
+
+    /// The receive frequency to command now, remembered as ours until the radio
+    /// confirms it — or `None` while an over owns the dial.
+    ///
+    /// The remembering is what [`Self::report`] needs: a write and a read cross
+    /// on every polled link, and without a record of what was just asked for
+    /// there is no way to tell the radio's answer to the old question from its
+    /// answer to the new one.
+    fn commanding(&mut self) -> Option<f64> {
+        if self.tx.is_some() {
+            return None;
+        }
+        let dial = self.rx_hz();
+        self.commanded = Some((dial, Instant::now()));
+        Some(dial)
     }
 
     /// Take the dial for an over on `tx_hz`. `None` when transmit already lands
@@ -93,6 +133,18 @@ impl Dial {
     /// (issue #233). So the frequency the over parked on is remembered and
     /// ignored until the rig reports something else, which the restore write
     /// makes it do on the very next poll.
+    ///
+    /// A frequency this end has just *commanded* is guarded the same way and
+    /// for the same reason. The read that answers here may have gone out before
+    /// the write did, in which case it carries where the radio used to be, and
+    /// adopting it undoes the tune the operator just asked for — issue #285,
+    /// where picking an FT8 band took several attempts because most of them
+    /// were being cancelled by the radio's answer to the previous question. So
+    /// a report that disagrees with the outstanding command is dropped until
+    /// the radio confirms the command or [`FREQ_SETTLE`] runs out, whichever
+    /// comes first. The timeout is the important half of that: a radio that
+    /// will not go where it was told — a band it cannot reach, a lock switch —
+    /// gets the last word rather than being argued with forever.
     pub(crate) fn report(&mut self, dial_hz: f64) -> Option<f64> {
         if self.tx.is_some() {
             return None;
@@ -104,6 +156,18 @@ impl Dial {
             // Anything else is the rig answering for where it is now — the
             // restore write's own echo, or the operator's hand on the knob.
             self.stale_tx = None;
+        }
+        if let Some((want, at)) = self.commanded {
+            if (dial_hz - want).abs() < 1.0 {
+                // The radio confirming where it was sent. Nothing is
+                // outstanding any more, so the operator's hand on the knob is
+                // followed again from the very next report.
+                self.commanded = None;
+            } else if at.elapsed() < FREQ_SETTLE {
+                return None;
+            } else {
+                self.commanded = None;
+            }
         }
         self.vfo = dial_hz - self.rit;
         Some(self.vfo)
@@ -181,6 +245,65 @@ mod tests {
         assert_eq!(d.report(147_000_000.0), Some(147_000_000.0));
         // …so the operator really tuning to the input afterwards is adopted.
         assert_eq!(d.report(146_400_000.0), Some(146_400_000.0));
+    }
+
+    /// Issue #285: changing band for FT8 on an Icom over its LAN port landed
+    /// on frequencies nobody had picked, and took three to five attempts to
+    /// stick. Every one of these links is polled, so the read that was already
+    /// in flight when the operator clicked is answered *after* the write — and
+    /// the old frequency, folded in, cancels the new one.
+    #[test]
+    fn the_answer_to_a_read_that_crossed_our_own_tune_does_not_undo_it() {
+        let mut d = at(14_074_000.0);
+        // The operator picks 40 m FT8. That goes to the radio…
+        assert_eq!(d.set_vfo(7_074_000.0), Some(7_074_000.0));
+        // …and the very next thing the radio says is where it was when the read
+        // went out, one poll period ago. It is an answer to the old question.
+        assert_eq!(d.report(14_074_000.0), None);
+        assert_eq!(d.vfo, 7_074_000.0, "the band the operator chose is still the band");
+        // Then the radio catches up and confirms.
+        assert_eq!(d.report(7_074_000.0), Some(7_074_000.0));
+        // With nothing outstanding, the operator's own hand on the knob is
+        // followed again immediately.
+        assert_eq!(d.report(7_075_000.0), Some(7_075_000.0));
+    }
+
+    /// The guard is not a way to overrule the radio. A rig that will not go
+    /// where it was sent — a transmit-only band, a lock switch, a model that
+    /// rounds — has the last word once the settling time is up, because the
+    /// alternative is a readout that disagrees with the radio for the rest of
+    /// the session.
+    #[test]
+    fn a_radio_that_refuses_the_tune_wins_in_the_end() {
+        let mut d = at(14_074_000.0);
+        assert_eq!(d.set_vfo(7_074_000.0), Some(7_074_000.0));
+        assert_eq!(d.report(14_074_000.0), None);
+        // Age the outstanding command past the settling time.
+        d.commanded = d.commanded.map(|(hz, _)| (hz, Instant::now() - FREQ_SETTLE * 2));
+        assert_eq!(d.report(14_074_000.0), Some(14_074_000.0));
+        assert_eq!(d.vfo, 14_074_000.0);
+    }
+
+    /// RIT rides on the same dial, so a report answering the write *before* the
+    /// offset was applied is the same stale answer and gets the same treatment.
+    #[test]
+    fn the_guard_covers_a_rit_write_too() {
+        let mut d = at(14_074_000.0);
+        assert_eq!(d.set_rit(700.0), Some(14_074_700.0));
+        assert_eq!(d.report(14_074_000.0), None, "the dial before the offset went out");
+        assert_eq!(d.rx_hz(), 14_074_700.0);
+        assert_eq!(d.report(14_074_700.0), Some(14_074_000.0));
+    }
+
+    /// Nothing is commanded during an over, so nothing is guarded either: the
+    /// [`Dial::stale_tx`] rule is what covers that window, and the two must not
+    /// tread on each other.
+    #[test]
+    fn a_retune_deferred_by_an_over_arms_nothing() {
+        let mut d = at(14_074_000.0);
+        d.begin_tx(14_200_000.0);
+        assert_eq!(d.set_vfo(14_080_000.0), None);
+        assert_eq!(d.commanded, None);
     }
 
     /// The guard lasts one over, not for good: a fresh over re-arms it, and
