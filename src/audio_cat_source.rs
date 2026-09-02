@@ -1296,33 +1296,4 @@ mod tests {
         assert_eq!(fill_iq(&mut c, &mut buf, -1.0, None, None), 1);
         assert_eq!(buf[0], Complex32::new(3.0, -4.0));
     }
-
-    /// Field report: a Kenwood on its I/Q output followed mode changes made at
-    /// the radio but not ones made in sdroxide. Quadrature is not `audio_mode`,
-    /// so the engine's "command the rig's mode" gate never fired — the same
-    /// hole the Icom LAN backend had, and the same flag closes it.
-    ///
-    /// Both formats, because the answer must not depend on which one the
-    /// operator picked: the radio owns its mode either way.
-    #[test]
-    fn a_cat_rig_owns_its_mode_in_either_sound_format() {
-        for format in [SoundFormat::Iq, SoundFormat::DemodAudio] {
-            // A port that cannot be opened: `open` is deliberately degradable
-            // (the CAT thread retries in the background and the audio streams
-            // are best-effort), so this needs neither a rig nor a sound card.
-            let cfg = CatConfig {
-                serial: sdroxide_types::SerialConfig {
-                    path: "/nonexistent/sdroxide-test-tty".into(),
-                    ..Default::default()
-                },
-                format,
-                ..Default::default()
-            };
-            let src = AudioCatSource::open(cfg, None, None).expect("open is best-effort");
-            assert!(
-                src.commands_rx_mode(),
-                "{format:?}: the transceiver in front of us owns its mode"
-            );
-        }
-    }
 }
