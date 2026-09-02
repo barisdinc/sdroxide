@@ -537,6 +537,11 @@ impl P2Thread {
                     // Protocol 2 boards have no front-end gain register this
                     // crate drives; the DDC command carries no gain field.
                     Ctrl::RxGain(_) => {}
+                    // Protocol 2's accessory-board outputs are the radio's own
+                    // band table rather than seven lines this end computes, so
+                    // there is nothing here to point at the dial. Protocol 1
+                    // drives them itself and does follow it (issue #278).
+                    Ctrl::BandDial(_) => {}
                     // Load the DUC ahead of key-down. Nothing on a Protocol 2
                     // board acts on this until MOX — there is no accessory bus
                     // here of the kind the Hermes-Lite has — but keeping the

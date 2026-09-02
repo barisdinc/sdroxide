@@ -1184,8 +1184,8 @@ fn open_converted_source(
     if radio.panadapter.is_attached() {
         return open_paired_source(radio, cli, settings);
     }
-    let offset = radio.converter_offset_hz;
-    if offset == 0.0 || !offset.is_finite() {
+    let plan = converter_plan(radio);
+    if plan.is_transparent() {
         let (source, caps) = open_configured_source(radio, cli, settings)?;
         return Ok((source, stated_ranges(caps, radio)));
     }
@@ -1193,6 +1193,7 @@ fn open_converted_source(
     // Not simply `dial + offset`: a dial from before the converter was set up is
     // still in the hardware's own domain, and that sum is below DC — see
     // `converter_open_hz`.
+    let offset = plan.offset_for(cli.center_hz());
     let hw = sdroxide_radio::converter_open_hz(cli.center_hz(), offset);
     if hw != cli.center_hz() + offset {
         tracing::info!(
@@ -1204,30 +1205,74 @@ fn open_converted_source(
     }
     c.freq = Some(hw);
     let (source, caps) = open_configured_source(radio, &c, settings)?;
-    // The transmit line is a separate fact about the station, and the operator
-    // states it — see `sdroxide_types::ConverterTx`.
-    let tx_offset = radio.converter_tx.offset_hz(offset);
     // Device ranges down into the operator's domain first, then whatever the
     // operator stated on top of them — that order is what makes a typed range
     // mean the dial rather than the I.F.
-    let caps = sdroxide_radio::converted_caps(
-        caps,
-        offset,
-        tx_offset,
-        &radio.freq_ranges_rx,
-        &radio.freq_ranges_tx,
-    );
+    let caps = sdroxide_radio::plan_caps(caps, &plan, &radio.freq_ranges_rx, &radio.freq_ranges_tx);
     log_stated_ranges(radio, &caps);
-    tracing::info!(
-        "frequency converter: hardware tuned {:.6} MHz above the dial; transmit {}",
-        offset / 1e6,
-        match tx_offset {
-            None => "withdrawn".to_string(),
-            Some(t) if t == 0.0 => "not converted (the radio transmits on the dial)".to_string(),
-            Some(t) => format!("tuned {:.6} MHz above the dial", t / 1e6),
+    Ok((Box::new(ConvertedSource::with_plan(source, plan)), caps))
+}
+
+/// What is in front of this radio, band by band: the transverter table first,
+/// then the single whole-dial converter offset as the last resort.
+///
+/// Both live in `radio.json` and both mean the same thing — the hardware is
+/// tuned to `dial + offset` — so they are one list here rather than two
+/// mechanisms. A dial that no transverter covers falls through to the single
+/// offset, and to the bare radio when that is zero as well, which is what keeps
+/// HF working on a station whose only converter is a 2 m transverter
+/// (issue #278).
+fn converter_plan(radio: &RadioConfig) -> sdroxide_radio::ConverterPlan {
+    use sdroxide_radio::ConverterStep;
+    let mut steps: Vec<ConverterStep> = Vec::new();
+    for x in radio.transverters.iter().take(sdroxide_types::MAX_TRANSVERTERS) {
+        if !x.enabled || !x.is_band() || !x.offset_hz.is_finite() {
+            continue;
         }
-    );
-    Ok((Box::new(ConvertedSource::new(source, offset, tx_offset)), caps))
+        let tx_offset = x.tx.offset_hz(x.offset_hz);
+        steps.push(ConverterStep {
+            band: Some((x.rf_lo_hz, x.rf_hi_hz)),
+            rx_offset_hz: x.offset_hz,
+            tx_offset_hz: tx_offset,
+            // A ceiling of 1.0 is no ceiling; anything less is one.
+            tx_drive: (x.tx_drive < 1.0).then(|| x.tx_drive.clamp(0.0, 1.0)),
+        });
+        tracing::info!(
+            "transverter {}: {:.3}–{:.3} MHz on the dial, hardware {:.6} MHz {}; transmit {}",
+            x.describe(),
+            x.rf_lo_hz / 1e6,
+            x.rf_hi_hz / 1e6,
+            x.offset_hz.abs() / 1e6,
+            if x.offset_hz < 0.0 { "below" } else { "above" },
+            match tx_offset {
+                None => "withdrawn".to_string(),
+                Some(_) => format!("at up to {:.0}% drive", x.tx_drive * 100.0),
+            }
+        );
+    }
+    let offset = radio.converter_offset_hz;
+    if offset != 0.0 && offset.is_finite() {
+        // The transmit line is a separate fact about the station, and the
+        // operator states it — see `sdroxide_types::ConverterTx`.
+        let tx_offset = radio.converter_tx.offset_hz(offset);
+        tracing::info!(
+            "frequency converter: hardware tuned {:.6} MHz above the dial; transmit {}",
+            offset / 1e6,
+            match tx_offset {
+                None => "withdrawn".to_string(),
+                Some(t) if t == 0.0 =>
+                    "not converted (the radio transmits on the dial)".to_string(),
+                Some(t) => format!("tuned {:.6} MHz above the dial", t / 1e6),
+            }
+        );
+        steps.push(ConverterStep {
+            band: None,
+            rx_offset_hz: offset,
+            tx_offset_hz: tx_offset,
+            tx_drive: None,
+        });
+    }
+    sdroxide_radio::ConverterPlan::from_steps(steps)
 }
 
 /// Open a radio that borrows another roster radio's receiver as its panadapter:

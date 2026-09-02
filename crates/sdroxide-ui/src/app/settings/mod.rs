@@ -363,6 +363,158 @@ fn freq_range_edit(ui: &mut egui::Ui, id: &str, text: &mut String, hover: &str) 
     });
 }
 
+/// A frequency field shown and typed in megahertz, held in hertz.
+///
+/// The converter Offset above these is in hertz because that is how every
+/// converter's documentation states it. A transverter's *band* is not: nobody
+/// writes 144000000, and the RX/TX range boxes on this same page are already in
+/// megahertz. So this one reads the way a band plan does.
+fn mhz_drag(ui: &mut egui::Ui, hz: &mut f64, hover: &str) -> egui::Response {
+    ui.add(
+        egui::DragValue::new(hz)
+            .speed(1000.0)
+            .range(0.0..=sdroxide_types::FREQ_RANGE_MAX_HZ)
+            .custom_formatter(|n, _| format!("{:.4}", n / 1e6))
+            .custom_parser(|s| s.trim().parse::<f64>().ok().map(|m| m * 1e6))
+            .suffix(" MHz"),
+    )
+    .on_hover_text(hover)
+}
+
+/// The transverter table: one row per box in front of the radio, each with the
+/// band it works and the offset it works it at (issue #278).
+///
+/// Kept apart from the single **Offset** field above rather than replacing it.
+/// The two answer different questions: an upconverter or an LNB is in front of
+/// *everything* and has one offset for the whole dial, while a transverter is
+/// in front of one band and the radio is on its own below. A station can have
+/// both, and a dial no row covers falls through to the offset above it.
+fn transverter_table(ui: &mut egui::Ui, cfg: &mut sdroxide_types::RadioConfig) {
+    use sdroxide_types::{ConverterTx as Tx, MAX_TRANSVERTERS, Transverter};
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(RichText::new("Transverters").size(14.0).strong().color(crate::theme::CYAN()));
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "One row per box. While the dial is inside a row's band the radio is tuned to \
+             dial + offset and that row's transmit rule and drive limit apply; outside every \
+             row the radio is on its own bands. Rows are tried top to bottom.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+
+    let mut remove: Option<usize> = None;
+    egui::Grid::new("xvtr-grid").num_columns(8).spacing([10.0, 6.0]).striped(true).show(ui, |ui| {
+        for h in ["", "Name", "Band low", "Band high", "Offset", "Transmit", "Max drive", ""] {
+            ui.label(RichText::new(h).weak().size(10.0));
+        }
+        ui.end_row();
+
+        for (i, x) in cfg.transverters.iter_mut().enumerate() {
+            crate::chrome::checkbox(ui, &mut x.enabled, "").on_hover_text(
+                "Off takes this transverter out of the line without losing the row — the \
+                     band goes back to whatever the radio reaches on its own.",
+            );
+            crate::chrome::field(
+                ui,
+                egui::TextEdit::singleline(&mut x.name)
+                    .id_salt(("xvtr-name", i))
+                    .desired_width(110.0)
+                    .hint_text("2 m"),
+            )
+            .on_hover_text("What you call it. Shown in the log when the dial selects it.");
+            mhz_drag(
+                ui,
+                &mut x.rf_lo_hz,
+                "The bottom of the band this transverter works, \
+                     on the dial. 144 for 2 m.",
+            );
+            mhz_drag(
+                ui,
+                &mut x.rf_hi_hz,
+                "The top of the band, on the dial. 148 for 2 m \
+                     in Regions 2 and 3, 146 in Region 1.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut x.offset_hz)
+                    .speed(1000.0)
+                    .range(
+                        -sdroxide_types::CONVERTER_OFFSET_MAX_HZ
+                            ..=sdroxide_types::CONVERTER_OFFSET_MAX_HZ,
+                    )
+                    .custom_formatter(|n, _| format!("{:.4}", n / 1e6))
+                    .custom_parser(|s| s.trim().parse::<f64>().ok().map(|m| m * 1e6))
+                    .suffix(" MHz"),
+            )
+            .on_hover_text(
+                "The radio ends up on dial + offset, so a transverter that brings a band \
+                     down to an I.F. is negative: 2 m into a 28 MHz I.F. is -116, because \
+                     144 - 116 = 28. Drag to trim it a hertz at a time for an oscillator that \
+                     is slightly off.",
+            );
+            egui::ComboBox::from_id_salt(("xvtr-tx", i))
+                .selected_text(x.tx.label())
+                .width(120.0)
+                .show_styled(ui, |ui| {
+                    for opt in [Tx::Off, Tx::Transverter] {
+                        let on = std::mem::discriminant(&opt) == std::mem::discriminant(&x.tx);
+                        if ui.selectable_label(on, opt.label()).clicked() && !on {
+                            x.tx = opt;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Off while converting: receive only — the row is a converter, not a \
+                         transverter, and nothing is keyed on this band.\n\nThrough the same \
+                         converter: it works both ways, and transmit takes the same offset.",
+                );
+            ui.add(
+                egui::DragValue::new(&mut x.tx_drive)
+                    .speed(0.005)
+                    .range(0.0..=1.0)
+                    .custom_formatter(|n, _| format!("{:.0}", n * 100.0))
+                    .custom_parser(|s| s.trim().parse::<f64>().ok().map(|p| p / 100.0))
+                    .suffix(" %"),
+            )
+            .on_hover_text(
+                "A ceiling on transmit drive while this transverter is selected, as a \
+                     percentage of full. A transverter's I.F. input takes milliwatts and the \
+                     drive that is right for the radio's own bands will destroy it, so this is \
+                     the row's most important field. 100% is no limit.\n\nYour Drive setting \
+                     is held under this rather than moved, so the number you use on HF comes \
+                     back when the dial leaves the band.",
+            );
+            if crate::chrome::chip(ui, false, "REMOVE").clicked() {
+                remove = Some(i);
+            }
+            ui.end_row();
+        }
+    });
+    if let Some(i) = remove {
+        cfg.transverters.remove(i);
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let full = cfg.transverters.len() >= MAX_TRANSVERTERS;
+        if ui
+            .add_enabled(!full, egui::Button::new("ADD TRANSVERTER"))
+            .on_disabled_hover_text(format!("{MAX_TRANSVERTERS} is the most this table holds"))
+            .clicked()
+        {
+            cfg.transverters.push(Transverter { tx: Tx::Transverter, ..Transverter::default() });
+        }
+        ui.label(
+            RichText::new("Takes effect on Apply / reconnect, like the converter offset above.")
+                .weak(),
+        );
+    });
+}
+
 /// One row of the transmit-EQ grid: a band's frequency, gain and Q/slope.
 /// `q_range` doubles as the shelf-slope range for the two shelf bands, see
 /// [`sdroxide_types::TxEqBand::q`].
@@ -1880,6 +2032,8 @@ impl SdroxideApp {
                         );
                     }
                 }
+
+                transverter_table(ui, cfg);
 
                 self.settings_panadapter(ui, cfg);
 

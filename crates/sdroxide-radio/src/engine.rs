@@ -5420,7 +5420,8 @@ impl Engine {
                         // nothing in the one mode where it is the *only*
                         // control — the rig keys its own transmitter here and
                         // never looks at the audio we send it.
-                        self.source.set_tx_drive(self.state.tx.drive as f64);
+                        let d = self.tx_drive();
+                        self.source.set_tx_drive(d as f64);
                         // And throw the external T/R switch, for the same
                         // reason and with the same lead. `tx_active` never
                         // becomes true on this path, so nothing else in the
@@ -6820,7 +6821,8 @@ impl Engine {
                 // this and scale the modulated samples instead. While tuning the
                 // rig is holding the tune level, so leave it alone until unkey.
                 if !self.state.tx.tune {
-                    self.source.set_tx_drive(self.state.tx.drive as f64);
+                    let d = self.tx_drive();
+                    self.source.set_tx_drive(d as f64);
                 }
             }
             SetTuneDrive(v) => {
@@ -12419,7 +12421,29 @@ impl Engine {
     /// the rig and a tune would go out at the (typically much lower) voice
     /// drive.
     fn tx_power_level(&self) -> f32 {
-        if self.state.tx.tune { self.state.tx.tune_drive } else { self.state.tx.drive }
+        let want = if self.state.tx.tune { self.state.tx.tune_drive } else { self.state.tx.drive };
+        self.under_ceiling(want)
+    }
+
+    /// The drive actually used: the operator's setting held under whatever
+    /// ceiling the converter in front of the radio imposes.
+    ///
+    /// A transverter's I.F. input takes milliwatts, and the drive that is right
+    /// for the radio's own bands destroys it — so the limit is applied here,
+    /// on its way out, rather than by moving the slider. The number the
+    /// operator set for HF is still there when the dial leaves the
+    /// transverter's band (issue #278).
+    fn under_ceiling(&self, want: f32) -> f32 {
+        match self.source.tx_drive_ceiling() {
+            Some(c) => want.min(c.clamp(0.0, 1.0)),
+            None => want,
+        }
+    }
+
+    /// [`Self::under_ceiling`] applied to the transmit drive, which is what
+    /// scales the modulated I/Q.
+    fn tx_drive(&self) -> f32 {
+        self.under_ceiling(self.state.tx.drive)
     }
 
     /// Key or unkey from an operator PTT — the on-screen button, a MIDI or
@@ -12820,7 +12844,8 @@ impl Engine {
             // the next call — from its own hand microphone, where nothing here
             // is in the way — at a few watts.
             if self.source.commands_tx_power() {
-                self.source.set_tx_drive(self.state.tx.drive as f64);
+                let d = self.tx_drive();
+                self.source.set_tx_drive(d as f64);
             }
             // The radio kept streaming RX for the whole over; PTT only
             // stopped us polling it. Drop the backlog instead of replaying
@@ -13340,6 +13365,9 @@ impl Engine {
             return Ok(());
         }
         let tci_tx = self.tci_tx;
+        // Read before the chain is borrowed: it asks the *source* what ceiling
+        // the converter in front of the radio imposes.
+        let drive = self.tx_drive();
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         tx.mod_buf.clear();
@@ -13404,7 +13432,6 @@ impl Engine {
             }
             let modulator = tx.modulator.as_mut().expect("checked above");
             modulator.process(&audio, &mut tx.mod_buf);
-            let drive = self.state.tx.drive;
             for z in &mut tx.mod_buf {
                 *z *= drive;
                 // Hard limiter: digital full scale is the ceiling.
@@ -13467,6 +13494,8 @@ impl Engine {
         if let Some(mixer) = self.mixer.as_mut() {
             mixer.push_tx(&audio);
         }
+        // Read before the chain is borrowed, as above.
+        let drive = self.tx_drive();
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
         tx.mod_buf.clear();
@@ -13484,7 +13513,6 @@ impl Engine {
             }
         };
         modulator.process(&audio, &mut tx.mod_buf);
-        let drive = self.state.tx.drive;
         for z in &mut tx.mod_buf {
             *z *= drive;
             let mag = z.norm();

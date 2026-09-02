@@ -393,6 +393,12 @@ pub(crate) enum Ctrl {
         ddc: u8,
         hz: f64,
     },
+    /// Where the *dial* is, when a transverter has left the radio somewhere
+    /// else. Only the accessory board's band code reads it: a decoder driving
+    /// filters and antenna relays has to follow the band on the air, not the
+    /// I.F. the radio is tuned to (issue #278). `None` puts it back on the
+    /// hardware frequency, which is the ordinary case.
+    BandDial(Option<f64>),
     /// Front-end LNA gain in dB (Hermes-Lite 2 only; ignored elsewhere).
     RxGain(f64),
     /// Where the radio *would* transmit, sent while receiving so an accessory
@@ -828,6 +834,15 @@ impl HpsdrRx {
     pub fn set_rx_freq(&self, hz: f64) {
         tracing::debug!("HPSDR: set DDC{} freq {hz:.0} Hz", self.ddc);
         let _ = self.dev.ctrl.send(Ctrl::RxFreq { ddc: self.ddc, hz });
+    }
+
+    /// Tell the accessory board's band decoder where the dial is, which is not
+    /// where the radio is tuned when a transverter is in front of it. Only
+    /// DDC 0 — the accessory board is the *board's*, not a stream's.
+    pub fn set_band_dial(&self, hz: Option<f64>) {
+        if self.ddc == 0 {
+            let _ = self.dev.ctrl.send(Ctrl::BandDial(hz));
+        }
     }
 
     /// Whether this board has a front-end gain this crate can command.

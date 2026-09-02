@@ -157,6 +157,17 @@ impl IqSource for HpsdrSource {
         Ok(())
     }
 
+    /// Where the operator's dial is, which on a station with a transverter is
+    /// not where the board is tuned. Only the accessory board's band decoder
+    /// reads it — see `HpsdrRx::set_band_dial`.
+    fn set_dial_hz(&mut self, hz: f64) {
+        if let Some(rx) = self.rx.as_ref() {
+            // Equal means nothing is in front of the radio, and the decoder is
+            // better off on the frequency it already had.
+            rx.set_band_dial((hz - self.center).abs().gt(&0.5).then_some(hz));
+        }
+    }
+
     fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
         let Some(rx) = self.rx.as_mut() else {
             // Released: nothing will ever arrive; nap so the engine loop

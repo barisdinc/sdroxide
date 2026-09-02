@@ -859,6 +859,17 @@ transverter, or an offset of its own — including none at all, which is the
 QO-100 station that hears 10 GHz through an LNB and puts 2.4 GHz straight out of
 the radio. Not yet verified against physical hardware.
 
+A station with more than one box has a **transverter table** below that: up to
+ten rows, each with the band it works (on the dial, in MHz), its own offset, its
+own transmit rule, and a **max drive** the operator's Drive setting is held
+under — a transverter's I.F. input takes milliwatts, and the drive that is right
+for the radio's own bands will destroy it. The dial picks the row; a frequency
+no row covers falls through to the single offset above and then to the bare
+radio, so HF still works on a station whose only converter is a 2 m transverter.
+On an HPSDR board with a filter board on J16 the open-collector band code
+follows the dial too, so an accessory board switches its filters, relays and
+transverters for the band on the air rather than for the intermediate frequency.
+
 Beside it, **RX range** and **TX range** state which frequencies the radio
 covers, in MHz (`144-146, 430-440`). Leave them empty and sdroxide uses what the
 device says about itself. Fill them in when the device says nothing — publishing

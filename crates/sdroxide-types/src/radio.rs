@@ -5479,6 +5479,104 @@ impl ConverterTx {
     }
 }
 
+/// One transverter: a band it works, the offset it works it at, and what it can
+/// take on transmit.
+///
+/// A station with more than one of these has more than one answer, and which
+/// one applies is decided by where the dial is — that is the whole difference
+/// between this and [`RadioConfig::converter_offset_hz`], which is one answer
+/// for every frequency (issue #278). A 2 m transverter on a 28 MHz I.F. and a
+/// 6 m one on the same I.F. sit in the same table, each with its own offset,
+/// and the radio follows the dial from one to the other.
+///
+/// The offset carries the sign rule the rest of the feature uses: **the
+/// hardware is tuned to `dial + offset_hz`**. A transverter that brings a band
+/// *down* to an I.F. therefore has a negative offset — 2 m into 28 MHz is
+/// −116 MHz, because 144 − 116 = 28.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transverter {
+    /// What the operator calls it. Shown in the dialog and in the log line that
+    /// says which one the dial has selected; not otherwise interpreted.
+    #[serde(default)]
+    pub name: String,
+    /// Unticked leaves the row in the table and takes the transverter out of
+    /// the line — the box is switched off or unplugged, and the band goes back
+    /// to whatever the radio reaches on its own.
+    #[serde(default = "default_xvtr_enabled")]
+    pub enabled: bool,
+    /// The band this transverter works, on the *dial*, in Hz.
+    #[serde(default)]
+    pub rf_lo_hz: f64,
+    #[serde(default)]
+    pub rf_hi_hz: f64,
+    /// `hardware = dial + offset_hz`.
+    #[serde(default)]
+    pub offset_hz: f64,
+    /// What the transmit line does while this transverter is the selected one.
+    #[serde(default)]
+    pub tx: ConverterTx,
+    /// A ceiling on transmit drive while it is selected, 0.0–1.0 of full.
+    ///
+    /// The reason this is per transverter rather than per station: a
+    /// transverter's I.F. input takes milliwatts, and the drive that is right
+    /// for the radio's own bands will destroy it. 0.05 is 5 % of full drive,
+    /// which is the order most transverters want from a 100 W radio through
+    /// their built-in attenuator.
+    #[serde(default = "default_xvtr_drive")]
+    pub tx_drive: f32,
+}
+
+fn default_xvtr_enabled() -> bool {
+    true
+}
+
+fn default_xvtr_drive() -> f32 {
+    0.05
+}
+
+impl Default for Transverter {
+    fn default() -> Self {
+        Transverter {
+            name: String::new(),
+            enabled: true,
+            rf_lo_hz: 0.0,
+            rf_hi_hz: 0.0,
+            offset_hz: 0.0,
+            tx: ConverterTx::Off,
+            tx_drive: default_xvtr_drive(),
+        }
+    }
+}
+
+impl Transverter {
+    /// Whether this row describes a band at all. A pair that is not a range —
+    /// unset, inverted, not finite — selects nothing rather than everything:
+    /// a half-typed row must not take the whole dial with it.
+    pub fn is_band(&self) -> bool {
+        self.rf_lo_hz.is_finite()
+            && self.rf_hi_hz.is_finite()
+            && self.rf_lo_hz >= 0.0
+            && self.rf_hi_hz > self.rf_lo_hz
+    }
+
+    /// Whether the dial is inside this transverter's band.
+    pub fn covers(&self, dial_hz: f64) -> bool {
+        self.enabled && self.is_band() && (self.rf_lo_hz..=self.rf_hi_hz).contains(&dial_hz)
+    }
+
+    /// What to call it in a log line or a dialog row.
+    pub fn describe(&self) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.trim().to_string();
+        }
+        format!("{:.3}–{:.3} MHz", self.rf_lo_hz / 1e6, self.rf_hi_hz / 1e6)
+    }
+}
+
+/// How many transverters a station may state. Ten is more bands than any
+/// amateur station has boxes for, and the table is drawn in full.
+pub const MAX_TRANSVERTERS: usize = 10;
+
 /// The preset name for an offset, or `"Manual"` when it is not one of them.
 pub fn converter_preset_name(offset_hz: f64) -> &'static str {
     CONVERTER_PRESETS
@@ -6039,6 +6137,20 @@ pub struct RadioConfig {
     /// Ignored when there is no converter: with the offset at zero the transmit
     /// path was never touched to begin with.
     pub converter_tx: ConverterTx,
+    /// The station's transverters, each with its own band and its own offset —
+    /// see [`Transverter`].
+    ///
+    /// Where [`Self::converter_offset_hz`] is one answer for the whole dial
+    /// (an upconverter, an LNB: a box in front of *everything*), this is the
+    /// station whose 2 m, 6 m and 23 cm come from three different boxes on one
+    /// I.F. The dial decides which applies; a frequency no row covers falls
+    /// through to the single offset above, and to the bare radio when that is
+    /// zero too (issue #278).
+    ///
+    /// Appended last, and `#[serde(default)]`, so a `radio.json` written before
+    /// this existed loads with an empty table and behaves exactly as it did.
+    #[serde(default)]
+    pub transverters: Vec<Transverter>,
     /// Tuning ranges the operator states for this radio, in Hz, replacing what
     /// the device publishes about itself. Empty (the default) leaves the
     /// device's own answer alone.

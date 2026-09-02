@@ -5638,6 +5638,47 @@ A few things to know:
 This has been tested against sdroxide's own simulated front ends, not against a
 physical converter. If you have one, reports are welcome.
 
+**Transverters**, below the transmit row, are the other half of the same idea
+and the one a multi-band station wants. **Offset** above is one answer for the
+whole dial — an upconverter or an LNB is in front of *everything* — while a
+transverter is in front of one band and the radio is on its own below it. The
+table holds up to ten rows, and each has:
+
+- a tick, which takes that box out of the line without losing the row;
+- a **name**, which is what the log line says when the dial selects it;
+- the **band** it works, low and high, **in megahertz and on the dial**:
+  `144` to `148` for 2 m;
+- its **offset**, on the same sign rule as everything else here — the radio ends
+  up on dial + offset, so a transverter that brings a band down to an I.F. is
+  negative. 2 m into a 28 MHz I.F. is `-116`, because 144 − 116 = 28. Drag it to
+  trim an oscillator that is a little off;
+- what is in the **transmit** line: *Off while converting* for a receive
+  converter, *Through the same converter* for a transverter that works both
+  ways;
+- a **max drive**, as a percentage of full. This is the row's most important
+  field: a transverter's I.F. input takes milliwatts, and the drive that is
+  right for the radio's own bands will destroy it. Your Drive setting is held
+  *under* this rather than moved, so the number you use on HF is still there
+  when the dial leaves the transverter's band.
+
+Rows are tried in the order they are listed, and a dial no row covers falls
+through to the single **Offset** above and then to the bare radio — which is
+what keeps HF working on a station whose only converter is a 2 m transverter.
+Everything downstream follows the dial as it always has: the band buttons, the
+band-plan strip, the logbook, spots, the transmit gate, and on a Hermes/HPSDR
+board with a filter board on J16, the open-collector band code the accessory
+board switches its filters, relays and transverters with — that follows the
+frequency on the air, not the intermediate frequency the radio is sitting on.
+
+Two things the table does not do, on purpose. It does not switch the radio's own
+PA off or hold its T/R relay in receive — on a Hermes-Lite that is the **PA
+enable** switch on the HPSDR page ([6.2.3](#623-hpsdr-network-radios)),
+which turns the onboard amplifier off and leaves transmit at the low-power RF1
+output, which is how an external amplifier or a transverter is driven. And it
+does not choose the receive port: that is remembered **per band** already, so
+selecting the transverter's antenna once on the band leaves it there
+([6.2](#62-radio-choosing-and-configuring-the-rig)).
+
 **RX range** and **TX range**, below the offset, are where you tell sdroxide
 which frequencies this radio actually covers. They are **in megahertz**, written
 low-high and separated by commas — `144-146, 430-440`, which is

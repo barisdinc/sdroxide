@@ -1073,7 +1073,14 @@ use sdroxide_types::{
 /// a discriminant it has never heard of as an error, so a v118 client handed a
 /// `RadioState` whose mode is 36 fails the whole frame rather than one field.
 /// The handshake refuses the pairing instead (issue #280).
-pub const PROTO_VERSION: u16 = 119;
+///
+/// v120: the transverter table — [`sdroxide_types::RadioConfig`] gains
+/// `transverters`, a list with a band and an offset per box. `RadioConfig`
+/// rides `ServerMsg::RadioConfig` and `Command::SetRadioConfig` **whole**, so a
+/// v119 peer handed one with a list on the end reads the tail of every one of
+/// those messages out of step — the same not-survivable addition every config
+/// field before it made (issue #278).
+pub const PROTO_VERSION: u16 = 120;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

@@ -170,6 +170,11 @@ fn alex_oc(freq_hz: f64) -> u8 {
 struct Regs {
     rx_freq: u32,
     tx_freq: u32,
+    /// Where the operator's dial is, when a transverter has put the radio
+    /// somewhere else — the frequency the accessory board's decoder has to
+    /// switch for. `None` when nothing is in front of the radio, which is when
+    /// the NCO frequency *is* the band.
+    band_dial: Option<f64>,
     lna_gain: Option<f64>,
     /// `Some(true)` to run the Hermes-Lite's onboard PA, `Some(false)` to leave
     /// it off and keep the antenna jack on receive, `None` on a board that is
@@ -197,7 +202,13 @@ impl Regs {
     /// the low-pass filter has to match what is actually going out — and the
     /// receive frequency otherwise.
     fn oc(&self) -> u8 {
-        let freq = if self.ptt { self.tx_freq } else { self.rx_freq } as f64;
+        // The dial wins where there is one: with a 2 m transverter in front,
+        // the NCO says 28 MHz and the filters, relays and transverter the
+        // decoder switches all belong to 144 (issue #278).
+        let freq = match self.band_dial {
+            Some(hz) => hz,
+            None => (if self.ptt { self.tx_freq } else { self.rx_freq }) as f64,
+        };
         match self.filter_board {
             HpsdrFilterBoard::None => 0,
             HpsdrFilterBoard::N2adr => n2adr_oc(freq),
@@ -533,6 +544,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
     let mut regs = Regs {
         rx_freq: 7_100_000,
         tx_freq: 7_100_000,
+        band_dial: None,
         lna_gain: has_lna.then_some(lna_gain_db),
         pa: hermes_lite.then_some(pa_enable),
         filter_board,
@@ -611,6 +623,16 @@ pub(crate) fn run(ctx: ThreadCtx) {
                         regs.rx_freq = hz.max(0.0) as u32;
                         rot.urge(Slot::RxFreq);
                         tracing::debug!("HPSDR P1: RX NCO -> {} Hz", regs.rx_freq);
+                    }
+                }
+                Ctrl::BandDial(hz) => {
+                    let hz = hz.filter(|h| h.is_finite() && *h > 0.0);
+                    if regs.band_dial != hz {
+                        regs.band_dial = hz;
+                        tracing::debug!(
+                            "HPSDR P1: accessory-board band follows the dial at {:?} Hz",
+                            hz
+                        );
                     }
                 }
                 Ctrl::RxGain(db) => {
@@ -897,12 +919,42 @@ mod tests {
         assert_eq!(other.versions, None);
     }
 
+    /// A converter puts the radio on an intermediate frequency, and the
+    /// accessory board's decoder — which is in the antenna line, ahead of the
+    /// converter — has to switch for the band on the *air* rather than for
+    /// that (issue #278).
+    ///
+    /// The example is an upconverter, because that is the one where the two
+    /// answers differ inside these boards' tables: a Ham It Up presents 80 m to
+    /// the receiver at 128.7 MHz, and the filter the antenna needs is 80 m's.
+    #[test]
+    fn the_accessory_board_follows_the_dial_through_a_converter() {
+        let mut regs = Regs {
+            rx_freq: 128_700_000,
+            tx_freq: 128_700_000,
+            band_dial: None,
+            lna_gain: None,
+            pa: None,
+            filter_board: HpsdrFilterBoard::Alex,
+            ptt: false,
+        };
+        // Without a dial, the I.F. is all there is.
+        assert_eq!(regs.oc(), alex_oc(128_700_000.0));
+        regs.band_dial = Some(3_700_000.0);
+        assert_eq!(regs.oc(), alex_oc(3_700_000.0), "the band code has to follow the dial");
+        assert_ne!(regs.oc(), alex_oc(128_700_000.0));
+        // Putting it back is the radio on its own bands again.
+        regs.band_dial = None;
+        assert_eq!(regs.oc(), alex_oc(128_700_000.0));
+    }
+
     #[test]
     fn ep2_datagram_shape() {
         let mut seq = 0u32;
         let regs = Regs {
             rx_freq: 7_074_000,
             tx_freq: 7_074_000,
+            band_dial: None,
             lna_gain: None,
             pa: None,
             filter_board: HpsdrFilterBoard::None,
@@ -931,6 +983,7 @@ mod tests {
         let keyed = Regs {
             rx_freq: 7_000_000,
             tx_freq: 7_000_000,
+            band_dial: None,
             lna_gain: None,
             pa: None,
             filter_board: HpsdrFilterBoard::None,
@@ -952,6 +1005,7 @@ mod tests {
         let hl2 = Regs {
             rx_freq: 14_074_000,
             tx_freq: 14_074_000,
+            band_dial: None,
             lna_gain: Some(20.0),
             pa: Some(true),
             filter_board: HpsdrFilterBoard::None,
@@ -1022,6 +1076,7 @@ mod tests {
         let regs = Regs {
             rx_freq: 7_000_000,
             tx_freq: 7_000_000,
+            band_dial: None,
             lna_gain: Some(0.0),
             pa: None,
             filter_board: HpsdrFilterBoard::None,
@@ -1126,6 +1181,7 @@ mod tests {
         let regs = Regs {
             rx_freq: 14_074_000,
             tx_freq: 14_074_000,
+            band_dial: None,
             lna_gain: Some(20.0),
             pa: None,
             filter_board: HpsdrFilterBoard::None,
@@ -1138,6 +1194,7 @@ mod tests {
         let split = Regs {
             rx_freq: 14_074_000,
             tx_freq: 7_074_000,
+            band_dial: None,
             filter_board: HpsdrFilterBoard::N2adr,
             ..regs
         };
@@ -1155,6 +1212,7 @@ mod tests {
         let hl2 = Regs {
             rx_freq: 7_000_000,
             tx_freq: 7_000_000,
+            band_dial: None,
             lna_gain: Some(20.0),
             pa: None,
             filter_board: HpsdrFilterBoard::None,
