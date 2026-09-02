@@ -1426,6 +1426,20 @@ pub fn save_memories(memories: &[sdroxide_types::MemoryChannel]) -> Result<(), C
     save_json("memories.json", &memories)
 }
 
+/// The frequencies the operator has added to the digital modes' own tables.
+///
+/// Its own file for the same reason the memory list has one: it is a list the
+/// operator builds as they use the radio, and it must survive an sdroxide that
+/// knows nothing about it — a version without the feature leaves the file
+/// alone rather than writing an empty one over it.
+pub fn load_digi_presets() -> Vec<sdroxide_types::DigiPreset> {
+    load_json_list("digi_presets.json")
+}
+
+pub fn save_digi_presets(presets: &[sdroxide_types::DigiPreset]) -> Result<(), ConfigError> {
+    save_json("digi_presets.json", &presets)
+}
+
 /// The memory folders. Their own file rather than a new shape for
 /// `memories.json`, so a list written before folders existed still loads.
 pub fn load_memory_folders() -> Vec<sdroxide_types::MemoryFolder> {
@@ -2104,6 +2118,9 @@ mod tests {
             vfo_b_hz: Some(7_090_000.0),
             active_vfo: sdroxide_types::Vfo::B,
             mode: sdroxide_types::Mode::Ft8,
+            // A VFO left in CW while the one in use is on FT8 — the point of
+            // remembering a mode per VFO at all.
+            vfo_modes: Some([sdroxide_types::Mode::Cw, sdroxide_types::Mode::Ft8]),
             antenna_rx: Some("LNAW".into()),
             antenna_tx: Some("BAND2".into()),
             volume: 0.8,

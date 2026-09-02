@@ -1102,7 +1102,15 @@ use sdroxide_types::{
 /// #287). The struct rides `ServerMsg::SstvStatus` whole and is re-sent several
 /// times a second while the mode is up, so a v122 peer handed one with an
 /// option on the end reads the tail of every one of them out of step.
-pub const PROTO_VERSION: u16 = 123;
+///
+/// v124: the operator's own frequencies —
+/// [`sdroxide_types::StationConfig`] gains `digi_presets`, the list a station
+/// has added to the digital modes' own tables, and
+/// [`sdroxide_types::Command`] gains `SetDigiPresets` to edit it (issue #268).
+/// The config rides `ServerMsg::StationConfig` whole, so a v123 peer handed one
+/// with a list on the end reads the tail of it out of step; the command is
+/// appended last, so no surviving discriminant moved.
+pub const PROTO_VERSION: u16 = 124;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

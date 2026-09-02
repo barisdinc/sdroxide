@@ -2863,6 +2863,12 @@ fn engine_thread(
     // first call also seeds `bandplan.json` if the operator has none.
     sdroxide_types::set_band_plan(sdroxide_config::load_band_plan());
     sdroxide_types::set_region(sdroxide_config::load_region());
+    // The operator's own additions to the digital modes' frequency tables. Read
+    // here for the same reason as the plan above: they are process-wide, every
+    // radio at the station offers the same ones, and a headless `--server`
+    // engine has to have them too — its clients draw the picker from what it
+    // announces.
+    sdroxide_types::set_digi_presets(sdroxide_config::load_digi_presets());
 
     let mut state = RadioState::default();
     state.center_hz = source.center_hz();
@@ -8041,6 +8047,26 @@ impl Engine {
                 self.state.band = Band::containing(self.state.active_freq_hz());
                 self.emit_station_config();
             }
+            SetDigiPresets(presets) => {
+                // Sorted and de-duplicated on the way in, so the picker never
+                // has to and two clients editing the same list converge on the
+                // same file. A preset with no frequency is dropped rather than
+                // saved as a row that can never be tuned.
+                let mut presets: Vec<sdroxide_types::DigiPreset> =
+                    presets.into_iter().filter(|p| p.dial_hz > 0.0).collect();
+                presets.sort_by(|a, b| {
+                    (a.mode as u8).cmp(&(b.mode as u8)).then(a.dial_hz.total_cmp(&b.dial_hz))
+                });
+                presets.dedup_by(|a, b| a.mode == b.mode && (a.dial_hz - b.dial_hz).abs() < 1.0);
+                if let Err(e) = sdroxide_config::save_digi_presets(&presets) {
+                    warn!("saving the digital-mode frequency presets: {e}");
+                    self.notice(&format!("Could not save your frequency presets: {e}"));
+                }
+                // Process-wide, like the band plan: every radio at this station
+                // offers the same list from the next lookup.
+                sdroxide_types::set_digi_presets(presets);
+                self.emit_station_config();
+            }
             ReloadBandPlan => {
                 // A missing file is seeded here as well as at startup, which is
                 // what makes "delete it to get the defaults back" work without
@@ -9644,6 +9670,7 @@ impl Engine {
                 relay: self.relay_cfg.clone(),
                 region: sdroxide_types::region(),
                 band_plan: sdroxide_types::band_plan().clone(),
+                digi_presets: sdroxide_types::digi_presets().to_vec(),
             },
         )));
     }
@@ -10497,11 +10524,19 @@ impl Engine {
             return None;
         }
         let here = sdroxide_types::digi_channels_in(mode, Band::containing(dial));
-        // The plain calling frequency, which is the one with no note — the same
-        // choice the band buttons already make. Not simply the lowest: FT8's
-        // DXpedition dial is *below* the calling one on five bands, and dropping
-        // an operator into a Fox/Hound window would be a trap.
-        let hz = here.iter().find(|c| c.note.is_empty()).or_else(|| here.first())?.dial_hz;
+        // The plain calling frequency, which is the published one with no note
+        // — the same choice the band buttons already make. Not simply the
+        // lowest: FT8's DXpedition dial is *below* the calling one on five
+        // bands, and dropping an operator into a Fox/Hound window would be a
+        // trap. And not one the operator saved themselves either: a dial that
+        // is already on one of those is left alone by the check above, which is
+        // the whole of what a saved frequency should do to a rule that moves
+        // the radio without being asked.
+        let hz = here
+            .iter()
+            .find(|c| !c.mine && c.note.is_empty())
+            .or_else(|| here.iter().find(|c| !c.mine))?
+            .dial_hz;
         // `may_rx_hz`, not `can_rx_hz`: a driver that publishes no tuning range
         // has said nothing about where it tunes, not "nowhere".
         self.caps.may_rx_hz(hz).then_some(hz)

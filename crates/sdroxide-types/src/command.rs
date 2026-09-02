@@ -921,4 +921,16 @@ pub enum Command {
     TestRelay {
         channel: u8,
     },
+
+    /// Replace the operator's own additions to the digital modes' frequency
+    /// tables (issue #268), saved to `digi_presets.json` and echoed back in
+    /// [`crate::RadioEvent::StationConfig`].
+    ///
+    /// The whole list rather than one entry: it is short, the picker edits it
+    /// in place, and sending it whole means a client and the station cannot
+    /// come to disagree about what is in it — the same latest-wins rule the
+    /// rest of the station's configuration follows.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetDigiPresets(Vec<crate::DigiPreset>),
 }

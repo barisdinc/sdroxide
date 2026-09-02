@@ -1390,6 +1390,13 @@ impl SdroxideApp {
                     if sdroxide_types::band_plan() != &c.band_plan {
                         sdroxide_types::set_band_plan(c.band_plan.clone());
                     }
+                    // The operator's own additions to the modes' frequency
+                    // tables, on the same terms and for the same reason: the
+                    // station owns the list, and this client draws the picker
+                    // from it. Guarded against the same leak.
+                    if sdroxide_types::digi_presets() != c.digi_presets.as_slice() {
+                        sdroxide_types::set_digi_presets(c.digi_presets.clone());
+                    }
                 }
                 RadioEvent::TleSubStatus(s) => self.on_tle_sub_status(s),
                 RadioEvent::SatTrack(t) => self.sat_track = t.map(|t| *t),

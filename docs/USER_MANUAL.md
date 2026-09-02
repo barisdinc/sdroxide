@@ -2605,11 +2605,11 @@ THOR, SSTV and the rest are worked across a sub-band rather than on one spot, so
 a frequency you chose inside it is a frequency you meant. The button below is
 how those reach a convention — by asking.
 
-#### The agreed frequencies for a mode
+#### The agreed frequencies for a mode, and your own
 
-Every mode with a convention of its own carries a **⇵** button in its operating
-panel — FT8, FT4, FT2, JS8, WSPR, PSK, RTTY, FSQ, SSTV (analog and FM), RIFP and
-APRS. It lists **every band's** agreed frequency for that mode, grouped by band
+Every digital mode carries a **⇵** button in its operating panel. It lists
+**every band's** agreed frequency for that mode — FT8, FT4, FT2, JS8, WSPR, PSK,
+RTTY, FSQ, SSTV (analog and FM), RIFP and APRS all have one — grouped by band
 with the band you are already in at the top, so changing band is one click rather
 than a band button and then a number you had to remember.
 
@@ -2630,6 +2630,27 @@ left alone.
 WEFAX has its own **STATIONS** button instead ([3.8](#38-weather-fax-wefax--radiofax)): its
 transmitters are not on any band plan, so they are listed by station rather than
 by band.
+
+**Saving your own.** The bottom of the list has **＋ Save *this* MHz**, which
+remembers the dial you are on under the mode you are in. The club net that meets
+on 3.585 every Tuesday is not in anybody's global table and never will be, so
+having found it once you should not have to find it again. Saved entries appear
+in the same list marked with a **★**, in every band group like any other, and
+carry an **✕** to forget them — published conventions do not, because 14.074 is
+not this station's to delete.
+
+A mode the tables have nothing at all for — Olivia, THOR, Contestia,
+Hellschreiber — still has the button, with nothing in it but the save row. That
+is the only way the first entry for such a mode could ever be made.
+
+Your saved frequencies belong to the **station**, not to the screen: they live in
+`digi_presets.json` beside the band plan ([13](#13-configuration-files)), every
+radio at the station offers the same ones, and a remote client draws the same
+list the console does. They are also deliberately *passive* — the band buttons
+and the "choosing a slotted mode tunes the radio" rule above both stay on the
+published calling frequency, because those move the dial without being asked and
+one station's own note is not where the band is worked. Being *on* a saved
+frequency is enough to stop the mode rule moving you off it.
 
 The frequencies that differ by region — PSK31 and RTTY on 40 m, SSTV on 80 m and
 40 m — are not offered as a choice, because the **IARU region** setting
@@ -12252,6 +12273,7 @@ sdroxide stores its settings under the per-user config directory:
 | `memories.json` | JSON | Saved memory channels. |
 | `bandstacks.json` | JSON | Per-band memory of your last frequency/mode/filter (up to three per band). |
 | `bandplan.json` | JSON | The band plan itself, per IARU region: band edges, the CW/data/phone/beacon/all-modes sub-segments, and the PSK and RTTY skimmer windows — all in MHz. Written from the built-in IARU tables on first start and meant to be edited; narrow a band here and the transmit lockout narrows with it. Which region applies is `region` in `config.toml`. **RELOAD BAND PLAN** on the General tab applies an edit without a restart, and deleting the file restores the defaults. See [§6.1](#61-general-station-audio-and-remote-access). |
+| `digi_presets.json` | JSON | The frequencies you have added to the digital modes' own lists yourself, as `mode` / `dial_hz` / `note` — written by the **＋ Save** button in the **⇵** picker ([§3.1](#31-general-considerations)) and readable and editable by hand, which is where a `note` comes from. Belongs to the station, so every radio and every remote client offers the same list. Absent until you save one. |
 | `session.json` | JSON | Where you left the radio: both VFO dials and which of the two was selected, the mode, the RX/TX antenna ports, the AF volume, RX gain, AGC mode, squelch and noise reduction, the TX drive/tune drive/mic gain, and the front end's own gain stages (the sliders on the Radio tab's device panel), restored the next time you start. Written by the engine as you tune, so `--freq`, `--mode`, `--antenna` and `--tx-antenna` override it for a run without changing it. Gain stages are remembered by name: one your current front end does not have is kept, not thrown away, so switching back to the radio it belongs to brings it back, and a figure past what this device offers is clamped to its range. |
 | `qso_log.json` | JSON | The logbook (digital and manual QSOs, with contest/QSL fields). |
 | `net.json` | JSON | Network cockpit: DX cluster / POTA / SOTA / PSK / FreeDV Reporter / WSPRnet feed settings, and callsign-lookup / eQSL / QRZ / HamQTH / Club Log / LoTW credentials (stored in plaintext). |
