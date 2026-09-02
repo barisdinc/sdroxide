@@ -255,8 +255,9 @@ fn cw_text(text: &str) -> String {
 /// Send `text` as CW from the rig's own keyer (cmd `0x17`). `None` when nothing
 /// in `text` is sendable — an empty frame would be a rejected frame.
 ///
-/// The rig keys itself for the length of the message (its break-in decides how
-/// it switches), so this must not be wrapped in PTT.
+/// The rig keys itself for the length of the message, so this must not be
+/// wrapped in PTT. Break-in decides whether it keys at all — see
+/// [`set_break_in_frame`].
 pub fn send_cw_frame(radio: u8, text: &str) -> Option<Vec<u8>> {
     let msg = cw_text(text);
     (!msg.is_empty()).then(|| frame(radio, 0x17, msg.as_bytes()))
@@ -276,6 +277,78 @@ pub fn keyer_speed_frame(radio: u8, wpm: f32) -> Vec<u8> {
     let level = (((wpm - 6.0) * (255.0 / 42.0)).round() as u32).min(255);
     let [hi, lo] = encode_level(level);
     frame(radio, 0x14, &[0x0C, hi, lo])
+}
+
+/// The rig's break-in setting, which is what decides whether a message handed
+/// to its keyer keys the transmitter at all.
+///
+/// CI-V `16 47`, on the "various settings" command every current Icom carries:
+/// `00` off, `01` semi break-in, `02` full break-in (QSK). A model without it
+/// answers NG, which costs one frame and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakIn {
+    Off,
+    /// Semi: the rig keys on the first element and drops back to receive after
+    /// its delay. What a message sent from a computer wants.
+    Semi,
+    /// Full (QSK): receive between elements.
+    Full,
+}
+
+impl BreakIn {
+    fn code(self) -> u8 {
+        match self {
+            BreakIn::Off => 0x00,
+            BreakIn::Semi => 0x01,
+            BreakIn::Full => 0x02,
+        }
+    }
+
+    fn from_code(b: u8) -> Option<BreakIn> {
+        match b {
+            0x00 => Some(BreakIn::Off),
+            0x01 => Some(BreakIn::Semi),
+            0x02 => Some(BreakIn::Full),
+            _ => None,
+        }
+    }
+
+    /// Whether a message given to the keyer will actually go out on the air.
+    pub fn keys_the_transmitter(self) -> bool {
+        self != BreakIn::Off
+    }
+}
+
+/// The `16` sub-command that carries break-in.
+const BREAK_IN_SUB: u8 = 0x47;
+
+/// Set the break-in function (cmd `0x16` sub `0x47`).
+///
+/// Without this a CW message sent with [`send_cw_frame`] is *accepted and not
+/// transmitted*: the radio's own reference says a message from the PC goes out
+/// only while `[TRANSMIT]` is on, an external TX switch is closed, or break-in
+/// is on — and the first two are front-panel things an operator working the
+/// radio over a network cannot reach (issue #282).
+pub fn set_break_in_frame(radio: u8, bk: BreakIn) -> Vec<u8> {
+    frame(radio, 0x16, &[BREAK_IN_SUB, bk.code()])
+}
+
+/// Read the break-in setting back (cmd `0x16` sub `0x47`, no value).
+pub fn read_break_in_frame(radio: u8) -> Vec<u8> {
+    frame(radio, 0x16, &[BREAK_IN_SUB])
+}
+
+/// The break-in setting in a `16` reply, or `None` for the several dozen other
+/// sub-commands answered on the same command byte.
+///
+/// The length is what tells an answer from the question: a read carries the
+/// sub-command and nothing else — which is exactly what our own frame looks
+/// like on its way out — and an answer appends the value.
+pub fn parse_break_in_reply(data: &[u8]) -> Option<BreakIn> {
+    if data.first() != Some(&BREAK_IN_SUB) || data.len() < 2 {
+        return None;
+    }
+    BreakIn::from_code(data[1])
 }
 
 /// Icom's generic 0–255 level as the two BCD bytes its level commands carry
@@ -1392,6 +1465,31 @@ mod tests {
         assert_eq!(long.len() - 6, CW_MAX);
         // Abort is the same command with the escape payload.
         assert_eq!(stop_cw_frame(0x94), vec![0xFE, 0xFE, 0x94, 0xE0, 0x17, 0xFF, 0xFD]);
+    }
+
+    /// Issue #282: a message handed to the keyer with break-in off is accepted
+    /// and never transmitted, and over a network there is no `[TRANSMIT]` key
+    /// to press instead.
+    #[test]
+    fn break_in_is_the_switch_a_keyed_message_needs() {
+        // `16 47` with the position as the value.
+        assert_eq!(
+            set_break_in_frame(0x94, BreakIn::Semi),
+            vec![0xFE, 0xFE, 0x94, 0xE0, 0x16, 0x47, 0x01, 0xFD]
+        );
+        assert_eq!(set_break_in_frame(0x94, BreakIn::Off)[6], 0x00);
+        assert_eq!(set_break_in_frame(0x94, BreakIn::Full)[6], 0x02);
+        // The read is the same frame with no value — which is why the parser
+        // needs the length to tell our own question from the radio's answer.
+        assert_eq!(read_break_in_frame(0x94), vec![0xFE, 0xFE, 0x94, 0xE0, 0x16, 0x47, 0xFD]);
+        assert_eq!(parse_break_in_reply(&[0x47]), None, "that is the question, not the answer");
+        assert_eq!(parse_break_in_reply(&[0x47, 0x00]), Some(BreakIn::Off));
+        assert_eq!(parse_break_in_reply(&[0x47, 0x02]), Some(BreakIn::Full));
+        // Any of the several dozen other `16` sub-commands is not this one.
+        assert_eq!(parse_break_in_reply(&[0x46, 0x01]), None, "that is VOX");
+        assert_eq!(parse_break_in_reply(&[0x47, 0x09]), None, "no such position");
+        assert!(!BreakIn::Off.keys_the_transmitter());
+        assert!(BreakIn::Semi.keys_the_transmitter() && BreakIn::Full.keys_the_transmitter());
     }
 
     /// Transmit power is a level on the same 0–255 scale as everything else in

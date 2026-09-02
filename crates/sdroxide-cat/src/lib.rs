@@ -399,6 +399,20 @@ trait Protocol: Send {
     fn read_squelch(&self) -> Vec<Vec<u8>> {
         Vec::new()
     }
+
+    /// Frames asking whether the rig's break-in is on, sent once when the port
+    /// opens.
+    ///
+    /// Not adopted like the power and the squelch above — this one is *needed*.
+    /// Every family here that keys the rig's own keyer has to have break-in on
+    /// or the message is accepted and never transmitted, and Yaesu and Kenwood
+    /// simply assert it with each message. On CI-V the setting has three
+    /// positions rather than two, and knocking an operator who runs QSK down to
+    /// semi break-in every time they send is worth one frame at open to avoid.
+    /// Empty for families with no such read, which is every other one.
+    fn read_break_in(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
     /// Whether [`Protocol::set_squelch`] reaches this family at all.
     fn commands_squelch(&self) -> bool {
         false
@@ -583,6 +597,10 @@ struct Civ {
     scope_assembler: civ::ScopeAssembler,
     /// The newest finished sweep, until [`Protocol::take_scope_sweep`] takes it.
     scope_finished: Option<ScopeFrame>,
+    /// What the rig last said its break-in was set to, from the read at open
+    /// and from our own writes. `None` until it has answered — a model that
+    /// NAKs the read, or a reply still in flight.
+    break_in: Option<civ::BreakIn>,
 }
 
 /// How long after a broadcast a disagreeing polled answer is put down to the
@@ -607,6 +625,7 @@ impl Civ {
             scope_half_span: None,
             scope_assembler: civ::ScopeAssembler::default(),
             scope_finished: None,
+            break_in: None,
         }
     }
 
@@ -681,7 +700,28 @@ impl Protocol for Civ {
         civ::CW_MAX
     }
     fn send_cw(&mut self, text: &str) -> Vec<Vec<u8>> {
-        civ::send_cw_frame(self.radio, text).into_iter().collect()
+        let Some(msg) = civ::send_cw_frame(self.radio, text) else {
+            return Vec::new();
+        };
+        let mut frames = Vec::new();
+        // Break-in has to be on or the message is taken and never transmitted.
+        // The rig's own reference is explicit about it: a message sent from a
+        // PC goes out only while `[TRANSMIT]` is on, an external TX switch is
+        // closed, or break-in is on — and an operator working the radio over a
+        // network can reach none of the first two. That was issue #282, where
+        // CW from the panel did nothing at all on an IC-9700.
+        //
+        // Semi rather than full, because that is what a message sent from a
+        // computer wants — but never *down* from full: an operator who runs QSK
+        // has said what they want, and the read at open is there so this end
+        // knows. Idempotent otherwise, so it rides with every chunk the way
+        // Yaesu's `BI1` and Kenwood's `VX1` do.
+        if self.break_in != Some(civ::BreakIn::Full) {
+            frames.push(civ::set_break_in_frame(self.radio, civ::BreakIn::Semi));
+            self.break_in = Some(civ::BreakIn::Semi);
+        }
+        frames.push(msg);
+        frames
     }
     fn abort_cw(&mut self) -> Vec<Vec<u8>> {
         vec![civ::stop_cw_frame(self.radio)]
@@ -709,6 +749,9 @@ impl Protocol for Civ {
     }
     fn read_squelch(&self) -> Vec<Vec<u8>> {
         vec![civ::read_squelch_frame(self.radio)]
+    }
+    fn read_break_in(&self) -> Vec<Vec<u8>> {
+        vec![civ::read_break_in_frame(self.radio)]
     }
     fn commands_squelch(&self) -> bool {
         true
@@ -829,6 +872,20 @@ impl Protocol for Civ {
                         out.push(CatUpdate::Power(frac));
                     } else if let Some(frac) = civ::parse_squelch_reply(&reply.data) {
                         out.push(CatUpdate::Squelch(frac));
+                    }
+                }
+                // The "various settings" block (0x16). Only one of its several
+                // dozen sub-commands is asked for here — break-in (0x47),
+                // once when the port opens — and the sub-command byte in the
+                // reply is the only thing that says which arrived, the same
+                // shape as the level and meter reads around it.
+                //
+                // Nothing is surfaced to the app: this is not a control, it is
+                // what `send_cw` needs to know before it decides whether to
+                // assert semi break-in over an operator's QSK (issue #282).
+                0x16 => {
+                    if let Some(bk) = civ::parse_break_in_reply(&reply.data) {
+                        self.break_in = Some(bk);
                     }
                 }
                 // Meter read (0x15): while transmitting the SWR sub-meter
@@ -1993,6 +2050,16 @@ fn serial_thread(
             // radio's own level rather than somewhere the audio would not
             // match.
             for f in protocol.read_squelch() {
+                if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
+                    break 'opening true;
+                }
+            }
+            // Whether break-in is on, which on a CI-V rig is what decides
+            // whether a CW message handed to its keyer is transmitted at all.
+            // Not adopted — asserted at the moment of sending — but read here
+            // so an operator running full break-in is not knocked down to semi
+            // by their own first message (issue #282).
+            for f in protocol.read_break_in() {
                 if write_frame(&mut *port, &mut *protocol, &f, &mut last_write, &mut io) {
                     break 'opening true;
                 }
@@ -3335,6 +3402,53 @@ mod tests {
         for hz in [0.2, 0.5, 1.0, 2.0, 5.0, 20.0] {
             let cfg = CatConfig { poll_hz: hz, ..CatConfig::default() };
             assert!(mode_poll_period(&cfg) >= poll_period(&cfg), "{hz} Hz");
+        }
+    }
+
+    /// Issue #282: an IC-9700 worked over a network took the CW the panel sent
+    /// it and transmitted nothing, because a message from a PC keys the
+    /// transmitter only while `[TRANSMIT]` is on, an external TX switch is
+    /// closed, or break-in is on — and the first two are front-panel things.
+    #[test]
+    fn a_civ_rig_is_put_in_break_in_before_it_is_handed_cw() {
+        let civ = || make_protocol(&CatConfig { family: CatFamily::Icom, ..CatConfig::default() });
+
+        // Nothing has been read back, so the switch is asserted: break-in
+        // first, the message second, and in that order.
+        let mut p = civ();
+        let frames = p.send_cw("cq de w1aw");
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0][4..7], [0x16, 0x47, 0x01], "semi break-in");
+        assert_eq!(frames[1][4], 0x17, "the message");
+
+        // A rig that has answered "full break-in" is left in it: an operator
+        // running QSK has said what they want, and knocking them down to semi
+        // on every message would be this end arguing with the front panel.
+        // A reply *from* the radio (0x70) *to* the controller (0xE0); the
+        // other way round is our own echo, which `parse` skips.
+        let reply = |bk: u8| vec![0xFE, 0xFE, 0xE0, 0x70, 0x16, 0x47, bk, 0xFD];
+        let mut p = civ();
+        p.parse(&mut reply(0x02));
+        let frames = p.send_cw("cq de w1aw");
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0][4], 0x17);
+
+        // But one that has answered "off" is exactly the radio the issue was
+        // reported on, and it gets the switch.
+        let mut p = civ();
+        p.parse(&mut reply(0x00));
+        assert_eq!(p.send_cw("cq").len(), 2);
+
+        // Nothing sendable is still no frames at all — a message that is only
+        // punctuation must not leave the radio keyed in break-in for nothing.
+        let mut p = civ();
+        assert!(p.send_cw("  <>  ").is_empty());
+
+        // And the read that makes the distinction possible goes out at open.
+        assert_eq!(civ().read_break_in().len(), 1);
+        for f in [CatFamily::Yaesu, CatFamily::Kenwood, CatFamily::Elecraft, CatFamily::QrpLabs] {
+            let p = make_protocol(&CatConfig { family: f, ..CatConfig::default() });
+            assert!(p.read_break_in().is_empty(), "{f:?} asserts break-in without asking");
         }
     }
 

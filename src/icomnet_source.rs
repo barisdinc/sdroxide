@@ -223,6 +223,10 @@ pub struct IcomNetSource {
     /// answer that crossed a command on the wire, which would otherwise put the
     /// rail back where the radio was before the operator moved it.
     squelch_set: bool,
+    /// What the radio last said its break-in was set to, from the read
+    /// `configure` sends and from this end's own writes. `None` until it has
+    /// answered. See [`Self::send_cw`] for why it is worth knowing.
+    break_in: Option<civ::BreakIn>,
     /// Which antenna socket the radio says it is on, and whether it has a
     /// selector at all: empty until it has answered the read `configure` sends,
     /// which a radio with one connector NAKs instead — see
@@ -362,6 +366,7 @@ impl IcomNetSource {
             last_telem: None,
             transmitting: false,
             squelch_set: false,
+            break_in: None,
             antenna: None,
             antenna_probes_left: ANTENNA_PROBE_RETRIES,
             last_antenna_probe: Instant::now(),
@@ -408,6 +413,11 @@ impl IcomNetSource {
         // connector NAKs this rather than answering it, whether there is a
         // selector here to offer at all (issue #238).
         self.send(civ::read_antenna_frame(self.civ_addr));
+        // Whether break-in is on, which is what decides whether a CW message
+        // handed to the radio's own keyer is transmitted at all. Not adopted —
+        // `send_cw` asserts it — but read so an operator running full break-in
+        // is not knocked down to semi by their own first message (issue #282).
+        self.send(civ::read_break_in_frame(self.civ_addr));
 
         // Which Set-mode menu items this session has to put its own value in,
         // collected before any of them is written: they are read back first,
@@ -785,6 +795,15 @@ impl IcomNetSource {
                     }
                 }
             }
+            // The "various settings" block, of which this session asks for one
+            // thing only: whether break-in is on (issue #282). Not surfaced to
+            // the app — it is not a control here, it is what `send_cw` needs to
+            // know before it asserts semi break-in over an operator's QSK.
+            0x16 => {
+                if let Some(bk) = civ::parse_break_in_reply(&reply.data) {
+                    self.break_in = Some(bk);
+                }
+            }
             0x15 => {
                 if let Some(dbm) = civ::parse_smeter_reply(&reply.data) {
                     self.last_signal = Some((Instant::now(), dbm));
@@ -1013,9 +1032,19 @@ impl IqSource for IcomNetSource {
         matches!(self.cw_keying, CwKeying::Audio)
     }
     fn send_cw(&mut self, text: &str) {
-        if let Some(f) = civ::send_cw_frame(self.civ_addr, text) {
-            self.send(f);
+        let Some(f) = civ::send_cw_frame(self.civ_addr, text) else { return };
+        // Break-in first, or the radio takes the message and never transmits
+        // it: its own reference sends a message from a PC only while
+        // `[TRANSMIT]` is on, an external TX switch is closed, or break-in is
+        // on — and over a network link there is no front panel to reach for.
+        // That was issue #282 on an IC-9700. Semi is what a computer-sent
+        // message wants, but never *down* from a full break-in the operator
+        // chose: the read in `configure` is what tells this end which.
+        if self.break_in != Some(civ::BreakIn::Full) {
+            self.break_in = Some(civ::BreakIn::Semi);
+            self.send(civ::set_break_in_frame(self.civ_addr, civ::BreakIn::Semi));
         }
+        self.send(f);
     }
     fn abort_cw(&mut self) {
         self.send(civ::stop_cw_frame(self.civ_addr));

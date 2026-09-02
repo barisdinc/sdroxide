@@ -470,8 +470,12 @@ pub(in crate::app) fn settings_cat_tab(
         ui.label("CW keying").on_hover_text(
             "How the CW panel's keyer transmits. \"Rig keyer\" puts the radio in CW \
              and hands it the text to send with its own keyer. It uses the rig's \
-             keyer speed (set from the panel's WPM), needs break-in on, and on Yaesu \
+             keyer speed (set from the panel's WPM), and on Yaesu \
              it sends by way of keyer memory 1, overwriting whatever was stored in it.\n\n\
+             It needs break-in on at the radio, which sdroxide turns on itself with each \
+             message on Icom, Yaesu and Kenwood — a rig with break-in off takes the message \
+             and transmits nothing. It is left on afterwards, and a full break-in is never \
+             turned down to semi.\n\n\
              \"Sound card\" sends the keyed sidetone as audio instead (MCW), a tone at \
              dial + pitch — and because a rig in CW would ignore its sound card \
              entirely, selecting CW then follows the Digimode mode setting (USB, DATA, \

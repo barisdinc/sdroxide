@@ -6357,7 +6357,15 @@ What that needs on the radio:
   because with break-in off the keyer runs into the sidetone and never keys the
   transmitter. On Kenwood the same switch is `VX`, which is the *VOX* switch in
   every mode except CW — so sdroxide sends it only once the rig has reported
-  that it is in CW, rather than risk turning VOX on under a live sound card. If
+  that it is in CW, rather than risk turning VOX on under a live sound card. On
+  Icom it is `16 47`, sent with every message for the same reason: an Icom sends
+  a message given to it by a computer only while `[TRANSMIT]` is on, an external
+  TX switch is closed, or break-in is on, and the first two are front-panel
+  things an operator working the radio over a network cannot reach — which is
+  what left CW on a remote IC-9700 doing nothing at all (issue #282). It is set
+  to **semi** break-in, and never *down* from full: the setting is read once
+  when the link opens, so a rig you run in QSK is left in QSK. Either way the
+  radio is left in break-in afterwards, as it is on the other two families. If
   you key CW with **Mode control** set to `Radio controlled`, turn break-in on
   at the radio yourself. Elecraft and QRP Labs need none of this: a `KY` message
   keys the transmitter itself there, the way a recorded message does.
@@ -12532,6 +12540,9 @@ ignores audio sent to its sound card, so it can only be keyed from text: with
 **Rig keyer (CAT)**, on Yaesu check that CW memory 1 is free to be overwritten;
 on Kenwood, that break-in is on (sdroxide only asserts it when the rig has
 reported CW, because the same command is the VOX switch in every other mode);
+on Icom, that the radio takes `16 47` — sdroxide turns semi break-in on with
+every message, and a model old enough to answer NG to that needs break-in set at
+the radio, or `[TRANSMIT]` held on, instead;
 on Elecraft, that the rig is not sitting in a limited-access state such as BSET
 or VFO REV, where it answers `?;` and does nothing; on any rig, that
 the radio is actually in CW (**Mode control** = `CAT`) and that the **Drive**
@@ -12739,6 +12750,13 @@ All in [§6.2.2](#622-cat-radios-serial-control--usb-audio):
   and every control frame steals bus time. Turn the poll down. The scope
   stream above is the same trade several times over — if the audio breaks up
   with it on, the scope is the first thing to try switching off.
+- **CW:** an Icom sends a message given to it by a computer only while
+  `[TRANSMIT]` is on, an external TX switch is closed, or **break-in** is on.
+  sdroxide turns semi break-in on (`16 47`) with every message, since the first
+  two are things you cannot reach from another room — but it never turns a full
+  break-in *down*: the setting is read once when the link opens, so a rig you
+  run in QSK stays in QSK. The radio is left in break-in when the message is
+  done, the same way it is on Yaesu and Kenwood.
 - Two Icoms are two of the same USB codec under one name — the device list
   tags the second (`[#a3f1]`-style) so they can be told apart.
 
@@ -12760,7 +12778,10 @@ All in [§6.2.10](#6210-icom-lan-network-radios):
   own scope; the panadapter on AF is the demodulated audio, on the 12 kHz IF
   (which needs the **48000 Hz** audio rate) about ±12 kHz around the dial.
 - **CW keying** `Sound card (MCW)` keeps the radio in plain USB, the same
-  mode the digital modes ride here.
+  mode the digital modes ride here. `Rig keyer (CAT)` hands the text to the
+  radio's own keyer, and turns semi break-in on first for the same reason as
+  over USB above: without it the radio takes the message and transmits nothing,
+  and there is no `[TRANSMIT]` key to press over a network (issue #282).
 
 ### 15.5 Icom IC-R8600
 
