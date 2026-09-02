@@ -6333,6 +6333,36 @@ pub struct RadioConfig {
 }
 
 impl RadioConfig {
+    /// The converter offset that is actually in force at `dial_hz`, to be
+    /// changed in place.
+    ///
+    /// A measurement made *through* a converter — the QO-100 beacon's, above
+    /// all — corrects the box the dial is currently looking through, and on a
+    /// station with a transverter table that is not necessarily
+    /// [`Self::converter_offset_hz`]. The engine resolves the same precedence
+    /// when it tunes (`ConverterPlan`: a band-limited row first, the single
+    /// offset behind it), so a correction written anywhere else is written
+    /// into a number nothing reads, the beacon does not move, and a closed
+    /// loop watching for it to move never stops correcting.
+    ///
+    /// Falls through to [`Self::converter_offset_hz`] when no row covers the
+    /// dial, which is the bare radio and the single-converter station both.
+    pub fn converter_offset_at_mut(&mut self, dial_hz: f64) -> &mut f64 {
+        match self.transverters.iter_mut().find(|x| x.covers(dial_hz)) {
+            Some(x) => &mut x.offset_hz,
+            None => &mut self.converter_offset_hz,
+        }
+    }
+
+    /// The converter offset in force at `dial_hz`, read-only.
+    pub fn converter_offset_at(&self, dial_hz: f64) -> f64 {
+        self.transverters
+            .iter()
+            .find(|x| x.covers(dial_hz))
+            .map(|x| x.offset_hz)
+            .unwrap_or(self.converter_offset_hz)
+    }
+
     /// Point this radio at another interface, carrying the stated tuning
     /// ranges with the interface they were stated for.
     ///
@@ -6790,6 +6820,40 @@ mod tests {
             assert_eq!(cfg.converter_offset_hz, 0.0, "converter offset after loading {json}");
         }
         assert_eq!(RadioConfig::default().converter_offset_hz, 0.0);
+    }
+
+    /// A correction measured through a converter has to reach the offset the
+    /// dial is actually looking through. On a station with a transverter row
+    /// covering the band, that is the row — the single offset is behind it and
+    /// nothing reads it there (issue #291).
+    #[test]
+    fn the_offset_in_force_is_the_row_covering_the_dial_then_the_single_one() {
+        const QO100: f64 = 10_489_750_000.0;
+        let mut cfg = RadioConfig { converter_offset_hz: -9_750_000_000.0, ..Default::default() };
+
+        // No table: the single offset, as it has always been.
+        assert_eq!(cfg.converter_offset_at(QO100), -9_750_000_000.0);
+        *cfg.converter_offset_at_mut(QO100) += 3_000.0;
+        assert_eq!(cfg.converter_offset_hz, -9_749_997_000.0);
+
+        // A row covering the beacon takes precedence, and takes the correction.
+        cfg.transverters.push(Transverter {
+            name: "LNB".into(),
+            rf_lo_hz: 10_489_000_000.0,
+            rf_hi_hz: 10_500_000_000.0,
+            offset_hz: -9_750_000_000.0,
+            ..Default::default()
+        });
+        assert_eq!(cfg.converter_offset_at(QO100), -9_750_000_000.0);
+        *cfg.converter_offset_at_mut(QO100) += 3_000.0;
+        assert_eq!(cfg.transverters[0].offset_hz, -9_749_997_000.0, "the row is corrected");
+        assert_eq!(cfg.converter_offset_hz, -9_749_997_000.0, "the single offset is left alone");
+
+        // A row for another band does not: 2 m through a transverter must not
+        // catch a correction measured on 3 cm.
+        cfg.transverters[0].rf_lo_hz = 144_000_000.0;
+        cfg.transverters[0].rf_hi_hz = 146_000_000.0;
+        assert_eq!(cfg.converter_offset_at(QO100), cfg.converter_offset_hz);
         let up: RadioConfig =
             serde_json::from_str(r#"{"converter_offset_hz": 125000000.0}"#).expect("parses");
         assert_eq!(up.converter_offset_hz, 125_000_000.0);

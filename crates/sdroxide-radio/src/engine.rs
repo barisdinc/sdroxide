@@ -2761,19 +2761,50 @@ fn qo100_rate_for_cfg(cfg: &sdroxide_types::Qo100Settings) -> f64 {
 struct Qo100Auto {
     /// When the last correction was written, for the rate limit.
     last_apply: Option<Instant>,
+    /// Everything the decision below carries from one cycle to the next.
+    run: Qo100AutoRun,
+    /// How many corrections have been written since the tracker came on, and
+    /// the last one, with the unix second it happened — shown on the page.
+    applies: u64,
+    last_hz: f64,
+    last_unix: i64,
+}
+
+/// What one cycle of the closed loop hands to the next. Kept apart from
+/// [`Qo100Auto`]'s clocks and counters so the decision itself is a pure
+/// function of it, testable without an engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Qo100AutoRun {
     /// The most recent clean estimate, and how many clean estimates in a row
     /// (this one included) have agreed with it — a correction needs
     /// [`QO100_AUTO_AGREE_RUN`] before it will move a running receiver, so one
     /// or two stray readings never reopen the front end.
     agree_ref_hz: Option<f64>,
     agree_run: u8,
-    /// Signed Hz written into the converter offset since the tracker came on,
-    /// and how many writes that took — shown on the QO-100 page.
+    /// A correction that has been written and not yet been shown to have
+    /// worked, and how many in a row have failed that test.
+    ///
+    /// This is the loop checking its own work. A correction is a claim about
+    /// the world — write this many Hz and the beacon lands on 10489.750 MHz —
+    /// so the first estimate to arrive once the front end has settled is the
+    /// answer to it: the beacon should be back near the target, not still out
+    /// where it was. It will not be whenever the number written is not the
+    /// number the receiver reads — a `Transverter` row covering the beacon
+    /// takes precedence over the single converter offset, a front end that
+    /// will not reopen never picks the new value up. Without this the loop
+    /// writes the same correction every [`QO100_AUTO_MIN_INTERVAL`] for as
+    /// long as it is left armed, reopening the receiver each time and walking
+    /// the offset further from the truth on every pass.
+    ///
+    /// Deliberately *not* a comparison of one correction against the last. A
+    /// steadily warming LNB earns a fresh correction of much the same size
+    /// every few minutes, and that is the loop working perfectly — what
+    /// separates it from a runaway is not the size of the corrections but
+    /// whether the beacon goes back to the target in between.
+    pending_hz: Option<f64>,
+    stalled: u8,
+    /// Signed Hz written into the converter offset since the tracker came on.
     total_hz: f64,
-    applies: u64,
-    /// The last single correction, and the unix second it happened.
-    last_hz: f64,
-    last_unix: i64,
 }
 
 /// The tracker's estimate must clear all of these before its correction is
@@ -2796,14 +2827,59 @@ const QO100_AUTO_DEADBAND_HZ: f64 = 200.0;
 /// the front-end reopen each correction costs to at most one every half a
 /// minute.
 const QO100_AUTO_MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// A correction counts as having taken effect if the error left behind it is
+/// smaller than this share of it. Half is loose on purpose: the question being
+/// asked is only "did the beacon go back toward the target at all", not "how
+/// precisely" — the deadband above is what judges that.
+const QO100_AUTO_SHRINK: f64 = 0.5;
+/// How long after a correction the loop waits before believing what it reads.
+/// A correction reopens the front end, and the tracker's window has to refill
+/// through that before its estimate says anything about the new offset rather
+/// than the old one.
+const QO100_AUTO_SETTLE: Duration = Duration::from_secs(6);
+/// How many corrections in a row may fail to shrink before the loop gives up
+/// and disarms. Two, because the first could be a genuine second drift step
+/// arriving while the first correction was still settling; a third says the
+/// write is not reaching the receiver.
+const QO100_AUTO_MAX_STALLED: u8 = 2;
+/// A ceiling on what the loop may move the offset by in one session, as a
+/// backstop under the convergence check for any way of not converging that
+/// still shrinks. Far more than an uncalibrated LNB needs (tens of kHz) plus a
+/// day of thermal drift (a few kHz), and small enough that a runaway is caught
+/// while the station is still recognisable.
+const QO100_AUTO_TOTAL_MAX_HZ: f64 = 150_000.0;
+
+/// Why the closed loop took itself off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qo100AutoStop {
+    /// Corrections are going out and the beacon is not moving.
+    NotConverging,
+    /// The running total left what any real LNB could be out by.
+    Runaway,
+}
+
+impl Qo100AutoStop {
+    /// What the operator is told on the notice line.
+    fn notice(self) -> &'static str {
+        match self {
+            Qo100AutoStop::NotConverging => {
+                "QO-100 auto-correct switched off: the offset is being written but the beacon is                  not moving. If this station has a transverter row covering 10489.750 MHz, check                  that it is the one being corrected; otherwise check that the receiver reopens."
+            }
+            Qo100AutoStop::Runaway => {
+                "QO-100 auto-correct switched off: it has moved the converter offset further than                  any LNB should need. The offset it has written is unlikely to be right — check                  Settings ▸ Radio ▸ Converter."
+            }
+        }
+    }
+}
 
 /// What one pass of the tracker's closed loop decided.
 struct Qo100AutoOutcome {
     /// Hz to add to the converter offset now — `None` means "not this cycle".
     correction: Option<f64>,
-    /// The agreement reference and run length to carry forward.
-    agree_ref_hz: Option<f64>,
-    agree_run: u8,
+    /// The state to carry forward.
+    run: Qo100AutoRun,
+    /// Set when the loop has decided to take itself off the air.
+    stop: Option<Qo100AutoStop>,
 }
 
 /// The closed loop's decision, pure so it can be tested without an engine: a
@@ -2811,29 +2887,77 @@ struct Qo100AutoOutcome {
 /// (a convincing twin-lobe shape) in a row that all agree, that clears the
 /// deadband, and only if the last correction has had time to settle.
 /// `since_last` is `None` before the loop has ever acted.
+///
+/// It also watches its own effect. A loop that writes a correction the
+/// receiver never sees would otherwise write it again, and again, for as long
+/// as the operator left it armed — see [`Qo100AutoRun::stalled`]. When that
+/// happens, or when the running total leaves what an LNB could plausibly be
+/// out by, the outcome carries a [`Qo100AutoStop`] and the caller takes the
+/// loop off rather than going round again.
 fn qo100_auto_correction(
     est_offset_hz: Option<f64>,
     null_db: f32,
     sym: f32,
     snr_db: f32,
-    agree_ref_hz: Option<f64>,
-    agree_run: u8,
+    prev: Qo100AutoRun,
     since_last: Option<Duration>,
 ) -> Qo100AutoOutcome {
-    let hold = |r, n| Qo100AutoOutcome { correction: None, agree_ref_hz: r, agree_run: n };
+    // A cycle with no usable estimate keeps everything the loop knows about
+    // its own effect; only the agreement run moves.
+    let idle = |n: u8| Qo100AutoOutcome {
+        correction: None,
+        run: Qo100AutoRun { agree_ref_hz: None, agree_run: n, ..prev },
+        stop: None,
+    };
 
-    let Some(off) = est_offset_hz else { return hold(None, 0) };
+    let Some(off) = est_offset_hz else { return idle(0) };
     let clean =
         null_db >= QO100_AUTO_NULL_DB && sym >= QO100_AUTO_SYM && snr_db >= QO100_AUTO_SNR_DB;
     if !clean {
-        return hold(None, 0); // a bad cycle breaks the run
+        return idle(0); // a bad cycle breaks the run
     }
+
+    // Did the last correction do what it said it would? This estimate is the
+    // answer, once the front end has had QO100_AUTO_SETTLE to reopen and the
+    // tracker's window to refill through it.
+    let mut pending = prev.pending_hz;
+    let mut stalled = prev.stalled;
+    if let Some(c) = pending
+        && since_last.is_none_or(|d| d >= QO100_AUTO_SETTLE)
+    {
+        pending = None;
+        if off.abs() < c.abs() * QO100_AUTO_SHRINK {
+            stalled = 0;
+        } else {
+            stalled = stalled.saturating_add(1);
+            if stalled > QO100_AUTO_MAX_STALLED {
+                return Qo100AutoOutcome {
+                    correction: None,
+                    run: Qo100AutoRun {
+                        agree_ref_hz: None,
+                        agree_run: 0,
+                        pending_hz: None,
+                        stalled,
+                        ..prev
+                    },
+                    stop: Some(Qo100AutoStop::NotConverging),
+                };
+            }
+        }
+    }
+
+    // From here the effect check has run, so holding has to carry it too.
+    let hold = |r: Option<f64>, n: u8| Qo100AutoOutcome {
+        correction: None,
+        run: Qo100AutoRun { agree_ref_hz: r, agree_run: n, pending_hz: pending, stalled, ..prev },
+        stop: None,
+    };
 
     // Extend the run if this estimate agrees with the reference (and has the
     // same sign — a drift keeps one sign, an oscillation flips), else restart.
-    let run = match agree_ref_hz {
+    let run = match prev.agree_ref_hz {
         Some(r) if (r - off).abs() <= QO100_AUTO_AGREE_HZ && r.signum() == off.signum() => {
-            agree_run.saturating_add(1)
+            prev.agree_run.saturating_add(1)
         }
         _ => 1,
     };
@@ -2845,9 +2969,37 @@ fn qo100_auto_correction(
     if !cooled || off.abs() < QO100_AUTO_DEADBAND_HZ {
         return hold(Some(off), run);
     }
+
+    // A correction is due, unless the running total says the loop has already
+    // moved the offset further than any LNB could have been out by.
+    let total = prev.total_hz + off;
+    if total.abs() > QO100_AUTO_TOTAL_MAX_HZ {
+        return Qo100AutoOutcome {
+            correction: None,
+            run: Qo100AutoRun {
+                agree_ref_hz: None,
+                agree_run: 0,
+                pending_hz: None,
+                stalled,
+                ..prev
+            },
+            stop: Some(Qo100AutoStop::Runaway),
+        };
+    }
+
     // Correction written: start a fresh run so the next one needs its own
-    // steady stretch of agreeing estimates.
-    Qo100AutoOutcome { correction: Some(off), agree_ref_hz: None, agree_run: 0 }
+    // steady stretch of agreeing estimates, and put it up to be checked.
+    Qo100AutoOutcome {
+        correction: Some(off),
+        run: Qo100AutoRun {
+            agree_ref_hz: None,
+            agree_run: 0,
+            pending_hz: Some(off),
+            stalled,
+            total_hz: total,
+        },
+        stop: None,
+    }
 }
 
 /// How soon after noticing a disconnected front-end the first reconnect attempt
@@ -8809,8 +8961,8 @@ impl Engine {
             self.qo100_auto = Qo100Auto::default();
         } else {
             self.qo100_auto_step(&status);
-            status.auto_applying = true;
-            status.auto_total_hz = self.qo100_auto.total_hz;
+            status.auto_applying = self.state.qo100.auto_apply;
+            status.auto_total_hz = self.qo100_auto.run.total_hz;
             status.auto_applies = self.qo100_auto.applies;
             status.auto_last_hz = self.qo100_auto.last_hz;
             status.auto_last_unix = self.qo100_auto.last_unix;
@@ -8825,24 +8977,53 @@ impl Engine {
     /// from yanking a running receiver on a single bad reading — the
     /// "deadband + rare reopen" approach the QO-100 page is built around.
     fn qo100_auto_step(&mut self, status: &sdroxide_types::Qo100Status) {
+        // ⛔ Never under an over. A correction *is* a front-end reopen — the
+        // device is released and claimed again — and QO-100 is worked full
+        // duplex, so on a station whose transmitter and receiver are the same
+        // box (a Pluto, a LimeSDR) doing that unasked in the middle of a
+        // transmission cuts the operator off mid-word. The manual APPLY button
+        // reopens too, but an operator pressing it has chosen the moment; this
+        // loop has not. Held rather than dropped: the agreement run is left
+        // standing, so the correction goes out on the first cycle after the
+        // over instead of having to be earned again.
+        if self.on_air() {
+            return;
+        }
+
         let out = qo100_auto_correction(
             status.est_offset_hz,
             status.est_null_depth_db,
             status.est_symmetry,
             status.est_snr_db,
-            self.qo100_auto.agree_ref_hz,
-            self.qo100_auto.agree_run,
+            self.qo100_auto.run,
             self.qo100_auto.last_apply.map(|t| t.elapsed()),
         );
-        self.qo100_auto.agree_ref_hz = out.agree_ref_hz;
-        self.qo100_auto.agree_run = out.agree_run;
+        self.qo100_auto.run = out.run;
+
+        if let Some(stop) = out.stop {
+            // The loop has decided it is doing harm. Take it off the way the
+            // operator would — the chip goes out on the page, because a
+            // control that says it is armed while nothing is armed is worse
+            // than the runaway it just stopped.
+            self.state.qo100.auto_apply = false;
+            warn!(?stop, total_hz = self.qo100_auto.run.total_hz, "QO-100 auto-correct disarmed");
+            let _ = self.event_tx.send(RadioEvent::Notice(Some(stop.notice().to_string())));
+            let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
+            return;
+        }
+
         let Some(off) = out.correction else { return };
 
         // `hardware_hz = dial_hz + offset`, so moving the beacon from where it
         // reads (`target + off`) back onto `target` means adding `off` to the
         // converter offset — the same maths the page's APPLY button uses.
+        //
+        // Which offset that is, the config decides: a transverter row covering
+        // the beacon takes precedence over the single converter offset, and
+        // correcting the one the receiver is not reading moves nothing (see
+        // `RadioConfig::converter_offset_at_mut`).
         let mut cfg = self.store.load_radio_config();
-        cfg.converter_offset_hz += off;
+        *cfg.converter_offset_at_mut(sdroxide_types::QO100_BEACON_HZ) += off;
         if let Err(e) = self.store.save_radio_config(&cfg) {
             warn!("qo100 auto-apply: saving radio config: {e}");
             return;
@@ -8851,13 +9032,12 @@ impl Engine {
         self.reopen_source();
 
         self.qo100_auto.last_apply = Some(Instant::now());
-        self.qo100_auto.total_hz += off;
         self.qo100_auto.applies += 1;
         self.qo100_auto.last_hz = off;
         self.qo100_auto.last_unix = unix_now_f64() as i64;
         info!(
             correction_hz = off,
-            total_hz = self.qo100_auto.total_hz,
+            total_hz = self.qo100_auto.run.total_hz,
             "QO-100 tracker corrected the converter offset"
         );
     }
@@ -15436,25 +15616,34 @@ mod qo100_rate_tests {
     use super::{qo100_capture_rate_for, qo100_rate_for_cfg};
     use sdroxide_types::Qo100Settings;
 
-    use super::{QO100_AUTO_AGREE_RUN, QO100_AUTO_MIN_INTERVAL, qo100_auto_correction};
+    use super::{
+        QO100_AUTO_AGREE_RUN, QO100_AUTO_MAX_STALLED, QO100_AUTO_MIN_INTERVAL,
+        QO100_AUTO_TOTAL_MAX_HZ, Qo100AutoRun, Qo100AutoStop, qo100_auto_correction,
+    };
     use std::time::Duration;
 
     // A twin-lobe shape clean enough for the loop to act on.
     const CLEAN: (f32, f32, f32) = (7.0, 0.85, 6.0);
 
-    /// Feed `off` through as a run of agreeing clean cycles and return the
-    /// final outcome — `since_last` says how long ago the last correction was.
-    fn run(off: f64, cycles: u8, since_last: Option<Duration>) -> super::Qo100AutoOutcome {
+    /// Feed `off` through as a run of agreeing clean cycles from `prev` and
+    /// return the final outcome — `since_last` says how long ago the last
+    /// correction was.
+    fn run_from(
+        prev: Qo100AutoRun,
+        off: f64,
+        cycles: u8,
+        since_last: Option<Duration>,
+    ) -> super::Qo100AutoOutcome {
         let (n, s, r) = CLEAN;
-        let mut ref_hz = None;
-        let mut run = 0u8;
-        let mut out = qo100_auto_correction(Some(off), n, s, r, ref_hz, run, since_last);
+        let mut out = qo100_auto_correction(Some(off), n, s, r, prev, since_last);
         for _ in 1..cycles {
-            ref_hz = out.agree_ref_hz;
-            run = out.agree_run;
-            out = qo100_auto_correction(Some(off), n, s, r, ref_hz, run, since_last);
+            out = qo100_auto_correction(Some(off), n, s, r, out.run, since_last);
         }
         out
+    }
+
+    fn run(off: f64, cycles: u8, since_last: Option<Duration>) -> super::Qo100AutoOutcome {
+        run_from(Qo100AutoRun::default(), off, cycles, since_last)
     }
 
     #[test]
@@ -15465,31 +15654,109 @@ mod qo100_rate_tests {
         // The run completed: correction goes out and the run resets.
         let fired = run(400.0, QO100_AUTO_AGREE_RUN, None);
         assert_eq!(fired.correction, Some(400.0));
-        assert_eq!(fired.agree_run, 0);
-        assert_eq!(fired.agree_ref_hz, None);
+        assert_eq!(fired.run.agree_run, 0);
+        assert_eq!(fired.run.agree_ref_hz, None);
+        assert_eq!(fired.run.total_hz, 400.0);
     }
 
     #[test]
     fn a_marginal_shape_breaks_the_run() {
         let (_, s, r) = CLEAN;
         // A full run's worth of agreeing estimates, but the shape is marginal.
-        let out = qo100_auto_correction(Some(400.0), 3.0, s, r, Some(400.0), 9, None);
+        let prev = Qo100AutoRun { agree_ref_hz: Some(400.0), agree_run: 9, ..Default::default() };
+        let out = qo100_auto_correction(Some(400.0), 3.0, s, r, prev, None);
         assert_eq!(out.correction, None);
-        assert_eq!(out.agree_run, 0, "a bad cycle resets the run");
+        assert_eq!(out.run.agree_run, 0, "a bad cycle resets the run");
     }
 
     #[test]
     fn an_estimate_that_flips_sign_restarts_the_run() {
         let (n, s, r) = CLEAN;
-        let out = qo100_auto_correction(Some(400.0), n, s, r, Some(-400.0), 9, None);
+        let prev = Qo100AutoRun { agree_ref_hz: Some(-400.0), agree_run: 9, ..Default::default() };
+        let out = qo100_auto_correction(Some(400.0), n, s, r, prev, None);
         assert_eq!(out.correction, None);
-        assert_eq!(out.agree_run, 1, "an oscillation never builds a run");
+        assert_eq!(out.run.agree_run, 1, "an oscillation never builds a run");
     }
 
     #[test]
     fn inside_the_deadband_nothing_is_written() {
         let out = run(120.0, QO100_AUTO_AGREE_RUN + 2, None);
         assert_eq!(out.correction, None);
+    }
+
+    /// The loop checking its own work: a correction that does not move the
+    /// beacon is the signature of a write landing somewhere the receiver does
+    /// not read it (a transverter row covering the beacon, a front end that
+    /// will not reopen). Repeating it forever is the runaway; this stops.
+    ///
+    /// Driven the way the engine drives it — a stream of *estimates*, with the
+    /// beacon staying obstinately where it was however often it is corrected.
+    #[test]
+    fn a_correction_that_does_not_move_the_beacon_takes_the_loop_off() {
+        let settled = Some(QO100_AUTO_MIN_INTERVAL + Duration::from_secs(1));
+        let (n, sy, r) = CLEAN;
+        let mut state = Qo100AutoRun::default();
+        let mut corrections = 0;
+
+        // The beacon reads 3 kHz out and never moves, whatever is written.
+        for _ in 0..40 {
+            let out = qo100_auto_correction(Some(3_000.0), n, sy, r, state, settled);
+            state = out.run;
+            if out.correction.is_some() {
+                corrections += 1;
+            }
+            if let Some(stop) = out.stop {
+                assert_eq!(stop, Qo100AutoStop::NotConverging);
+                assert!(
+                    corrections <= QO100_AUTO_MAX_STALLED as usize + 1,
+                    "gave up only after {corrections} fruitless corrections"
+                );
+                // …and it stays off: nothing more is written after the stop.
+                let after = qo100_auto_correction(Some(3_000.0), n, sy, r, state, settled);
+                assert_eq!(after.correction, None);
+                return;
+            }
+        }
+        panic!("the loop corrected {corrections} times and never gave up");
+    }
+
+    /// A correction that *is* taking effect leaves the beacon back on target,
+    /// and that resets the patience above — a slowly warming LNB corrected
+    /// over and over across an afternoon must never look like a runaway, even
+    /// though every one of its corrections is much the same size.
+    #[test]
+    fn a_beacon_that_comes_back_to_target_is_a_working_loop() {
+        let settled = Some(QO100_AUTO_MIN_INTERVAL + Duration::from_secs(1));
+        let (n, sy, r) = CLEAN;
+        let mut state = Qo100AutoRun::default();
+
+        for round in 0..8 {
+            // The LNB has drifted another ~300 Hz: three agreeing cycles, then
+            // the correction goes out.
+            let mut out = qo100_auto_correction(Some(300.0), n, sy, r, state, settled);
+            for _ in 1..QO100_AUTO_AGREE_RUN {
+                out = qo100_auto_correction(Some(300.0), n, sy, r, out.run, settled);
+            }
+            assert_eq!(out.correction, Some(300.0), "round {round}");
+            assert_eq!(out.stop, None, "round {round}");
+
+            // …and it worked: the beacon is back on target.
+            let back = qo100_auto_correction(Some(10.0), n, sy, r, out.run, settled);
+            assert_eq!(back.run.stalled, 0, "round {round}: a working correction clears the count");
+            state = back.run;
+        }
+    }
+
+    /// The backstop under the convergence check: however it got there, an
+    /// offset this far from where it started is not a calibration any more.
+    #[test]
+    fn a_running_total_past_any_real_lnb_takes_the_loop_off() {
+        let settled = Some(QO100_AUTO_MIN_INTERVAL + Duration::from_secs(1));
+        let state =
+            Qo100AutoRun { total_hz: QO100_AUTO_TOTAL_MAX_HZ - 100.0, ..Default::default() };
+        let out = run_from(state, 4_000.0, QO100_AUTO_AGREE_RUN, settled);
+        assert_eq!(out.correction, None);
+        assert_eq!(out.stop, Some(Qo100AutoStop::Runaway));
     }
 
     #[test]

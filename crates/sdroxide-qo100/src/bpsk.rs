@@ -326,21 +326,48 @@ fn refine_offset_hz(iq: &[Complex32], rate_hz: f64, cm: &CoarseMatch) -> f64 {
     sum.arg() as f64 * rate_hz / std::f64::consts::TAU
 }
 
+/// How often the mixing phasor in [`mix_decimate`] is pulled back onto the
+/// unit circle. A complex multiply per sample is what makes the mixer cheap,
+/// but it also compounds the rounding error of the one before it, and left
+/// alone the phasor's magnitude walks away from 1 and takes the mixed
+/// amplitude with it. Renormalising costs one square root every `RENORM`
+/// samples — nothing beside the multiply it rides on.
+const RENORM: usize = 4096;
+
 /// Mix `iq` down by `shift_hz` and integer-decimate by `deci` in one pass,
 /// each output sample the mean of its `deci` inputs. That boxcar is a crude
 /// anti-alias filter, but its nulls sit exactly at multiples of the output
 /// rate — where any energy would fold — and the beacon is 400 baud, far
 /// inside the output passband, so nothing that carries the frame is touched.
 /// Output rate is `rate_hz / deci`.
+///
+/// The phasor advances by one complex multiply per sample rather than a
+/// `sin`/`cos` pair. This function is the whole cost of an [`acquire`] sweep —
+/// it runs once per candidate frequency over the entire ~24 s buffer, and a
+/// profile puts ~96 % of the sweep inside it — so the two transcendentals it
+/// used to evaluate per input sample were, in the end, most of what the
+/// decoder did. See [`RENORM`] for what keeps the recurrence honest.
 fn mix_decimate(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> Vec<Complex32> {
     let deci = deci.max(1);
     let w = -std::f64::consts::TAU * shift_hz / rate_hz;
+    // The recurrence runs in f64 and only its *output* is narrowed. Rounding
+    // the step to f32 would put a fixed error into the angle, and a fixed
+    // angle error per sample is a phase ramp: harmless per sample, ~0.1 rad by
+    // the far end of a 24 s buffer. The differential demodulator would not
+    // even notice that, but it is a lie about where the carrier is, and this
+    // function's callers are trying to measure exactly that.
+    let (sr, si) = (w.cos(), w.sin());
+    let (mut pr, mut pi) = (1.0f64, 0.0f64);
     let mut out = Vec::with_capacity(iq.len() / deci + 1);
     let mut acc = Complex32::new(0.0, 0.0);
     let mut k = 0usize;
     for (n, &z) in iq.iter().enumerate() {
-        let ph = w * n as f64;
-        acc += z * Complex32::new(ph.cos() as f32, ph.sin() as f32);
+        acc += z * Complex32::new(pr as f32, pi as f32);
+        (pr, pi) = (pr * sr - pi * si, pr * si + pi * sr);
+        if n % RENORM == RENORM - 1 {
+            let m = (pr * pr + pi * pi).sqrt();
+            (pr, pi) = (pr / m, pi / m);
+        }
         k += 1;
         if k == deci {
             out.push(acc / deci as f32);
@@ -556,12 +583,14 @@ pub(crate) fn coarse_carrier_hz(
 /// search width, so the total grew with the *square* of the width and the
 /// widest settings ran many times slower than real time.
 ///
-/// Candidates are tried outward from [`coarse_carrier_hz`]'s spectral seed
-/// when it found one, else from the centre, so a beacon near where it is
-/// expected — the common case for a roughly-calibrated station — is found
-/// without walking the whole grid first. A seed past `search_half_width_hz`
-/// also widens the grid out to it (capped at [`ACQ_RANGE_MAX_HZ`] and
-/// Nyquist), which is what lets an uncalibrated station be found at all.
+/// When [`coarse_carrier_hz`] finds the beacon's shape, the sweep is a dense
+/// grid on that seed alone — the spectrum has already said where the carrier
+/// is, and the coarse grid behind it would be hundreds of full-buffer
+/// mix-downs re-answering the same question. A seed past
+/// `search_half_width_hz` is still followed out to it (capped at
+/// [`ACQ_RANGE_MAX_HZ`] and Nyquist), which is what lets an uncalibrated
+/// station be found at all. With no seed the old centre-outward walk of the
+/// whole grid runs unchanged.
 /// `cancel` is polled between candidates so the engine can drop the
 /// controller (turning the decoder off, or changing the search width) without
 /// waiting out a search in progress.
@@ -616,12 +645,25 @@ pub fn acquire(
             freqs.push(s + d as f64 * FINE_STEP_HZ);
         }
     }
-    // Then the full coarse grid, ordered by distance from the seed step (ties
-    // to the high side, as the plain centre-out sweep did). With no seed this
-    // is exactly `0, +1, -1, +2, -2, …` from DC.
-    let mut coarse: Vec<i64> = (-steps..=steps).collect();
-    coarse.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
-    freqs.extend(coarse.iter().map(|&s| s as f64 * freq_step_hz));
+    // With no seed, the full coarse grid: `0, +1, -1, +2, -2, …` from DC, the
+    // plain centre-out sweep this function has always made.
+    //
+    // With a seed, that grid is *not* walked. The seed is a carrier estimate
+    // good to a bin — ~15 Hz at the rates the engine uses, and the estimator's
+    // own tests hold it inside a few hundred — so the dense grid above already
+    // brackets its error, and the several hundred coarse candidates behind it
+    // are several hundred full-buffer mix-downs looking for a carrier the
+    // spectrum has already placed. Skipping them is what brings the drift
+    // search in [`acquire_debug`] inside the window it has to run in: the
+    // sweep goes from ~335 candidates to 21, and the price is that a seed the
+    // shape test got wrong is no longer caught by a sweep behind it. The gates
+    // in [`estimate_carrier`] are what that price is paid against — a bare
+    // carrier, an SSB signal and noise all fail them (see its tests).
+    if seed_hz.is_none() {
+        let mut coarse: Vec<i64> = (-steps..=steps).collect();
+        coarse.sort_by_key(|&s| ((s - seed_step).unsigned_abs(), s < seed_step));
+        freqs.extend(coarse.iter().map(|&s| s as f64 * freq_step_hz));
+    }
 
     for coarse_hz in freqs {
         if cancel.load(Ordering::Relaxed) {
@@ -800,6 +842,13 @@ const ACCEL_GRID_STEP_HZ_S2: f64 = 3.0;
 /// caller's own estimates (0.0 = "no idea"); the grid is centred on them, with
 /// zero curvature tried first, so a good estimate keeps the search short and a
 /// linearly-drifting station pays what it did before the curvature term.
+///
+/// The grid runs only when the spectrum can still see the beacon's twin-lobe
+/// shape in the buffer de-rotated by the caller's estimate. A window with no
+/// beacon in it gets one plain sweep instead of the whole grid — the
+/// difference between a decoder that keeps up with the air and one that runs
+/// an order of magnitude behind it, since a window that decodes nothing is
+/// the case the grid would otherwise walk in full every time.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn acquire_debug(
     iq: &[Complex32],
@@ -813,10 +862,25 @@ pub(crate) fn acquire_debug(
 ) -> (Option<Qo100Lock>, DecodeProgress) {
     use std::sync::atomic::Ordering;
 
+    // Is there a beacon in this window at all?
+    //
+    // Asked once, of the buffer de-rotated by the caller's own estimate — the
+    // centre of the grid below, and so the de-rotation most likely to leave
+    // the shape standing. It decides whether the grid runs, because every one
+    // of its points costs a whole [`acquire`] sweep and a drift search over a
+    // window holding no beacon is that cost multiplied by the size of the
+    // grid, spent looking for something that is not there. A station whose
+    // beacon the shape test cannot see is not left worse off than it was
+    // before the grid existed: it gets the single plain sweep below.
+    let centred = dechirp(iq, rate_hz, drift_hz_per_s, drift_accel_hz_s2);
+    let seeded = coarse_carrier_hz(&centred, rate_hz, search_half_width_hz).is_some();
+
     // Curvature outer, drift-rate inner — both centre-outward from the
     // estimate, so (zero curvature, best rate) is tried first.
-    let s_steps = (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64;
-    let a_steps = (ACCEL_GRID_HALF_HZ_S2 / ACCEL_GRID_STEP_HZ_S2).round() as i64;
+    let s_steps =
+        if seeded { (DRIFT_GRID_HALF_HZ_S / DRIFT_GRID_STEP_HZ_S).round() as i64 } else { 0 };
+    let a_steps =
+        if seeded { (ACCEL_GRID_HALF_HZ_S2 / ACCEL_GRID_STEP_HZ_S2).round() as i64 } else { 0 };
     'grid: for ka in 0..=2 * a_steps {
         let da = if ka % 2 == 0 { ka / 2 } else { -(ka / 2 + 1) };
         let accel = drift_accel_hz_s2 + da as f64 * ACCEL_GRID_STEP_HZ_S2;
@@ -826,7 +890,9 @@ pub(crate) fn acquire_debug(
             }
             let ds = if ks % 2 == 0 { ks / 2 } else { -(ks / 2 + 1) };
             let slope = drift_hz_per_s + ds as f64 * DRIFT_GRID_STEP_HZ_S;
-            let buf = dechirp(iq, rate_hz, slope, accel);
+            // Unseeded, the grid is one point and the estimate behind it is
+            // unconfirmed, so the sweep runs on the buffer as it arrived.
+            let buf = if seeded { dechirp(iq, rate_hz, slope, accel) } else { iq.to_vec() };
             if let Some(lock) =
                 acquire(&buf, rate_hz, search_half_width_hz, freq_step_hz, demod_rate_hz, cancel)
             {
@@ -1373,5 +1439,104 @@ pub(crate) mod tests {
         assert!(lock.is_none());
         assert!(!p.crc_ok);
         assert_ne!(p.sync_bit_errors, u8::MAX, "the sync probe should still have run");
+    }
+
+    /// The mixing phasor advances by a complex multiply per sample rather than
+    /// a `sin`/`cos` pair, which is most of what an [`acquire`] sweep costs.
+    /// The recurrence has to stay on the unit circle over a buffer as long as
+    /// the decoder's, or it would quietly scale the mixed signal.
+    #[test]
+    fn the_mixer_recurrence_stays_on_the_unit_circle_over_a_whole_window() {
+        // What `mix_decimate` did before the recurrence: the phase evaluated
+        // from scratch at every sample.
+        fn reference(iq: &[Complex32], rate_hz: f64, shift_hz: f64, deci: usize) -> Vec<Complex32> {
+            let w = -std::f64::consts::TAU * shift_hz / rate_hz;
+            let mut out = Vec::new();
+            let mut acc = Complex32::new(0.0, 0.0);
+            let mut k = 0usize;
+            for (n, &z) in iq.iter().enumerate() {
+                let ph = w * n as f64;
+                acc += z * Complex32::new(ph.cos() as f32, ph.sin() as f32);
+                k += 1;
+                if k == deci {
+                    out.push(acc / deci as f32);
+                    acc = Complex32::new(0.0, 0.0);
+                    k = 0;
+                }
+            }
+            out
+        }
+
+        // A buffer the length of a real decode window, so the drift the
+        // recurrence could accumulate has the whole run to accumulate over.
+        let rate = 62_500.0;
+        let n = (rate * FRAME_SECONDS * 2.3) as usize;
+        let mut rng = TestRng::new(17);
+        let iq: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+
+        let got = mix_decimate(&iq, rate, 4_321.0, 4);
+        let want = reference(&iq, rate, 4_321.0, 4);
+        assert_eq!(got.len(), want.len());
+        let worst = got.iter().zip(&want).map(|(a, b)| (a - b).norm()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "worst sample differs by {worst}, out by more than rounding");
+
+        // …and it is no further out at the end of the buffer than at the
+        // start. A phasor leaving the unit circle drifts *with* the run, so
+        // the tail is where it would show; measured against the reference
+        // rather than against itself, so the noise the two share cancels and
+        // what is left is the recurrence's own error.
+        let level = |c: &[Complex32]| c.iter().map(|z| z.norm()).sum::<f32>() / c.len() as f32;
+        let ratio = |r: std::ops::Range<usize>| level(&got[r.clone()]) / level(&want[r]);
+        let (head, tail) = (ratio(0..1_000), ratio(got.len() - 1_000..got.len()));
+        assert!((tail - head).abs() < 1e-4, "gain drifts across the window: {head} -> {tail}");
+    }
+
+    /// A window with no beacon in it must cost one sweep, not a whole drift
+    /// grid's worth. The grid is a per-point [`acquire`], so running it over a
+    /// window that decodes nothing — which is every window on a station whose
+    /// LNB phase noise the frame decoder cannot survive — is what put the
+    /// decoder an order of magnitude behind the air it was reading.
+    ///
+    /// Asserted as a ratio of two runs in the same process rather than a wall
+    /// clock, so it says the same thing on a loaded machine as an idle one.
+    #[test]
+    fn a_window_with_no_beacon_costs_one_sweep_not_a_whole_drift_grid() {
+        let rate = 20_000.0;
+        let n = (rate * 12.0) as usize;
+        let mut rng = TestRng::new(23);
+        let noise: Vec<Complex32> = (0..n)
+            .map(|_| Complex32::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32))
+            .collect();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let t = std::time::Instant::now();
+        assert!(
+            acquire(&noise, rate, 5_000.0, TEST_STEP, crate::controller::DEMOD_RATE_HZ, &cancel)
+                .is_none()
+        );
+        let one_sweep = t.elapsed();
+
+        let t = std::time::Instant::now();
+        let (lock, _) = acquire_debug(
+            &noise,
+            rate,
+            5_000.0,
+            TEST_STEP,
+            crate::controller::DEMOD_RATE_HZ,
+            0.0,
+            0.0,
+            &cancel,
+        );
+        let whole_pass = t.elapsed();
+        assert!(lock.is_none());
+
+        // One sweep, one spectrum check and the sync probe — not the 27 sweeps
+        // the drift grid would be. Generous enough not to fail on scheduling.
+        assert!(
+            whole_pass < one_sweep * 4,
+            "a beaconless window cost {whole_pass:?} against a single sweep's {one_sweep:?}"
+        );
     }
 }

@@ -1124,7 +1124,21 @@ use sdroxide_types::{
 /// `Command::SetRadioConfig` whole, so a v125 peer handed one with four fields
 /// on the end of that block reads the tail of every one of those messages out
 /// of step.
-pub const PROTO_VERSION: u16 = 126;
+///
+/// v127: the QO-100 spectral tracker — [`sdroxide_types::Qo100Settings`] gains
+/// `park_lo_hz`, `park_hi_hz`, `decode_telemetry` and `auto_apply`, the
+/// parking window the tracker searches and the two things it may do with what
+/// it finds (issue #291). The struct sits inside `RadioState` with `vdl2`
+/// after it, and `RadioState` rides `ServerMsg::State` whole on every change,
+/// so a v126 peer handed one with four fields in the middle of that block
+/// reads `vdl2` — and the tail of every state update — out of step. It also
+/// rides `Command::SetQo100Config`, which a remote client sends whole when the
+/// operator touches any of the page's chips.
+///
+/// [`sdroxide_types::Qo100Status`] grows in the same commit, but it is not on
+/// the wire yet: `sdroxide_server` maps `RadioEvent::Qo100Status` to `None`
+/// and the QO-100 readout is local to the receiving station.
+pub const PROTO_VERSION: u16 = 127;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

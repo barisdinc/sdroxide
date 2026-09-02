@@ -704,11 +704,13 @@ impl SdroxideApp {
                     })
                     .size(10.0)
                     .monospace()
-                    .color(if s.est_drift_hz_s.abs() > 15.0 || s.est_drift_accel_hz_s2.abs() > 3.0 {
-                        theme::YELLOW()
-                    } else {
-                        theme::TEXT()
-                    }),
+                    .color(
+                        if s.est_drift_hz_s.abs() > 15.0 || s.est_drift_accel_hz_s2.abs() > 3.0 {
+                            theme::YELLOW()
+                        } else {
+                            theme::TEXT()
+                        },
+                    ),
                 );
                 ui.end_row();
 
@@ -748,7 +750,12 @@ impl SdroxideApp {
         }
 
         let radio_cfg = self.ctrl.radio_config();
-        let old_offset = radio_cfg.as_ref().map(|c| c.converter_offset_hz).unwrap_or(0.0);
+        // The offset in force *at the beacon*, which on a station with a
+        // transverter row covering 10489.750 MHz is that row's and not the
+        // single converter offset — correcting the wrong one leaves the beacon
+        // exactly where it was (`RadioConfig::converter_offset_at`).
+        let old_offset =
+            radio_cfg.as_ref().map(|c| c.converter_offset_at(QO100_BEACON_HZ)).unwrap_or(0.0);
 
         egui::Grid::new("qo100-grid").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
             let dim = |s: &str| RichText::new(s).size(9.5).color(theme::CYAN_DIM());
@@ -935,9 +942,9 @@ impl SdroxideApp {
             if apply.clicked()
                 && let (Some(mut c), Some((measured, _))) = (radio_cfg.clone(), effective)
             {
-                let new_offset =
-                    corrected_offset_hz(c.converter_offset_hz, measured, QO100_BEACON_HZ);
-                c.converter_offset_hz = new_offset;
+                let slot = c.converter_offset_at_mut(QO100_BEACON_HZ);
+                let new_offset = corrected_offset_hz(*slot, measured, QO100_BEACON_HZ);
+                *slot = new_offset;
                 self.ctrl.set_radio_config(c.clone());
                 self.ctrl.reopen_source();
                 self.radio_cfg = Some(c);

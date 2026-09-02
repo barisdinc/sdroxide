@@ -2481,7 +2481,19 @@ anywhere the beacon is still inside the captured span.
   tracker makes is applied — a slow, deadbanded, rate-limited nudge to the
   converter/LNB offset that pulls the beacon back onto 10489.750 MHz and holds
   it there as the LNB warms up and drifts. A single noisy reading never yanks
-  the receiver; it takes a run of agreeing measurements to move the offset.
+  the receiver; it takes a run of agreeing measurements to move the offset,
+  and no correction is ever made **while you are transmitting** — each one
+  reopens the receiver, and on a station whose transmitter and receiver are
+  the same box that would cut you off mid-over. A correction held back for an
+  over goes out as soon as it ends.
+
+  AUTO also watches its own work, and **switches itself off** if the offset it
+  writes does not move the beacon, or if it has moved the offset further than
+  any LNB could plausibly be out by. You get a notice saying which. The usual
+  cause of the first is a **transverter row** covering 10489.750 MHz on a
+  station that also has one: the row's offset is the one the dial uses, so
+  that is the one AUTO and APPLY correct — if you have edited the single
+  converter offset by hand and nothing changed, that is why.
 - **TELEMETRY** (optional) additionally runs the AO-40 frame decoder, with a
   `carrier → sync → CRC` readout of how far each pass got. It is an independent
   check and shows the beacon's own status text when it locks; it is not needed
@@ -2549,8 +2561,11 @@ anywhere the beacon is still inside the captured span.
 - **width `−` / `+`** — how far either side of 10489.750 MHz the AO-40 decoder
   searches, ±5 kHz to ±50 kHz in 5 kHz steps. Wider costs a wider capture and a
   slower sweep, so open it only as far as needed to find the beacon, then bring
-  it back to ±5 kHz. It does not affect the spectral tracker, which uses the
-  **park** window instead.
+  it back to ±5 kHz. At the widest setting, with TELEMETRY on and no decode,
+  the decoder is the most expensive thing in the program — still comfortably
+  inside the window it is searching, but a noticeable fraction of one core.
+  It does not affect the spectral tracker, which uses the **park** window
+  instead and costs almost nothing at any setting.
 - **park `lo` / `hi`** — the lane, in +kHz above the dial, that the spectral
   tracker scans for the twin-lobe shape (shaded on the strip). Park the beacon
   inside it, clear of the DC spike, before switching ON. With AUTO armed the
@@ -2568,8 +2583,10 @@ anywhere the beacon is still inside the captured span.
 - **RECEIVER / TARGET / MEASURED / DRIFT** — the dial now, the 10489.750 MHz
   target, where the beacon was actually found (from a decoder lock or your
   hand-mark), and the difference. DRIFT is green within ±200 Hz, amber to ±3 kHz.
-- **CONVERTER OFFSET** — the converter/LNB offset currently in force, the number
-  APPLY and AUTO write to.
+- **CONVERTER OFFSET** — the converter/LNB offset currently in force *at the
+  beacon*, and the number APPLY and AUTO write to. On a station with a
+  transverter row covering 10489.750 MHz that is the row's own offset, not the
+  single converter offset behind it — the same precedence the dial follows.
 - **DECODE** — the AO-40 decoder's progress: `carrier → sync → CRC`, plus
   `sync N/32 err ×M` (fewest sync-word bit errors, and how many candidate frame
   alignments were seen — `×0` near the error budget means no real frame, just a
