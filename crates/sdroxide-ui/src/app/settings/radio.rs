@@ -1000,6 +1000,63 @@ pub(in crate::app) fn settings_hpsdr_tab(
              latency. Takes effect on APPLY, which reconnects to the board.",
         );
         ui.end_row();
+
+        // ── PureSignal ──
+        ui.label("PureSignal").on_hover_text(
+            "Adaptive predistortion: linearise the transmitter from a sample of what it actually \
+             emitted, for twenty-odd decibels less intermodulation at the same power. The \
+             receiver is the feedback path — the board keeps receiving through an over — so a \
+             directional coupler and an attenuator have to put a sample of the amplifier's \
+             output into an input the T/R switch does not take away on transmit. On a \
+             Hermes-Lite 2 that means the IO board's PureSignal jack, and the receive input \
+             above set to match. With nothing coupled in, the loop never locks and the \
+             transmitter is left exactly as it would have been. Applies on Apply / reconnect, \
+             and only on the radio that owns the transmitter (DDC1).",
+        );
+        crate::chrome::checkbox(
+            ui,
+            &mut cfg.hpsdr.puresignal,
+            "Correct the transmitter from the receiver's own feedback",
+        );
+        ui.end_row();
+
+        ui.add_enabled_ui(cfg.hpsdr.puresignal, |ui| {
+            ui.label("  Table steps").on_hover_text(
+                "How finely the amplifier's curve is modelled. More steps follow a sharper knee \
+                 and take longer to fill in; 32 is a sensible start.",
+            );
+        });
+        ui.add_enabled_ui(cfg.hpsdr.puresignal, |ui| {
+            let mut bins = i32::from(cfg.hpsdr.ps_bins);
+            if ui
+                .add(egui::DragValue::new(&mut bins).range(
+                    i32::from(sdroxide_types::LimeAuxConfig::PS_MIN_BINS)
+                        ..=i32::from(sdroxide_types::LimeAuxConfig::PS_MAX_BINS),
+                ))
+                .changed()
+            {
+                cfg.hpsdr.ps_bins = bins as u8;
+            }
+        });
+        ui.end_row();
+
+        ui.add_enabled_ui(cfg.hpsdr.puresignal, |ui| {
+            ui.label("  Adaptation").on_hover_text(
+                "How fast the correction follows what the coupler reports. Slow is right — this \
+                 is averaging an amplifier's curve, which does not move, out of a feedback path \
+                 that has noise in it.",
+            );
+        });
+        ui.add_enabled_ui(cfg.hpsdr.puresignal, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut cfg.hpsdr.ps_rate, 0.0..=1.0).show_value(false));
+                crate::chrome::checkbox(ui, &mut cfg.hpsdr.ps_frozen, "Hold").on_hover_text(
+                    "Stop adapting and keep the correction where it is — for measuring, and for \
+                     an operator happy with what it has learned.",
+                );
+            });
+        });
+        ui.end_row();
     });
     ui.add_space(6.0);
     ui.label(

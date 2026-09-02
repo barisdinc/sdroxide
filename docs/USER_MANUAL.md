@@ -6816,8 +6816,55 @@ involved:
   setting of the same name, this is not a buffer inside the radio — OpenHPSDR
   has no such thing — so it only widens sdroxide's own margin on this side of
   the network. Takes effect on **APPLY**, which reconnects to the board.
+- **PureSignal** — adaptive predistortion: linearise the transmitter from a
+  sample of what it actually emitted. Every amplifier compresses near its
+  ceiling, and compression on a multi-tone signal — which is what SSB and every
+  digital mode are — is intermodulation, landing either side of your
+  transmission on other people's contacts. Backing off is the traditional
+  answer and costs most of the amplifier. Predistortion instead sends a
+  deliberately *wrong* signal, bent by the inverse of the amplifier's own
+  curve, so what comes out is right; twenty-odd decibels of IMD improvement is
+  the usual figure, and the amplifier keeps its power. See below for what it
+  needs.
 
 Receive is wideband IQ, so the full panadapter and the skimmers work.
+
+**PureSignal needs the transmit sample to reach the receiver.** The board is
+commanded in duplex, so its receiver keeps running through an over — that is the
+feedback path, and there is no second receiver involved. What is needed is a
+**directional coupler** on the amplifier's output and an **attenuator** after
+it, feeding an input the T/R switch does not take away on transmit. On a Hermes
+Lite 2 that means the **IO board's PureSignal jack (J10)**, with **IO board RX
+input** set to *"IO board J9, PureSignal on transmit"* so the board switches it
+in for the length of every over. A coupler into the radio's own antenna jack
+will not do: the T/R relay disconnects the receiver there for exactly the period
+being measured.
+
+Set the attenuation so the feedback is strong but well clear of clipping — a
+Stockton bridge is about 36 dB down across HF, and the reference feedback unit
+adds another 25 dB. Two things hold whatever it is fed:
+
+- the correction table starts at **unity**, so a coupler that is not connected,
+  a receiver that is deaf, or an alignment that never locks all leave the
+  transmitter exactly as it would have been;
+- and it **cannot make the transmitter louder** — the table is normalised at the
+  top, so a compressing amplifier is linearised by taking small-signal gain away
+  rather than by asking for more than full scale.
+
+The log says which it is: while transmitting you get either *"PureSignal is
+correcting N dB of compression"* or *"PureSignal has not found the transmission
+in the receiver's stream"*, every few seconds. **Table steps** is how finely the
+curve is modelled (32 is a sensible start) and **Adaptation** how fast it
+follows the coupler; slow is right, because it is averaging a curve that does
+not move out of a path that has noise in it. **Hold** stops it adapting and
+keeps what it has learned.
+
+> ⚠️ **Not verified against hardware.** No amplifier has been on the end of this
+> on a Hermes Lite 2. The processor itself is exercised against a simulated
+> compressing amplifier and converges; that says the arithmetic is right, not
+> that a real feedback path is what it expects. The safe failure — nothing
+> coupled in, so nothing learned and the transmitter left alone — is the one it
+> is built around, but treat the first over as an experiment and watch the log.
 
 The radio's own **PTT input** keys sdroxide too: a foot switch or mic button on
 the board's PTT connector (a Hermes Lite 2's CN4 jack) transmits exactly as the

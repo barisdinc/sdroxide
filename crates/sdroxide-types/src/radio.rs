@@ -1310,6 +1310,44 @@ pub struct HpsdrConfig {
     /// [`HpsdrConfig::default_tx_latency_ms`].
     #[serde(default = "HpsdrConfig::default_tx_latency_ms")]
     pub tx_latency_ms: f64,
+
+    // ── PureSignal: adaptive predistortion from the transmit sample ──
+    /// Linearise the transmitter from a sample of what it actually emitted —
+    /// what openHPSDR calls PureSignal (issue #283).
+    ///
+    /// The receiver is the feedback path. The board is commanded in duplex, so
+    /// its DDC keeps running through an over; give that DDC a coupled sample of
+    /// the amplifier's output and the transmitter can compare what came back
+    /// with what it meant to send, and bend the next block by the inverse of
+    /// the difference. Twenty-odd decibels of intermodulation improvement is
+    /// the usual figure, and the amplifier keeps its power.
+    ///
+    /// **It needs the sample to reach the receiver**, which on a Hermes-Lite 2
+    /// means a directional coupler and an attenuator into an input the T/R
+    /// switch does not take away on transmit — the IO board's PureSignal jack,
+    /// which is [`HpsdrIoRxInput::IoBoardPureSignal`]. With nothing coupled in
+    /// the loop simply never locks and the transmitter is left exactly as it
+    /// would have been: the table starts at unity and only measurement moves
+    /// it.
+    ///
+    /// Off by default, and only ever on the radio that owns the transmitter
+    /// (DDC 0).
+    #[serde(default)]
+    pub puresignal: bool,
+    /// Steps in the predistortion table — how finely the amplifier's curve is
+    /// modelled. Clamped to [`LimeAuxConfig::PS_MIN_BINS`] ..=
+    /// [`LimeAuxConfig::PS_MAX_BINS`], as the same processor's other caller is.
+    #[serde(default = "HpsdrConfig::default_ps_bins")]
+    pub ps_bins: u8,
+    /// How fast the table follows what the coupler reports, 0..1. Slow is
+    /// right: this is averaging an amplifier's curve, which does not move, out
+    /// of a feedback path that has noise in it.
+    #[serde(default = "HpsdrConfig::default_ps_rate")]
+    pub ps_rate: f32,
+    /// Hold the table where it is instead of adapting — for measuring, and for
+    /// an operator who has a correction they are happy with.
+    #[serde(default)]
+    pub ps_frozen: bool,
 }
 
 impl Default for HpsdrConfig {
@@ -1326,11 +1364,26 @@ impl Default for HpsdrConfig {
             ppm: 0.0,
             ddc: 0,
             tx_latency_ms: Self::default_tx_latency_ms(),
+            puresignal: false,
+            ps_bins: Self::default_ps_bins(),
+            ps_rate: Self::default_ps_rate(),
+            ps_frozen: false,
         }
     }
 }
 
 impl HpsdrConfig {
+    /// See [`Self::ps_bins`] — the same 32 steps the other caller of this
+    /// processor starts at.
+    pub fn default_ps_bins() -> u8 {
+        32
+    }
+
+    /// See [`Self::ps_rate`].
+    pub fn default_ps_rate() -> f32 {
+        0.5
+    }
+
     /// Range of the Hermes-Lite 2 front-end gain, in dB.
     pub const LNA_GAIN_MIN_DB: f64 = -12.0;
     pub const LNA_GAIN_MAX_DB: f64 = 48.0;

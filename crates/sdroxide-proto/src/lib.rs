@@ -1116,7 +1116,15 @@ use sdroxide_types::{
 /// (issue #283). `TxState` sits in the middle of `RadioState`, which travels
 /// whole on every change, so a v124 peer desynchronises on everything after it;
 /// the command is appended last, so no surviving discriminant moved.
-pub const PROTO_VERSION: u16 = 125;
+///
+/// v126: PureSignal on an HPSDR board —
+/// [`sdroxide_types::HpsdrConfig`] gains `puresignal`, `ps_bins`, `ps_rate`
+/// and `ps_frozen` at its tail (issue #283). `HpsdrConfig` is part of
+/// `RadioConfig`, which rides `ServerMsg::RadioConfig` and
+/// `Command::SetRadioConfig` whole, so a v125 peer handed one with four fields
+/// on the end of that block reads the tail of every one of those messages out
+/// of step.
+pub const PROTO_VERSION: u16 = 126;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

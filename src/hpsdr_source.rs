@@ -11,9 +11,10 @@
 //! DDC-0 source alone, and Protocol 1 boards have only DDC 0.
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use sdroxide_hpsdr::{HpsdrBoard, HpsdrRx, LNA_GAIN_ELEMENT};
+use sdroxide_dsp::{Decimator, PureSignal};
+use sdroxide_hpsdr::{HpsdrBoard, HpsdrRx, LNA_GAIN_ELEMENT, TX_RATE_HZ};
 use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
 
 use crate::device_registry::{DeviceKey, SharedDevice, registry};
@@ -29,6 +30,14 @@ impl SharedDevice for HpsdrBoard {
 /// milliseconds a healthy board takes to begin streaming after the run
 /// command, and longer than the network thread's own starved-DDC nudges.
 const SILENCE_BEFORE_REOPEN: Duration = Duration::from_secs(5);
+
+/// How often the predistortion loop says whether it has found the feedback.
+///
+/// It is one line and it only appears during an over, but it is the only thing
+/// that separates "the coupler is doing its job" from "the correction table has
+/// been sitting at unity all evening", so it goes out often enough to be seen
+/// on a short transmission.
+const PS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct HpsdrSource {
     /// The shared connection and this source's stream on it. `None` after
@@ -52,6 +61,28 @@ pub struct HpsdrSource {
     label: String,
     /// See [`sdroxide_types::HpsdrConfig::tx_latency_ms`].
     tx_latency_ms: f64,
+
+    // ── PureSignal ──
+    /// The predistortion loop, present exactly when the operator has asked for
+    /// it on the radio that owns the transmitter.
+    puresignal: Option<PureSignal>,
+    /// Brings the board's receive rate down to the 48 kHz the transmit stream
+    /// runs at, so the two can be compared sample for sample. `None` when the
+    /// board is already at 48 kHz.
+    ps_decim: Option<Decimator>,
+    /// Where the transmitter is this over, for the offset the feedback has to
+    /// be spun back by. Zero while receiving.
+    ps_tx_hz: f64,
+    ps_fb_raw: Vec<f32>,
+    ps_fb_iq: Vec<Complex32>,
+    ps_fb_dec: Vec<Complex32>,
+    /// The transmit block, predistorted — `IqSource::tx_write` is handed a
+    /// shared slice and the predistorter has to own what it bends.
+    ps_tx_iq: Vec<Complex32>,
+    ps_log_at: Instant,
+    /// Whether the "the transmitter is too far outside the receiver's window"
+    /// complaint has already been made this session.
+    ps_warned_offset: bool,
 }
 
 impl HpsdrSource {
@@ -96,8 +127,42 @@ impl HpsdrSource {
             "HPSDR source ready: {label}, Protocol {}, center {center_hz:.0} Hz",
             board.protocol()
         );
+        // The predistortion loop, on the radio that owns the transmitter and
+        // nowhere else: a second DDC has no transmitter to linearise.
+        let rate = board.sample_rate_hz();
+        let puresignal = (cfg.puresignal && cfg.ddc == 0)
+            .then(|| PureSignal::new(usize::from(cfg.ps_bins), cfg.ps_rate, TX_RATE_HZ as f64));
+        // The receive stream is faster than the transmit one on every rate but
+        // the lowest, and the loop compares the two sample for sample, so the
+        // feedback is brought down to the transmitter's rate before it is
+        // handed over. Every Protocol 1 and Protocol 2 rate is a power of two
+        // times 48 kHz, which is exactly what this decimator does.
+        let ps_decim = puresignal.as_ref().and_then(|_| {
+            let factor = (rate / f64::from(TX_RATE_HZ)).round() as u32;
+            (factor > 1).then(|| Decimator::new(factor))
+        });
+        if puresignal.is_some() {
+            tracing::info!(
+                "HPSDR: PureSignal is on — the receiver is the feedback path, so a coupled \
+                 sample of the transmitter has to reach it during the over (on a Hermes-Lite 2 \
+                 that is the IO board's PureSignal input). {} table steps, feedback decimated \
+                 by {}. Until the loop locks the transmitter is left exactly as it would have \
+                 been.",
+                cfg.ps_bins,
+                ps_decim.as_ref().map_or(1, |d| d.factor())
+            );
+            if cfg.io_rx_input != sdroxide_types::HpsdrIoRxInput::IoBoardPureSignal {
+                tracing::warn!(
+                    "HPSDR: PureSignal is on but the IO board's receive input is set to \"{}\" \
+                     — unless you have wired the transmit sample in some other way, the T/R \
+                     switch takes the coupler away for the length of every over and the loop \
+                     will never lock",
+                    cfg.io_rx_input.label()
+                );
+            }
+        }
         Ok(HpsdrSource {
-            rate: board.sample_rate_hz(),
+            rate,
             center: center_hz,
             ppm: cfg.ppm,
             rx_scratch: Vec::new(),
@@ -116,6 +181,18 @@ impl HpsdrSource {
                 *sdroxide_types::HpsdrConfig::TX_LATENCY_MS_RANGE.start(),
                 *sdroxide_types::HpsdrConfig::TX_LATENCY_MS_RANGE.end(),
             ),
+            puresignal: puresignal.map(|mut ps| {
+                ps.set_frozen(cfg.ps_frozen);
+                ps
+            }),
+            ps_decim,
+            ps_tx_hz: 0.0,
+            ps_fb_raw: Vec::new(),
+            ps_fb_iq: Vec::new(),
+            ps_fb_dec: Vec::new(),
+            ps_tx_iq: Vec::new(),
+            ps_log_at: Instant::now(),
+            ps_warned_offset: false,
         })
     }
 
@@ -137,6 +214,88 @@ impl HpsdrSource {
     /// Whether the board has a front-end gain the UI should offer.
     pub fn has_lna_gain(&self) -> bool {
         self.board.as_ref().is_some_and(|b| b.has_lna_gain())
+    }
+
+    /// Take what the coupler has put into the receiver and give it to the
+    /// predistortion loop.
+    ///
+    /// Called from `tx_write`, which is the only place that runs during an
+    /// over: the engine stops reading a half-duplex source for the length of a
+    /// transmission, so this is the only thing draining the ring. The board
+    /// itself keeps streaming — Protocol 1 is commanded in duplex — so what is
+    /// in the ring while keyed is exactly what the receiver heard of our own
+    /// transmitter.
+    ///
+    /// The ring is drained whether or not the loop can use it. Leaving it to
+    /// fill would mean the next over's feedback started with the last one's
+    /// samples, and an alignment measured against the wrong transmission is
+    /// worse than none.
+    fn pump_feedback(&mut self) {
+        let (Some(rx), Some(ps)) = (self.rx.as_mut(), self.puresignal.as_mut()) else { return };
+        // Enough for a comfortable block at the highest rate, so a long over
+        // never leaves the ring standing full between transmit blocks.
+        const WANT_PAIRS: usize = 32_768;
+        if self.ps_fb_raw.len() < WANT_PAIRS * 2 {
+            self.ps_fb_raw.resize(WANT_PAIRS * 2, 0.0);
+        }
+        let n = rx.rx_read(&mut self.ps_fb_raw);
+        let pairs = n / 2;
+        if pairs == 0 {
+            return;
+        }
+        self.ps_fb_iq.clear();
+        self.ps_fb_iq.extend(
+            (0..pairs).map(|p| Complex32::new(self.ps_fb_raw[2 * p], self.ps_fb_raw[2 * p + 1])),
+        );
+        let fb: &[Complex32] = match self.ps_decim.as_mut() {
+            Some(d) => {
+                self.ps_fb_dec.clear();
+                d.process(&self.ps_fb_iq, &mut self.ps_fb_dec);
+                &self.ps_fb_dec
+            }
+            None => &self.ps_fb_iq,
+        };
+        if fb.is_empty() {
+            return;
+        }
+        // The transmitter and the receiver are two NCOs on one board and they
+        // are commanded separately, so the coupled signal lands wherever the
+        // difference puts it in the receiver's span. It is known exactly, so
+        // this is arithmetic rather than a search.
+        let offset = self.ps_tx_hz - self.center;
+        if offset.abs() > f64::from(TX_RATE_HZ) * 0.45 {
+            if !self.ps_warned_offset {
+                self.ps_warned_offset = true;
+                tracing::warn!(
+                    "HPSDR: transmitting {:.1} kHz from where the receiver is tuned, which is \
+                     outside the 48 kHz the feedback is compared over — PureSignal will not \
+                     correct this over",
+                    offset / 1e3
+                );
+            }
+            return;
+        }
+        ps.feed_back(fb, offset, f64::from(TX_RATE_HZ));
+        if self.ps_log_at.elapsed() >= PS_LOG_INTERVAL {
+            self.ps_log_at = Instant::now();
+            if ps.locked() {
+                tracing::info!(
+                    "HPSDR PureSignal is correcting {:.1} dB of compression (feedback matched \
+                     at {:.2}){}",
+                    ps.correction_db(),
+                    ps.score(),
+                    if ps.frozen() { ", table held" } else { "" }
+                );
+            } else {
+                tracing::info!(
+                    "HPSDR PureSignal has not found the transmission in the receiver's stream \
+                     (best match {:.2}) — the transmitter is uncorrected. Check the coupler and \
+                     its attenuator, and that the receive input is the one the transmit sample \
+                     is wired to",
+                    ps.score()
+                );
+            }
+        }
     }
 }
 
@@ -281,6 +440,19 @@ impl IqSource for HpsdrSource {
     }
 
     fn tx_begin(&mut self, center_hz: f64, _rate: f64) -> Result<f64> {
+        // Where the feedback will be, relative to the receiver — see
+        // `pump_feedback`. The un-trimmed frequency on both sides: the ppm
+        // correction is the same multiplier on each, so the difference the
+        // loop needs is the same either way, and mixing the two would put a
+        // few hertz of error into it.
+        self.ps_tx_hz = center_hz;
+        // A new over is a new alignment: the delay through the transmit FIFO,
+        // the converters and the amplifier is constant *within* an over and
+        // has no reason to be the same across a gap. The table itself is kept,
+        // which is the point of having learned it.
+        if let Some(ps) = self.puresignal.as_mut() {
+            ps.unlock();
+        }
         match self.rx.as_ref() {
             Some(rx) => {
                 Ok(rx.tx_begin(sdroxide_types::HpsdrConfig::apply_ppm(center_hz, self.ppm)))
@@ -290,13 +462,33 @@ impl IqSource for HpsdrSource {
     }
 
     fn tx_write(&mut self, samples: &[Complex32]) -> Result<()> {
-        let Some(rx) = self.rx.as_mut() else { return Ok(()) };
+        if self.rx.is_none() {
+            return Ok(());
+        }
+        // What the coupler heard of the *previous* blocks, before this one is
+        // bent: the loop's own reference history is written by `predistort`
+        // below, and feeding back against a reference that has not been
+        // recorded yet would find nothing to align to.
+        self.pump_feedback();
+        // The predistorter needs to own the samples — it multiplies each by a
+        // gain looked up from its table — and this one arrives as a shared
+        // slice.
+        let tx: &[Complex32] = match self.puresignal.as_mut() {
+            Some(ps) => {
+                self.ps_tx_iq.clear();
+                self.ps_tx_iq.extend_from_slice(samples);
+                ps.predistort(&mut self.ps_tx_iq);
+                &self.ps_tx_iq
+            }
+            None => samples,
+        };
         self.tx_scratch.clear();
-        self.tx_scratch.reserve(samples.len() * 2);
-        for s in samples {
+        self.tx_scratch.reserve(tx.len() * 2);
+        for s in tx {
             self.tx_scratch.push(s.re);
             self.tx_scratch.push(s.im);
         }
+        let Some(rx) = self.rx.as_mut() else { return Ok(()) };
         rx.tx_write(&self.tx_scratch);
         Ok(())
     }
@@ -305,6 +497,7 @@ impl IqSource for HpsdrSource {
         if let Some(rx) = self.rx.as_ref() {
             rx.tx_end();
         }
+        self.ps_tx_hz = 0.0;
         Ok(())
     }
 
