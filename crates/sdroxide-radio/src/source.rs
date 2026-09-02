@@ -818,6 +818,36 @@ pub fn shift_caps(
     caps
 }
 
+/// The tuning ranges a front end behind a converter publishes, from the two
+/// answers that exist about them.
+///
+/// The order is the whole of issue #279. What the *device* says is in the
+/// hardware's own domain, so [`shift_caps`] moves it onto the dial; what the
+/// *operator* typed is already on the dial, because a transverter owner who
+/// writes 144-148 means the band they tune and not the 28-32 MHz I.F. their
+/// radio is really sitting on. So the shift goes on first and the stated ranges
+/// replace the result — applying the offset to a typed range put the limit a
+/// whole offset away from the band it named, and a 2 m transverter came up
+/// refusing everything outside 260-264 MHz.
+///
+/// A stated transmit range cannot put back a transmitter the operator withdrew:
+/// with `tx_offset_hz` of `None`, [`shift_caps`] has taken transmit away and it
+/// stays away.
+pub fn converted_caps(
+    caps: sdroxide_types::DeviceCaps,
+    offset_hz: f64,
+    tx_offset_hz: Option<f64>,
+    stated_rx: &[(f64, f64)],
+    stated_tx: &[(f64, f64)],
+) -> sdroxide_types::DeviceCaps {
+    let shifted = shift_caps(caps, offset_hz, tx_offset_hz);
+    let mut caps = override_caps_ranges(shifted, stated_rx, stated_tx);
+    if tx_offset_hz.is_none() {
+        caps.freq_ranges_tx.clear();
+    }
+    caps
+}
+
 /// Which hardware frequency to open a converted front end on, for the dial the
 /// engine is holding — the current one on a runtime interface change, the
 /// restored session's at startup.

@@ -5525,7 +5525,9 @@ GQRX) states: how far the converter moves the signal on its way to the receiver.
 A Ham It Up is `125000000`. Positive means an upconverter — you type 10.1008 MHz
 and sdroxide quietly sends the receiver to 135.1008 MHz. Negative means a
 down-converter: a universal Ku-band LNB is `-9750000000`, so a 10.489 GHz
-downlink is received at 739 MHz while the dial reads 10.489 GHz. Dragging the
+downlink is received at 739 MHz while the dial reads 10.489 GHz. A transverter
+follows the same rule — one working 2 m into a 28 MHz I.F. is `-116000000`,
+because the radio ends up on dial + offset and 144 − 116 = 28. Dragging the
 box trims a hertz at a time, which is what a converter whose oscillator is a
 little off wants. The offset takes effect when you press **Apply / reconnect**,
 not as you type it.
@@ -5640,11 +5642,13 @@ the amateur bands is refused whatever you write here, unless you have set
 `tx_ham_only = false` in `config.toml`. And it does not give a receive-only
 device a transmitter — a device with no TX channel stays receive-only.
 
-Ranges describe the radio, on the hardware side of any converter offset, which
-is the same side the device's own answer comes from. With a converter set they
-are shifted onto the dial along with everything else — the receive range by the
-receive offset and the transmit range by whatever the **Transmit** row says, so
-each ends up in the numbers you will actually be reading.
+Ranges are **dial frequencies** — the numbers you read on screen, on your side
+of any converter offset. State the band you tune: a 2 m transverter on a 28 MHz
+I.F. gets `144-148`, not `28-32`, whatever the offset says. Only the device's
+own published ranges are in the hardware's domain, and those are moved onto the
+dial before yours replace them. (Before 1.6.3 a stated range was read as a
+hardware one and the offset was applied to it too, which put the limit an offset
+away from the band it named.)
 
 They also belong to the **interface** they were typed for, not to the tab. Change
 **Radio interface** and the two boxes reload with whatever you had stated for the

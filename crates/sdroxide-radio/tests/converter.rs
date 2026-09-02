@@ -812,3 +812,48 @@ fn a_swap_to_a_front_end_that_cannot_reach_the_dial_moves_it() {
         let _ = t.join();
     }
 }
+
+/// A Hermes Lite 2 behind a 2 m transverter: the radio covers DC to 38.4 MHz,
+/// the transverter brings 144-148 MHz down to a 28 MHz I.F., and the operator
+/// types the band they tune into the RX range box.
+///
+/// Issue #279: that range used to be read as a *hardware* one and shifted by
+/// the offset along with the device's, so 144-148 with a −116 MHz transverter
+/// came out as 260-264 MHz and the radio refused every frequency in the band it
+/// had just been told about.
+#[test]
+fn a_stated_range_is_on_the_dial_not_the_intermediate_frequency() {
+    /// 28 MHz I.F. for 144 MHz on the air.
+    const XVTR: f64 = -116_000_000.0;
+    let hl2 = DeviceCaps {
+        driver: "test".into(),
+        label: "test".into(),
+        rx_channels: 1,
+        tx_channels: 1,
+        sample_rates: vec![RATE],
+        freq_ranges_rx: vec![(0.0, 38_400_000.0)],
+        freq_ranges_tx: vec![(0.0, 38_400_000.0)],
+        antennas_tx: vec!["TX/RX".into()],
+        ..DeviceCaps::default()
+    };
+    let band = [(144_000_000.0, 148_000_000.0)];
+
+    let caps = sdroxide_radio::converted_caps(hl2.clone(), XVTR, Some(XVTR), &band, &band);
+    assert_eq!(
+        caps.freq_ranges_rx, band,
+        "the band the operator typed is the band they get, offset or no offset"
+    );
+    assert_eq!(caps.freq_ranges_tx, band, "and the same on transmit, through the same transverter");
+
+    // Nothing stated: the device's own answer is the one that moves, because
+    // that one really is in the hardware's domain. 0-38.4 MHz through a
+    // −116 MHz transverter is 116-154.4 MHz on the dial.
+    let device_only = sdroxide_radio::converted_caps(hl2.clone(), XVTR, Some(XVTR), &[], &[]);
+    assert_eq!(device_only.freq_ranges_rx, vec![(116_000_000.0, 154_400_000.0)]);
+
+    // And a stated transmit range cannot hand a transmitter back to an operator
+    // who said there is nothing in the transmit line.
+    let rx_only = sdroxide_radio::converted_caps(hl2, XVTR, None, &band, &band);
+    assert_eq!(rx_only.freq_ranges_rx, band);
+    assert!(rx_only.freq_ranges_tx.is_empty(), "transmit was withdrawn and must stay withdrawn");
+}

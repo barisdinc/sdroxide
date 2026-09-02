@@ -1719,8 +1719,10 @@ impl SdroxideApp {
                     .on_hover_text(
                         "How far a converter moves the signal on its way to the receiver, in Hz \
                          — the same number and sign every converter's documentation and every \
-                         other SDR program states. Positive for an upconverter (a Ham It Up is \
-                         125000000), negative for a down-converter such as a satellite LNB. \
+                         other SDR program states. The radio ends up on dial + offset: positive \
+                         for an upconverter (a Ham It Up is 125000000), negative for anything \
+                         that brings a band down to an I.F. — a satellite LNB, or a 2 m \
+                         transverter on a 28 MHz I.F., which is -116000000 (28 − 144). \
                          0 = no converter.\n\nDrag to trim it a hertz at a time, which is what \
                          a converter whose oscillator is slightly off wants.\n\nThis is the \
                          receive path. What is in the transmit line is the row below.\n\nTakes \
@@ -1808,8 +1810,10 @@ impl SdroxideApp {
                         &mut ranges.0,
                         "Which frequencies this radio receives, in MHz: 144-146, 430-440. Leave \
                          empty to use whatever the device reports about itself.\n\nBand buttons \
-                         outside the range are greyed out and the dial will not go there.\n\nTakes \
-                         effect on Apply.",
+                         outside the range are greyed out and the dial will not go there.\n\n\
+                         These are dial frequencies. With a converter set, state the band you \
+                         tune — 144-148 for a 2 m transverter — not the I.F. the radio is really \
+                         on.\n\nTakes effect on Apply.",
                     );
                     ui.end_row();
 
@@ -1821,7 +1825,8 @@ impl SdroxideApp {
                         "Which frequencies this radio transmits on, in MHz: 144-146, 430-440. \
                          Leave empty to use whatever the device reports — and if it reports \
                          nothing, the driver is taken at its word and any frequency is \
-                         allowed.\n\nThis is a limit you set, not a licence: transmitting outside \
+                         allowed.\n\nDial frequencies, like the receive range above.\n\nThis \
+                         is a limit you set, not a licence: transmitting outside \
                          the amateur bands is refused regardless unless you have turned that off \
                          in config.toml. Nor does it give a receive-only device a \
                          transmitter.\n\nTakes effect on Apply.",
@@ -1834,7 +1839,8 @@ impl SdroxideApp {
                 ui.label(
                     RichText::new(
                         "Ranges are in MHz, low-high, separated by commas: 144-146, 430-440 — \
-                         that is 144000000-146000000 Hz and 430000000-440000000 Hz. The \
+                         that is 144000000-146000000 Hz and 430000000-440000000 Hz. They are \
+                         dial frequencies: a converter offset does not move them. The \
                          converter offset above is the field in hertz. Leave a range empty to \
                          use whatever the device reports about itself; a device that reports \
                          nothing is taken at its word.",

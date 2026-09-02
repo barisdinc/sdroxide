@@ -1173,9 +1173,11 @@ fn open_source(cli: &Cli, settings: &Settings) -> anyhow::Result<(Box<dyn IqSour
 /// offset goes on here, once, and [`ConvertedSource`] takes it off again for
 /// everything the source reports back.
 ///
-/// Stated ranges go on before the offset, for the same reason: they describe
-/// the hardware, and `shift_caps` moves the hardware's ranges into the
-/// operator's domain whether the hardware or its owner named them.
+/// Stated ranges go on *after* the offset, because they are the one thing here
+/// the operator typed: a transverter owner who writes 144-148 means the band
+/// they tune, not the 28-32 MHz I.F. the radio is really on. Only the device's
+/// own published ranges are in the hardware's domain, and `shift_caps` moves
+/// those into the operator's before the stated ones replace them (issue #279).
 fn open_converted_source(
     radio: &RadioConfig,
     cli: &Cli,
@@ -1204,10 +1206,20 @@ fn open_converted_source(
     }
     c.freq = Some(hw);
     let (source, caps) = open_configured_source(radio, &c, settings)?;
-    let caps = stated_ranges(caps, radio);
     // The transmit line is a separate fact about the station, and the operator
     // states it — see `sdroxide_types::ConverterTx`.
     let tx_offset = radio.converter_tx.offset_hz(offset);
+    // Device ranges down into the operator's domain first, then whatever the
+    // operator stated on top of them — that order is what makes a typed range
+    // mean the dial rather than the I.F.
+    let caps = sdroxide_radio::converted_caps(
+        caps,
+        offset,
+        tx_offset,
+        &radio.freq_ranges_rx,
+        &radio.freq_ranges_tx,
+    );
+    log_stated_ranges(radio, &caps);
     tracing::info!(
         "frequency converter: hardware tuned {:.6} MHz above the dial; transmit {}",
         offset / 1e6,
@@ -1217,10 +1229,7 @@ fn open_converted_source(
             Some(t) => format!("tuned {:.6} MHz above the dial", t / 1e6),
         }
     );
-    Ok((
-        Box::new(ConvertedSource::new(source, offset, tx_offset)),
-        shift_caps(caps, offset, tx_offset),
-    ))
+    Ok((Box::new(ConvertedSource::new(source, offset, tx_offset)), caps))
 }
 
 /// Open a radio that borrows another roster radio's receiver as its panadapter:
@@ -1337,9 +1346,16 @@ fn panadapter_owners() -> std::collections::HashMap<u32, u32> {
 /// refuses to come up.
 fn stated_ranges(caps: DeviceCaps, radio: &RadioConfig) -> DeviceCaps {
     let out = override_caps_ranges(caps, &radio.freq_ranges_rx, &radio.freq_ranges_tx);
+    log_stated_ranges(radio, &out);
+    out
+}
+
+/// Say in the log which of the ranges now in `caps` came from the configuration
+/// rather than from the device.
+fn log_stated_ranges(radio: &RadioConfig, caps: &DeviceCaps) {
     for (dir, stated, applied) in [
-        ("RX", &radio.freq_ranges_rx, &out.freq_ranges_rx),
-        ("TX", &radio.freq_ranges_tx, &out.freq_ranges_tx),
+        ("RX", &radio.freq_ranges_rx, &caps.freq_ranges_rx),
+        ("TX", &radio.freq_ranges_tx, &caps.freq_ranges_tx),
     ] {
         if !stated.is_empty() {
             tracing::info!(
@@ -1348,7 +1364,6 @@ fn stated_ranges(caps: DeviceCaps, radio: &RadioConfig) -> DeviceCaps {
             );
         }
     }
-    out
 }
 
 /// Open the interface selected in `radio.json`. `Auto` prefers a SoapySDR device
