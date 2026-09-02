@@ -174,6 +174,7 @@ impl Qo100Controller {
                     // drift-rate fit the frame decoder is handed.
                     let mut est_hist: VecDeque<(f64, f64)> = VecDeque::new();
                     let mut drift_hz_s = 0.0f64;
+                    let mut drift_accel = 0.0f64;
                     let mut progress = bpsk::DecodeProgress::default();
                     // Samples gathered since the last tracker pass.
                     let mut since_track = 0usize;
@@ -239,18 +240,21 @@ impl Qo100Controller {
                                                 {
                                                     est_hist.pop_front();
                                                 }
-                                                drift_hz_s = drift_slope(&est_hist);
+                                                let (s, a) = drift_fit(&est_hist);
+                                                drift_hz_s = s;
+                                                drift_accel = a;
                                             }
                                             None => {
                                                 est_misses += 1;
                                                 est_hist.clear();
                                                 drift_hz_s = 0.0;
+                                                drift_accel = 0.0;
                                             }
                                         }
                                         let _ = res_tx.send(status_snapshot(
                                             &cfg, tried, locked, est_updates, est_misses,
-                                            &last, &last_est, drift_hz_s, &progress, buf.len(),
-                                            frame_len, now,
+                                            &last, &last_est, drift_hz_s, drift_accel, &progress,
+                                            buf.len(), frame_len, now,
                                         ));
                                     }
 
@@ -269,6 +273,7 @@ impl Qo100Controller {
                                             FREQ_STEP_HZ,
                                             DEMOD_RATE_HZ,
                                             drift_hz_s,
+                                            drift_accel,
                                             &cancel,
                                         );
                                         progress = prog;
@@ -290,8 +295,8 @@ impl Qo100Controller {
                                     buf.drain(..start);
                                     let _ = res_tx.send(status_snapshot(
                                         &cfg, tried, locked, est_updates, est_misses,
-                                        &last, &last_est, drift_hz_s, &progress, buf.len(),
-                                        frame_len, now,
+                                        &last, &last_est, drift_hz_s, drift_accel, &progress,
+                                        buf.len(), frame_len, now,
                                     ));
                                 }
                                 Err(_) => break,
@@ -345,37 +350,74 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// How long a stretch of tracker estimates the drift-rate fit uses.
+/// How long a stretch of tracker estimates the drift fit uses.
 const DRIFT_FIT_SECS: f64 = 12.0;
 
-/// Least-squares slope, in Hz/s, of `(t, hz)` samples — the beacon's drift
-/// rate the frame decoder is handed. `0.0` until there are enough points over
-/// a long enough span for the fit to mean anything, and clamped to a sane
-/// range so one wild estimate cannot send the decoder chasing a huge chirp.
-fn drift_slope(hist: &VecDeque<(f64, f64)>) -> f64 {
-    if hist.len() < 4 {
-        return 0.0;
+/// Least-squares fit of `hz ≈ a + b·t + c·t²` to the recent `(t, hz)` tracker
+/// estimates, returned as `(drift_rate, curvature)` in Hz/s and Hz/s² — what
+/// [`bpsk::acquire_debug`] de-rotates before it looks for a frame.
+///
+/// A warming LNB's local oscillator does not walk at a constant rate, so a
+/// straight-line fit leaves a residual chirp across the decoder's ~24 s window
+/// even when the last few seconds looked linear. The second-order term catches
+/// that. The drift rate is reported at the *middle* of the fit window, which
+/// is ≈ the centre of the decode buffer `dechirp` pivots on — so the value can
+/// be handed straight through without a further time shift.
+///
+/// `(0.0, 0.0)` until there are enough points over a long enough span for the
+/// fit to mean anything; each term clamped so one wild estimate cannot send
+/// the decoder chasing a huge chirp.
+fn drift_fit(hist: &VecDeque<(f64, f64)>) -> (f64, f64) {
+    if hist.len() < 5 {
+        return (0.0, 0.0);
     }
-    let n = hist.len() as f64;
-    let (mut st, mut sh) = (0.0, 0.0);
-    for &(t, h) in hist {
-        st += t;
-        sh += h;
-    }
-    let (tm, hm) = (st / n, sh / n);
     let span = hist.back().unwrap().0 - hist.front().unwrap().0;
     if span < 0.5 * DRIFT_FIT_SECS {
-        return 0.0;
+        return (0.0, 0.0);
     }
-    let (mut num, mut den) = (0.0, 0.0);
+    // Normal equations for [a, b, c] against 1, x, x² with x = t − mean(t);
+    // centring keeps the 3×3 well-conditioned for a dozen points over ~12 s.
+    let n = hist.len() as f64;
+    let tm = hist.iter().map(|&(t, _)| t).sum::<f64>() / n;
+    let (mut s1, mut s2, mut s3, mut s4) = (0.0, 0.0, 0.0, 0.0);
+    let (mut r0, mut r1, mut r2) = (0.0, 0.0, 0.0);
     for &(t, h) in hist {
-        num += (t - tm) * (h - hm);
-        den += (t - tm) * (t - tm);
+        let x = t - tm;
+        let (x2, x3, x4) = (x * x, x * x * x, x * x * x * x);
+        s1 += x;
+        s2 += x2;
+        s3 += x3;
+        s4 += x4;
+        r0 += h;
+        r1 += h * x;
+        r2 += h * x2;
     }
-    if den <= 0.0 {
-        return 0.0;
+    let Some([_, b, c]) = solve3([[n, s1, s2], [s1, s2, s3], [s2, s3, s4]], [r0, r1, r2]) else {
+        return (0.0, 0.0);
+    };
+    (b.clamp(-120.0, 120.0), (2.0 * c).clamp(-15.0, 15.0))
+}
+
+/// Cramer's rule for a 3×3 system; `None` when it is singular.
+fn solve3(m: [[f64; 3]; 3], v: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |a: &[[f64; 3]; 3]| {
+        a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+            - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+            + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+    };
+    let d = det(&m);
+    if d.abs() < 1e-9 {
+        return None;
     }
-    (num / den).clamp(-40.0, 40.0)
+    let mut out = [0.0f64; 3];
+    for (i, o) in out.iter_mut().enumerate() {
+        let mut mi = m;
+        for row in 0..3 {
+            mi[row][i] = v[row];
+        }
+        *o = det(&mi) / d;
+    }
+    Some(out)
 }
 
 /// Build a full status snapshot from the worker's running counters — the one
@@ -391,6 +433,7 @@ fn status_snapshot(
     last: &Option<(f64, String, i64)>,
     last_est: &Option<(bpsk::CarrierEstimate, i64)>,
     drift_hz_s: f64,
+    drift_accel_hz_s2: f64,
     progress: &bpsk::DecodeProgress,
     buf_len: usize,
     frame_len: usize,
@@ -414,10 +457,12 @@ fn status_snapshot(
         est_updates,
         est_misses,
         est_drift_hz_s: if fresh.is_some() { drift_hz_s as f32 } else { 0.0 },
+        est_drift_accel_hz_s2: if fresh.is_some() { drift_accel_hz_s2 as f32 } else { 0.0 },
         decoding: cfg.decode_telemetry,
         carrier_seen: progress.carrier,
         sync_seen: progress.sync,
         sync_bit_errors: progress.sync_bit_errors,
+        sync_matches: progress.sync_matches,
         frame_fill: if frame_len > 0 { (buf_len as f32 / frame_len as f32).min(1.0) } else { 0.0 },
         crc_ok: progress.crc_ok,
         // The closed-loop fields are the engine's to fill in — the worker
@@ -467,23 +512,35 @@ mod tests {
     }
 
     #[test]
-    fn drift_slope_fits_a_steady_walk_and_ignores_a_short_or_flat_run() {
+    fn drift_fit_recovers_rate_and_curvature_and_ignores_a_short_or_flat_run() {
         // Too few points, or too short a span: no fit.
         let mut h: VecDeque<(f64, f64)> = [(0.0, 100.0), (1.0, 106.0), (2.0, 112.0)].into();
-        assert_eq!(drift_slope(&h), 0.0, "three points is not enough");
+        assert_eq!(drift_fit(&h), (0.0, 0.0), "three points is not enough");
 
-        // A clean 6 Hz/s walk over a full fit window.
+        // A clean 6 Hz/s straight walk over a full fit window: rate 6, no
+        // curvature. The rate is reported at the middle of the window, which
+        // for a straight line is the same everywhere.
         h = (0..=12).map(|i| (i as f64, 100.0 + 6.0 * i as f64)).collect();
-        assert!((drift_slope(&h) - 6.0).abs() < 0.01, "got {}", drift_slope(&h));
+        let (rate, accel) = drift_fit(&h);
+        assert!((rate - 6.0).abs() < 0.05 && accel.abs() < 0.05, "rate {rate}, accel {accel}");
 
-        // Flat: near zero.
+        // hz(t) = 100 + 2t + 0.5·t² → curvature 1.0 Hz/s², and rate at the
+        // window middle (t = 6) is 2 + 1·6 = 8 Hz/s.
+        h = (0..=12).map(|i| (i as f64, 100.0 + 2.0 * i as f64 + 0.5 * (i * i) as f64)).collect();
+        let (rate, accel) = drift_fit(&h);
+        assert!((accel - 1.0).abs() < 0.02, "curvature {accel}");
+        assert!((rate - 8.0).abs() < 0.05, "mid-window rate {rate}");
+
+        // Flat: both near zero.
         h = (0..=12).map(|i| (i as f64, 200.0)).collect();
-        assert!(drift_slope(&h).abs() < 0.01);
+        let (rate, accel) = drift_fit(&h);
+        assert!(rate.abs() < 0.01 && accel.abs() < 0.01);
 
-        // A single wild estimate cannot drag the fit past the clamp.
+        // A single wild estimate cannot drag either term past its clamp.
         h = (0..=12).map(|i| (i as f64, 0.0)).collect();
         h.push_back((12.5, 1_000_000.0));
-        assert!(drift_slope(&h).abs() <= 40.0);
+        let (rate, accel) = drift_fit(&h);
+        assert!(rate.abs() <= 120.0 && accel.abs() <= 15.0);
     }
 
     #[test]

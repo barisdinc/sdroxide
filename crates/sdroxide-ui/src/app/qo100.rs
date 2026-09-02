@@ -691,13 +691,20 @@ impl SdroxideApp {
                 ui.label(dim("DRIFT"));
                 ui.label(
                     RichText::new(if s.est_drift_hz_s.abs() >= 0.05 {
-                        format!("{:+.1} Hz/s  (de-rotated before decode)", s.est_drift_hz_s)
+                        if s.est_drift_accel_hz_s2.abs() >= 0.05 {
+                            format!(
+                                "{:+.1} Hz/s   {:+.2} Hz/s²  (de-rotated before decode)",
+                                s.est_drift_hz_s, s.est_drift_accel_hz_s2
+                            )
+                        } else {
+                            format!("{:+.1} Hz/s  (de-rotated before decode)", s.est_drift_hz_s)
+                        }
                     } else {
                         "— (need a longer run of estimates)".to_string()
                     })
                     .size(10.0)
                     .monospace()
-                    .color(if s.est_drift_hz_s.abs() > 15.0 {
+                    .color(if s.est_drift_hz_s.abs() > 15.0 || s.est_drift_accel_hz_s2.abs() > 3.0 {
                         theme::YELLOW()
                     } else {
                         theme::TEXT()
@@ -821,15 +828,24 @@ impl SdroxideApp {
                 if s.sync_bit_errors != u8::MAX {
                     // Always shown: sync passing (≤3) but CRC never lighting
                     // means the demod is marginal — the closer this is to 0,
-                    // the more of the payload is decoding right.
+                    // the more of the payload is decoding right. The ×N is how
+                    // many distinct sync alignments the best bitstream held: a
+                    // real frame shows ×1–2 at very few errors, a lone chance
+                    // hit shows ×1 near 3 errors.
+                    let real = s.sync_bit_errors <= 1 && s.sync_matches >= 1;
                     ui.label(
-                        RichText::new(format!("sync {} / 32 err", s.sync_bit_errors))
-                            .size(9.0)
-                            .color(if s.sync_bit_errors <= 3 {
-                                theme::CYAN_DIM()
-                            } else {
-                                theme::YELLOW()
-                            }),
+                        RichText::new(format!(
+                            "sync {} / 32 err  ×{}",
+                            s.sync_bit_errors, s.sync_matches
+                        ))
+                        .size(9.0)
+                        .color(if real {
+                            theme::GREEN()
+                        } else if s.sync_bit_errors <= 3 {
+                            theme::CYAN_DIM()
+                        } else {
+                            theme::YELLOW()
+                        }),
                     );
                 }
             });
