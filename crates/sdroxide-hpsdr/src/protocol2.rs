@@ -90,17 +90,35 @@ fn put_u32_be(buf: &mut [u8], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
 }
 
-/// Build the General/run packet (dest port 1024). `run` sets the run bit;
-/// clearing it stops streaming. Enables the hardware watchdog.
-pub fn general_packet(seq: u32, run: bool) -> [u8; GENERAL_LEN] {
+/// Build the General packet (dest port 1024): the port assignments and the
+/// board-wide switches. It carries **no run bit** — that lives in the
+/// high-priority packet, which is the only thing that starts and stops a
+/// Protocol 2 radio.
+///
+/// Byte 4 is the *packet type* of the 60-byte datagrams that go to port 1024,
+/// and `0x00` is what makes this one a General packet: `0x02` is discovery,
+/// `0x03`/`0x04` erase and program, `0x06` sets the radio's IP. A board that
+/// reads anything else there has been handed a packet of a type it does not
+/// know and drops the whole thing — which is what sdroxide used to send
+/// whenever it meant "run", so the port table, the phase-word mode bit, the
+/// watchdog and the PA/Alex switches never reached the radio at all. An ANAN
+/// G2 (Saturn) answered that by configuring its DDCs and streaming nothing
+/// (issue #281).
+///
+/// Every field left at zero means "use the default", which is what the port
+/// assignments want: the defaults are the ports this crate listens on.
+///
+/// `alex_both` enables the second Alex/filter chain, which the two-ADC boards
+/// (Orion2, Saturn) have and the rest do not.
+pub fn general_packet(seq: u32, alex_both: bool) -> [u8; GENERAL_LEN] {
     let mut b = [0u8; GENERAL_LEN];
     put_u32_be(&mut b, 0, seq);
-    b[4] = if run { 0x01 } else { 0x00 };
+    b[4] = 0x00; // packet type: General. Never anything else.
     b[23] = 0x00; // wideband disabled
-    b[37] = 0x08; // phase-word / PA config
+    b[37] = 0x08; // NCO fields carry phase words, not frequencies
     b[38] = 0x01; // hardware watchdog enable
     b[58] = 0x01; // PA enable
-    b[59] = 0x01; // ALEX enable (single ADC)
+    b[59] = if alex_both { 0x03 } else { 0x01 }; // ALEX 0, and 1 on a two-ADC board
     b
 }
 
@@ -145,13 +163,18 @@ pub fn duc_command_packet(seq: u32) -> [u8; DUC_COMMAND_LEN] {
     b
 }
 
-/// Build the High-Priority command packet (dest port 1027): RX/TX NCO
-/// frequencies, PTT/MOX, and drive level (0..=255).
+/// Build the High-Priority command packet (dest port 1027): the run bit, RX/TX
+/// NCO frequencies, PTT/MOX, and drive level (0..=255).
 ///
 /// Offsets: DDC-*n* RX NCO @ `buf[9 + 4n .. 13 + 4n]` (the spec's frequency
 /// table, 4 bytes per DDC), TX DUC0 NCO @ `buf[329..333]`, drive @ `buf[345]`,
 /// run/MOX flags @ `buf[4]` — canonical P2 values; DDC0's offset is
 /// hardware-verified, the stride is per the TAPR layout.
+///
+/// `run` is bit 0 of byte 4 and is the *only* thing that starts and stops the
+/// radio's streams. Sending this packet with it clear is how a session ends —
+/// nothing on port 1024 will do it, and a radio left running goes on answering
+/// discovery as "in use" long after the program that started it has gone.
 ///
 /// `rx_phases[n]` is DDC *n*'s phase word; a DDC that is not enabled simply
 /// has its slot written as given (zero for an unused one is fine — the board
@@ -160,12 +183,13 @@ pub fn high_priority_packet(
     seq: u32,
     rx_phases: &[u32; MAX_DDCS as usize],
     tx_phase: u32,
+    run: bool,
     ptt: bool,
     drive: u8,
 ) -> [u8; HIGH_PRIORITY_LEN] {
     let mut b = [0u8; HIGH_PRIORITY_LEN];
     put_u32_be(&mut b, 0, seq);
-    b[4] = 0x01 | if ptt { 0x02 } else { 0x00 }; // run + MOX
+    b[4] = u8::from(run) | if ptt { 0x02 } else { 0x00 }; // run + MOX
     for (n, &phase) in rx_phases.iter().enumerate() {
         put_u32_be(&mut b, 9 + 4 * n, phase); // DDC-n RX NCO
     }
@@ -263,6 +287,9 @@ pub(crate) fn run(ctx: ThreadCtx) {
         ptt: false,
         last_kick: None,
         kick_logged: false,
+        // The two-ADC boards drive a second Alex chain; the rest have one.
+        // Same test piHPSDR makes, and it is a board fact, not a setting.
+        alex_both: matches!(ctx.board.as_str(), "Saturn" | "Orion2"),
     };
     t.run();
 }
@@ -309,6 +336,8 @@ struct P2Thread {
     /// The starved-DDC watchdog's rate limit and one-shot log flag.
     last_kick: Option<Instant>,
     kick_logged: bool,
+    /// Whether this board has the second Alex/filter chain (Orion2, Saturn).
+    alex_both: bool,
 }
 
 impl P2Thread {
@@ -316,7 +345,13 @@ impl P2Thread {
         SocketAddr::new(self.radio, p)
     }
 
+    /// Send the high-priority packet with the run bit set — the packet that
+    /// keeps the radio streaming, and the one that starts it.
     fn send_high_priority(&mut self) {
+        self.send_high_priority_run(true);
+    }
+
+    fn send_high_priority_run(&mut self, run: bool) {
         let seq = next_seq(&mut self.seq.high_priority);
         let mut phases = [0u32; MAX_DDCS as usize];
         for (&ddc, slot) in &self.slots {
@@ -324,10 +359,10 @@ impl P2Thread {
         }
         let tx = phase_word(self.tx_freq, CLOCK_HZ);
         let drive = if self.ptt { TX_DRIVE } else { 0 };
-        let pkt = high_priority_packet(seq, &phases, tx, self.ptt, drive);
+        let pkt = high_priority_packet(seq, &phases, tx, run, self.ptt, drive);
         tracing::trace!(
-            "HPSDR P2: high-priority seq {seq}: {} DDC NCO(s), TX phase 0x{tx:08X} ({:.0} Hz), \
-             MOX {}, drive {drive}",
+            "HPSDR P2: high-priority seq {seq}: run {run}, {} DDC NCO(s), TX phase 0x{tx:08X} \
+             ({:.0} Hz), MOX {}, drive {drive}",
             self.slots.len(),
             self.tx_freq,
             self.ptt
@@ -382,9 +417,9 @@ impl P2Thread {
             );
         }
         self.last_kick = Some(Instant::now());
+        self.send_general();
         self.send_ddc_command();
         self.send_high_priority();
-        self.send_general(true);
     }
 
     fn send_duc_command(&mut self) {
@@ -399,7 +434,12 @@ impl P2Thread {
     fn stop_stream(&mut self, why: &str) {
         if crate::net::owns_connection(self.radio, self.conn_id) {
             tracing::info!("HPSDR P2: {why}; stopping the radio's stream");
-            self.send_general(false);
+            // The run bit, cleared. Nothing on the General port stops a
+            // Protocol 2 radio, which is why one left running kept answering
+            // discovery as "in use" and every reconnect found its own last
+            // session in the way (issue #281).
+            self.ptt = false;
+            self.send_high_priority_run(false);
         } else {
             tracing::info!(
                 "HPSDR P2: {why}; another connection has taken over this radio, leaving its \
@@ -408,9 +448,9 @@ impl P2Thread {
         }
     }
 
-    fn send_general(&mut self, run: bool) {
+    fn send_general(&mut self) {
         let seq = next_seq(&mut self.seq.general);
-        let pkt = general_packet(seq, run);
+        let pkt = general_packet(seq, self.alex_both);
         let _ = self.socket.send_to(&pkt, self.dest(port::GENERAL));
     }
 
@@ -425,10 +465,18 @@ impl P2Thread {
             port::HIGH_PRIORITY,
             port::GENERAL,
         );
+        // The order and the pauses are the protocol's, not a style: the
+        // General packet carries the port table and the board switches and has
+        // to land before anything is configured against them, and each step
+        // needs a moment in the FPGA before the next one arrives. The run
+        // command comes last, once there is something configured to run.
+        self.send_general();
+        std::thread::sleep(Duration::from_millis(100));
         self.send_ddc_command();
+        std::thread::sleep(Duration::from_millis(50));
         self.send_duc_command();
+        std::thread::sleep(Duration::from_millis(50));
         self.send_high_priority();
-        self.send_general(true);
         tracing::debug!(
             "HPSDR P2: run command sent; awaiting DDC I/Q on source port {}..{}",
             port::DDC_IQ_BASE,
@@ -649,7 +697,7 @@ impl P2Thread {
 
             if last_watchdog.elapsed() >= WATCHDOG {
                 self.send_high_priority();
-                self.send_general(true);
+                self.send_general();
                 last_watchdog = Instant::now();
             }
         }
@@ -723,7 +771,7 @@ mod tests {
         phases[0] = rx0;
         phases[1] = rx1;
         let tx = phase_word(7_100_000.0, CLOCK_HZ);
-        let b = high_priority_packet(0, &phases, tx, true, 200);
+        let b = high_priority_packet(0, &phases, tx, true, true, 200);
         assert_eq!(b[4] & 0x02, 0x02, "MOX bit set");
         // The DDC frequency table: 4 bytes per DDC from offset 9.
         assert_eq!(u32::from_be_bytes([b[9], b[10], b[11], b[12]]), rx0);
@@ -731,6 +779,44 @@ mod tests {
         assert_eq!(u32::from_be_bytes([b[17], b[18], b[19], b[20]]), 0, "DDC2 unused");
         assert_eq!(u32::from_be_bytes([b[329], b[330], b[331], b[332]]), tx);
         assert_eq!(b[345], 200);
+    }
+
+    /// Byte 4 of a 60-byte datagram to port 1024 is the packet *type*, and
+    /// `0x00` is what makes one a General packet. Issue #281: sdroxide put a
+    /// run bit there, the radio saw a packet type it did not know and dropped
+    /// every one — port table, phase-word mode bit, watchdog and PA/Alex
+    /// switches with it.
+    #[test]
+    fn the_general_packet_is_always_of_the_general_type() {
+        for alex_both in [false, true] {
+            let b = general_packet(7, alex_both);
+            assert_eq!(b[4], 0x00, "packet type must stay General");
+            assert_eq!(u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 7, "sequence");
+            assert_eq!(b[37], 0x08, "NCO fields carry phase words");
+            assert_eq!(b[38], 0x01, "hardware watchdog");
+            assert_eq!(b[58], 0x01, "PA enable");
+            // Everything the protocol reads as a port number is left at zero,
+            // which is what asks for the defaults this crate listens on.
+            assert!(b[5..23].iter().all(|&x| x == 0), "port table left at its defaults");
+        }
+        // The two-ADC boards drive a second filter chain.
+        assert_eq!(general_packet(0, false)[59], 0x01);
+        assert_eq!(general_packet(0, true)[59], 0x03);
+    }
+
+    /// The run bit is the high-priority packet's, and clearing it is the only
+    /// way to stop a Protocol 2 radio — a session that never cleared it left
+    /// the radio answering discovery as "in use" (issue #281).
+    #[test]
+    fn the_run_bit_lives_in_the_high_priority_packet() {
+        let phases = [0u32; MAX_DDCS as usize];
+        let running = high_priority_packet(0, &phases, 0, true, false, 0);
+        assert_eq!(running[4] & 0x01, 0x01, "run");
+        assert_eq!(running[4] & 0x02, 0x00, "not keyed");
+        let stopped = high_priority_packet(1, &phases, 0, false, false, 0);
+        assert_eq!(stopped[4], 0x00, "a stop is the run bit cleared, and nothing else");
+        // MOX rides beside it either way.
+        assert_eq!(high_priority_packet(2, &phases, 0, true, true, 0)[4], 0x03);
     }
 
     #[test]
