@@ -24,14 +24,15 @@
 //! - **headers, Reed-Solomon failures** — real frames, arriving damaged. Note
 //!   that a failure here is not fatal: the block is tried uncorrected too and
 //!   the frame check sequence decides, which is what **FEC bypassed** counts.
-//! - **Reed-Solomon good, frame check bad** — the error correction is fine and
-//!   something above it is not, which is this decoder's fault and not the
-//!   band's. On a real recording this figure is the sharpest evidence there is.
+//! - **frames, and a comparable count of bad FCS** — a marginal path. The bits
+//!   are arriving damaged and nothing repairs them, because the Reed-Solomon
+//!   parameters do not fit what is on the air (see `rs.rs`): one bad bit loses
+//!   the frame. The EVM printed per frame says how marginal — under about 4°
+//!   is comfortable, 7° is on the edge.
 //!
-//! `--syndromes` prints the fraction of Reed-Solomon blocks that were already
-//! clean before any correction. On a decent recording that is nearly all of
-//! them; if the code's parameters were wrong it would be none, and the check
-//! needs no reference decoder and no aerial of one's own.
+//! `--syndromes` is accepted and ignored; it used to print how many
+//! Reed-Solomon blocks were clean before correction, and the answer on real
+//! traffic is none of them, for the reason above.
 
 use std::io::Read;
 
@@ -251,12 +252,14 @@ impl Totals {
                  arriving too damaged to repair: a weak signal, or the wrong aerial.",
                 self.headers, self.rs_fail
             );
-        } else if self.fcs_bad > self.frames {
+        } else if self.fcs_bad * 2 > self.frames {
             println!(
-                "{} blocks repaired and {} frames failed their check sequence against {} \
-                 that passed. The error correction is working and something above it is not, \
-                 which is this decoder's fault rather than the band's.",
-                self.rs_ok, self.fcs_bad, self.frames
+                "{} frames passed their check sequence and {} failed it. That is a marginal \
+                 path: the bits are arriving damaged, and the Reed-Solomon layer that should \
+                 be repairing them does not fit what is on the air (see `rs.rs`), so a frame \
+                 with one bad bit is simply lost. More aerial or more gain is what moves this \
+                 number — the per-burst EVM above says how marginal.",
+                self.frames, self.fcs_bad
             );
         } else {
             println!(
