@@ -11530,9 +11530,23 @@ impl Engine {
         }
     }
 
+    /// Write the memory list out, and say so on screen if it could not be
+    /// written.
+    ///
+    /// A log line is not enough here. The operator has just stored, edited or
+    /// filed a channel and the list in front of them shows the change, so a
+    /// refused save is a lie they only find out about at the next start. The
+    /// commonest refusal is the deliberate one — the file could not be read at
+    /// startup, so sdroxide will not write the empty list it had to run on over
+    /// it (issue #269) — and that is precisely the case they have to be told
+    /// about, because the channels are still there and this screen says they
+    /// are not.
     fn save_memories(&mut self) {
         if let Err(e) = sdroxide_config::save_memories(&self.memories) {
             warn!("saving memories: {e}");
+            let _ = self
+                .event_tx
+                .send(RadioEvent::Notice(Some(format!("the memory list was not saved: {e}"))));
         }
         self.mark_shared_store_write();
         let _ = self.event_tx.send(RadioEvent::Memories(self.memories.clone()));
@@ -11541,6 +11555,9 @@ impl Engine {
     fn save_mem_folders(&mut self) {
         if let Err(e) = sdroxide_config::save_memory_folders(&self.mem_folders) {
             warn!("saving memory folders: {e}");
+            let _ = self
+                .event_tx
+                .send(RadioEvent::Notice(Some(format!("the memory folders were not saved: {e}"))));
         }
         self.mark_shared_store_write();
         let _ = self.event_tx.send(RadioEvent::MemoryFolders(self.mem_folders.clone()));
