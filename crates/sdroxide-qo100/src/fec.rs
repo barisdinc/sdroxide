@@ -250,12 +250,12 @@ pub fn decode_frame(soft: &[f32]) -> Option<FecFrame> {
 /// that happened to decode.
 pub fn decode_iq(iq: &[Complex32], rate_hz: f64, carrier_hz: f64) -> Option<(FecFrame, f64)> {
     let mut rx = crate::rx::Rx::new(rate_hz, carrier_hz);
-    let mut flips = Vec::new();
+    let mut chips = Vec::new();
     for chunk in iq.chunks(8192) {
-        flips.extend(rx.process(chunk));
+        chips.extend(rx.process(chunk));
     }
     (0..2)
-        .find_map(|parity| decode_frame(&crate::rx::symbols(&flips, parity)))
+        .find_map(|parity| decode_frame(&crate::rx::symbols(&chips, parity)))
         .map(|f| (f, rx.state().carrier_hz))
 }
 
@@ -404,6 +404,26 @@ pub(crate) mod tests {
         assert_eq!(frame.rs_errors, [0, 0], "a clean frame needs no correction");
         assert_eq!(frame.start, 0);
         assert!(frame.sync_quality > 0.99, "sync {}", frame.sync_quality);
+    }
+
+    /// The test encoder must agree with the reference encoder bit for bit.
+    ///
+    /// [`encode_frame`] exists to put frames through channels in these tests,
+    /// and everything that uses it would still pass if it and the decoder
+    /// shared a mistake. This is what stops that: the same payload through
+    /// `encode_ref.c` and through it must give the same 5200 symbols.
+    #[test]
+    fn the_test_encoder_agrees_with_the_reference_encoder() {
+        let hex = include_str!("../tests/ao40_reference_frame.hex").trim();
+        let packed: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect();
+        let want: Vec<bool> =
+            (0..FRAME_SYMBOLS).map(|p| packed[p / 8] & (0x80 >> (p % 8)) != 0).collect();
+        let got = encode_frame(&sample_payload());
+        assert_eq!(got.len(), want.len());
+        let diff = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+        assert_eq!(diff, 0, "{diff} of {FRAME_SYMBOLS} symbols differ from the reference");
     }
 
     /// …and the same frame received upside down, which is what an I/Q swap or

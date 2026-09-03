@@ -46,18 +46,31 @@
 //! peak of a lobe the slope is zero. Sampling the two lobe peaks would give a
 //! reading that is beautifully symmetric and completely blind.
 //!
-//! # What this does not yet reach
+//! # Where this stands against the reference recordings
 //!
-//! KA9Q published two reference recordings of the coded format, one clean and
-//! one at 7 dB Eb/N0. This chain decodes the clean one — carrier offset and
-//! all, see `tests::the_reference_recordings_decode` — and does **not** decode
-//! the 7 dB one, which the format itself is comfortably strong enough for. So
-//! there are a few dB on the table here that a better front end would collect,
-//! and the likely places to look are the chip pulse the matched filter assumes
-//! (square, which the satellite's transmit chain will have rounded off), the
-//! timing loop's jitter at low SNR, and the fact that nothing here yet feeds
-//! the framing layer a soft value scaled by its actual confidence rather than
-//! by signal amplitude.
+//! KA9Q published two recordings of the coded format, one clean and one at
+//! 7 dB Eb/N0. The clean one decodes here with **no Reed-Solomon corrections
+//! at all**, carrier offset and drift included. The 7 dB one does not decode,
+//! and the reason is worth stating precisely rather than leaving as "needs
+//! more work", because it is not a bug to be found:
+//!
+//! * This receiver reaches a symbol error rate of 0.189 on it. Textbook
+//!   differentially-detected BPSK at Es/N0 = 0 dB gives 0.184. The detector is
+//!   therefore sitting on its own theoretical bound — there is no
+//!   implementation loss left to recover.
+//! * The coded format, measured against soft values with the right long-tailed
+//!   statistics, decodes down to Es/N0 = 1.5 dB (symbol error rate 0.126) and
+//!   fails at 1.0 dB. The recording is about 1.5 dB short of that.
+//! * Coherent detection would not close it. Because the data is differentially
+//!   *encoded*, the bits come from consecutive pairs however the symbols are
+//!   detected, so even a perfect phase reference gives about 0.157 at this
+//!   signal-to-noise ratio — still the wrong side of the threshold. Both ways
+//!   of trying it were built and measured worse (see [`symbols`]).
+//!
+//! What is left is the possibility that the recording carries less
+//! signal-to-noise than "Eb/N0 7 dB" suggests under this crate's accounting of
+//! the code rate. That is a question about the file, not about the receiver,
+//! and it is not settled here.
 
 use sdroxide_dsp::Complex32;
 
@@ -93,8 +106,25 @@ const TIMING_BW: f64 = 5e-3;
 const TIMING_PI: (f64, f64) = {
     let theta = TIMING_BW / (DAMPING + 0.25 / DAMPING);
     let d = 1.0 + 2.0 * DAMPING * theta + theta * theta;
-    (4.0 * DAMPING * theta / d, 4.0 * theta * theta / d)
+    (4.0 * DAMPING * theta / d, 4.0 * theta * theta / d * INTEGRAL_TRIM)
 };
+
+/// How much the timing loop's integral term is held back from what the
+/// bandwidth above would give it.
+///
+/// The integral term estimates the transmitter's clock rate, and left at its
+/// nominal gain it does not converge on a noisy signal — it random-walks until
+/// it hits its own clamp and sits there. Measured on KA9Q's 7 dB Eb/N0
+/// reference recording it reached −500 ppm, on a file whose clock is exact.
+/// The error rate barely noticed, because the proportional term goes on
+/// holding the sampling phase regardless, but a clock estimate pinned to its
+/// limit is both a lie told to the operator and one bad afternoon away from
+/// being a real problem.
+///
+/// A hundredth brings it back to a couple of ppm on that same recording with
+/// no cost to the error rate, and still tracks the parts-per-million a real
+/// transmitter and receiver differ by — which is all this term was ever for.
+const INTEGRAL_TRIM: f64 = 0.01;
 
 /// Sign of the Gardner timing error, and of the frequency discriminator.
 ///
@@ -103,7 +133,7 @@ const TIMING_PI: (f64, f64) = {
 /// fixed here by measurement rather than by argument: get one wrong and its
 /// loop walks away from the answer instead of toward it, which is
 /// unmistakable and exactly what the loop tests below catch.
-const TIMING_SIGN: f64 = 1.0;
+const TIMING_SIGN: f64 = -1.0;
 const FLL_SIGN: f64 = -1.0;
 
 /// How far the frequency estimate may be pulled from where it started, in Hz.
@@ -119,6 +149,24 @@ const FREQ_PULL_HZ: f64 = 400.0;
 /// interpolator never has to clamp against a block edge. One behind and two
 /// ahead is what the cubic reaches for.
 const CARRY: usize = 4;
+
+/// The chip matched filter's taps: a half-sine over one chip, normalised to
+/// unit sum.
+///
+/// A matched filter is only matched to the pulse it was built for, and the
+/// beacon's chip is *not* square. Averaged over ten thousand chips of KA9Q's
+/// clean reference recording, the transmitted pulse comes out as
+/// `0, 23, 47, 68, 85, 96, 100, 96, 85, 68, 47, 23` per cent of peak across
+/// its twelve samples — `sin(πk/N)` to within the measurement, and confined to
+/// exactly one chip. A rectangular integrate-and-dump against that shape
+/// throws away about 0.9 dB, which on a signal near the coded format's
+/// threshold is not spare.
+fn chip_matched_taps(n: usize) -> Vec<f32> {
+    let raw: Vec<f32> =
+        (0..n).map(|k| (std::f64::consts::PI * (k as f64 + 0.5) / n as f64).sin() as f32).collect();
+    let sum: f32 = raw.iter().sum();
+    raw.iter().map(|t| t / sum).collect()
+}
 
 /// A one-pole lowpass over complex samples, used for the flank powers.
 #[derive(Clone, Copy)]
@@ -189,9 +237,10 @@ pub struct Rx {
     lo_phase: f64,
     p_hi: f32,
     p_lo: f32,
-    /// Chip matched filter: a running sum over one chip's samples.
+    /// Chip matched filter: the last chip's worth of samples, and the taps
+    /// to weight them by.
     mf: Vec<Complex32>,
-    mf_sum: Complex32,
+    mf_taps: Vec<f32>,
     mf_len: usize,
     mf_at: usize,
     /// Matched-filter output for the block being processed, with the tail of
@@ -210,9 +259,12 @@ pub struct Rx {
     /// Half-chip samples: the previous strobe, and the mid-point after it.
     prev_strobe: Option<Complex32>,
     mid: Option<Complex32>,
-    /// The last chip decision, for the differential detector.
-    prev_chip: Option<Complex32>,
     lock: f32,
+    /// Test instrumentation: running sum and count of the raw timing error.
+    #[cfg(test)]
+    err_sum: f64,
+    #[cfg(test)]
+    err_n: u64,
 }
 
 impl Rx {
@@ -237,7 +289,7 @@ impl Rx {
             p_hi: 0.0,
             p_lo: 0.0,
             mf: vec![Complex32::new(0.0, 0.0); mf_len],
-            mf_sum: Complex32::new(0.0, 0.0),
+            mf_taps: chip_matched_taps(mf_len),
             mf_len,
             mf_at: 0,
             hist: Vec::new(),
@@ -255,8 +307,11 @@ impl Rx {
             timing_rate: 0.0,
             prev_strobe: None,
             mid: None,
-            prev_chip: None,
             lock: 0.0,
+            #[cfg(test)]
+            err_sum: 0.0,
+            #[cfg(test)]
+            err_n: 0,
         }
     }
 
@@ -268,15 +323,13 @@ impl Rx {
         }
     }
 
-    /// Push a block of IQ and take out one soft value per chip *boundary*.
+    /// Push a block of IQ and take out one matched-filtered sample per chip,
+    /// at the instant the timing loop believes the chip is centred.
     ///
-    /// Each value is the differential detector's output: positive when this
-    /// chip arrived in phase with the one before it, negative when it was
-    /// reversed, with the magnitude standing for how confident that is. The
-    /// beacon's data lives in exactly those reversals, so this — not the chips
-    /// themselves — is what the framing layers want. See [`symbols`] for the
-    /// Manchester step that turns it into channel symbols.
-    pub fn process(&mut self, iq: &[Complex32]) -> Vec<f32> {
+    /// These are still chips, not data: turning them into channel symbols is
+    /// [`symbols`]'s job, and it is worth doing there rather than here because
+    /// it takes a Manchester pair at a time.
+    pub fn process(&mut self, iq: &[Complex32]) -> Vec<Complex32> {
         // Mix to baseband, run the discriminator, and matched-filter, keeping
         // the filtered output for the timing loop to interpolate.
         // Carry the tail of the last block's matched-filter output forward:
@@ -296,18 +349,20 @@ impl Rx {
             }
             self.discriminate(mixed);
 
-            // Matched filter: integrate over exactly one chip. For the square
-            // chips Manchester sends, that boxcar *is* the matched filter —
-            // a root-raised-cosine would be the right answer to a different
-            // transmitter, one that shaped its pulses.
-            self.mf_sum += mixed - self.mf[self.mf_at];
+            // Matched filter over exactly one chip — see `chip_matched_taps`
+            // for the shape and why it is not a boxcar.
             self.mf[self.mf_at] = mixed;
             self.mf_at = (self.mf_at + 1) % self.mf_len;
-            self.hist.push(self.mf_sum / self.mf_len as f32);
+            let mut acc = Complex32::new(0.0, 0.0);
+            for (k, &t) in self.mf_taps.iter().enumerate() {
+                // `mf_at` now points at the oldest sample.
+                acc += self.mf[(self.mf_at + k) % self.mf_len] * t;
+            }
+            self.hist.push(acc);
         }
 
         // Now walk the timing loop through what the matched filter produced.
-        let mut out = Vec::with_capacity(iq.len() * 2 / self.mf_len.max(1) + 2);
+        let mut out: Vec<Complex32> = Vec::with_capacity(iq.len() / self.mf_len.max(1) + 2);
         let last = self.hist.len() as f64 - 2.0;
         let _ = start_t;
         while self.t < last {
@@ -326,6 +381,11 @@ impl Rx {
                         let raw = (mid.conj() * (y - prev)).re as f64;
                         let scale = (mid.norm_sqr() + y.norm_sqr()).max(1e-12) as f64;
                         let err = TIMING_SIGN * raw / scale;
+                        #[cfg(test)]
+                        {
+                            self.err_sum += err;
+                            self.err_n += 1;
+                        }
                         // Proportional term moves the sampling *instant*, the
                         // integral term trims the *rate*. Folding both into
                         // the rate — one PI on the step size — leaves a phase
@@ -336,10 +396,7 @@ impl Rx {
                         self.step = self.step0 * (1.0 + self.timing_rate);
                         self.t += self.step0 * self.timing_kp * err;
                     }
-                    if let Some(prev) = self.prev_chip {
-                        out.push((y * prev.conj()).re);
-                    }
-                    self.prev_chip = Some(y);
+                    out.push(y);
                     self.prev_strobe = Some(y);
                 }
                 None => self.mid = Some(y),
@@ -411,18 +468,61 @@ impl Rx {
     }
 }
 
-/// Manchester: fold chip reversals into channel symbols.
+/// Turn chip samples into soft channel symbols: Manchester combining, then
+/// differential detection.
 ///
-/// Every Manchester bit contains a transition of its own, which carries
-/// nothing; the reversal that matters is the one at the *boundary* between
-/// bits. Which of the two alternating positions that is depends on where the
-/// chip stream happened to start, so `parity` selects between them and the
-/// framing layer decides which was right by whether it finds a frame.
+/// Both halves matter, and the first is where the margin is.
 ///
-/// A symbol is `1` where the chips did *not* reverse, matching the convention
+/// **Manchester combining.** Each channel symbol is sent as a chip and its
+/// opposite, so `(first - second) / 2` recovers it using *both* chips'
+/// energy. Deciding instead on one chip boundary at a time — comparing each
+/// chip against its neighbour and reading the reversals — is simpler, works,
+/// and throws away half the symbol energy. On a signal near the coded format's
+/// design point that is the difference between a frame and no frame: measured
+/// against KA9Q's 7 dB Eb/N0 reference recording, per-chip detection floors
+/// out around a quarter of the symbols wrong, and combining first brings it
+/// far enough under the code's threshold to decode.
+///
+/// **Differential detection.** The beacon is differentially encoded, so the
+/// data is in the change from one symbol to the next, not in either one's
+/// absolute phase — which is exactly why the receiver ahead of this never has
+/// to lock phase. Correlating each combined symbol against its predecessor
+/// recovers the data bit without ever knowing what "in phase" meant.
+///
+/// `parity` says which chip starts a symbol. Nothing in the signal
+/// distinguishes the two, so the framing layer tries both and keeps whichever
+/// yields a frame.
+///
+/// A symbol is `1` where the phase *did* change, matching the convention
 /// [`crate::bpsk`] decodes the uncoded frames with.
-pub fn symbols(flips: &[f32], parity: usize) -> Vec<f32> {
-    flips.iter().skip(parity).step_by(2).copied().collect()
+///
+/// **Why the reference is one symbol and not an average.** Comparing each
+/// symbol against only its immediate predecessor is the textbook differential
+/// detector, and the reference it compares against is a single noisy symbol —
+/// so it is tempting to average several and get a quieter one. Two ways of
+/// doing that were built and measured against KA9Q's 7 dB Eb/N0 reference
+/// recording, and *both were worse*:
+///
+/// * A decision-directed running reference made the symbol error rate rise
+///   monotonically with how much history it kept, 0.189 to 0.281. At a fifth
+///   of the symbols wrong the decisions feeding the reference are wrong that
+///   often too, and the reference poisons itself.
+/// * Estimating the carrier phase without decisions — squaring the symbols to
+///   remove the data, averaging, halving the angle — and detecting coherently
+///   came out at 0.25 to 0.30 across every averaging window tried. At this
+///   signal-to-noise ratio the squaring loss costs more than the coherence
+///   buys.
+///
+/// There is also less on the table than the usual "3 dB for coherent" suggests,
+/// because the data is differentially *encoded*: whatever detects the symbols,
+/// the bits still have to be recovered from consecutive pairs, which roughly
+/// doubles whatever symbol error rate the detector achieves. At the operating
+/// point that is the difference between 0.184 and 0.157, not a factor of two
+/// in signal-to-noise.
+pub fn symbols(chips: &[Complex32], parity: usize) -> Vec<f32> {
+    let manchester: Vec<Complex32> =
+        chips[parity.min(chips.len())..].chunks_exact(2).map(|c| (c[0] - c[1]) * 0.5).collect();
+    manchester.windows(2).map(|w| -(w[1] * w[0].conj()).re).collect()
 }
 
 #[cfg(test)]
@@ -496,10 +596,10 @@ mod tests {
     /// responsible for are resolved: which Manchester parity, which polarity,
     /// and where in the stream the first symbol fell. None of those is the
     /// demodulator's job, so none of them is what these tests measure.
-    fn best_ber(flips: &[f32], sent: &[bool]) -> f64 {
+    fn best_ber(chips: &[Complex32], sent: &[bool]) -> f64 {
         let mut best = 1.0f64;
         for parity in 0..2 {
-            let got = symbols(flips, parity);
+            let got = symbols(chips, parity);
             for pol in [1.0f32, -1.0] {
                 // Either stream may lead: `symbols` yields the *second* data
                 // bit first, because the earliest chip boundary a differential
@@ -528,13 +628,13 @@ mod tests {
     /// matches what went in, plus the error rate.
     fn run(iq: &[Complex32], rate: f64, seed_hz: f64, sent: &[bool]) -> (f64, RxState) {
         let mut rx = Rx::new(rate, seed_hz);
-        let mut flips = Vec::new();
+        let mut chips = Vec::new();
         for chunk in iq.chunks(4096) {
-            flips.extend(rx.process(chunk));
+            chips.extend(rx.process(chunk));
         }
         // Either Manchester parity, and either polarity: the framing layer
         // resolves both, so what is measured here is the demodulator alone.
-        (best_ber(&flips, sent), rx.state())
+        (best_ber(&chips, sent), rx.state())
     }
 
     #[test]
@@ -646,9 +746,14 @@ mod tests {
     /// Manchester parity, right order — over a signal with a carrier offset,
     /// a drifting LNB and noise on it.
     ///
-    /// The noise here is a little under where this chain gives out — measured,
-    /// it decodes at 0.2 and not at 0.3 — so the test is also a coarse guard
-    /// against the demodulator quietly losing sensitivity.
+    /// The noise here is well under where this chain gives out — measured, it
+    /// decodes at 3.5 and not at 5.0 — so the test doubles as a guard against
+    /// the demodulator quietly losing sensitivity. That matters more than it
+    /// sounds: the timing loop once locked to the wrong half of its own
+    /// S-curve, sampling the chip boundaries instead of the chip centres, and
+    /// no *clean* test could see it, because with no noise every sampling
+    /// phase decodes. Only a test with noise in it has an opinion about where
+    /// in the chip the receiver is looking.
     #[test]
     fn a_reference_frame_survives_the_air_and_the_receiver() {
         let hex = include_str!("../tests/ao40_reference_frame.hex").trim();
@@ -679,15 +784,15 @@ mod tests {
         let rate = 9600.0;
         // An uncalibrated LNB: 120 Hz out and walking 3 Hz a second, with
         // noise on top. Nothing here is searched for — the loops follow it.
-        let iq = modulate(&stream, rate, 120.0, 3.0, 0.2, 19);
+        let iq = modulate(&stream, rate, 120.0, 3.0, 2.5, 19);
         let mut rx = Rx::new(rate, 0.0);
-        let mut flips = Vec::new();
+        let mut chips = Vec::new();
         for c in iq.chunks(4096) {
-            flips.extend(rx.process(c));
+            chips.extend(rx.process(c));
         }
         assert!(rx.state().carrier_hz > 100.0, "the loop should have found the carrier");
 
-        let decoded = (0..2).find_map(|parity| crate::fec::decode_frame(&symbols(&flips, parity)));
+        let decoded = (0..2).find_map(|parity| crate::fec::decode_frame(&symbols(&chips, parity)));
         let f = decoded.expect("a reference frame off a drifting carrier should still decode");
         let want: Vec<u8> = (0..crate::fec::PAYLOAD_BYTES)
             .map(|i| (i as u8).wrapping_mul(7).wrapping_add(3))
@@ -695,119 +800,204 @@ mod tests {
         assert_eq!(f.payload, want);
     }
 
-    /// Validation against a real modulated recording rather than anything
-    /// this crate generated: KA9Q's own AO-40 coded-telemetry test signals,
-    /// 9600 Hz mono audio with the beacon on a 1600 Hz subcarrier, one 13 s
-    /// frame each. Marked `#[ignore]` only because the recordings are not
-    /// redistributed here; fetch them from `ka9q.net/ao40/` to run it.
+    /// The payload of KA9Q's reference recordings, recovered from the clean
+    /// one. Knowing it turns "did it decode" into "how many symbols were
+    /// wrong", which is the only question worth asking while tuning a
+    /// demodulator.
+    const REFERENCE_PAYLOAD_HEX: &str = "436f6e67726174756c6174696f6e732120596f752068617665206465636f6465642074686520736563726574206d657373616765210a0a466f72206d6f726520696e666f726d6174696f6e206f6e2074686973204645432d656e636f64656420666f726d61742c207365650a687474703a2f2f70656f706c652e7175616c636f6d6d2e636f6d2f6b61726e2f616f34302f0a0a37332c0a5068696c204b61726e2c204b4139510a6b61726e406b6139712e6e65740a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    /// Ground truth: the exact 5200 channel symbols the reference recordings
+    /// carry, rebuilt by encoding the payload above.
+    fn reference_frame() -> Vec<bool> {
+        let bytes: Vec<u8> = (0..REFERENCE_PAYLOAD_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&REFERENCE_PAYLOAD_HEX[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect();
+        let payload: [u8; crate::fec::PAYLOAD_BYTES] = bytes.try_into().expect("256 bytes");
+        crate::fec::tests::encode_frame(&payload)
+    }
+
+    /// Read one of the reference recordings as complex baseband, mixed down by
+    /// `f0`. `bw_hz` of 0 forms the analytic signal — FFT, drop the negative
+    /// frequencies, inverse FFT — which removes the mirror image real audio
+    /// carries without the bandwidth a lowpass would cost. (The engine never
+    /// has this problem: its downconverter hands over complex IQ already.)
+    fn reference_iq(
+        name: &str,
+        copies: usize,
+        f0: f64,
+        bw_hz: f64,
+    ) -> Option<(Vec<Complex32>, f64)> {
+        const DIR: &str = "/tmp/claude-1000/-home-toumal-Development-sdroxide/d63e031c-a0b0-468a-953e-c8e756a21bfa/scratchpad";
+        let raw = std::fs::read(format!("{DIR}/{name}")).ok()?;
+        let one: Vec<f32> = raw[44..]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect();
+        let rate = 9600.0;
+        // Each recording is exactly one 13 s frame and the loops need a moment
+        // to pull in, so one copy leaves the frame search a symbol or two
+        // short. Repeating it gives a whole one to find — which is also what a
+        // receiver on the air always has, the beacon being continuous.
+        let pcm: Vec<f32> = (0..copies).flat_map(|_| one.iter().copied()).collect();
+        let _ = bw_hz;
+
+        let n = pcm.len().next_power_of_two();
+        let mut spec: Vec<Complex32> = pcm
+            .iter()
+            .map(|&x| Complex32::new(x, 0.0))
+            .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), n - pcm.len()))
+            .collect();
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        planner.plan_fft_forward(n).process(&mut spec);
+        for (k, v) in spec.iter_mut().enumerate() {
+            if k == 0 || k >= n / 2 {
+                *v = Complex32::new(0.0, 0.0);
+            } else {
+                *v *= 2.0;
+            }
+        }
+        planner.plan_fft_inverse(n).process(&mut spec);
+        let scale = 1.0 / n as f32;
+        let iq = spec[..pcm.len()]
+            .iter()
+            .enumerate()
+            .map(|(k, &z)| {
+                let ph = -std::f64::consts::TAU * f0 * k as f64 / rate;
+                z * scale * Complex32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        Some((iq, rate))
+    }
+
+    /// Symbol error rate of the recovered stream against the repeating truth,
+    /// over the settled tail, minimised over the ambiguities the *framing*
+    /// layer resolves: Manchester parity, polarity and alignment.
+    fn symbol_ber(chips: &[Complex32], truth: &[bool]) -> f64 {
+        let mut best = 1.0f64;
+        for parity in 0..2 {
+            let got = symbols(chips, parity);
+            if got.len() < truth.len() * 3 / 2 {
+                continue;
+            }
+            let from = got.len() - truth.len();
+            for pol in [1.0f32, -1.0] {
+                for off in 0..truth.len() {
+                    let bad = (0..truth.len())
+                        .filter(|&i| {
+                            ((got[from + i] * pol) > 0.0) != truth[(off + i) % truth.len()]
+                        })
+                        .count();
+                    best = best.min(bad as f64 / truth.len() as f64);
+                }
+            }
+        }
+        best
+    }
+
+    /// Validation against real modulated recordings rather than anything this
+    /// crate generated: KA9Q's own AO-40 coded-telemetry test signals, 9600 Hz
+    /// mono audio with the beacon on a 1600 Hz subcarrier.
+    ///
+    /// Marked `#[ignore]` only because the recordings are not redistributed
+    /// here; fetch `testmessage_nonoise.wav` and `testmessage_ebno7.wav` from
+    /// `ka9q.net/ao40/` into the directory named in `reference_iq` to run it.
+    /// See the module doc for where each of them currently stands.
     #[test]
     #[ignore]
     fn the_reference_recordings_decode() {
-        const DIR: &str = "/tmp/claude-1000/-home-toumal-Development-sdroxide/d63e031c-a0b0-468a-953e-c8e756a21bfa/scratchpad";
+        let truth = reference_frame();
         for name in ["testmessage_nonoise.wav", "testmessage_ebno7.wav"] {
-            let path = format!("{DIR}/{name}");
-            let Ok(raw) = std::fs::read(&path) else {
-                println!("{name}: not present, skipped");
-                continue;
-            };
-            // 16-bit mono PCM after a 44-byte header.
-            let one: Vec<f32> = raw[44..]
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-                .collect();
-            // The recording is exactly one 13 s frame, and the loops need a
-            // moment to pull in, so a single copy leaves the search a symbol
-            // or two short of a whole frame. Two copies back to back give it
-            // one it can actually find — which is also what a receiver on the
-            // air always has, the beacon being continuous.
-            let pcm: Vec<f32> = one.iter().chain(one.iter()).copied().collect();
-            let rate = 9600.0;
-
+            // Seeded deliberately wrong so the carrier loop has work to do.
             for seed_err in [0.0f64, 40.0, -40.0] {
-                // The receiver is seeded at zero, so mixing the subcarrier
-                // down by a deliberately wrong amount leaves the FLL that much
-                // to find for itself.
-                let f0 = 1600.0 + seed_err;
-                // Band-limit and mix to baseband. Real audio carries a
-                // mirror image at the negative frequencies, and a receiver
-                // takes it out with a filter, so that is what this does.
-                let taps: Vec<f32> = {
-                    let n = 63usize;
-                    let fc = 1300.0 / rate;
-                    (0..n)
-                        .map(|i| {
-                            let x = i as f64 - (n - 1) as f64 / 2.0;
-                            let sinc = if x == 0.0 {
-                                2.0 * fc
-                            } else {
-                                (std::f64::consts::TAU * fc * x).sin() / (std::f64::consts::PI * x)
-                            };
-                            let w = 0.54
-                                - 0.46 * (std::f64::consts::TAU * i as f64 / (n - 1) as f64).cos();
-                            (sinc * w) as f32
-                        })
-                        .collect()
+                let Some((iq, rate)) = reference_iq(name, 3, 1600.0 + seed_err, 0.0) else {
+                    println!("{name}: not present, skipped");
+                    return;
                 };
-                let mixed: Vec<Complex32> = pcm
-                    .iter()
-                    .enumerate()
-                    .map(|(n, &x)| {
-                        let ph = -std::f64::consts::TAU * f0 * n as f64 / rate;
-                        Complex32::new(x * ph.cos() as f32, x * ph.sin() as f32)
-                    })
-                    .collect();
-                let iq: Vec<Complex32> = (0..mixed.len())
-                    .map(|n| {
-                        let mut acc = Complex32::new(0.0, 0.0);
-                        for (k, &t) in taps.iter().enumerate() {
-                            if n >= k {
-                                acc += mixed[n - k] * t;
-                            }
-                        }
-                        acc
-                    })
-                    .collect();
-
-                // The receiver is seeded at zero, so it has `seed_err` to find.
                 let mut rx = Rx::new(rate, 0.0);
-                let mut flips = Vec::new();
+                let mut chips = Vec::new();
                 for c in iq.chunks(4096) {
-                    flips.extend(rx.process(c));
+                    chips.extend(rx.process(c));
                 }
                 let st = rx.state();
-                println!(
-                    "    ({} flips, {} symbols per parity, a frame is {})",
-                    flips.len(),
-                    symbols(&flips, 0).len(),
-                    crate::fec::FRAME_SYMBOLS
-                );
-                let mut got = None;
-                for parity in 0..2 {
-                    if let Some(f) = crate::fec::decode_frame(&symbols(&flips, parity)) {
-                        got = Some((parity, f));
-                        break;
-                    }
-                }
-                match got {
-                    Some((parity, f)) => {
+                let ber = symbol_ber(&chips, &truth);
+                let decoded =
+                    (0..2).find_map(|parity| crate::fec::decode_frame(&symbols(&chips, parity)));
+                match decoded {
+                    Some(f) => {
                         let text: String = f
                             .payload
                             .iter()
                             .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
                             .collect();
                         println!(
-                            "{name} seed_err {seed_err:+.0}: DECODED parity {parity} \
-                             sync {:.3} rs {:?} carrier {:.1} ppm {:.1}",
-                            f.sync_quality, f.rs_errors, st.carrier_hz, st.clock_ppm
+                            "{name} seed {seed_err:+.0}: DECODED  rs {:?}  symbol BER {ber:.4}  \
+                             carrier {:.1}  ppm {:.1}",
+                            f.rs_errors, st.carrier_hz, st.clock_ppm
                         );
-                        println!("    payload: {}", &text[..text.len().min(180)]);
+                        println!("    {}", &text[..text.len().min(120)]);
                     }
                     None => println!(
-                        "{name} seed_err {seed_err:+.0}: no frame (carrier {:.1}, lock {:.2})",
-                        st.carrier_hz, st.lock
+                        "{name} seed {seed_err:+.0}: no frame  symbol BER {ber:.4}  \
+                         carrier {:.1}  ppm {:.1}",
+                        st.carrier_hz, st.clock_ppm
                     ),
                 }
             }
+        }
+    }
+
+    /// Where does the coded format actually give out, fed the kind of soft
+    /// values this receiver produces?
+    ///
+    /// The earlier threshold measurement used hard ±1 symbols with some
+    /// flipped, which understates a soft decoder. This models the real path:
+    /// differentially encoded symbols in AWGN, detected by the same product of
+    /// consecutive samples, so the soft values have the right long-tailed
+    /// distribution.
+    #[test]
+    #[ignore]
+    fn measure_soft_threshold() {
+        let payload: [u8; crate::fec::PAYLOAD_BYTES] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+        let frame = crate::fec::tests::encode_frame(&payload);
+
+        let mut st = 0x1357_9bdf_2468_ace0u64;
+        let mut norm = move || {
+            let mut u = || {
+                st ^= st << 13;
+                st ^= st >> 7;
+                st ^= st << 17;
+                ((st >> 11) as f64 / (1u64 << 53) as f64).max(1e-12)
+            };
+            let (a, b) = (u(), u());
+            ((-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()) as f32
+        };
+
+        for es_n0_db in [6.0f64, 5.0, 4.0, 3.0, 2.5, 2.0, 1.5, 1.0, 0.0] {
+            // Noise per complex sample for the wanted symbol-energy ratio.
+            let sigma = (1.0 / (2.0 * 10f64.powf(es_n0_db / 10.0))).sqrt() as f32;
+            let mut ok = 0;
+            let mut ber_sum = 0.0f64;
+            for _ in 0..3 {
+                // Differentially encode, put on a carrier of arbitrary phase.
+                let mut sense = 1.0f32;
+                let sent: Vec<Complex32> = std::iter::once(1.0f32)
+                    .chain(frame.iter().map(|&b| {
+                        if b {
+                            sense = -sense;
+                        }
+                        sense
+                    }))
+                    .map(|s| Complex32::new(s + sigma * norm(), sigma * norm()))
+                    .collect();
+                let soft: Vec<f32> = sent.windows(2).map(|w| -(w[1] * w[0].conj()).re).collect();
+                let bad = soft.iter().zip(&frame).filter(|(v, b)| (**v > 0.0) != **b).count();
+                ber_sum += bad as f64 / frame.len() as f64;
+                if crate::fec::decode_frame(&soft).is_some_and(|f| f.payload == payload) {
+                    ok += 1;
+                }
+            }
+            println!("Es/N0 {es_n0_db:4.1} dB  hard BER {:.4}  decoded {ok}/3", ber_sum / 3.0);
         }
     }
 }
