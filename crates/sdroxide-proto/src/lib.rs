@@ -1153,7 +1153,14 @@ use sdroxide_types::{
 /// would read the end of every state update out of step. Both the message and
 /// the command are appended last in their enums, so no surviving discriminant
 /// moved.
-pub const PROTO_VERSION: u16 = 128;
+///
+/// v129: per-band transmit drive calibration —
+/// [`sdroxide_types::RadioConfig`] gains `tx_drive_trim` at its tail, the
+/// table that makes one Drive setting mean one output power on every band
+/// (issue #295). `RadioConfig` rides `ServerMsg::RadioConfig` and
+/// `Command::SetRadioConfig` whole, so a v128 peer handed one with a field on
+/// the end reads the tail of every one of those messages out of step.
+pub const PROTO_VERSION: u16 = 129;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -2037,9 +2044,17 @@ mod tests {
 
         let cfg = RadioConfig {
             backend: Backend::RtlSdr,
-            // The other enum with a payload on one variant only, and the last
-            // field in the struct — so a slip anywhere above it lands here.
+            // The other enum with a payload on one variant only, near the end
+            // of the struct — so a slip anywhere above it lands here.
             rx_site: sdroxide_types::RxSite::Elsewhere("DO30db".into()),
+            // The last field in the struct, and a `Vec` of a struct carrying an
+            // enum: a length, then variant indices and floats. Two rows, on
+            // bands far apart in `Band`'s declaration order, so a discriminant
+            // read a byte out of step cannot land on the right one by luck.
+            tx_drive_trim: vec![
+                sdroxide_types::BandDriveTrim { band: sdroxide_types::Band::M160, db: -4.5 },
+                sdroxide_types::BandDriveTrim { band: sdroxide_types::Band::M6, db: 2.0 },
+            ],
             converter_offset_hz: 125_000_000.0,
             // The transmit converter is an enum with a payload on one variant
             // only — the shape a self-describing format forgives and postcard

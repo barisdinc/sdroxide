@@ -2075,6 +2075,19 @@ struct Engine {
     /// The transmit frequency the source has already been told, so
     /// [`Self::push_tx_freq`] only speaks when it moves.
     tx_freq_told: Option<f64>,
+    /// This band's transmit drive calibration in dB of output power, resolved
+    /// from `radio.json`'s table against wherever we would transmit (issue
+    /// #295).
+    ///
+    /// Cached rather than looked up per block: it is a band-plan search and a
+    /// file the engine deliberately does not hold, and it can only change when
+    /// the transmit frequency moves or the operator edits the table — which is
+    /// exactly where it is refreshed ([`Self::refresh_drive_trim`]).
+    drive_trim_db: f32,
+    /// The operator's table, kept so a retune can be answered without going
+    /// back to the store. Empty on the overwhelming majority of stations, which
+    /// is what makes [`Self::refresh_drive_trim`] free there.
+    drive_trim: Vec<sdroxide_types::BandDriveTrim>,
     tx_center_hz: f64,
     tx_ham_only: bool,
     /// SWR guard: trip threshold, and the latch it sets.
@@ -3364,6 +3377,11 @@ fn engine_thread(
     scan_cfg.forget_stale_skips();
     let stacks = sdroxide_config::load_bandstacks();
     let digi_config = sdroxide_config::load_digi_config();
+    // Only the per-band drive calibration is kept out of `radio.json` — the
+    // engine deliberately does not hold that file (see
+    // [`Engine::emit_radio_config`]), and this one table is consulted on every
+    // transmitted block.
+    let radio_cfg = engine_cfg.store.load_radio_config();
 
     info!(source = %source.describe(), "engine started");
     let _ = event_tx.send(RadioEvent::Capabilities(caps.clone()));
@@ -3490,6 +3508,8 @@ fn engine_thread(
         hw_ptt: false,
         rig_tx: false,
         tx_freq_told: None,
+        drive_trim_db: 0.0,
+        drive_trim: radio_cfg.tx_drive_trim.clone(),
         tx_center_hz: 0.0,
         tx_ham_only: engine_cfg.tx_ham_only,
         swr_guard: engine_cfg.swr_guard,
@@ -7281,11 +7301,11 @@ impl Engine {
             }
             SetTuneDrive(v) => {
                 self.state.tx.tune_drive = v.clamp(0.0, 1.0);
-                self.source.set_tune_drive(self.state.tx.tune_drive as f64);
+                self.source.set_tune_drive(self.tx_tune_level() as f64);
                 // Tuning right now: the rig's power is the tune level, so the
                 // slider takes effect without unkeying.
                 if self.state.tx.tune {
-                    self.source.set_tx_drive(self.state.tx.tune_drive as f64);
+                    self.source.set_tx_drive(self.tx_tune_level() as f64);
                 }
             }
             SetMicGain(v) => self.state.tx.mic_gain = v.clamp(0.0, 1.0),
@@ -8493,6 +8513,15 @@ impl Engine {
                 if let Err(e) = self.store.save_radio_config(&cfg) {
                     warn!("saving radio config: {e}");
                 }
+                // The per-band drive calibration is the one part of this file
+                // the engine holds a copy of, because it is read on every
+                // transmitted block (issue #295). Taken from what was asked
+                // for rather than from the store: a save that failed leaves
+                // the radio running the configuration on disk, and the trim
+                // is corrected on the next reload either way.
+                self.drive_trim = cfg.tx_drive_trim.clone();
+                let tx_hz = self.tx_freq_told.unwrap_or_else(|| self.state.tx_freq_hz());
+                self.refresh_drive_trim(tx_hz);
                 // Announced from the store rather than echoed from `cfg`, so
                 // what every client shows is what was actually written — a
                 // failed save leaves them on the configuration the radio is
@@ -13331,6 +13360,11 @@ impl Engine {
         if self.tx_freq_told != Some(hz) {
             self.tx_freq_told = Some(hz);
             self.source.set_tx_freq_hz(hz);
+            // The band the amplifier is about to work has changed with it, and
+            // with the band its calibration (issue #295). Same reason this is
+            // derived here rather than pushed from the dozen places that move
+            // the transmit frequency.
+            self.refresh_drive_trim(hz);
         }
     }
 
@@ -13444,18 +13478,29 @@ impl Engine {
     /// the rig and a tune would go out at the (typically much lower) voice
     /// drive.
     fn tx_power_level(&self) -> f32 {
-        let want = if self.state.tx.tune { self.state.tx.tune_drive } else { self.state.tx.drive };
-        self.under_ceiling(want)
+        if self.state.tx.tune { self.tx_tune_level() } else { self.tx_drive() }
     }
 
-    /// The drive actually used: the operator's setting held under whatever
-    /// ceiling the converter in front of the radio imposes.
+    /// The drive actually used: the operator's setting, calibrated for the band
+    /// it is going out on and then held under whatever ceiling the converter in
+    /// front of the radio imposes.
     ///
-    /// A transverter's I.F. input takes milliwatts, and the drive that is right
-    /// for the radio's own bands destroys it — so the limit is applied here,
-    /// on its way out, rather than by moving the slider. The number the
-    /// operator set for HF is still there when the dial leaves the
-    /// transverter's band (issue #278).
+    /// Both corrections in one place, in that order, because they answer
+    /// different questions and only one of them is a limit. The band trim is a
+    /// calibration — every amplifier has a different gain on every band, and
+    /// this is what makes one Drive setting mean one output power across all of
+    /// them (issue #295). The ceiling is a hard limit and therefore last: a
+    /// transverter's I.F. input takes milliwatts, and the drive that is right
+    /// for the radio's own bands destroys it, so no calibration may lift the
+    /// drive back over it (issue #278).
+    ///
+    /// Neither moves the operator's slider. The number they set for HF is still
+    /// there when the dial leaves the transverter's band, and the trim is a
+    /// property of the station rather than of the setting.
+    fn calibrated(&self, want: f32) -> f32 {
+        self.under_ceiling(want * self.drive_trim()).clamp(0.0, 1.0)
+    }
+
     fn under_ceiling(&self, want: f32) -> f32 {
         match self.source.tx_drive_ceiling() {
             Some(c) => want.min(c.clamp(0.0, 1.0)),
@@ -13463,10 +13508,62 @@ impl Engine {
         }
     }
 
-    /// [`Self::under_ceiling`] applied to the transmit drive, which is what
-    /// scales the modulated I/Q.
+    /// The multiplier this band's calibration puts on the drive — decibels of
+    /// output power converted for whichever kind of drive control this source
+    /// has (see [`sdroxide_types::BandDriveTrim::factor_for`]).
+    fn drive_trim(&self) -> f32 {
+        sdroxide_types::BandDriveTrim::factor_for(
+            self.drive_trim_db,
+            self.source.commands_tx_power(),
+        )
+    }
+
+    /// Work out this band's drive calibration afresh — after a retune, and
+    /// after the operator edits the table.
+    ///
+    /// Free on a station that has not made one: an empty table is the
+    /// overwhelming majority, and it never reaches the band-plan lookup.
+    fn refresh_drive_trim(&mut self, tx_dial_hz: f64) {
+        let (band, db) = if self.drive_trim.is_empty() {
+            (sdroxide_types::Band::Gen, 0.0)
+        } else {
+            let band = sdroxide_types::Band::containing(tx_dial_hz);
+            let db = self
+                .drive_trim
+                .iter()
+                .find(|t| t.band == band)
+                .map(sdroxide_types::BandDriveTrim::db)
+                .unwrap_or(0.0);
+            (band, db)
+        };
+        if db == self.drive_trim_db {
+            return;
+        }
+        debug!("TX drive calibration: {db:+.1} dB on {} ({tx_dial_hz:.0} Hz)", band.label());
+        self.drive_trim_db = db;
+        // A rig that holds its own power setting has already been told the old
+        // one; it is not keyed (this only runs when the transmit frequency
+        // moves or the table is edited), so correct it now rather than leaving
+        // the next over to open at the previous band's level.
+        if self.source.commands_tx_power() && !self.tx_active {
+            let level = self.tx_power_level() as f64;
+            self.source.set_tx_drive(level);
+        }
+    }
+
+    /// [`Self::calibrated`] applied to the transmit drive, which is what scales
+    /// the modulated I/Q.
     fn tx_drive(&self) -> f32 {
-        self.under_ceiling(self.state.tx.drive)
+        self.calibrated(self.state.tx.drive)
+    }
+
+    /// …and to the TUNE level, which is the drive for as long as TUNE holds the
+    /// transmitter. The same two corrections apply: a tune is RF out of the
+    /// same amplifier and into the same transverter as an over, and a tune that
+    /// ignored the converter's ceiling would be the one transmission most
+    /// likely to destroy its I.F. input — it is a carrier, held.
+    fn tx_tune_level(&self) -> f32 {
+        self.calibrated(self.state.tx.tune_drive)
     }
 
     /// Key or unkey from an operator PTT — the on-screen button, a MIDI or
@@ -13706,7 +13803,7 @@ impl Engine {
             // apply mode and drive in the modulator chain instead.
             let _ = self.source.set_control_mode(self.control_mode());
             self.source.set_tx_drive(self.tx_power_level() as f64);
-            self.source.set_tune_drive(self.state.tx.tune_drive as f64);
+            self.source.set_tune_drive(self.tx_tune_level() as f64);
             // In audio mode `tx_begin` just asserts CAT PTT; there is no
             // modulator/DUC (the rig modulates the audio we feed its sound card).
             let begin_rate = if self.audio_mode { self.radio_fs } else { self.state.sample_rate };
@@ -14391,6 +14488,7 @@ impl Engine {
         // Read before the chain is borrowed: it asks the *source* what ceiling
         // the converter in front of the radio imposes.
         let drive = self.tx_drive();
+        let tune_level = self.tx_tune_level();
         let cessb_db = self.state.tx.cessb_db;
         let Some(tx) = self.tx.as_mut() else { return Ok(()) };
 
@@ -14398,7 +14496,7 @@ impl Engine {
         let mut burst_done = false;
         if self.state.tx.tune || tx.modulator.is_none() {
             // Steady carrier at the tune level (also CW until the keyer exists).
-            let level = self.state.tx.tune_drive.clamp(0.0, 1.0);
+            let level = tune_level;
             tx.mod_buf.resize(TX_AUDIO_BLOCK, Complex32::new(level, 0.0));
             self.mic_fifo.clear();
             // The recording tap has no other source of TX audio during tune —

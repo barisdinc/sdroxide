@@ -518,6 +518,93 @@ fn transverter_table(ui: &mut egui::Ui, cfg: &mut sdroxide_types::RadioConfig) {
     });
 }
 
+/// The per-band transmit drive calibration: one trim per band, so that one
+/// Drive setting means one output power everywhere (issue #295).
+///
+/// Rows are only written for bands the operator has actually moved. A table
+/// full of zeros and one full of nothing say the same thing, and the second is
+/// what a station that has never opened this keeps in its `radio.json`.
+fn drive_trim_table(ui: &mut egui::Ui, cfg: &mut sdroxide_types::RadioConfig) {
+    use sdroxide_types::{Band, BandDriveTrim};
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Transmit drive by band").size(14.0).strong().color(crate::theme::CYAN()),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "Every amplifier has a different gain on every band, so one Drive setting makes a \
+             different power on each. Measure the output on each band, then trim the bands \
+             that come out high until they all match: set Drive for the band that needs the \
+             most (usually the highest), and take the others down to it. Decibels of output \
+             power, applied to voice, digital and TUNE alike. Zero everywhere — the default — \
+             changes nothing.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+
+    // Bands the station's own region actually has: a Region 1 operator has no
+    // 1.25 m to calibrate, and a row for one would be a row that can never be
+    // reached. GEN closes the table for a dial outside every ham band.
+    let bands: Vec<Band> =
+        Band::ALL.iter().copied().filter(|b| *b == Band::Gen || b.edges().is_some()).collect();
+    let mut set: Option<(Band, f32)> = None;
+    egui::Grid::new("drive-trim-grid").num_columns(8).spacing([12.0, 6.0]).striped(true).show(
+        ui,
+        |ui| {
+            for (i, band) in bands.iter().enumerate() {
+                let mut db =
+                    cfg.tx_drive_trim.iter().find(|t| t.band == *band).map(|t| t.db).unwrap_or(0.0);
+                ui.label(if *band == Band::Gen { "Other" } else { band.label() });
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut db)
+                            .speed(0.1)
+                            .range(BandDriveTrim::DB_RANGE)
+                            .fixed_decimals(1)
+                            .suffix(" dB"),
+                    )
+                    .changed()
+                {
+                    set = Some((*band, db));
+                }
+                if i % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+            ui.end_row();
+        },
+    );
+    if let Some((band, db)) = set {
+        cfg.tx_drive_trim.retain(|t| t.band != band);
+        if db != 0.0 {
+            cfg.tx_drive_trim.push(BandDriveTrim { band, db });
+        }
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!cfg.tx_drive_trim.is_empty(), egui::Button::new("CLEAR ALL"))
+            .on_hover_text("Back to no calibration: the Drive setting reaches every band whole.")
+            .clicked()
+        {
+            cfg.tx_drive_trim.clear();
+        }
+        ui.label(
+            RichText::new(
+                "Applies immediately, and to the band you would transmit on — behind a \
+                 transverter that is the band on the dial, and the transverter's own drive \
+                 limit still wins over anything set here.",
+            )
+            .weak(),
+        );
+    });
+}
+
 /// One row of the transmit-EQ grid: a band's frequency, gain and Q/slope.
 /// `q_range` doubles as the shelf-slope range for the two shelf bands, see
 /// [`sdroxide_types::TxEqBand::q`].
@@ -2141,6 +2228,7 @@ impl SdroxideApp {
                 // selected above, so it sits here rather than in one of the
                 // per-backend sections below.
                 if self.tx_capable() {
+                    drive_trim_table(ui, cfg);
                     ui.separator();
                     ui.label(
                         RichText::new("Transmit EQ")

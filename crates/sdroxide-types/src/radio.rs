@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Band;
 use crate::limerfe::LimeRfeConfig;
 
 /// Which radio backend to drive.
@@ -5630,6 +5631,131 @@ impl Transverter {
 /// amateur station has boxes for, and the table is drawn in full.
 pub const MAX_TRANSVERTERS: usize = 10;
 
+/// One band's transmit drive calibration: how far the drive that reaches the
+/// air has to be moved on that band for the operator's Drive setting to mean
+/// the same output power everywhere (issue #295).
+///
+/// Every amplifier has a different gain on every band — a 10 m stage typically
+/// wants several decibels more drive than the same radio's 40 m one — so a
+/// single Drive number produces a different power on each. This table takes
+/// that out: the operator sets Drive for the band that needs the most, then
+/// trims every other band down by what they measure.
+///
+/// `db` is decibels of **RF output power**, negative to take power off, which
+/// is the direction a calibration runs in: the slider is already the maximum,
+/// so the bands the amplifier is happier on come *down* to meet the one it is
+/// not. A little the other way is allowed for a station whose worst band is
+/// calibrated below full — see [`BandDriveTrim::DB_RANGE`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BandDriveTrim {
+    /// The band this row calibrates, matched against the *transmit* frequency
+    /// on the **dial** — where the station radiates, which is the band whose
+    /// amplifier is being calibrated. Behind a transverter that is the
+    /// converted band, not the I.F. the radio is really on; what the
+    /// transverter's own I.F. input can take is its row's drive ceiling
+    /// ([`Transverter::tx_drive`]), which still wins over anything here.
+    pub band: Band,
+    /// Decibels of output power to add on this band. `0.0` — the default, and
+    /// what an absent row means — leaves the band exactly as it was.
+    pub db: f32,
+}
+
+impl BandDriveTrim {
+    /// How far a row may trim, in dB of output power.
+    ///
+    /// Twenty decibels down is a hundredth of the power, which is more than the
+    /// spread between any two bands of one amplifier; the six the other way are
+    /// for a station that calibrated its worst band below full drive and has
+    /// somewhere to go. Drive is still a fraction of full scale afterwards, so
+    /// a positive trim runs out at the top rather than overdriving anything.
+    pub const DB_RANGE: std::ops::RangeInclusive<f32> = -20.0..=6.0;
+
+    /// The trim, held inside [`Self::DB_RANGE`] and never NaN — what a
+    /// hand-edited `radio.json` gets held to before it reaches the modulator.
+    pub fn db(&self) -> f32 {
+        if self.db.is_finite() {
+            self.db.clamp(*Self::DB_RANGE.start(), *Self::DB_RANGE.end())
+        } else {
+            0.0
+        }
+    }
+
+    /// The multiplier `db` decibels of **output power** puts on a drive
+    /// control.
+    ///
+    /// Which conversion applies depends on what drive *is* on the radio
+    /// underneath, and the two differ by a factor of two in the exponent:
+    ///
+    /// - `drive_is_power`: the control is a fraction of the radio's rated
+    ///   power — 0.5 is half its watts — the way a CAT, LAN or TCI transceiver
+    ///   takes it. A decibel of output is then a decibel of drive:
+    ///   `10^(dB/10)`.
+    /// - Otherwise drive scales the modulated I/Q, which is an *amplitude*,
+    ///   and power goes as its square: `10^(dB/20)`.
+    ///
+    /// So a row means the same change at the antenna whichever kind of radio
+    /// the operator points this configuration at, which is the whole point of
+    /// stating the table in decibels of output rather than in "drive units".
+    pub fn factor_for(db: f32, drive_is_power: bool) -> f32 {
+        if db == 0.0 || !db.is_finite() {
+            return 1.0;
+        }
+        10f32.powf(db / if drive_is_power { 10.0 } else { 20.0 })
+    }
+}
+
+#[cfg(test)]
+mod drive_trim_tests {
+    use super::*;
+
+    /// A row applies to its own band and to nothing else, and a dial outside
+    /// every band falls on the `Gen` row if there is one.
+    #[test]
+    fn the_trim_follows_the_transmit_band() {
+        let cfg = RadioConfig {
+            tx_drive_trim: vec![
+                BandDriveTrim { band: Band::M10, db: 0.0 },
+                BandDriveTrim { band: Band::M40, db: -6.0 },
+                BandDriveTrim { band: Band::Gen, db: -12.0 },
+            ],
+            ..RadioConfig::default()
+        };
+        assert_eq!(cfg.drive_trim_db(7_074_000.0), -6.0);
+        assert_eq!(cfg.drive_trim_db(28_074_000.0), 0.0, "a row set to zero is no trim at all");
+        assert_eq!(cfg.drive_trim_db(14_074_000.0), 0.0, "a band with no row is untouched");
+        assert_eq!(cfg.drive_trim_db(11_000_000.0), -12.0, "outside every ham band");
+        // The station that has never opened the table, which is nearly all of
+        // them: nothing is looked up and nothing is changed.
+        assert_eq!(RadioConfig::default().drive_trim_db(7_074_000.0), 0.0);
+    }
+
+    /// A hand-edited `radio.json` cannot drive the transmitter through the
+    /// roof — or produce a NaN that would silence it.
+    #[test]
+    fn an_impossible_row_is_held_to_the_range() {
+        assert_eq!(BandDriveTrim { band: Band::M20, db: 40.0 }.db(), 6.0);
+        assert_eq!(BandDriveTrim { band: Band::M20, db: -100.0 }.db(), -20.0);
+        assert_eq!(BandDriveTrim { band: Band::M20, db: f32::NAN }.db(), 0.0);
+    }
+
+    /// The same decibels of output, on the two kinds of drive control.
+    #[test]
+    fn a_decibel_means_the_same_at_the_antenna_either_way() {
+        // Six decibels down is a quarter of the power, which is half the
+        // amplitude — and a quarter of a rig's power setting.
+        let amplitude = BandDriveTrim::factor_for(-6.0, false);
+        let power = BandDriveTrim::factor_for(-6.0, true);
+        assert!((amplitude - 0.5011872).abs() < 1e-4, "{amplitude}");
+        assert!((power - 0.2511886).abs() < 1e-4, "{power}");
+        // …and squaring the amplitude gets back to the power fraction, which is
+        // the identity the pair exists to keep.
+        assert!((amplitude * amplitude - power).abs() < 1e-4);
+        // No trim is exactly no change, not a rounding of one.
+        assert_eq!(BandDriveTrim::factor_for(0.0, false), 1.0);
+        assert_eq!(BandDriveTrim::factor_for(0.0, true), 1.0);
+    }
+}
+
 /// The preset name for an offset, or `"Manual"` when it is not one of them.
 pub fn converter_preset_name(offset_hz: f64) -> &'static str {
     CONVERTER_PRESETS
@@ -6330,6 +6456,16 @@ pub struct RadioConfig {
     /// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole (issue
     /// #284).
     pub rx_site: RxSite,
+    /// Per-band transmit drive calibration — see [`BandDriveTrim`]. Appended
+    /// after `rx_site`, for the same reason as every field above it: the
+    /// layout is positional, so a new block goes on the end and nowhere else,
+    /// and `RadioConfig` rides `ServerMsg::RadioConfig` and
+    /// `Command::SetRadioConfig` whole (issue #295).
+    ///
+    /// Empty in a configuration written before this existed, and empty is
+    /// exactly right: no row means no trim, and the radio transmits at the
+    /// operator's Drive setting on every band as it always did.
+    pub tx_drive_trim: Vec<BandDriveTrim>,
 }
 
 impl RadioConfig {
@@ -6352,6 +6488,26 @@ impl RadioConfig {
             Some(x) => &mut x.offset_hz,
             None => &mut self.converter_offset_hz,
         }
+    }
+
+    /// The drive calibration in force at `tx_dial_hz`, in dB of output power,
+    /// or `0.0` where the operator has set none (issue #295).
+    ///
+    /// The *dial* transmit frequency, which behind a transverter is the
+    /// converted band rather than the I.F. the radio is really on: the table
+    /// calibrates the amplifier that puts the signal on the air, and on a
+    /// transverter station that is the transverter. What its I.F. input can
+    /// take is a separate and harder limit — [`Transverter::tx_drive`] — and
+    /// the engine applies that after this.
+    ///
+    /// A band with more than one row takes the first: rows are the operator's
+    /// and a duplicate is a mistake, not an instruction to add them up.
+    pub fn drive_trim_db(&self, tx_dial_hz: f64) -> f32 {
+        if self.tx_drive_trim.is_empty() {
+            return 0.0;
+        }
+        let band = Band::containing(tx_dial_hz);
+        self.tx_drive_trim.iter().find(|t| t.band == band).map(BandDriveTrim::db).unwrap_or(0.0)
     }
 
     /// The converter offset in force at `dial_hz`, read-only.

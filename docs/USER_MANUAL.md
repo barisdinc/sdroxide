@@ -1127,7 +1127,11 @@ On a TX-capable rig the **Transmit** module appears:
 
 - **PTT** — key the transmitter.
 - **TUNE** — send a carrier at the tune-drive level for tuning an ATU.
-- **Drive** — transmit drive (0–100%).
+- **Drive** — transmit drive (0–100%). One number for every band; if your
+  amplifier makes a different power on each, calibrate it once in **Transmit
+  drive by band** (Settings → Radio,
+  [6.2](#62-radio-choosing-and-configuring-the-rig)) rather than resetting this
+  on every band change.
 - **Tune** — the (lower) drive level used by TUNE.
 - **Mic** — microphone gain.
 - **TX audio** — how loud a digital mode is handed to a radio that modulates it
@@ -6103,6 +6107,34 @@ somebody else's antenna from your own square is worse than not reporting it.
 Like the ranges above, it belongs to the interface it was typed for: changing
 **Radio interface** puts it back to *At the station*, because where the antenna
 was belonged to the receiver you have just left.
+
+**Transmit drive by band** is a calibration table, one trim per band, that makes
+one **Drive** setting mean one output power everywhere. Every amplifier has a
+different gain on every band — 10 m typically wants several decibels more drive
+than 40 m for the same watts out — so without it a constant output across bands
+means remembering a different Drive number for each and setting it by hand on
+every band change.
+
+To calibrate: put Drive where you want it on the band that needs the *most*
+drive (usually the highest one you work), and measure the output there. Then go
+to each other band, measure again, and type in how much that band is *over* —
+`-3.0` on a band making twice the power, `-6.0` on one making four times.
+Nothing but the bands you touch is affected: zero, the default everywhere, is
+no trim at all.
+
+The numbers are decibels of **output power** — what a wattmeter reads — not
+"drive units", so the same table means the same thing whether the drive control
+scales sdroxide's own modulator (an HPSDR board, a Pluto, a SoapySDR device) or
+commands the rig's power setting over CAT, TCI or a LAN. The range is −20 to
++6 dB, and the trim applies to voice, digital modes and **TUNE** alike.
+
+It follows the band you would **transmit** on, split and repeater shift
+included, and it is the band on the **dial**: behind a transverter that is the
+converted band, because that is the amplifier being calibrated. What the
+transverter's own I.F. input can take is a separate and harder limit — the
+row's **max drive** in the table above — and that still wins over anything set
+here. **CLEAR ALL** puts the whole table back to no calibration. Changes apply
+immediately; no reconnect.
 
 #### 6.2.1 SoapySDR devices
 
