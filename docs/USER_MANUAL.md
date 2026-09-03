@@ -1279,14 +1279,16 @@ being unity. In every other digital mode it does nothing at all — the burst is
 synthesized and the microphone is discarded — which is why the rail becomes
 **TX audio** there.
 
-**CESSB — more average power for the same peak.** The **CESSB** rail in the TX
-menu (voice USB and LSB only) is *controlled-envelope single sideband*, David
-Hershberger W9GR's 2014 technique. The thing an amplifier runs out of is the
-**envelope** — the magnitude of the sideband signal — and that is not the audio
-waveform, so a limiter on the microphone does not limit what the amplifier sees.
-The envelope of clipped speech overshoots by a long way, an SSB transmitter has
-to be backed off for peaks nobody hears, and the average power reaching the far
-end is a fraction of the transmitter's rating.
+**CESSB — more average power for the same peak.** The **CESSB** rail is
+*controlled-envelope single sideband*, David Hershberger W9GR's 2014 technique.
+It is the second vertical rail in the Transmit module, standing beside Mic on a
+desktop window, and a rail in the **TX** menu on a tablet or a phone. The thing
+an amplifier runs out of is the **envelope** — the magnitude of the sideband
+signal — and that is not the audio waveform, so a limiter on the microphone
+does not limit what the amplifier sees. The envelope of clipped speech
+overshoots by a long way, an SSB transmitter has to be backed off for peaks
+nobody hears, and the average power reaching the far end is a fraction of the
+transmitter's rating.
 
 CESSB works on the envelope directly: it clips it, filters the resulting
 splatter away, and then removes the peaks the filter put back by subtracting a
@@ -1306,7 +1308,9 @@ full scale, so your power setting means what it did before.
 It applies where sdroxide makes the sideband itself — an HPSDR board or Hermes
 Lite 2, a Pluto, a LimeSDR, a SoapySDR device. A transceiver that modulates the
 audio from its own sound card is making the envelope in its own DSP, where this
-cannot reach it.
+cannot reach it. The rail is drawn where it can do something and nowhere else,
+so on such a radio — or in any mode but voice USB and LSB, whose payload *is*
+the envelope this flattens — there is no CESSB rail to find.
 
 ### 2.11 Voice keyer
 

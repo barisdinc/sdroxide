@@ -124,6 +124,12 @@ const TX_MIC_COL_W: f32 = 30.0;
 /// — and "-40 dB" is what it has to fit: 30 pt of it at the desktop tier,
 /// against the 18 the word "Mic" takes. Same calibration, same test.
 const TX_LEVEL_COL_W: f32 = 36.0;
+/// Width of the condensed TX box's envelope-processor column, which stands
+/// beside the mic column in voice single sideband (issue #294). Wide enough
+/// for the word "CESSB" over its rail — 30 pt of it at the desktop tier, the
+/// caption being the name here rather than a readout — and calibrated the same
+/// way as the two columns above, guarded by the same test.
+const TX_CESSB_COL_W: f32 = 36.0;
 /// Padding between the TX rows' readouts and the mic column, so the vertical
 /// rail stands apart from the sliders beside it.
 const TX_MIC_GAP: f32 = 16.0;
@@ -3641,6 +3647,40 @@ impl SdroxideApp {
         }
     }
 
+    /// Whether the envelope processor is the live control for what is on the
+    /// air — and so whether either transmit surface should offer it.
+    ///
+    /// Two things have to hold, and each rules out a rail that would do
+    /// nothing:
+    ///
+    /// - the mode is voice single sideband. Every digital mode carries its
+    ///   information in the very envelope this processor flattens, so there is
+    ///   nothing for it to do in one;
+    /// - and we make that sideband ourselves. A radio that modulates the audio
+    ///   we send it (a CAT rig on its sound card, a FLEX, an Icom on its
+    ///   network port) builds the envelope in its own DSP, downstream of
+    ///   anything this end can do to it — which is the same split
+    ///   [`digi_tx_level_applies_to`] turns on, read the other way round, and
+    ///   the same one the engine builds its envelope processor behind: no
+    ///   modulator this end, no `Cessb` in the chain.
+    ///
+    /// A control that is present but inert is a control an operator will spend
+    /// an evening turning up.
+    fn cessb_applies(&self) -> bool {
+        cessb_applies_to(self.state.rx[0].mode, self.caps.as_ref())
+    }
+
+    /// The hover that explains the envelope processor wherever it is drawn.
+    fn cessb_hover(&self) -> String {
+        format!(
+            "Controlled-envelope SSB: more average power for the same peak, without \
+             splatter — three or four decibels of apparent loudness at the far end. \
+             How many decibels the voice is driven into the processor; 0 is off, 6 is \
+             a sensible first try. It does not touch Drive.\n\nNow: {}",
+            cessb_value_text(self.state.tx.cessb_db)
+        )
+    }
+
     /// Controlled-envelope SSB: label + rail, in decibels of compression.
     ///
     /// A single number, because that is the control: with nothing driven into
@@ -3648,19 +3688,51 @@ impl SdroxideApp {
     /// answers "whether", and there is no switch to leave in the wrong position.
     fn tx_cessb(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         let mut db = self.state.tx.cessb_db;
-        ui.label("CESSB").on_hover_text(
-            "Controlled-envelope SSB: more average power for the same peak, without splatter.              Three or four decibels of apparent loudness at the far end. 0 is off.",
-        );
+        let hover = self.cessb_hover();
+        ui.label("CESSB").on_hover_text(hover.clone());
         if crate::chrome::slider(
             ui,
             Slider::new(&mut db, 0.0..=sdroxide_types::CESSB_MAX_DB)
                 .show_value(true)
-                .custom_formatter(
-                    |v, _| if v < 0.05 { "off".into() } else { format!("{v:.0} dB") },
-                ),
+                .custom_formatter(|v, _| cessb_value_text(v as f32)),
         )
+        .on_hover_text(hover)
         .changed()
         {
+            cmds.push(Command::SetCessb(db));
+        }
+    }
+
+    /// The envelope processor as a vertical rail with its name above, in the
+    /// column beside the mic rail — the shape the condensed box has room for.
+    ///
+    /// Named rather than captioned with its own readout, unlike the
+    /// transmit-audio rail it stands beside: "CESSB" is not a word anyone
+    /// guesses from a number, the rail's own position already says off from
+    /// on, and the figure is one hover away. The whole control costs the box
+    /// [`TX_CESSB_COL_W`] of width, and only in the modes that can use it.
+    fn tx_cessb_vertical(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let mut db = self.state.tx.cessb_db;
+        let hover = self.cessb_hover();
+        let mut set = None;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new("CESSB").size(10.5)).on_hover_text(hover.clone());
+            // The rail takes whatever height the label left it.
+            ui.spacing_mut().slider_width = (ui.available_height() - 2.0).max(24.0);
+            if crate::chrome::slider(
+                ui,
+                Slider::new(&mut db, 0.0..=sdroxide_types::CESSB_MAX_DB)
+                    .vertical()
+                    .show_value(false),
+            )
+            .on_hover_text(hover)
+            .changed()
+            {
+                set = Some(db);
+            }
+        });
+        if let Some(db) = set {
             cmds.push(Command::SetCessb(db));
         }
     }
@@ -3825,12 +3897,11 @@ impl SdroxideApp {
             if level {
                 self.tx_digi_level(ui, cmds);
             }
-            // Voice single sideband only. Every digital mode carries its
-            // information in the very envelope this processor flattens, so
-            // there is nothing for it to do in one — and a control that is
-            // present but inert is a control an operator will spend an evening
-            // turning up.
-            if matches!(self.state.rx[0].mode, Mode::Usb | Mode::Lsb) {
+            // The envelope processor, where it reaches the air at all — see
+            // [`Self::cessb_applies`]. The condensed box draws the same
+            // control as a rail beside the mic one, so neither surface is
+            // missing a control the other has (issue #294).
+            if self.cessb_applies() {
                 self.tx_cessb(ui, cmds);
             }
         });
@@ -3842,22 +3913,31 @@ impl SdroxideApp {
         tx_rows_w_for(ui, self.state.rx[0].mode.allows_voice_keyer(), self.tx_side_col_w())
     }
 
-    /// What the condensed TX box's right-hand column costs: the transmit-audio
-    /// rail where it applies, else the mic rail. Exactly one of the two is
-    /// drawn, so the box pays for one of them.
+    /// What the condensed TX box's right-hand columns cost: the transmit-audio
+    /// rail where it applies, else the mic rail — exactly one of the two is
+    /// drawn, so the box pays for one of them — plus the envelope rail beside
+    /// it in the voice modes that can use it, gap included.
+    ///
+    /// In practice the second column only ever joins the mic one: the
+    /// transmit-audio rail wants a radio that modulates what we send it, and
+    /// CESSB wants one that does not.
     fn tx_side_col_w(&self) -> f32 {
-        if self.digi_tx_level_applies() { TX_LEVEL_COL_W } else { TX_MIC_COL_W }
+        let side = if self.digi_tx_level_applies() { TX_LEVEL_COL_W } else { TX_MIC_COL_W };
+        side + if self.cessb_applies() { MODULE_ROW_SPACING + TX_CESSB_COL_W } else { 0.0 }
     }
 
     /// The condensed TX box, keyed by what each row transmits: PTT beside the
     /// drive it keys at (and the voice keyer, which transmits the same way),
-    /// TUNE beside the carrier level it keys at, and the mic gain standing on
-    /// its own at the right as a vertical rail. Each row's rail is sized so
-    /// the two readouts end flush with each other at the box edge, whatever
-    /// width the packer granted.
+    /// TUNE beside the carrier level it keys at, and the levels that are not
+    /// keyed at all standing at the right as vertical rails — the mic gain (or
+    /// the transmit-audio level standing in for it), and the envelope
+    /// processor where it applies. Each row's rail is sized so the two
+    /// readouts end flush with each other at the box edge, whatever width the
+    /// packer granted.
     fn tx_condensed(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, w: f32) {
         let keyer = self.state.rx[0].mode.allows_voice_keyer();
         let level = self.digi_tx_level_applies();
+        let cessb = self.cessb_applies();
         let side_w = self.tx_side_col_w();
         let (fixed1, fixed2) = tx_rows_fixed_w(ui, keyer);
         let inner = w - 2.0 * crate::chrome::MODULE_MARGIN_X - 4.0;
@@ -3882,11 +3962,11 @@ impl SdroxideApp {
             // The side rail stands apart from the rows' readouts, so it reads
             // as its own control rather than a fourth element of the rows.
             //
-            // One rail, not two. In a digital mode the mic gain reaches nothing
-            // — the microphone is drained and discarded, and only the voice
-            // paths ever scale it — so the level rail takes its place rather
-            // than crowding a box of fixed height with a dead control beside a
-            // live one. Flipping USB to FT8 and watching the rail change is
+            // One of these two, never both. In a digital mode the mic gain
+            // reaches nothing — the microphone is drained and discarded, and
+            // only the voice paths ever scale it — so the level rail takes its
+            // place rather than crowding a box of fixed height with a dead
+            // control beside a live one. Flipping USB to FT8 and watching the rail change is
             // also how an operator finds this at all, which is the other half
             // of issue #186.
             ui.add_space(TX_MIC_GAP - MODULE_ROW_SPACING);
@@ -3894,6 +3974,13 @@ impl SdroxideApp {
                 self.tx_digi_level_vertical(ui, cmds);
             } else {
                 self.tx_mic_vertical(ui, cmds);
+            }
+            // And the envelope processor beside it in voice sideband, in the
+            // signal's own order: the mic gain drives what CESSB then flattens.
+            // Without this the control existed only in the TX menu, which the
+            // desktop strip does not have — the whole of issue #294.
+            if cessb {
+                self.tx_cessb_vertical(ui, cmds);
             }
         });
     }
@@ -4884,6 +4971,20 @@ fn digi_tx_level_applies_to(mode: Mode, caps: Option<&sdroxide_types::DeviceCaps
         return false;
     }
     mode != Mode::Cw || caps.cw_audio_keyed
+}
+
+/// [`SdroxideApp::cessb_applies`] over the two things that decide it, so the
+/// rule can be tested without an application around it.
+fn cessb_applies_to(mode: Mode, caps: Option<&sdroxide_types::DeviceCaps>) -> bool {
+    let Some(caps) = caps else { return false };
+    matches!(mode, Mode::Usb | Mode::Lsb) && !caps.audio_mode && !caps.tx_audio
+}
+
+/// The envelope processor's setting as every one of its surfaces spells it:
+/// decibels of compression, and "off" at the bottom of the rail rather than
+/// "0 dB", which reads like an amount.
+fn cessb_value_text(db: f32) -> String {
+    if db < 0.05 { "off".into() } else { format!("{db:.0} dB") }
 }
 
 fn tx_rows_w_for(ui: &egui::Ui, keyer: bool, side_col_w: f32) -> f32 {
@@ -6292,6 +6393,45 @@ mod tests {
         assert!(!digi_tx_level_applies_to(Mode::Ft8, None));
     }
 
+    /// The envelope processor is offered on the two surfaces that can draw it
+    /// exactly where it reaches the air: voice sideband on a radio whose
+    /// sideband we make ourselves. The rail went missing from the desktop
+    /// strip entirely (issue #294) because the two surfaces did not share this
+    /// rule — or any rule.
+    #[test]
+    fn the_cessb_rail_appears_where_it_does_something() {
+        use sdroxide_types::DeviceCaps;
+
+        // An SDR we modulate ourselves — where the processor lives.
+        let sdr = DeviceCaps::default();
+        // A radio that modulates the audio we send it: a CAT rig on its sound
+        // card, and one whose receive stream is demodulated audio too.
+        let cat = DeviceCaps { tx_audio: true, ..DeviceCaps::default() };
+        let cat_audio_rx = DeviceCaps { audio_mode: true, ..DeviceCaps::default() };
+
+        for mode in [Mode::Usb, Mode::Lsb] {
+            assert!(cessb_applies_to(mode, Some(&sdr)), "{mode:?} on an SDR was not offered CESSB");
+            for caps in [&cat, &cat_audio_rx] {
+                assert!(
+                    !cessb_applies_to(mode, Some(caps)),
+                    "{mode:?} was offered a processor the radio's own DSP is downstream of"
+                );
+            }
+        }
+
+        // Not in a mode whose payload is the envelope this flattens, nor in
+        // one that does not transmit at all.
+        for mode in [Mode::Ft8, Mode::Rtty, Mode::Rade, Mode::Nfm, Mode::Am, Mode::Cw, Mode::Drm] {
+            assert!(
+                !cessb_applies_to(mode, Some(&sdr)),
+                "{mode:?} was offered an envelope processor with nothing to flatten"
+            );
+        }
+
+        // And before the capabilities have arrived, nothing is offered.
+        assert!(!cessb_applies_to(Mode::Usb, None));
+    }
+
     /// Lay the condensed TX box's rows and mic column out with real widgets at
     /// desktop metrics and check each fits the width [`tx_rows_fixed_w`] and
     /// [`TX_MIC_COL_W`] price for it — which is what keeps
@@ -6397,6 +6537,26 @@ mod tests {
                         ui.min_rect().width()
                     })
                     .inner;
+                // The envelope rail that joins the mic one in voice sideband
+                // (issue #294), measured at its caption — which is its name,
+                // the widest thing in the column.
+                let mut cessb = 0.0f32;
+                let cessb_w = ui
+                    .vertical(|ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("CESSB").size(10.5));
+                            ui.spacing_mut().slider_width = 45.0;
+                            crate::chrome::slider(
+                                ui,
+                                Slider::new(&mut cessb, 0.0..=sdroxide_types::CESSB_MAX_DB)
+                                    .vertical()
+                                    .show_value(false),
+                            );
+                        });
+                        ui.min_rect().width()
+                    })
+                    .inner;
                 let (room1, room2) = (fixed1 + rail, fixed2 + rail);
                 assert!(row1 <= room1 + 0.5, "keyer={keyer}: row 1 took {row1} of {room1}");
                 assert!(row2 <= room2 + 0.5, "keyer={keyer}: row 2 took {row2} of {room2}");
@@ -6404,6 +6564,10 @@ mod tests {
                 assert!(
                     level_w <= TX_LEVEL_COL_W + 0.5,
                     "the transmit-audio column took {level_w} of {TX_LEVEL_COL_W}"
+                );
+                assert!(
+                    cessb_w <= TX_CESSB_COL_W + 0.5,
+                    "the CESSB column took {cessb_w} of {TX_CESSB_COL_W}"
                 );
             })
             .drop_without_applying_deltas();
@@ -6574,8 +6738,16 @@ mod tests {
             rx_rows(ui, false, false, false, mode).w() + 2.0 * crate::chrome::MODULE_MARGIN_X + 4.0;
         // A CAT rig modulates our audio, so a digital mode there draws the
         // transmit-audio rail rather than the mic one — and it is the wider of
-        // the two.
-        let side = if mode.takes_digi_tx_audio() { TX_LEVEL_COL_W } else { TX_MIC_COL_W };
+        // the two. It is also why no CESSB rail joins them: the envelope is
+        // built in the rig's own DSP, so the column is priced through the
+        // strip's own rule rather than assumed away (issue #294).
+        let caps = sdroxide_types::DeviceCaps { tx_audio: true, ..Default::default() };
+        let side = if mode.takes_digi_tx_audio() { TX_LEVEL_COL_W } else { TX_MIC_COL_W }
+            + if cessb_applies_to(mode, Some(&caps)) {
+                MODULE_ROW_SPACING + TX_CESSB_COL_W
+            } else {
+                0.0
+            };
         let tx = tx_rows_w_for(ui, mode.allows_voice_keyer(), side);
         let display = chip_row_w(ui, &DISPLAY_VIEW_CHIPS).max(chip_row_w(ui, &DISPLAY_TOOL_CHIPS))
             + 2.0 * crate::chrome::MODULE_MARGIN_X;
@@ -6629,6 +6801,50 @@ mod tests {
                     "in {mode:?} the strip wants {rows} rows of a {avail} pt pane; \
                      boxes {widths:?}",
                     rows = rows_needed(avail, gap, &boxes),
+                );
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
+    /// The rail issue #294 put back costs the desktop strip no row: on the
+    /// widest shape that draws it — an SDR in sideband with a front-end gain,
+    /// a decimation chip and its AGC switched off, so every receive control is
+    /// on the strip at once — the strip breaks into the same rows with the
+    /// column as without it, at every width the desktop tier covers.
+    ///
+    /// A column is cheap and a row is not: a third row costs the waterfall a
+    /// whole module height, which is what [`STRIP_RAIL_W`] exists to avoid.
+    #[test]
+    fn the_cessb_rail_costs_the_desktop_strip_no_row() {
+        let (ctx, input) = desktop_ctx();
+        ctx.run_ui(input, |ui| {
+            let mut boxes = cat_rig_strip_boxes(ui, Mode::Lsb);
+            // The receive box an SDR draws, in place of the CAT rig's.
+            let rx = rx_rows(ui, true, true, true, Mode::Lsb).w()
+                + 2.0 * crate::chrome::MODULE_MARGIN_X
+                + 4.0;
+            boxes[3] = StripBox { w: rx, flex: 2.0, max_w: rx + RAIL_STRETCH_MAX };
+            let tx_w = |cessb: bool| {
+                tx_rows_w_for(
+                    ui,
+                    true,
+                    TX_MIC_COL_W + if cessb { MODULE_ROW_SPACING + TX_CESSB_COL_W } else { 0.0 },
+                )
+            };
+            for avail in [1364.0, 1600.0, 1884.0, 2524.0, 3400.0] {
+                let rows = |cessb: bool| {
+                    let mut boxes = boxes.clone();
+                    let w = tx_w(cessb);
+                    boxes[4] = StripBox { w, flex: 2.0, max_w: w + RAIL_STRETCH_MAX };
+                    rows_needed(avail, 8.0, &boxes)
+                };
+                assert_eq!(
+                    rows(true),
+                    rows(false),
+                    "the CESSB column cost a {avail} pt strip a row: {} against {}",
+                    rows(true),
+                    rows(false),
                 );
             }
         })
