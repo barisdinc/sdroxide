@@ -7967,6 +7967,21 @@ stream over this protocol on a set with no transmitter in it.
 Note the radio's IP address from its **Network** screen — an Icom does not
 announce itself on the network, so there is no Discover button.
 
+##### A tune over a network
+
+A frequency sent over this link is a UDP datagram, and the radio never says it
+acted on one. So sdroxide watches for the radio to report the new frequency
+back, and if it has not within a fraction of a second it sends the tune again —
+up to a second, after which the radio has the last word. Over the same second
+the one frequency it will *not* accept from the radio is the one you just tuned
+away from: the answer to a question asked before the tune can arrive late, and
+out of order, and adopting it puts you back on the band you just left. That was
+a band change in FT8 taking three to five clicks (issues #285 and #297).
+
+None of this overrules the radio. Turn its own dial and sdroxide follows at
+once, and a frequency the radio will not go to — outside its range, or a lock
+switch — wins after that second rather than being argued with.
+
 ##### How wide the waterfall gets
 
 **No Icom outputs I/Q over the network.** One outputs it at all: the IC-7760's

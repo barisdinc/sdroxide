@@ -699,6 +699,16 @@ impl IcomNetSource {
             self.send(civ::read_antenna_frame(self.civ_addr));
         }
 
+        // A tune the radio has not agreed to, sent again. A CI-V frame on this
+        // link is a UDP datagram, and one lost on the way is a band change that
+        // never happened and that nothing here would otherwise notice — see
+        // [`Dial::retry`], and issue #297.
+        if !self.transmitting
+            && let Some(f) = self.dial.retry()
+        {
+            self.send(civ::set_freq_frame(self.civ_addr, f));
+        }
+
         if self.last_poll.elapsed() >= POLL_PERIOD {
             self.last_poll = Instant::now();
             self.send(civ::read_freq_frame(self.civ_addr));
@@ -1242,6 +1252,8 @@ mod tests {
     use super::*;
     use sdroxide_icomnet::sim::{Sim, SimOptions};
 
+    use crate::dial::FREQ_SETTLE;
+
     fn cfg(sim: &Sim) -> IcomNetConfig {
         IcomNetConfig {
             address: "127.0.0.1".into(),
@@ -1275,6 +1287,73 @@ mod tests {
                 .unwrap();
         let src = IcomNetSource::open(&cfg(&sim)).expect("open");
         assert_eq!(src.center_hz(), 7_074_000.0, "the radio's own dial, not 0");
+    }
+
+    /// Issue #297: a band change on a networked Icom took three to five clicks
+    /// to stick.
+    ///
+    /// A CI-V frame on this link is a UDP datagram with nothing above it that
+    /// says the radio acted on it, so a set-frequency lost on the way is a
+    /// tune that simply never happened — and one poll period later the radio
+    /// answers from where it always was, the settling guard runs out, and the
+    /// dial snaps back. The operator's own remedy was to click again; this is
+    /// sdroxide doing it for them. The simulator swallows the first tune, which
+    /// is exactly what that loss looks like from this end.
+    #[test]
+    fn a_tune_the_radio_never_took_is_sent_again_until_it_sticks() {
+        let sim = Sim::start(SimOptions {
+            freq_hz: 14_074_000.0,
+            ignore_tunes: 1,
+            scope: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+        assert_eq!(src.center_hz(), 14_074_000.0);
+
+        // The operator picks 40 m for FT8. That frame is the one the radio
+        // never sees.
+        src.set_center_hz(7_074_000.0).expect("tune");
+        wait_for("the radio to be tuned to the band that was asked for", || {
+            let _ = src.poll_control();
+            sim.dial() == 7_074_000.0
+        });
+        // And it has to stay there: the radio's answers from before it moved
+        // must not be folded back in on top of the tune.
+        let deadline = Instant::now() + FREQ_SETTLE * 2;
+        while Instant::now() < deadline {
+            let _ = src.poll_control();
+            assert_eq!(src.center_hz(), 7_074_000.0, "the band the operator chose did not stick");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// And the resend is a recovery, not a habit: a radio that takes the tune
+    /// is not asked over and over for the rest of the settling time.
+    ///
+    /// At most twice, rather than exactly once, because the radio's agreement
+    /// arrives on the next frequency poll — and a poll that had only just gone
+    /// out when the operator clicked leaves a full period before the next one.
+    /// One redundant set-frequency costs a frame on a link that already sends
+    /// four every poll; a stream of them would be this end arguing with a radio
+    /// that never disagreed.
+    #[test]
+    fn a_tune_the_radio_takes_is_not_asked_for_over_and_over() {
+        let sim =
+            Sim::start(SimOptions { freq_hz: 14_074_000.0, scope: false, ..Default::default() })
+                .unwrap();
+        let mut src = IcomNetSource::open(&cfg(&sim)).expect("open");
+        src.set_center_hz(7_074_000.0).expect("tune");
+        // Past the settling time, after which nothing is re-asked at all.
+        let deadline = Instant::now() + FREQ_SETTLE * 2;
+        while Instant::now() < deadline {
+            let _ = src.poll_control();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(sim.dial(), 7_074_000.0);
+        assert_eq!(src.center_hz(), 7_074_000.0);
+        let tunes = sim.civ_frames().iter().filter(|f| f.get(4) == Some(&0x05)).count();
+        assert!(tunes <= 2, "a radio that answered was asked {tunes} times");
     }
 
     /// Two Icoms on one LAN, each keeping its own session trace.

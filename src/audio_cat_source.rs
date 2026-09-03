@@ -691,6 +691,13 @@ impl IqSource for AudioCatSource {
 
     fn poll_control(&mut self) -> Vec<ControlUpdate> {
         let mut out = Vec::new();
+        // A tune the rig has not agreed to yet, asked for again. Cheap
+        // insurance on a serial port, where a command is only lost to a cable
+        // or a rig that was busy; the case it was written for is the networked
+        // Icom sharing this `Dial` — see [`Dial::retry`] and issue #297.
+        if let Some(f) = self.dial.retry() {
+            self.cat.set_freq(f);
+        }
         let updates = self.cat.poll();
         // Anything at all from the rig is also the answer to "is there a radio
         // on the control port": a link that only came up later — the operator
