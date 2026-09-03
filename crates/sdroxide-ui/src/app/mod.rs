@@ -552,6 +552,20 @@ pub struct SdroxideApp {
     show_adsb_setup: bool,
     adsb_sort: panels::adsb::AdsbSort,
     adsb_sort_desc: bool,
+    /// AIS: the vessel table and everything the decoder is seeing, as the
+    /// engine last sent it. Boxed for the reason the ADS-B one is — a busy
+    /// estuary's table, each row carrying a trail, is far larger than anything
+    /// else held here.
+    ais_status: Option<Box<sdroxide_types::AisStatus>>,
+    /// AIS: the chart's pan/zoom and which vessel is selected.
+    ais_map: crate::ais_map::AisMapState,
+    /// AIS: filter for the vessel list; matches a name, a call sign, a
+    /// destination or an MMSI.
+    ais_filter: String,
+    /// AIS: the decoder's own settings window is open.
+    show_ais_setup: bool,
+    ais_sort: panels::ais::AisSort,
+    ais_sort_desc: bool,
     /// VDL2: everything the decoder has, as the engine last sent it. Boxed
     /// because it carries a whole message log and is far larger than anything
     /// else held here.
@@ -1262,6 +1276,12 @@ impl SdroxideApp {
             show_adsb_setup: false,
             adsb_sort: panels::adsb::AdsbSort::default(),
             adsb_sort_desc: true,
+            ais_status: None,
+            ais_map: crate::ais_map::AisMapState::default(),
+            ais_filter: String::new(),
+            show_ais_setup: false,
+            ais_sort: panels::ais::AisSort::default(),
+            ais_sort_desc: true,
             vdl2_status: None,
             vdl2_filter: String::new(),
             vdl2_selected: None,

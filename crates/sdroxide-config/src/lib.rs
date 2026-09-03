@@ -1541,6 +1541,17 @@ pub fn save_adsb_config(cfg: &sdroxide_types::AdsbSettings) -> Result<(), Config
 /// ISM decoders' are: a front end that hands over demodulated audio, or one too
 /// narrow to reach any of the channel plan, forces the decoder off, and that
 /// must not overwrite what the operator chose for a receiver that can run it.
+/// Kept apart from the live `RadioState.ais` for the same reason the ADS-B and
+/// VDL2 configs are: the engine forces the live one off on a front end that
+/// cannot feed it, and that must not overwrite what the operator chose.
+pub fn load_ais_config() -> sdroxide_types::AisSettings {
+    load_json::<sdroxide_types::AisSettings>("ais.json").sane()
+}
+
+pub fn save_ais_config(cfg: &sdroxide_types::AisSettings) -> Result<(), ConfigError> {
+    save_json("ais.json", cfg)
+}
+
 pub fn load_vdl2_config() -> sdroxide_types::Vdl2Settings {
     load_json::<sdroxide_types::Vdl2Settings>("vdl2.json").sane()
 }

@@ -525,6 +525,16 @@ pub struct RadioState {
     /// Appended last: postcard numbers fields by position.
     #[serde(default)]
     pub vdl2: crate::Vdl2Settings,
+    /// How the AIS decoder behaves, and whether it can run at all.
+    ///
+    /// Here rather than only in `ais.json` for the reason [`Self::adsb`] is: a
+    /// remote client edits it, and the engine's reply is this field coming back
+    /// changed. It is also where the engine says no — a front end handing over
+    /// demodulated audio cannot feed a GMSK demodulator, and
+    /// [`crate::AisSettings::OFF`] arriving back is how the panel learns that.
+    /// Appended last: postcard numbers fields by position.
+    #[serde(default)]
+    pub ais: crate::AisSettings,
 }
 
 impl Default for RadioState {
@@ -569,6 +579,7 @@ impl Default for RadioState {
             rig_squelch: 0.0,
             qo100: crate::Qo100Settings::default(),
             vdl2: crate::Vdl2Settings::default(),
+            ais: crate::AisSettings::default(),
         }
     }
 }

@@ -1514,7 +1514,8 @@ fn mode_to_flex(m: Mode) -> &'static str {
         | Mode::SstvFm
         | Mode::RttyFm
         | Mode::Adsb
-        | Mode::Vdl2 => "FM",
+        | Mode::Vdl2
+        | Mode::Ais => "FM",
         Mode::Digl => "DIGL",
         Mode::Digu
         | Mode::Ft8

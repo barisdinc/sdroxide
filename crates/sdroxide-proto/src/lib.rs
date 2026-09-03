@@ -1138,7 +1138,22 @@ use sdroxide_types::{
 /// [`sdroxide_types::Qo100Status`] grows in the same commit, but it is not on
 /// the wire yet: `sdroxide_server` maps `RadioEvent::Qo100Status` to `None`
 /// and the QO-100 readout is local to the receiving station.
-pub const PROTO_VERSION: u16 = 127;
+/// v128: AIS — the ship-reporting system on the two 162 MHz channels.
+///
+/// `Mode::Ais` is appended to [`sdroxide_types::Mode`], which on its own is
+/// survivable in one direction and not the other: postcard writes an enum's
+/// discriminant positionally, so a v127 peer handed a mode it has no variant
+/// for fails to decode the message carrying it — and `Mode` is inside
+/// `RxState`, inside `RadioState`, which travels whole on every change.
+///
+/// With it: `ServerMsg::AisStatus` carrying the vessel table and what each
+/// channel is doing, `Command::SetAisConfig` to change how the decoder
+/// behaves, and [`sdroxide_types::RadioState::ais`] holding what it was set to
+/// — the settings field appended at the tail of `RadioState`, so a v127 peer
+/// would read the end of every state update out of step. Both the message and
+/// the command are appended last in their enums, so no surviving discriminant
+/// moved.
+pub const PROTO_VERSION: u16 = 128;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -1554,6 +1569,10 @@ pub enum ServerMsg {
     ///
     /// Appended last, for the usual reason.
     RelayStatus(Box<sdroxide_types::RelayStatus>),
+    /// Every vessel the AIS decoder is tracking, plus what both channels are
+    /// doing and why it is not running when it is not. A whole snapshot, twice
+    /// a second — see [`sdroxide_types::AisStatus`].
+    AisStatus(Box<sdroxide_types::AisStatus>),
 }
 
 /// One radio in a station's roster, as a client sees it.

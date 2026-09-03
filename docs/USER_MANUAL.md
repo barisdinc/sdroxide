@@ -16,7 +16,7 @@ or connects to a remote sdroxide server.
 1. [Feature overview](#1-feature-overview)
 2. [Basic operation](#2-basic-operation)
     - [2.21 QO-100 beacon plugin](#221-qo-100-beacon-plugin)
-3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX, VDL2)](#3-digital-modes)
+3. [Digital modes (FT8, FT4, FT2, PSK31, RTTY, Olivia, THOR, FSQ, Hellschreiber, SSTV, RIFP, weather fax, JS8, RF Paint, WSPR, packet, APRS, ADS-B, NAVTEX, VDL2, AIS)](#3-digital-modes)
 4. [Skimmers (CW, PSK, RTTY)](#4-skimmers)
 5. [ISM band decoder (315 / 345 / 433 / 868 / 915 MHz devices)](#5-ism-band-decoder)
 6. [Settings](#6-settings)
@@ -52,7 +52,10 @@ or connects to a remote sdroxide server.
   (spectrum-painting) mode, AX.25 **packet** on HF and VHF, and **APRS** — with
   a live map of every station heard, drawn with its own symbol, and messages you
   can send and answer. **ADS-B** decodes the aircraft overhead on 1090 MHz onto
-  a radar display — see [§3.13](#313-ads-b-aircraft-on-1090-mhz).
+  a radar display — see [§3.13](#313-ads-b-aircraft-on-1090-mhz) — and **AIS**
+  does the same for the ships on 162 MHz, onto a marine chart with the vessels
+  drawn as hulls pointed the way they are heading
+  ([§3.16](#316-ais-ships-on-162-mhz)).
 - **Receive controls:** AGC (Off/Slow/Med/Fast), volume, mute, squelch, an
   impulse noise blanker, an adaptive auto-notch (constant-tone canceller),
   noise reduction (four engines, three strengths each), front-end decimation
@@ -2714,9 +2717,10 @@ lockstep with everyone else on it — a receiver a few kilohertz off is not
 off-centre, it is deaf — and each of them keeps its own. On 20 m that is 14.074,
 14.080, 14.084, 14.078 and 14.095600 respectively, so even arriving from the
 mode next door is a move. Picking one of them from the DIGITAL row therefore
-tunes the dial to that band's agreed frequency, the same way APRS, ADS-B and
-VDL2 already do ([3.12](#312-aprs), [3.13](#313-ads-b-aircraft-on-1090-mhz),
-[3.15](#315-vdl2-what-the-aircraft-are-saying)).
+tunes the dial to that band's agreed frequency, the same way APRS, ADS-B, VDL2
+and AIS already do ([3.12](#312-aprs), [3.13](#313-ads-b-aircraft-on-1090-mhz),
+[3.15](#315-vdl2-what-the-aircraft-are-saying),
+[3.16](#316-ais-ships-on-162-mhz)).
 
 It moves the dial only when it has to, and only inside the band you are already
 on:
@@ -4827,6 +4831,128 @@ next. **The channel to watch is 136.975**, the Common Signalling Channel: every
 ground station beacons on it and every link starts there, so if that one is
 silent while the others show bursts, what the others are showing is not VDL2.
 
+### 3.16 AIS (ships on 162 MHz)
+
+Choose **AIS** from the end of the **DIGITAL** row. The Automatic Identification
+System is what every ship of any size transmits about itself — its identity,
+position, course, speed, name, dimensions, draught and where it is going — on
+two 25 kHz channels either side of 162.000 MHz. The panel is a vessel list on
+the left and a marine chart on the right.
+
+**Receive only, and it will stay that way.** AIS is a safety-of-life service.
+Putting false vessel traffic on it is not something an amateur licence covers,
+so there is no transmit half of this panel and no callsign to set.
+
+**The frequency is chosen for you.** Selecting the mode tunes to 162.000 MHz —
+*between* the two channels, because nothing transmits there and a zero-IF
+receiver's DC spike therefore lands on neither of them. The decoder places its
+own 150 kHz window from there and listens to both channels at once. The
+**162.000** button in the panel header puts the dial back if you wander off.
+
+#### What you need
+
+**An antenna for marine VHF, outdoors and with a view of the water.** This
+matters more than anything else on this page. AIS is line-of-sight: a ship's
+Class A transmitter is 12.5 watts at deck height, so from a window you might
+reach fifteen kilometres and from a mast on a hill sixty. A quarter wave at
+162 MHz is 46 cm. An indoor wire will hear the FM broadcast band perfectly well
+and nothing at all up here — the two facts are not related, and the first is not
+evidence for the second.
+
+Turn any input attenuation **off**, and be careful with gain for the same reason
+the VDL2 page gives: the FM broadcast band below is enormous by comparison, and
+a tuner wound up to its limit is overloaded by it rather than made more
+sensitive.
+
+**A stream of at least about 100 kHz at 162 MHz.**
+
+| Stream | What happens |
+| --- | --- |
+| below 48 kHz | Refused. There is not room for one channel. |
+| 48 – 100 kHz | Runs on whichever channel the window is over, and says which one it is missing. |
+| 100 kHz and up | Both channels. |
+
+Almost any receiver clears the last row. What matters far more is the aerial.
+
+**Both channels, or half the shipping.** A vessel alternates between AIS 1 and
+AIS 2 slot by slot, so a receiver reaching only one hears every ship at half its
+reporting rate. That does not look like half a signal — it looks like vessels
+that jump — which is why the two chips in the panel header, **AIS A** and
+**AIS B**, are lit only when a demodulator is actually running on each, and why
+the header says so out loud when one is out of reach.
+
+#### The vessel list
+
+One row per MMSI — the nine-digit identity every AIS station carries. Click a
+row to open its card and put the vessel on the chart.
+
+| Column | What it is |
+| --- | --- |
+| NAME | What it calls itself, once a static report has arrived. Until then, the MMSI: a ship reports its position every few seconds and its *name* only every six minutes, so a target with no name is normal rather than broken. |
+| MMSI | The identity, where the name is not already it. |
+| TYPE | `A` and `B` are Class A (ships over 300 tons, and every passenger vessel) and Class B (small craft). `BASE` is a shore station, `ATON` an aid to navigation — a buoy, a beacon, a lighthouse — `SAR` a search-and-rescue aircraft, and `SART` a distress beacon. |
+| KT | Speed over ground, knots. |
+| COG | Course over ground, degrees true. |
+| SIG | The last message's level in dBFS. |
+| KM | Range from your grid, once **My grid** is filled in ([3.2.1](#321-one-time-setup-your-callsign-and-grid)). |
+| AGE | How long since anything at all was heard from it. |
+
+A row greys when its *position* has aged out — five minutes by default — while
+staying on the list, because "heard, named, position not fresh" is real
+information and a vessel at anchor reports only every three minutes.
+
+The card below the list carries everything the station has said across every
+message type: name, call sign, IMO number, ship type and whether it is carrying
+dangerous goods, navigational status, length and beam, draught, destination and
+ETA, and the position with its accuracy.
+
+**The last line of the card is the message as an `!AIVDM` sentence.** That is
+the form every other AIS program in the world reads, and it is there on purpose:
+this decoder was written from ITU-R M.1371 rather than from a recording, so if
+you want to know whether sdroxide is reading a message correctly, copy that line
+into any other AIS decoder and compare.
+
+#### Data fields
+
+- **slots** — how many transmissions the gate opened on. A high slot count with
+  no messages is a channel busy with something that is not AIS, which is worth
+  knowing before you go looking for a decoder bug.
+- **AIS A / AIS B** — whether each channel has a demodulator on it. Hovering
+  gives its slot and message counts and its learned noise floor.
+- **how far off frequency the ships are.** A frequency discriminator turns a receiver's
+  clock error into a measurable offset, so every decoded message reports one for
+  free — and every ship being three kilohertz off in the same direction is not
+  three thousand bad oscillators, it is your receiver. Past about five
+  kilohertz — thirty parts per million at 162 MHz, which an uncalibrated dongle
+  can easily be — transmissions stop decoding altogether, and the panel says so
+  rather than leaving you to conclude the sea is empty. The fix is the front
+  end's frequency correction in the device settings.
+
+#### Setup
+
+**SETUP** in the panel header opens the decoder's own window.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Channels | both | Which of AIS 1 and AIS 2 to listen on. Switching one off halves how often every vessel is heard. |
+| Drop from chart after | 300 s | Seconds without a position report before a vessel leaves the chart and its row greys. Five minutes, not ADS-B's ten seconds: a vessel at anchor reports every three. |
+| Drop from list after | 1800 s | Seconds with nothing heard at all before it leaves the list. Half an hour, so a ship is not dropped just before it says what it is called. |
+| Trail length | 10 min | How much history to draw behind each target — **in minutes, not in points**, because AIS reporting rates span two orders of magnitude and a fixed count would be eighty seconds of a ferry and two hours of an anchored tanker, drawn identically. Zero switches trails off. |
+| Speed vector | 6 min | How far ahead the vector reaches. Zero switches vectors off. |
+| Slot threshold | 8 dB | How far above the channel's learned noise floor a slot has to be before it is demodulated. |
+| Track at most | 500 | The ceiling on the vessel table. The stations heard longest ago go first. |
+
+Everything here is saved to `ais.json` and restored at startup.
+
+#### What this decoder has and has not been proved against
+
+Every layer of it — the GMSK demodulator, the bit timing, the HDLC framing, the
+check sequence and the message field offsets — is tested against a transmitter
+built independently from the same standard, including on a receiver four
+kilohertz off frequency and with two ships in adjacent slots. What that cannot
+prove is that the standard was read correctly: a field offset wrong in the same
+way at both ends agrees with itself.
+
 ## 4. Skimmers
 
 The skimmers decode many signals at once across a wide (~192 kHz) window and
@@ -5962,7 +6088,7 @@ your own locator (**My grid**,
 [3.2.1](#321-one-time-setup-your-callsign-and-grid)) describes it. *Somewhere else*
 takes a Maidenhead locator beside it, and everything this radio hears is then
 reported from **that** square: PSK Reporter, WSPRnet and FreeDV Reporter, and
-the position ADS-B places aircraft against.
+the position the ADS-B and AIS charts measure ranges from.
 
 Set it for an online receiver, or for your own set up on a hilltop — anything
 whose antenna is not where you are. Picking a receiver under **PUBLIC SDR**
@@ -12390,7 +12516,7 @@ sends them.
 | `--freq <HZ>` | Center frequency in Hz (default: where the last session was left, or 14,200,000 on a first run). |
 | `--rate <HZ>` | Sample rate in Hz (default: from config). |
 | `--gain <DB>` | Overall RX gain in dB (default: hardware AGC or a moderate value). |
-| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, ISB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B, VDL2). Default: the mode the last session was left in. |
+| `--mode <MODE>` | Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, ISB, SPEC, FT8, FT4, FT2, PSK, RTTY, OLIVIA, THOR, FSQ, SSTV, RIFP, WEFAX, RFPAINT, RADE, DRM, ADS-B, VDL2, AIS). Default: the mode the last session was left in. |
 | `--antenna <NAME>` | RX antenna port, as the device names it (LNAH, TX/RX — `--probe` lists them). Default: the port the last session was left on, and failing that whatever the driver selects. |
 | `--tx-antenna <NAME>` | TX antenna port, likewise (BAND1, BAND2). |
 | `--server` | Run as a server (web client + WebSocket streaming backend). |
@@ -12480,6 +12606,7 @@ sdroxide stores its settings under the per-user config directory:
 | `skimmer.json` | JSON | Skimmers: which of CW / PSK / RTTY run, and each one's spot squelch in dB. Restored at startup; a narrowband (audio-mode) radio still forces them off without disturbing what you picked. |
 | `adsb.json` | JSON | ADS-B decoder ([§3.13](#313-ads-b-aircraft-on-1090-mhz)): the two timeouts, how many history dots to keep, how far ahead the speed vectors reach, and the ceiling on the aircraft table. Restored at startup, and — like `ism.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
 | `vdl2.json` | JSON | VDL2 decoder ([§3.15](#315-vdl2-what-the-aircraft-are-saying)): which of the seven channels to listen on, the burst threshold in dB, how much log and how many stations to keep, and how long a silent station stays on the list. Restored at startup, and — like `adsb.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
+| `ais.json` | JSON | AIS decoder ([§3.16](#316-ais-ships-on-162-mhz)): which of the two channels to listen on, the slot threshold in dB, the two timeouts, how many minutes of trail to keep, how far ahead the vectors reach, and the ceiling on the vessel table. Restored at startup, and — like `adsb.json` — a receiver that cannot feed the decoder forces it off without disturbing what you picked. |
 | `ism.json` | JSON | ISM decoder: whether it runs, which device families it listens for, the burst threshold in dB, and whether the rtl_433 decoders are on, which band they watch and how wide a window they get. Restored at startup, and — like `skimmer.json` — a narrowband (audio-mode) radio forces it off without disturbing what you picked. |
 | `rtl433_flex.conf` | text | Your own ISM decoders, in rtl_433's "flex" syntax ([§5.5](#55-adding-your-own-decoders-flex-specs)). Written with a commented example the first time the ISM decoder runs, and never rewritten afterwards — like `bandplan.json`, it is yours to edit. A specification that does not pass its check is listed in the ISM window and skipped; the rest still load. **RELOAD DECODERS** in the ISM window applies an edit without a restart. |
 | `input.json` | JSON | Control inputs: keyboard bindings, panadapter mouse behaviour, mouse-button bindings, and the MIDI controller mapping. Belongs to the machine running the user interface, not the engine. |
@@ -13781,6 +13908,7 @@ using. Bind them under **Speech** on the Controls tab:
 | APRS | Automatic Packet Reporting System — 1200 baud AX.25 on the region's shared channel, with a live map of every station heard, its own symbol per station, and messages you can send and answer. See [3.12](#312-aprs). |
 | ADS-B | Aircraft surveillance on 1090 MHz: a target list and a radar picture with history dots, speed vectors and data blocks. Receive only, and needs a receiver streaming at least 2 Msps. See [3.13](#313-ads-b-aircraft-on-1090-mhz). |
 | VDL2 | The VHF datalink aircraft exchange ACARS over, on seven channels around 136.8 MHz at once: a message log and the stations sending them. Receive only. See [3.15](#315-vdl2-what-the-aircraft-are-saying). |
+| AIS | Ship reporting on the two channels either side of 162.000 MHz at once: a vessel list and a marine chart with hulls drawn to their heading, time-based trails and speed vectors. Receive only. See [3.16](#316-ais-ships-on-162-mhz). |
 
 ### Bands
 

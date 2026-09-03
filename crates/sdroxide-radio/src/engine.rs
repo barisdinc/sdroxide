@@ -14,6 +14,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use tracing::{debug, info, trace, warn};
 
 use sdroxide_adsb::{AdsbAction, AdsbController};
+use sdroxide_ais::{AisAction, AisController};
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
     AprsController, CwController, DigiAction, DigiController, DigiEngine, FsqController,
@@ -2312,6 +2313,29 @@ struct Engine {
     /// rather than on every block. The outer `None` means nothing has been said
     /// yet, which is different from having said "there is nothing wrong".
     vdl2_idle_sent: Option<Option<String>>,
+
+    /// The AIS lane: a fifth window, on the two ship-reporting channels either
+    /// side of 162.000 MHz.
+    ///
+    /// Its own for the same reason ADS-B's and VDL2's are — it is somewhere
+    /// else entirely — and shaped like VDL2's inside, because AIS is a plan of
+    /// two channels rather than one frequency. It only runs in `Mode::Ais`:
+    /// nothing else can be listened to through a receiver parked on 162 MHz.
+    ais_ddc: Option<Ddc>,
+    ais: Option<AisController>,
+    ais_buf: Vec<Complex32>,
+    /// Absolute frequency the window is centred on.
+    ais_center_hz: f64,
+    /// The stream rate `ais_ddc` was built to decimate, so a retune can tell a
+    /// window that merely moved from one that has to be rebuilt.
+    ais_in_rate: f64,
+    /// The operator's persisted preference, kept apart from `state.ais` for the
+    /// same reason `adsb_cfg` is.
+    ais_cfg: sdroxide_types::AisSettings,
+    /// The last "cannot run" sentence sent to the panel, so it is sent once
+    /// rather than on every block. The outer `None` means nothing has been said
+    /// yet, which is different from having said "there is nothing wrong".
+    ais_idle_sent: Option<Option<String>>,
     /// QO-100 beacon decoder: a fixed downconversion onto
     /// [`sdroxide_types::QO100_BEACON_HZ`] plus a worker-thread demodulator,
     /// present only while the decoder is enabled. Simpler than the ISM
@@ -3234,6 +3258,21 @@ fn engine_thread(
             }
             state.band = Band::containing(hz);
         }
+        // ...and AIS, which is two channels 50 kHz apart, so the dial goes
+        // between them and the lane's own window takes in both.
+        if mode.is_ais() {
+            let hz = sdroxide_types::AIS_PLAN_CENTER_HZ;
+            info!(
+                from = state.active_freq_hz(),
+                to = hz,
+                "AIS is on the two channels either side of 162.000 MHz; tuning there"
+            );
+            match state.active_vfo {
+                Vfo::A => state.vfo_a_hz = hz,
+                Vfo::B => state.vfo_b_hz = hz,
+            }
+            state.band = Band::containing(hz);
+        }
     }
     let skim_cfg = sdroxide_config::load_skimmer_config();
     state.skimmer = if audio_mode {
@@ -3273,6 +3312,12 @@ fn engine_thread(
         sdroxide_types::AdsbSettings::OFF // wideband-only, and by far the widest
     } else {
         adsb_cfg
+    };
+    let ais_cfg = sdroxide_config::load_ais_config();
+    state.ais = if audio_mode {
+        sdroxide_types::AisSettings::OFF // wideband-only, like the rest of the lanes
+    } else {
+        ais_cfg
     };
 
     // Read before the DSP below rather than with the rest of the session
@@ -3536,6 +3581,13 @@ fn engine_thread(
         vdl2_in_rate: 0.0,
         vdl2_cfg,
         vdl2_idle_sent: None,
+        ais_ddc: None,
+        ais: None,
+        ais_buf: Vec::new(),
+        ais_center_hz: 0.0,
+        ais_in_rate: 0.0,
+        ais_cfg,
+        ais_idle_sent: None,
         qo100_ddc: None,
         qo100: None,
         qo100_buf: Vec::new(),
@@ -3666,6 +3718,7 @@ fn engine_thread(
         engine.sync_adsb_home();
         engine.sync_adsb(); // and the aircraft lane, if the mode is already ADS-B
         engine.sync_vdl2(); // ...and the datalink lane, likewise
+        engine.sync_ais(); // ...and the shipping lane, likewise
         engine.sync_qo100(); // a no-op today: `qo100_cfg` starts disabled and is never loaded
     }
     // Start any enabled network spot feeds from the persisted config. The
@@ -3879,6 +3932,7 @@ fn engine_thread(
         engine.poll_ism();
         engine.poll_adsb();
         engine.poll_vdl2();
+        engine.poll_ais();
         engine.poll_qo100();
         engine.poll_scanner();
         engine.poll_tci_server();
@@ -4694,6 +4748,15 @@ impl Engine {
                 d.on_rx_iq(&self.vdl2_buf);
             }
         }
+        // ...and the AIS lane, from 150 kHz around 162.000 MHz. The two
+        // channels are split out inside the worker, as VDL2's seven are.
+        if let Some(ddc) = self.ais_ddc.as_mut() {
+            self.ais_buf.clear();
+            ddc.process(iq, &mut self.ais_buf);
+            if let Some(d) = self.ais.as_ref() {
+                d.on_rx_iq(&self.ais_buf);
+            }
+        }
         // ...and the QO-100 beacon decoder from its own fixed downconversion
         // onto the beacon frequency.
         if let Some(ddc) = self.qo100_ddc.as_mut() {
@@ -5168,6 +5231,7 @@ impl Engine {
                 self.sync_ism_window();
                 self.sync_adsb_window();
                 self.sync_vdl2_window();
+                self.sync_ais_window();
                 self.sync_qo100_window();
                 self.update_tuning();
                 let _ = self.event_tx.send(RadioEvent::State(self.state.clone()));
@@ -5376,6 +5440,10 @@ impl Engine {
         // between — it goes where the span can reach the group and follows the
         // hardware centre when it has to.
         self.sync_vdl2_window();
+        // The AIS window is the same shape as the VDL2 one and smaller: two
+        // channels 50 kHz apart, and a span that reaches only one of them still
+        // hears every ship, at half its reporting rate.
+        self.sync_ais_window();
         // The QO-100 window, unlike the ISM one, *does* follow the hardware
         // centre — its one target frequency never moves, so re-seating the
         // mixer is all a retune ever needs.
@@ -7932,6 +8000,22 @@ impl Engine {
                 }
             }
 
+            // AIS decoder.
+            SetAisConfig(cfg) => {
+                let cfg = cfg.sane();
+                self.state.ais = cfg;
+                // Remembered before `sync_ais` may force the live state off, so
+                // a source swap back restores what was chosen.
+                self.ais_cfg = cfg;
+                if let Err(e) = sdroxide_config::save_ais_config(&cfg) {
+                    warn!("saving AIS config: {e}");
+                }
+                self.sync_ais();
+                if let Some(d) = self.ais.as_ref() {
+                    d.set_config(cfg);
+                }
+            }
+
             SetQo100Config(cfg) => {
                 self.state.qo100 = cfg;
                 // Held in step with the live setting for symmetry with the
@@ -9533,6 +9617,217 @@ impl Engine {
         }
     }
 
+    /// The rate the AIS window asks its down-converter for.
+    ///
+    /// Capped at what the front end delivers, because a window is a decimation
+    /// of that stream and not a second tuner. A receiver too narrow to hold even
+    /// one channel therefore lands on its own rate, `sync_ais` refuses to start,
+    /// and the panel says why.
+    fn ais_target_rate_hz(&self) -> f64 {
+        sdroxide_ais::plan::WINDOW_TARGET_RATE_HZ.min(self.state.sample_rate)
+    }
+
+    /// Where the window sits: over the pair of channels where the span reaches
+    /// them, and as close as the span allows otherwise.
+    fn ais_window_center_hz(&self, rate: f64) -> f64 {
+        sdroxide_ais::plan::window_center_for(self.state.center_hz, self.state.sample_rate, rate)
+    }
+
+    /// Why the decoder cannot run here, if it cannot. `None` means it can.
+    ///
+    /// Every sentence names the number it is talking about. "Nothing on the
+    /// water" and "this receiver was never going to hear any of it" produce the
+    /// same empty table, and only this tells them apart.
+    fn ais_unavailable(&self) -> Option<String> {
+        if self.audio_mode {
+            return Some(
+                "this front end hands over demodulated audio; AIS needs the raw I/Q stream"
+                    .to_string(),
+            );
+        }
+        if self.state.sample_rate < sdroxide_types::AIS_MIN_RATE_HZ {
+            return Some(format!(
+                "AIS needs at least {:.0} kHz of stream and this one is {:.1} kHz — \
+                 lower the front-end decimation, or raise the device sample rate",
+                sdroxide_types::AIS_MIN_RATE_HZ / 1e3,
+                self.state.sample_rate / 1e3
+            ));
+        }
+        // Silence is not a refusal; see the same check in `adsb_unavailable`.
+        if !self.caps.may_rx_hz(sdroxide_types::AIS_PLAN_CENTER_HZ) {
+            return Some("this receiver does not tune to 162 MHz".to_string());
+        }
+        let rate = Ddc::rate_for(self.state.sample_rate, self.ais_target_rate_hz());
+        let center = self.ais_window_center_hz(rate);
+        if !sdroxide_ais::window_covers(center, rate) {
+            return Some(format!(
+                "neither AIS channel is inside the receiver's window, which is {:.0} kHz \
+                 wide about {:.3} MHz",
+                rate / 1e3,
+                center / 1e6
+            ));
+        }
+        None
+    }
+
+    /// Why the decoder will do less than it could here, even though it runs.
+    ///
+    /// A different kind of statement from [`Self::ais_unavailable`]: the lane is
+    /// working, and an operator watching vessels report at half the rate they
+    /// should would otherwise have to guess whether the sea is quiet or half
+    /// the traffic is out of reach.
+    fn ais_degraded(&self) -> Option<String> {
+        if self.ais_unavailable().is_some() {
+            return None;
+        }
+        let rate = Ddc::rate_for(self.state.sample_rate, self.ais_target_rate_hz());
+        let center = self.ais_window_center_hz(rate);
+        let reached = sdroxide_ais::plan::channels_in_window(center, rate);
+        let total = sdroxide_ais::plan::CHANNELS.len();
+        if reached.len() < total {
+            let missing: Vec<String> = (0..total)
+                .filter(|i| !reached.contains(i))
+                .map(|i| sdroxide_ais::plan::CHANNELS[i].label.to_string())
+                .collect();
+            return Some(
+                format!(
+                    "this window is {:.0} kHz wide and reaches AIS {} only — a ship alternates \
+                 between the two channels, so it will be heard at half its reporting rate",
+                    rate / 1e3,
+                    sdroxide_ais::plan::CHANNELS[reached[0]].label,
+                ) + &format!(" (AIS {} is outside it)", missing.join(", ")),
+            );
+        }
+        let both = reached.len() == total;
+        let sps = sdroxide_ais::plan::channel_rate_for(rate, both) / sdroxide_types::AIS_BIT_RATE;
+        if sps < sdroxide_types::AIS_GOOD_SPS {
+            return Some(format!(
+                "this window leaves only {sps:.1} samples a bit; below {:.0} the bit \
+                 timing has too little to work with",
+                sdroxide_types::AIS_GOOD_SPS
+            ));
+        }
+        None
+    }
+
+    /// A down-converter for the AIS window, already mixed onto it, and the
+    /// absolute frequency it is centred on.
+    fn build_ais_window(&mut self) -> (Ddc, f64) {
+        let target = self.ais_target_rate_hz();
+        let mut ddc = Ddc::new(self.state.sample_rate, target);
+        let center = self.ais_window_center_hz(ddc.out_rate());
+        ddc.set_offset_hz(center - self.state.center_hz);
+        self.ais_in_rate = self.state.sample_rate;
+        (ddc, center)
+    }
+
+    /// Start or stop the AIS lane to match the mode and the front end.
+    ///
+    /// Follows the *mode*, like the ADS-B and VDL2 lanes and unlike the ISM
+    /// decoder: it needs the receiver parked on 162 MHz, and nothing else can be
+    /// listened to through that.
+    fn sync_ais(&mut self) {
+        let want = self.state.rx[0].mode.is_ais() && self.ais_unavailable().is_none();
+        // The operator's own preference survives being overruled: `state.ais` is
+        // what the panel reads, `ais_cfg` is what they chose.
+        if self.audio_mode {
+            self.state.ais = sdroxide_types::AisSettings::OFF;
+        } else {
+            self.state.ais = self.ais_cfg;
+        }
+        match (want, self.ais.is_some()) {
+            (true, false) => {
+                let (ddc, center) = self.build_ais_window();
+                let out_rate = ddc.out_rate();
+                self.ais = Some(AisController::new(center, out_rate, self.state.ais));
+                self.ais_ddc = Some(ddc);
+                self.ais_center_hz = center;
+                info!(rate = out_rate, center, "AIS decoder started");
+            }
+            (false, true) => {
+                self.ais = None;
+                self.ais_ddc = None;
+                self.ais_buf.clear();
+                info!("AIS decoder stopped");
+            }
+            (true, true) => self.sync_ais_window(),
+            _ => {}
+        }
+    }
+
+    /// Re-place the window after a retune or a rate change.
+    ///
+    /// The vessel table survives: a receiver nudged a few kilohertz is still
+    /// watching the same sea. The chain that feeds it is another matter — a
+    /// `Ddc` bakes in both its input rate and its decimation, so a change in
+    /// either is a rebuild rather than a retune.
+    fn sync_ais_window(&mut self) {
+        let Some(ddc) = self.ais_ddc.as_ref() else { return };
+        let want_rate = Ddc::rate_for(self.state.sample_rate, self.ais_target_rate_hz());
+        if (want_rate - ddc.out_rate()).abs() >= 1.0
+            || (self.state.sample_rate - self.ais_in_rate).abs() >= 1.0
+        {
+            let (ddc, center) = self.build_ais_window();
+            let rate = ddc.out_rate();
+            self.ais_ddc = Some(ddc);
+            self.ais_center_hz = center;
+            if let Some(d) = self.ais.as_ref() {
+                d.set_window(center, rate);
+            }
+            info!(rate, center, "AIS window rebuilt");
+            return;
+        }
+
+        let center = self.ais_window_center_hz(want_rate);
+        let Some(ddc) = self.ais_ddc.as_mut() else { return };
+        // Re-seated even when the window has not moved in absolute terms: the
+        // offset is measured from the *hardware* centre, and a retune is exactly
+        // what moves that.
+        ddc.set_offset_hz(center - self.state.center_hz);
+        if (center - self.ais_center_hz).abs() < 1.0 {
+            return;
+        }
+        self.ais_center_hz = center;
+        if let Some(d) = self.ais.as_ref() {
+            d.set_window(center, want_rate);
+        }
+    }
+
+    /// Drain the AIS decoder's vessel table and forward it.
+    ///
+    /// The worker knows what it is decoding but not what the receiver could have
+    /// been decoding, so the "why is this empty" fields are filled in here,
+    /// where the front end's capabilities are.
+    fn poll_ais(&mut self) {
+        let unavailable = self.ais_unavailable();
+        let Some(d) = self.ais.as_ref() else {
+            // Nothing running. On the AIS mode that is a fact worth sending — it
+            // is the only way the panel can say what is wrong — but off it there
+            // is nobody listening. Once, not per block.
+            if self.state.rx[0].mode.is_ais() && self.ais_idle_sent.as_ref() != Some(&unavailable) {
+                self.ais_idle_sent = Some(unavailable.clone());
+                let st = sdroxide_types::AisStatus {
+                    unavailable,
+                    suggest_center_hz: Some(sdroxide_types::AIS_PLAN_CENTER_HZ),
+                    ..Default::default()
+                };
+                let _ = self.event_tx.send(RadioEvent::AisStatus(Box::new(st)));
+            }
+            return;
+        };
+        // Running again: whatever was last said about it being down is stale.
+        self.ais_idle_sent = None;
+        let degraded = self.ais_degraded();
+        for action in d.poll() {
+            let AisAction::Status(mut st) = action;
+            st.unavailable = unavailable.clone();
+            st.degraded = degraded.clone();
+            st.suggest_center_hz = (unavailable.is_some() || degraded.is_some())
+                .then_some(sdroxide_types::AIS_PLAN_CENTER_HZ);
+            let _ = self.event_tx.send(RadioEvent::AisStatus(st));
+        }
+    }
+
     /// The main receiver's clean audio tap is shared: the digital-mode engine
     /// and the TCI server's RX-audio stream both read `tap_out`. Whoever wants
     /// it turns it on; it switches off only when nobody does. Every decision to
@@ -11079,6 +11374,26 @@ impl Engine {
             // See the APRS block above for why `follow_dial` is not enough.
             self.update_tuning();
         }
+        // AIS is the same argument as VDL2 with a shorter reach: two channels
+        // 50 kHz apart, and a window over either of them is worth having,
+        // because a ship alternates between the two and is heard on whichever
+        // one is being listened to.
+        if rx == RxId::Main
+            && mode.is_ais()
+            && !self.state.rx[0].mode.is_ais()
+            && self.caps.may_rx_hz(sdroxide_types::AIS_PLAN_CENTER_HZ)
+            && !sdroxide_ais::window_covers(self.state.center_hz, self.state.sample_rate)
+        {
+            let hz = sdroxide_types::AIS_PLAN_CENTER_HZ;
+            match self.state.active_vfo {
+                Vfo::A => self.state.vfo_a_hz = hz,
+                Vfo::B => self.state.vfo_b_hz = hz,
+            }
+            self.state.band = Band::containing(hz);
+            self.follow_dial();
+            // See the APRS block above for why `follow_dial` is not enough.
+            self.update_tuning();
+        }
         // Changing modes under a running keyer message would leave it playing
         // into a transmit chain that has just been rebuilt (or into a digital
         // mode that has no use for it).
@@ -11132,6 +11447,7 @@ impl Engine {
             // runs only while its mode is selected.
             self.sync_adsb();
             self.sync_vdl2();
+            self.sync_ais();
             self.emit_digi_status();
             // A wider channel needs a wider berth from the LO: switching a
             // narrow mode that was happily sitting 30 kHz off the LO into WFM
@@ -12489,6 +12805,13 @@ impl Engine {
         self.vdl2_ddc = None;
         self.vdl2 = None;
         self.vdl2_buf.clear();
+        // The AIS lane the same way: below about 100 kHz of stream the window
+        // stops holding both channels, and `sync_ais` says which one is left
+        // rather than restarting a decoder that will quietly hear half the
+        // shipping.
+        self.ais_ddc = None;
+        self.ais = None;
+        self.ais_buf.clear();
         // Dropped outright rather than left to `sync_tci_iq`'s own comparison:
         // two device rates can snap to the same client rate, and it would then
         // keep a decimation chain built for the rate we have just left.
@@ -12500,6 +12823,7 @@ impl Engine {
         self.sync_ism();
         self.sync_adsb();
         self.sync_vdl2();
+        self.sync_ais();
         self.sync_qo100();
         self.sync_audio_tap();
         self.sync_tci_iq();
@@ -12869,6 +13193,7 @@ impl Engine {
             self.sync_ism();
             self.sync_adsb();
             self.sync_vdl2();
+            self.sync_ais();
             self.sync_qo100();
         }
         // Re-derive the TCI streams at the new device rate and push a fresh
@@ -14614,6 +14939,7 @@ impl Engine {
                 self.sync_ism_window();
                 self.sync_adsb_window();
                 self.sync_vdl2_window();
+                self.sync_ais_window();
                 self.sync_qo100_window();
                 true
             }
@@ -14720,7 +15046,8 @@ fn rig_mode_class(m: Mode) -> u8 {
         // dial is at 1090 MHz. Grouped with FM so an echo is never read as the
         // operator having left the mode.
         | Mode::Adsb
-        | Mode::Vdl2 => 5,
+        | Mode::Vdl2
+        | Mode::Ais => 5,
     }
 }
 

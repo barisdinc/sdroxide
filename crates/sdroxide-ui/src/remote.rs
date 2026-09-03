@@ -333,6 +333,7 @@ impl RemoteController {
             ServerMsg::IsmStatus(s) => self.pending.push_back(RadioEvent::IsmStatus(s)),
             ServerMsg::AdsbStatus(s) => self.pending.push_back(RadioEvent::AdsbStatus(s)),
             ServerMsg::Vdl2Status(s) => self.pending.push_back(RadioEvent::Vdl2Status(s)),
+            ServerMsg::AisStatus(s) => self.pending.push_back(RadioEvent::AisStatus(s)),
             ServerMsg::RifpRows { image_id, y, w, h, rows } => {
                 self.pending.push_back(RadioEvent::RifpRows { image_id, y, w, h, rows })
             }

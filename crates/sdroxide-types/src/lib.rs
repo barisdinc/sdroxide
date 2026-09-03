@@ -5,6 +5,7 @@
 
 mod access;
 mod adsb;
+mod ais;
 mod aprs;
 mod awards;
 mod band;
@@ -70,6 +71,13 @@ pub use adsb::{
     ADSB_DROP_LIST_S, ADSB_DROP_MAP_S, ADSB_FREQ_HZ, ADSB_GOOD_RATE_HZ, ADSB_HISTORY_POINTS,
     ADSB_MAX_AIRCRAFT, ADSB_MAX_RATE_HZ, ADSB_MIN_RATE_HZ, ADSB_TRACK_MAX, ADSB_VECTOR_MINUTES,
     AdsbAircraft, AdsbSettings, AdsbSource, AdsbStatus,
+};
+pub use ais::{
+    AIS_ALL_CHANNELS, AIS_BIT_RATE, AIS_CHANNEL_A_HZ, AIS_CHANNEL_B_HZ, AIS_CHANNEL_SPACING_HZ,
+    AIS_DROP_LIST_S, AIS_DROP_MAP_S, AIS_GOOD_SPS, AIS_MAX_VESSELS, AIS_MIN_RATE_HZ,
+    AIS_PLAN_CENTER_HZ, AIS_THRESHOLD_DB, AIS_TRACK_MAX, AIS_TRAIL_MINUTES, AIS_VECTOR_MINUTES,
+    AisChannelStatus, AisKind, AisSettings, AisStatus, AisVessel, aid_type_label, nav_status_label,
+    ship_type_hazard, ship_type_label,
 };
 pub use aprs::{
     APRS_MESSAGE_MAX, APRS_MSG_RETRIES, APRS_STATION_MAX, APRS_TRACK_MAX, APRS_TRAFFIC_MAX,

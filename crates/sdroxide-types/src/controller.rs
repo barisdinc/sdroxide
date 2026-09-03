@@ -332,6 +332,18 @@ pub enum RadioEvent {
     ///
     /// Appended last, for the usual reason.
     RelayStatus(Box<crate::RelayStatus>),
+    /// Everything the AIS decoder has: the vessel table, what both channels are
+    /// doing, and why it is not running when it is not. A whole snapshot, a
+    /// couple of times a second.
+    ///
+    /// One message rather than a stream of decoded reports, for the reason
+    /// [`RadioEvent::AdsbStatus`] is one — and boxed for the same reason as
+    /// well: a busy estuary's vessel table, each row carrying a trail, is far
+    /// larger than anything else in this enum, and an enum is as big as its
+    /// largest variant everywhere it is held.
+    ///
+    /// Appended last, for the usual reason.
+    AisStatus(Box<crate::AisStatus>),
 }
 
 /// Snapshot of the frontend's switchable sound devices (native clients).

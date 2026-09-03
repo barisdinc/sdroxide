@@ -5,6 +5,7 @@
 //! panel:
 //!
 //! - [`adsb`] — the aircraft list and the 1090 MHz radar picture
+//! - [`ais`] — the vessel list and the 162 MHz marine chart
 //! - [`vdl2`] — the VDL Mode 2 message log and station list
 //! - [`aprs`] — the APRS station list, map and messages
 //! - [`cw`] — the Morse decode/keyboard panel, the one non-digital mode here
@@ -18,6 +19,7 @@
 //! - [`widgets`] — the row and station-card widgets several panels draw
 
 pub(in crate::app) mod adsb;
+pub(in crate::app) mod ais;
 pub(in crate::app) mod aprs;
 pub(in crate::app) mod cw;
 pub(in crate::app) mod decodes;
@@ -77,6 +79,9 @@ pub(in crate::app) fn panel_panes(mode: Mode) -> &'static [&'static str] {
         // it. No map: VDL2 carries a position only occasionally, so one would be
         // mostly empty of the traffic this panel exists to show.
         Mode::Vdl2 => &["MESSAGES", "STATIONS"],
+        // Two, for the reason ADS-B has two: a safety broadcast nobody answers,
+        // and the only two questions about it are what is out there and where.
+        Mode::Ais => &["VESSELS", "CHART"],
         Mode::Wefax => &["CHART", "SAVED"],
         Mode::Navtex => &["MESSAGES", "READING"],
         Mode::RfPaint => &["TEXT", "IMAGE"],

@@ -4863,6 +4863,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdroxide-ais"
+version = "1.6.4"
+dependencies = [
+ "crossbeam-channel",
+ "num-complex",
+ "sdroxide-ax25",
+ "sdroxide-dsp",
+ "sdroxide-types",
+ "tracing",
+]
+
+[[package]]
 name = "sdroxide-aprs"
 version = "1.6.4"
 dependencies = [
@@ -5224,6 +5236,7 @@ dependencies = [
  "rayon",
  "rtrb",
  "sdroxide-adsb",
+ "sdroxide-ais",
  "sdroxide-aprs",
  "sdroxide-ax25",
  "sdroxide-config",

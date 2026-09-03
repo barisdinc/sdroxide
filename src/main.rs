@@ -80,7 +80,7 @@ struct Cli {
     gain: Option<f64>,
 
     /// Initial mode (USB, LSB, CW, AM, SAM, NFM, WFM, DIGU, DIGL, DSB, ISB, SPEC, FT8,
-    /// FT4, FT2, PSK, RTTY, PACKET, APRS, ADS-B, VDL2, SSTV, RIFP, OLIVIA, THOR, FSQ)
+    /// FT4, FT2, PSK, RTTY, PACKET, APRS, ADS-B, VDL2, AIS, SSTV, RIFP, OLIVIA, THOR, FSQ)
     ///
     /// Default: the mode the last session was left in.
     #[arg(long)]

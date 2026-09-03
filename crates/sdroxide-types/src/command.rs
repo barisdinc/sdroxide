@@ -909,6 +909,18 @@ pub enum Command {
     /// Appended for the usual reason — postcard numbers variants by position.
     SetRelayConfig(Box<crate::RelayConfig>),
 
+    /// Set how the AIS decoder behaves: which of the two channels to listen on,
+    /// how hard a slot has to be, how long a vessel stays on the map and how
+    /// much trail it leaves.
+    ///
+    /// The engine persists it to `ais.json` and echoes it back in
+    /// [`crate::RadioState::ais`], so there is no apply step and no way for the
+    /// panel's copy and the engine's to drift apart — the same bargain
+    /// [`Command::SetAdsbConfig`] strikes.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SetAisConfig(crate::AisSettings),
+
     /// Close one of the T/R switch's contacts briefly, so the operator can hear
     /// the relay and check their wiring with the transmitter cold.
     ///

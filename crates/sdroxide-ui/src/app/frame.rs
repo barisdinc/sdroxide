@@ -402,7 +402,12 @@ impl eframe::App for SdroxideApp {
             // are large enough to read on the waterfall. RIFP straddles the
             // dial rather than sitting above it, so its window is symmetric
             // and as wide as the profile's channel.
-            let (sub_lo, sub_hi) = if mode.is_vdl2() {
+            let (sub_lo, sub_hi) = if mode.is_ais() {
+                // Both AIS channels and a little either side, not a sub-band:
+                // the two are 50 kHz apart and both are being read at once, so
+                // framing one of them would be a view of half the traffic.
+                (dial - 60_000.0, dial + 60_000.0)
+            } else if mode.is_vdl2() {
                 // The whole datalink group, not a sub-band: seven channels
                 // spread over 325 kHz are all being read at once, and framing
                 // one of them would be a view of a sixth of what is happening.
@@ -670,6 +675,8 @@ impl eframe::App for SdroxideApp {
                                     self.adsb_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_vdl2() {
                                     self.vdl2_panel(ui, &mut cmds, panel_h);
+                                } else if mode.is_ais() {
+                                    self.ais_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_aprs() {
                                     self.aprs_panel(ui, &mut cmds, panel_h);
                                 } else if mode.is_packet() {
@@ -843,6 +850,7 @@ impl eframe::App for SdroxideApp {
         self.scanner_window(&ctx, &mut cmds);
         self.ism_window(&ctx, &mut cmds);
         self.adsb_setup_window(&ctx, &mut cmds);
+        self.ais_setup_window(&ctx, &mut cmds);
         self.vdl2_setup_window(&ctx, &mut cmds);
         self.rds_window(&ctx);
         self.drm_window(&ctx, &mut cmds);
@@ -1278,6 +1286,7 @@ impl SdroxideApp {
                 RadioEvent::IsmStatus(st) => self.ism_status = Some(st),
                 RadioEvent::AdsbStatus(st) => self.adsb_status = Some(st),
                 RadioEvent::Vdl2Status(st) => self.vdl2_status = Some(st),
+                RadioEvent::AisStatus(st) => self.ais_status = Some(st),
                 RadioEvent::Qo100Status(st) => self.qo100_status = Some(st),
                 RadioEvent::SstvStatus(s) => {
                     // Adopt a *newly* detected RX mode for the next transmit, but
