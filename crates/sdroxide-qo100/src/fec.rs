@@ -43,7 +43,7 @@
 //! checks this decoder against a frame that implementation actually produced,
 //! rather than against a matching encoder written from the same misreading.
 
-use sdroxide_dsp::{ConvCode, viterbi_soft};
+use sdroxide_dsp::{Complex32, ConvCode, viterbi_soft};
 
 use crate::bpsk::BAUD;
 use crate::rs::{self, Rs};
@@ -235,6 +235,37 @@ pub fn decode_frame(soft: &[f32]) -> Option<FecFrame> {
     }
 
     Some(FecFrame { payload, start: al.start, sync_quality: al.quality, rs_errors })
+}
+
+/// Decode a coded frame straight from complex baseband.
+///
+/// Runs the tracking receiver ([`crate::rx`]) over `iq`, seeded with the
+/// spectral tracker's carrier estimate, and tries both Manchester parities
+/// through [`decode_frame`]. `iq` needs to span at least one whole frame plus
+/// enough for the loops to pull in on — [`FRAME_SECONDS`] and a little.
+///
+/// Returns the frame and the carrier the receiver settled on, which is a
+/// measurement of the station's frequency error in its own right and a better
+/// one than the search produces: it is where the loop *is*, not the grid point
+/// that happened to decode.
+pub fn decode_iq(iq: &[Complex32], rate_hz: f64, carrier_hz: f64) -> Option<(FecFrame, f64)> {
+    let mut rx = crate::rx::Rx::new(rate_hz, carrier_hz);
+    let mut flips = Vec::new();
+    for chunk in iq.chunks(8192) {
+        flips.extend(rx.process(chunk));
+    }
+    (0..2)
+        .find_map(|parity| decode_frame(&crate::rx::symbols(&flips, parity)))
+        .map(|f| (f, rx.state().carrier_hz))
+}
+
+/// The payload as text, for the operator's readout.
+///
+/// The coded beacon's payload is the same sort of thing the uncoded one
+/// carries — status lines meant to be read — so it is rendered the same way,
+/// lossily, rather than being hidden behind a "256 bytes decoded".
+pub fn payload_text(payload: &[u8]) -> String {
+    String::from_utf8_lossy(payload).into_owned()
 }
 
 #[cfg(test)]

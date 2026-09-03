@@ -2494,11 +2494,27 @@ anywhere the beacon is still inside the captured span.
   station that also has one: the row's offset is the one the dial uses, so
   that is the one AUTO and APPLY correct — if you have edited the single
   converter offset by hand and nothing changed, that is why.
-- **TELEMETRY** (optional) additionally runs the AO-40 frame decoder, with a
+- **TELEMETRY** (optional) additionally runs the AO-40 frame decoders, with a
   `carrier → sync → CRC` readout of how far each pass got. It is an independent
   check and shows the beacon's own status text when it locks; it is not needed
-  for calibration and depends heavily on LNB phase-noise — a clean twin-lobe
-  shape can track perfectly while the bits never decode.
+  for calibration.
+
+  The beacon alternates two frame formats and sdroxide reads both. The
+  **uncoded** frame is 514 bytes behind a sync word and a CRC, and it either
+  checks out or it does not — which on a station with a phase-noisy LNB
+  usually means it does not, because a CRC over 514 bytes wants a nearly
+  perfect bit stream. The **coded** frame carries 256 bytes behind Reed-Solomon
+  and convolutional coding, interleaving and a distributed sync vector, and
+  still decodes with roughly one channel symbol in twelve arriving wrong. If
+  telemetry appears on your station at all, that is usually the one bringing
+  it.
+
+  Behind both is a tracking receiver — a frequency-locked loop on the carrier,
+  a matched filter on the chips, and a timing loop on the chip clock — so a
+  drifting LNB is *followed* rather than searched for. It locks frequency and
+  not phase deliberately: the beacon is differentially encoded, so absolute
+  phase carries nothing, and a phase-locked loop would spend its life fighting
+  LNB phase noise for a quantity nothing needs.
 
 #### Recommended procedure
 

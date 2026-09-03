@@ -277,9 +277,40 @@ impl Qo100Controller {
                                             &cancel,
                                         );
                                         progress = prog;
-                                        if let Some(l) = lock {
-                                            locked += 1;
-                                            last = Some((l.offset_hz, l.text, now));
+                                        match lock {
+                                            Some(l) => {
+                                                locked += 1;
+                                                last = Some((l.offset_hz, l.text, now));
+                                            }
+                                            // The beacon alternates uncoded
+                                            // and coded frames, so a window
+                                            // the uncoded decoder made nothing
+                                            // of may simply have held the
+                                            // other kind — and on a station
+                                            // whose phase noise the 514-byte
+                                            // CRC cannot survive, the coded
+                                            // frame is the only one that will
+                                            // ever come back. Tried second
+                                            // rather than first because it is
+                                            // the more expensive of the two
+                                            // and the uncoded path has already
+                                            // done the cheap thing.
+                                            None => {
+                                                let seed =
+                                                    last_est.map(|(e, _)| e.hz).unwrap_or(0.0);
+                                                if let Some((f, carrier)) =
+                                                    crate::fec::decode_iq(&buf, rate_hz, seed)
+                                                {
+                                                    locked += 1;
+                                                    progress.carrier = true;
+                                                    progress.crc_ok = true;
+                                                    last = Some((
+                                                        carrier,
+                                                        crate::fec::payload_text(&f.payload),
+                                                        now,
+                                                    ));
+                                                }
+                                            }
                                         }
                                     } else {
                                         progress = bpsk::DecodeProgress::default();
