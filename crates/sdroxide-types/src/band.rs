@@ -77,6 +77,16 @@ impl Band {
         Band::Gen,
     ];
 
+    /// This band's place in [`Band::ALL`] — the order the bands are shown in,
+    /// and a stable index for a table with one entry per band.
+    ///
+    /// Not the declaration order, which is the postcard wire order and has 70
+    /// cm, 4 m and 1.25 m appended out of place; [`Band::ALL`] is the order an
+    /// operator reads.
+    pub fn index(self) -> usize {
+        Band::ALL.iter().position(|b| *b == self).unwrap_or(Band::ALL.len() - 1)
+    }
+
     /// The band's name, as the station's configured region writes it.
     pub fn label(self) -> &'static str {
         self.label_in(crate::region())

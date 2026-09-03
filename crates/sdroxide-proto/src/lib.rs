@@ -1160,7 +1160,16 @@ use sdroxide_types::{
 /// (issue #295). `RadioConfig` rides `ServerMsg::RadioConfig` and
 /// `Command::SetRadioConfig` whole, so a v128 peer handed one with a field on
 /// the end reads the tail of every one of those messages out of step.
-pub const PROTO_VERSION: u16 = 129;
+///
+/// v130: operator-defined open-collector control words —
+/// [`sdroxide_types::HpsdrConfig`] gains `oc_table` at its tail and
+/// [`sdroxide_types::HpsdrFilterBoard`] gains a `Custom` variant (issue #296).
+/// The block sits in the middle of `RadioConfig`, which rides
+/// `ServerMsg::RadioConfig` and `Command::SetRadioConfig` whole, so a v129 peer
+/// reads every field after `hpsdr` out of step; and the enum's new variant is
+/// appended, so no surviving discriminant moved but a v129 peer handed one
+/// fails to decode the message carrying it.
+pub const PROTO_VERSION: u16 = 130;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
@@ -2047,6 +2056,26 @@ mod tests {
             // The other enum with a payload on one variant only, near the end
             // of the struct — so a slip anywhere above it lands here.
             rx_site: sdroxide_types::RxSite::Elsewhere("DO30db".into()),
+            // A `Vec` in the middle of the struct, of a struct carrying an enum
+            // — and the enum's own new variant, which is the pair that has to
+            // survive together. Two bands, one asserting different words on
+            // receive and transmit.
+            hpsdr: sdroxide_types::HpsdrConfig {
+                filter_board: sdroxide_types::HpsdrFilterBoard::Custom,
+                oc_table: vec![
+                    sdroxide_types::HpsdrOcRow {
+                        band: sdroxide_types::Band::M40,
+                        rx: 0x01,
+                        tx: 0x41,
+                    },
+                    sdroxide_types::HpsdrOcRow {
+                        band: sdroxide_types::Band::M2,
+                        rx: 0x7F,
+                        tx: 0x00,
+                    },
+                ],
+                ..sdroxide_types::HpsdrConfig::default()
+            },
             // The last field in the struct, and a `Vec` of a struct carrying an
             // enum: a length, then variant indices and floats. Two rows, on
             // bands far apart in `Band`'s declaration order, so a discriminant

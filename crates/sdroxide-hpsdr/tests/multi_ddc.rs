@@ -219,7 +219,7 @@ fn two_ddcs_share_one_connection_and_detach_independently() {
         "127.0.0.1".parse().unwrap(),
         384_000.0,
         0.0,
-        sdroxide_types::HpsdrFilterBoard::None,
+        sdroxide_types::HpsdrOcPlan::none(),
         false,
         true,
         sdroxide_types::HpsdrIoRxInput::Radio,

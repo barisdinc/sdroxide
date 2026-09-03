@@ -15,6 +15,7 @@ use crossbeam_channel::Receiver;
 use rtrb::{Consumer, Producer};
 
 use crate::net::{Ctrl, RxStats, SeqTracker, ThreadCtx, WATCHDOG, hex_head, push_iq};
+use sdroxide_types::HpsdrOcPlan;
 
 /// UDP ports. Host→radio use these as the *destination* port; radio→host DDC IQ
 /// arrives with a *source* port of [`port::DDC_IQ_BASE`]` + ddc_index`.
@@ -163,13 +164,25 @@ pub fn duc_command_packet(seq: u32) -> [u8; DUC_COMMAND_LEN] {
     b
 }
 
+/// Byte of the high-priority packet carrying the open-collector outputs, and
+/// the shift they sit at inside it.
+///
+/// Same convention as Protocol 1's C2 (`protocol1::config_cc`): the seven
+/// outputs occupy bits 7..1 with bit 0 unused, so the word is written shifted
+/// up by one. Offset and shift are from piHPSDR's `new_protocol.c`, which
+/// writes `band->OCtx`/`OCrx << 1` here, and from the N4MTT dissector; like
+/// every other offset in this file they are **not** hardware-verified.
+const HP_OC: usize = 1400;
+
 /// Build the High-Priority command packet (dest port 1027): the run bit, RX/TX
-/// NCO frequencies, PTT/MOX, and drive level (0..=255).
+/// NCO frequencies, PTT/MOX, drive level (0..=255) and the open-collector
+/// outputs.
 ///
 /// Offsets: DDC-*n* RX NCO @ `buf[9 + 4n .. 13 + 4n]` (the spec's frequency
 /// table, 4 bytes per DDC), TX DUC0 NCO @ `buf[329..333]`, drive @ `buf[345]`,
-/// run/MOX flags @ `buf[4]` — canonical P2 values; DDC0's offset is
-/// hardware-verified, the stride is per the TAPR layout.
+/// open collectors @ `buf[1400]` (see [`HP_OC`]), run/MOX flags @ `buf[4]` —
+/// canonical P2 values; DDC0's offset is hardware-verified, the stride is per
+/// the TAPR layout.
 ///
 /// `run` is bit 0 of byte 4 and is the *only* thing that starts and stops the
 /// radio's streams. Sending this packet with it clear is how a session ends —
@@ -179,6 +192,11 @@ pub fn duc_command_packet(seq: u32) -> [u8; DUC_COMMAND_LEN] {
 /// `rx_phases[n]` is DDC *n*'s phase word; a DDC that is not enabled simply
 /// has its slot written as given (zero for an unused one is fine — the board
 /// ignores frequencies of disabled DDCs).
+///
+/// `oc` is the seven open-collector lines as the accessory board sees them
+/// (bit 0 = output 1), and is zero on a station that has configured no filter
+/// board — which is what every Protocol 2 radio sent before issue #296,
+/// because nothing on this path wrote the byte at all.
 pub fn high_priority_packet(
     seq: u32,
     rx_phases: &[u32; MAX_DDCS as usize],
@@ -186,6 +204,7 @@ pub fn high_priority_packet(
     run: bool,
     ptt: bool,
     drive: u8,
+    oc: u8,
 ) -> [u8; HIGH_PRIORITY_LEN] {
     let mut b = [0u8; HIGH_PRIORITY_LEN];
     put_u32_be(&mut b, 0, seq);
@@ -195,6 +214,7 @@ pub fn high_priority_packet(
     }
     put_u32_be(&mut b, 329, tx_phase); // DUC0 TX NCO
     b[345] = drive; // TX drive level 0..255
+    b[HP_OC] = (oc & 0x7F) << 1; // open-collector outputs 1..7
     b
 }
 
@@ -285,6 +305,8 @@ pub(crate) fn run(ctx: ThreadCtx) {
         seq: Seq::default(),
         tx_freq: 7_100_000.0,
         ptt: false,
+        oc: ctx.oc,
+        band_dial: None,
         last_kick: None,
         kick_logged: false,
         // The two-ADC boards drive a second Alex chain; the rest have one.
@@ -333,6 +355,14 @@ struct P2Thread {
     seq: Seq,
     tx_freq: f64,
     ptt: bool,
+    /// How the seven open-collector outputs are driven (issue #296).
+    oc: HpsdrOcPlan,
+    /// Where the operator's dial is, when a transverter has put the radio
+    /// somewhere else — the frequency the accessory board's decoder has to
+    /// switch for. `None` when nothing is in front of the radio, which is when
+    /// the DDC frequency *is* the band. Exactly `Regs::band_dial`'s job on the
+    /// Protocol 1 side.
+    band_dial: Option<f64>,
     /// The starved-DDC watchdog's rate limit and one-shot log flag.
     last_kick: Option<Instant>,
     kick_logged: bool,
@@ -359,15 +389,45 @@ impl P2Thread {
         }
         let tx = phase_word(self.tx_freq, CLOCK_HZ);
         let drive = if self.ptt { TX_DRIVE } else { 0 };
-        let pkt = high_priority_packet(seq, &phases, tx, run, self.ptt, drive);
+        let oc = self.oc_word();
+        let pkt = high_priority_packet(seq, &phases, tx, run, self.ptt, drive, oc);
         tracing::trace!(
             "HPSDR P2: high-priority seq {seq}: run {run}, {} DDC NCO(s), TX phase 0x{tx:08X} \
-             ({:.0} Hz), MOX {}, drive {drive}",
+             ({:.0} Hz), MOX {}, drive {drive}, OC 0x{oc:02X}",
             self.slots.len(),
             self.tx_freq,
             self.ptt
         );
         let _ = self.socket.send_to(&pkt, self.dest(port::HIGH_PRIORITY));
+    }
+
+    /// The seven open-collector outputs for wherever this radio is working:
+    /// the transmit frequency while keyed — the low-pass filter has to match
+    /// what is actually going out — and the receive frequency otherwise.
+    ///
+    /// The dial wins where there is one: with a 2 m transverter in front, the
+    /// DDC says 28 MHz and the filters, relays and transverter the decoder
+    /// switches all belong to 144 (issue #278). Without a dial it is DDC 0's
+    /// frequency, because DDC 0 is the receiver that owns the transmitter; a
+    /// second radio tab on another DDC is a panadapter and does not get to
+    /// throw the station's relays.
+    fn oc_word(&self) -> u8 {
+        let freq = match self.band_dial {
+            Some(hz) => hz,
+            None if self.ptt => self.tx_freq,
+            None => match self.slots.get(&0) {
+                Some(s) => s.freq_hz,
+                // No DDC 0 attached: the lowest one there is, so a board driven
+                // by a panadapter-only tab still switches for what it hears
+                // rather than for 7.1 MHz.
+                None => self
+                    .slots
+                    .iter()
+                    .min_by_key(|(d, _)| **d)
+                    .map_or(self.tx_freq, |(_, s)| s.freq_hz),
+            },
+        };
+        self.oc.word(freq, self.ptt)
     }
 
     fn send_ddc_command(&mut self) {
@@ -537,11 +597,16 @@ impl P2Thread {
                     // Protocol 2 boards have no front-end gain register this
                     // crate drives; the DDC command carries no gain field.
                     Ctrl::RxGain(_) => {}
-                    // Protocol 2's accessory-board outputs are the radio's own
-                    // band table rather than seven lines this end computes, so
-                    // there is nothing here to point at the dial. Protocol 1
-                    // drives them itself and does follow it (issue #278).
-                    Ctrl::BandDial(_) => {}
+                    // The open collectors follow the dial here exactly as they
+                    // do on Protocol 1: a band decoder switches for the signal
+                    // on the air, not for the I.F. a transverter left the radio
+                    // on (issue #278, and #296 for driving them at all).
+                    Ctrl::BandDial(hz) => {
+                        if self.band_dial != hz {
+                            self.band_dial = hz;
+                            freq_changed = true;
+                        }
+                    }
                     // Load the DUC ahead of key-down. Nothing on a Protocol 2
                     // board acts on this until MOX — there is no accessory bus
                     // here of the kind the Hermes-Lite has — but keeping the
@@ -776,7 +841,7 @@ mod tests {
         phases[0] = rx0;
         phases[1] = rx1;
         let tx = phase_word(7_100_000.0, CLOCK_HZ);
-        let b = high_priority_packet(0, &phases, tx, true, true, 200);
+        let b = high_priority_packet(0, &phases, tx, true, true, 200, 0);
         assert_eq!(b[4] & 0x02, 0x02, "MOX bit set");
         // The DDC frequency table: 4 bytes per DDC from offset 9.
         assert_eq!(u32::from_be_bytes([b[9], b[10], b[11], b[12]]), rx0);
@@ -784,6 +849,29 @@ mod tests {
         assert_eq!(u32::from_be_bytes([b[17], b[18], b[19], b[20]]), 0, "DDC2 unused");
         assert_eq!(u32::from_be_bytes([b[329], b[330], b[331], b[332]]), tx);
         assert_eq!(b[345], 200);
+        assert_eq!(b[HP_OC], 0, "no filter board configured: every output off");
+    }
+
+    /// The open-collector byte, which Protocol 2 never used to send at all —
+    /// so a Protocol 2 station could not switch a filter board, an antenna
+    /// relay or an amplifier's band decoder from sdroxide however the filter
+    /// board setting was left (issue #296).
+    ///
+    /// Same convention as Protocol 1's C2: seven outputs in bits 7..1, bit 0
+    /// unused, so the word goes out shifted up by one.
+    #[test]
+    fn the_open_collector_word_lands_in_the_high_priority_packet() {
+        let phases = [0u32; MAX_DDCS as usize];
+        // Outputs 1, 3 and 7.
+        let b = high_priority_packet(0, &phases, 0, true, false, 0, 0b100_0101);
+        assert_eq!(b[HP_OC], 0b1000_1010, "outputs 1, 3 and 7, shifted off bit 0");
+        assert_eq!(HP_OC, 1400);
+        // Nothing else in the packet moved with it.
+        assert_eq!(b[345], 0);
+        assert!(b[1401..].iter().all(|&x| x == 0), "nothing written past the OC byte");
+        // There is no eighth output: bit 7 of the word cannot reach the wire.
+        let b = high_priority_packet(0, &phases, 0, true, false, 0, 0xFF);
+        assert_eq!(b[HP_OC], 0xFE);
     }
 
     /// Byte 4 of a 60-byte datagram to port 1024 is the packet *type*, and
@@ -815,13 +903,13 @@ mod tests {
     #[test]
     fn the_run_bit_lives_in_the_high_priority_packet() {
         let phases = [0u32; MAX_DDCS as usize];
-        let running = high_priority_packet(0, &phases, 0, true, false, 0);
+        let running = high_priority_packet(0, &phases, 0, true, false, 0, 0);
         assert_eq!(running[4] & 0x01, 0x01, "run");
         assert_eq!(running[4] & 0x02, 0x00, "not keyed");
-        let stopped = high_priority_packet(1, &phases, 0, false, false, 0);
+        let stopped = high_priority_packet(1, &phases, 0, false, false, 0, 0);
         assert_eq!(stopped[4], 0x00, "a stop is the run bit cleared, and nothing else");
         // MOX rides beside it either way.
-        assert_eq!(high_priority_packet(2, &phases, 0, true, true, 0)[4], 0x03);
+        assert_eq!(high_priority_packet(2, &phases, 0, true, true, 0, 0)[4], 0x03);
     }
 
     #[test]

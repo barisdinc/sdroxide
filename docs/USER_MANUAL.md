@@ -6019,10 +6019,11 @@ Rows are tried in the order they are listed, and a dial no row covers falls
 through to the single **Offset** above and then to the bare radio — which is
 what keeps HF working on a station whose only converter is a 2 m transverter.
 Everything downstream follows the dial as it always has: the band buttons, the
-band-plan strip, the logbook, spots, the transmit gate, and on a Hermes/HPSDR
-board with a filter board on J16, the open-collector band code the accessory
-board switches its filters, relays and transverters with — that follows the
-frequency on the air, not the intermediate frequency the radio is sitting on.
+band-plan strip, the logbook, spots, the transmit gate, and on an HPSDR board
+with anything on its open-collector outputs, the control word the accessory
+switches its filters, relays and transverters with — that follows the frequency
+on the air, not the intermediate frequency the radio is sitting on, on both
+protocols.
 
 Two things the table does not do, on purpose. It does not switch the radio's own
 PA off or hold its T/R relay in receive — on a Hermes-Lite that is the **PA
@@ -7045,25 +7046,64 @@ involved:
   convincing-looking traces while SSB comes out on the wrong sideband and FT8
   returns no decodes at all (or a handful of CQs from callsigns that don't match
   their grid).
-- **Filter board** — which accessory board is fitted to the Hermes Lite 2's J16
-  header. Leave this at **None** unless one really is fitted. Those seven pins
-  are general-purpose open-collector outputs, and operators also use them for
-  amplifier PTT, antenna relays and transverter switching; driving them from
-  band data would start operating whatever is connected. (If what you want is
-  an antenna relay that follows *transmit* rather than the band, that is the
-  **T/R switch** tab — see [6.11](#611-tr-switch-protecting-the-receiver-on-transmit)
-  — which drives one over USB and sequences an amplifier with it.) With the **N2ADR filter
-  board** selected, the low-pass filter follows the band you are on (the
-  transmit band while keyed) and the board's 3 MHz receive high-pass is switched
-  in above 3 MHz. **Alex / Hermes band code** is the other convention: the band
-  goes out as a four-bit number on outputs 1–4 (160 m = 1, 80 m = 2, 60 m = 0,
-  40 m = 3, 30 m = 4, 20 m = 5, 17 m = 6, 15 m = 7, 12 m = 8, 10 m = 9, 6 m =
-  10), which is what an ANAN's Alex board, a Zeus SDR, a HiQSDR and Quisk all
-  expect. Outputs 5–7 stay off on that preset — they carry no part of the band
-  code, and on those boards they are the spare pins operators wire to a
-  preamplifier, an attenuator or a transverter. Either preset follows the
-  transmit frequency while keyed and the receive frequency otherwise, and both
-  take effect on **Apply / reconnect**.
+- **Filter board** — how the board's seven open-collector outputs are driven.
+  On a Hermes Lite 2 these are the J16 header; every other openHPSDR board has
+  them too, **Protocol 2 boards included** (Odyssey 2, ANAN-G2, Saturn — before
+  1.6.5 nothing was sent on those at all, whatever this was set to). Leave this
+  at **None** unless something really is connected. Those pins are
+  general-purpose outputs, and operators also use them for amplifier PTT,
+  antenna relays and transverter switching; driving them from band data would
+  start operating whatever is wired there. (If what you want is an antenna relay
+  that follows *transmit* rather than the band, that is the **T/R switch** tab —
+  see [6.11](#611-tr-switch-protecting-the-receiver-on-transmit) — which drives
+  one over USB and sequences an amplifier with it.) There are three ways to
+  drive them:
+
+  - **N2ADR filter board** — the low-pass filter follows the band you are on
+    (the transmit band while keyed) and the board's 3 MHz receive high-pass is
+    switched in above 3 MHz.
+  - **Alex / Hermes band code** — the band goes out as a four-bit number on
+    outputs 1–4 (160 m = 1, 80 m = 2, 60 m = 0, 40 m = 3, 30 m = 4, 20 m = 5,
+    17 m = 6, 15 m = 7, 12 m = 8, 10 m = 9, 6 m = 10), which is what an ANAN's
+    Alex board, a Zeus SDR, a HiQSDR and Quisk all expect. Outputs 5–7 stay off
+    — they carry no part of the band code, and on those boards they are the
+    spare pins operators wire to a preamplifier, an attenuator or a
+    transverter.
+  - **Custom** — you state the words yourself in the table that appears below,
+    described next.
+
+  Both presets follow the transmit frequency while keyed and the receive
+  frequency otherwise, and this takes effect on **Apply / reconnect**.
+- **Open-collector outputs by band** — the table **Custom** opens: one control
+  word per band, written in hexadecimal the way your hardware's documentation
+  states it, with **bit 0 = output 1** and **bit 6 = output 7**. It is there for
+  everything the two presets do not fit — an antenna switch, an amplifier's band
+  decoder, a transverter sequencer, a filter board with its own wiring.
+
+  Each band has **two** words. **RX** is asserted while you are receiving on
+  that band and **TX** while the transmitter is keyed. Make them the same for a
+  filter, which has to be in circuit both ways, and different for anything that
+  belongs on one side of the changeover only — an amplifier's key line, a
+  receive preamplifier's bypass. The outputs each word asserts are listed beside
+  it, so there is no need to convert in your head. A band left at `0x00` asserts
+  nothing. The last row, **Other**, is everywhere outside the amateur bands —
+  short-wave listening, and anything a transverter's dial lands on that no band
+  covers; without it a custom table would leave those frequencies unfiltered
+  where a preset gives them the nearest filter it has.
+
+  **FILL FROM N2ADR** and **FILL FROM ALEX BAND CODE** replace the table with
+  what that preset would send on every band, which is how you configure a board
+  that is *nearly* one of them: pour the preset in, then change the pins that
+  differ. **CLEAR** puts every band back to nothing. The table is kept even
+  while a preset is selected, so switching to one to compare and back again does
+  not lose it.
+
+  What is driven is the seven open collectors, and only those. sdroxide does not
+  send a genuine Alex board's own 32-bit filter word on either protocol — the
+  **Alex / Hermes band code** preset is that band code on the open collectors,
+  which is what the boards listed above read. The Protocol 2 byte carrying these
+  outputs is taken from the published field layout and has **not** been verified
+  against a Protocol 2 board here; reports are welcome.
 - **Transmit buffer** — how far ahead of real time transmit audio is fed toward
   the board, 10 to 500 ms, before sdroxide slows down to feed it at exactly the
   rate the board consumes it. That head start is the only thing covering a
@@ -13404,12 +13444,14 @@ All in [§6.2.3](#623-hpsdr-network-radios):
   PTT, accessory bus — but the antenna jack makes no power. Turn it off only
   when driving an external amplifier from RF1.
 - **Invert spectrum is on by default because a Hermes Lite 2 needs it.**
-- **Filter board:** leave at `None` unless one really is fitted — the J16
-  pins are general-purpose outputs that operators also wire to amp PTT and
-  antenna relays, and driving them from band data would operate whatever is
-  connected. `N2ADR` is one relay per band; `Alex / Hermes band code` is the
-  four-bit band number on outputs 1–4 that an ANAN, a Zeus SDR, a HiQSDR or
-  Quisk expects.
+- **Filter board:** leave at `None` unless something really is connected — the
+  open-collector pins are general-purpose outputs that operators also wire to
+  amp PTT and antenna relays, and driving them from band data would operate
+  whatever is there. `N2ADR` is one relay per band; `Alex / Hermes band code` is
+  the four-bit band number on outputs 1–4 that an ANAN, a Zeus SDR, a HiQSDR or
+  Quisk expects; `Custom` opens a per-band table of your own words, with a
+  separate one for receive and transmit. **They work on Protocol 2 boards too**
+  as of 1.6.5 — before that nothing was sent on a P2 radio however this was set.
 - Over WiFi or a VPN raise **Transmit buffer** to 100–200 ms.
 - Protocol 1 boards (the HL2 among them) top out at 384 kHz and have DDC1
   only; a Protocol 2 board gives a second band to a second radio tab on

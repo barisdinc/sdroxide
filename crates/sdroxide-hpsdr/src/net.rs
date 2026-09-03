@@ -14,7 +14,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::discovery;
 use crate::{protocol1, protocol2};
-use sdroxide_types::{HpsdrFilterBoard, HpsdrIoRxInput};
+use sdroxide_types::{HpsdrIoRxInput, HpsdrOcPlan};
 
 /// Host→radio TX I/Q rate. **Both** protocols transmit at 48 kHz: Protocol 2
 /// feeds the DUC directly, and Protocol 1's EP2 stream (speaker audio + TX I/Q)
@@ -433,8 +433,9 @@ pub(crate) struct ThreadCtx {
     pub rate_hz: f64,
     /// Initial front-end LNA gain (dB) for boards that have one.
     pub lna_gain_db: f64,
-    /// Accessory board on J16, deciding how the open-collector outputs are driven.
-    pub filter_board: HpsdrFilterBoard,
+    /// How the seven open-collector outputs are driven: a preset's convention
+    /// or the operator's own per-band table (see `HpsdrConfig::oc_plan`).
+    pub oc: HpsdrOcPlan,
     /// Conjugate I/Q in both directions (see `HpsdrConfig::invert_spectrum`).
     pub invert_spectrum: bool,
     /// Switch on the Hermes-Lite's onboard PA (see `HpsdrConfig::pa_enable`).
@@ -515,7 +516,7 @@ impl HpsdrBoard {
         ip: Ipv4Addr,
         sample_rate_hz: f64,
         lna_gain_db: f64,
-        filter_board: HpsdrFilterBoard,
+        oc: HpsdrOcPlan,
         invert_spectrum: bool,
         pa_enable: bool,
         io_rx_input: HpsdrIoRxInput,
@@ -585,11 +586,11 @@ impl HpsdrBoard {
             if invert_spectrum { "INVERTED" } else { "normal" },
             if invert_spectrum { "" } else { "not " },
         );
-        if filter_board != HpsdrFilterBoard::None {
+        if oc.drives_anything() {
             tracing::info!(
-                "HPSDR: driving the J16 open-collector outputs for a {} — check nothing else \
+                "HPSDR: driving the open-collector outputs from {} — check nothing else \
                  (amplifier PTT, antenna relays) is wired to those pins",
-                filter_board.label()
+                oc.describe()
             );
         }
         // The setting that decides whether a keyed Hermes-Lite makes any power
@@ -635,7 +636,7 @@ impl HpsdrBoard {
             board: board.clone(),
             rate_hz: rate,
             lna_gain_db,
-            filter_board,
+            oc,
             invert_spectrum,
             pa_enable,
             io_rx_input,

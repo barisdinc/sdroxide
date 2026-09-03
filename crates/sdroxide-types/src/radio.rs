@@ -1220,17 +1220,234 @@ pub enum HpsdrFilterBoard {
     /// preamplifier, an attenuator or a transverter, and this backend has no
     /// way to know which.
     Alex,
+    /// Neither convention: the operator states the seven outputs themselves,
+    /// band by band, in [`HpsdrConfig::oc_table`] (issue #296).
+    ///
+    /// The two presets above are the boards this program can name. An operator
+    /// with anything else on those pins — an antenna switch, an amplifier's
+    /// band decoder, a transverter sequencer, a filter board neither preset
+    /// fits — knows what their hardware wants and nothing here can guess it, so
+    /// the table is theirs to fill in. Each preset can be *poured into* that
+    /// table as a starting point, which is how a board that is nearly an N2ADR
+    /// gets configured.
+    Custom,
+}
+
+/// Open-collector byte for the N2ADR filter board when tuned to `freq_hz`.
+///
+/// The board selects one-hot from its own documentation: bit 0 = 160 m LPF,
+/// 1 = 80 m, 2 = 60/40 m, 3 = 30/20 m, 4 = 17/15 m, 5 = 12/10 m, and bit 6 is a
+/// 3 MHz high-pass used on receive to keep broadcast AM out of the front end.
+/// The board switches that high-pass out itself while transmitting, so it can be
+/// asserted unconditionally above 3 MHz. Frequencies between the ham bands pick
+/// the lowest filter that still passes them, so short-wave listening is not
+/// filtered into silence.
+pub fn hpsdr_n2adr_oc(freq_hz: f64) -> u8 {
+    let lpf = match freq_hz {
+        f if f <= 2_000_000.0 => 0,
+        f if f <= 4_000_000.0 => 1,
+        f if f <= 7_300_000.0 => 2,
+        f if f <= 14_350_000.0 => 3,
+        f if f <= 21_450_000.0 => 4,
+        _ => 5,
+    };
+    let hpf = if freq_hz >= 3_000_000.0 { 1 << 6 } else { 0 };
+    (1 << lpf) | hpf
+}
+
+/// Open-collector byte for an Alex-style filter board when tuned to `freq_hz`.
+///
+/// Not one-hot like the N2ADR board above: this is the band as a four-bit
+/// number on outputs 1–4, which is the mapping a Hermes/ANAN's Alex board, a
+/// Zeus SDR, a HiQSDR and Quisk's own filter switching all share (issue #196).
+/// 160 m is 1 and the code counts upwards by band — except 60 m, which is 0,
+/// the same byte as "nothing selected", because that is what the boards
+/// expect.
+///
+/// Outputs 5–7 are left off: they carry no part of the band code, and on the
+/// boards that use this mapping they are the spare pins an operator wires to a
+/// preamplifier, an attenuator or a transverter. An operator who wants those
+/// pins driven pours this preset into [`HpsdrConfig::oc_table`] and adds them.
+///
+/// Between the bands the boundary sits in the middle of the gap, so a
+/// short-wave listener gets the nearer of the two filters rather than silence,
+/// and everything below 160 m and above 10 m is carried by the band at that
+/// end.
+pub fn hpsdr_alex_oc(freq_hz: f64) -> u8 {
+    match freq_hz {
+        f if f < 2_750_000.0 => 0x01,  // 160 m
+        f if f < 4_650_000.0 => 0x02,  // 80 m
+        f if f < 6_200_000.0 => 0x00,  // 60 m — no pins, by the board's table
+        f if f < 8_700_000.0 => 0x03,  // 40 m
+        f if f < 12_100_000.0 => 0x04, // 30 m
+        f if f < 16_200_000.0 => 0x05, // 20 m
+        f if f < 19_600_000.0 => 0x06, // 17 m
+        f if f < 23_200_000.0 => 0x07, // 15 m
+        f if f < 26_500_000.0 => 0x08, // 12 m
+        f if f < 39_900_000.0 => 0x09, // 10 m
+        _ => 0x0A,                     // 6 m
+    }
+}
+
+/// One band's open-collector control words: what the seven outputs are while
+/// receiving on that band, and what they are while transmitting on it (issue
+/// #296).
+///
+/// Two words rather than one because the outputs are not only filters. A
+/// low-pass filter has to be the same either way, but an amplifier's key line,
+/// a transverter's sequencer and a receive preamplifier's bypass are all things
+/// an operator wants asserted on exactly one side of the changeover — and
+/// Thetis's table, which this is modelled on, has offered both since the
+/// beginning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HpsdrOcRow {
+    /// The band these words apply to, matched against the frequency on the
+    /// *dial*: an accessory board switches for the signal on the air, not for
+    /// the intermediate frequency a transverter left the radio on.
+    pub band: Band,
+    /// Outputs 1–7 as a bit mask (bit 0 = output 1) while receiving. Bit 7 is
+    /// not an output and is ignored.
+    pub rx: u8,
+    /// The same while the transmitter is keyed.
+    pub tx: u8,
+}
+
+impl HpsdrOcRow {
+    /// One of the presets poured into a table, so it can be edited from
+    /// something that works rather than from seven zeros.
+    ///
+    /// Each band is asked for at its own default entry frequency, which is
+    /// inside the band in every region. Receive and transmit come out the same:
+    /// both presets describe filters, which have to be in circuit in both
+    /// directions — the N2ADR board's receive-only 3 MHz high-pass is switched
+    /// out by the board itself, not by us. What an operator wants on one side
+    /// only is exactly what they add here afterwards.
+    pub fn from_preset(board: HpsdrFilterBoard) -> Vec<HpsdrOcRow> {
+        let Some(f) = (match board {
+            HpsdrFilterBoard::N2adr => Some(hpsdr_n2adr_oc as fn(f64) -> u8),
+            HpsdrFilterBoard::Alex => Some(hpsdr_alex_oc as fn(f64) -> u8),
+            HpsdrFilterBoard::None | HpsdrFilterBoard::Custom => None,
+        }) else {
+            return Vec::new();
+        };
+        Band::ALL
+            .iter()
+            .filter(|b| **b != Band::Gen)
+            .map(|&band| {
+                let w = f(band.default_entry().0) & 0x7F;
+                HpsdrOcRow { band, rx: w, tx: w }
+            })
+            .collect()
+    }
+}
+
+/// The open-collector outputs resolved for a whole connection: which convention
+/// is in force, and — for [`HpsdrFilterBoard::Custom`] — the operator's words
+/// for every band, ready to be indexed rather than searched.
+///
+/// Flattened out of [`HpsdrConfig`] at open time and `Copy`, because the
+/// protocol threads carry it inside a register snapshot that is copied around
+/// several hundred times a second; a `Vec` there would be a heap allocation per
+/// datagram and would cost those structs their `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HpsdrOcPlan {
+    board: HpsdrFilterBoard,
+    /// Indexed by [`Band::index`]; only read under `Custom`.
+    rx: [u8; Band::ALL.len()],
+    tx: [u8; Band::ALL.len()],
+}
+
+impl Default for HpsdrOcPlan {
+    fn default() -> Self {
+        HpsdrOcPlan {
+            board: HpsdrFilterBoard::None,
+            rx: [0; Band::ALL.len()],
+            tx: [0; Band::ALL.len()],
+        }
+    }
+}
+
+impl HpsdrOcPlan {
+    /// Nothing attached: every output stays off, whatever the dial does.
+    pub fn none() -> HpsdrOcPlan {
+        HpsdrOcPlan::default()
+    }
+
+    /// The plan a preset alone describes, for a caller that has no table.
+    pub fn preset(board: HpsdrFilterBoard) -> HpsdrOcPlan {
+        HpsdrOcPlan { board, ..HpsdrOcPlan::default() }
+    }
+
+    /// Which convention this plan drives.
+    pub fn board(&self) -> HpsdrFilterBoard {
+        self.board
+    }
+
+    /// What the log line at open calls this — the operator's only warning that
+    /// seven general-purpose outputs are about to start moving, so it names
+    /// what will move them rather than repeating a menu entry.
+    pub fn describe(&self) -> String {
+        match self.board {
+            HpsdrFilterBoard::None => "nothing (all outputs off)".into(),
+            HpsdrFilterBoard::N2adr => "an N2ADR filter board".into(),
+            HpsdrFilterBoard::Alex => "an Alex / Hermes band code".into(),
+            HpsdrFilterBoard::Custom => {
+                let bands = Band::ALL
+                    .iter()
+                    .filter(|b| {
+                        let i = b.index();
+                        self.rx[i] != 0 || self.tx[i] != 0
+                    })
+                    .count();
+                format!("a custom table ({bands} band(s) with outputs asserted)")
+            }
+        }
+    }
+
+    /// Whether anything at all is driven. A plan that asserts nothing on any
+    /// band is the same as no accessory board, and is not announced as one.
+    pub fn drives_anything(&self) -> bool {
+        match self.board {
+            HpsdrFilterBoard::None => false,
+            HpsdrFilterBoard::Custom => self.rx.iter().chain(&self.tx).any(|&w| w != 0),
+            _ => true,
+        }
+    }
+
+    /// The seven outputs for a radio on `freq_hz`, keyed or not — bit 0 is
+    /// output 1, and bit 7 is never set (there is no eighth output).
+    ///
+    /// The two presets are frequency-driven and answer the same word either
+    /// way: they describe filters, and the caller has already handed us the
+    /// transmit frequency if that is what is on the air. Only a custom table
+    /// distinguishes the two directions, which is the point of having one.
+    pub fn word(&self, freq_hz: f64, keyed: bool) -> u8 {
+        match self.board {
+            HpsdrFilterBoard::None => 0,
+            HpsdrFilterBoard::N2adr => hpsdr_n2adr_oc(freq_hz),
+            HpsdrFilterBoard::Alex => hpsdr_alex_oc(freq_hz),
+            HpsdrFilterBoard::Custom => {
+                let i = Band::containing(freq_hz).index();
+                if keyed { self.tx[i] } else { self.rx[i] }
+            }
+        }
+    }
 }
 
 impl HpsdrFilterBoard {
-    pub const ALL: [HpsdrFilterBoard; 3] =
-        [HpsdrFilterBoard::None, HpsdrFilterBoard::N2adr, HpsdrFilterBoard::Alex];
+    pub const ALL: [HpsdrFilterBoard; 4] = [
+        HpsdrFilterBoard::None,
+        HpsdrFilterBoard::N2adr,
+        HpsdrFilterBoard::Alex,
+        HpsdrFilterBoard::Custom,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             HpsdrFilterBoard::None => "None — outputs stay off",
             HpsdrFilterBoard::N2adr => "N2ADR filter board",
             HpsdrFilterBoard::Alex => "Alex / Hermes band code (Zeus, HiQSDR, Quisk)",
+            HpsdrFilterBoard::Custom => "Custom — my own table below",
         }
     }
 }
@@ -1349,6 +1566,15 @@ pub struct HpsdrConfig {
     /// an operator who has a correction they are happy with.
     #[serde(default)]
     pub ps_frozen: bool,
+    /// The operator's own open-collector words, one row per band, used when
+    /// [`Self::filter_board`] is [`HpsdrFilterBoard::Custom`] — see
+    /// [`HpsdrOcRow`] (issue #296).
+    ///
+    /// Kept even while a preset is selected: switching to a preset to compare
+    /// and back again must not throw the table away. A band with no row
+    /// asserts nothing, which is what a fresh table is made of.
+    #[serde(default)]
+    pub oc_table: Vec<HpsdrOcRow>,
 }
 
 impl Default for HpsdrConfig {
@@ -1369,11 +1595,26 @@ impl Default for HpsdrConfig {
             ps_bins: Self::default_ps_bins(),
             ps_rate: Self::default_ps_rate(),
             ps_frozen: false,
+            oc_table: Vec::new(),
         }
     }
 }
 
 impl HpsdrConfig {
+    /// The open-collector outputs this configuration asks for, flattened for
+    /// the protocol threads — see [`HpsdrOcPlan`] (issue #296).
+    pub fn oc_plan(&self) -> HpsdrOcPlan {
+        let mut plan = HpsdrOcPlan::preset(self.filter_board);
+        if self.filter_board == HpsdrFilterBoard::Custom {
+            for row in &self.oc_table {
+                let i = row.band.index();
+                plan.rx[i] = row.rx & 0x7F;
+                plan.tx[i] = row.tx & 0x7F;
+            }
+        }
+        plan
+    }
+
     /// See [`Self::ps_bins`] — the same 32 steps the other caller of this
     /// processor starts at.
     pub fn default_ps_bins() -> u8 {
@@ -5701,6 +5942,94 @@ impl BandDriveTrim {
             return 1.0;
         }
         10f32.powf(db / if drive_is_power { 10.0 } else { 20.0 })
+    }
+}
+
+#[cfg(test)]
+mod oc_table_tests {
+    use super::*;
+
+    /// The operator's own words reach the wire, and receive and transmit are
+    /// genuinely separate — which is what an amplifier key line or a receive
+    /// preamplifier bypass on one of those pins needs (issue #296).
+    #[test]
+    fn a_custom_table_answers_per_band_and_per_direction() {
+        let cfg = HpsdrConfig {
+            filter_board: HpsdrFilterBoard::Custom,
+            oc_table: vec![
+                HpsdrOcRow { band: Band::M40, rx: 0x01, tx: 0x41 },
+                HpsdrOcRow { band: Band::M20, rx: 0x02, tx: 0x02 },
+            ],
+            ..HpsdrConfig::default()
+        };
+        let plan = cfg.oc_plan();
+        assert_eq!(plan.word(7_074_000.0, false), 0x01);
+        assert_eq!(plan.word(7_074_000.0, true), 0x41, "the amplifier line is transmit-only");
+        assert_eq!(plan.word(14_074_000.0, false), 0x02);
+        assert_eq!(plan.word(14_074_000.0, true), 0x02, "a filter is the same either way");
+        // A band with no row asserts nothing, and so does a dial outside every
+        // band: an operator who has said nothing about 10 m has said nothing.
+        assert_eq!(plan.word(28_074_000.0, false), 0);
+        assert_eq!(plan.word(11_000_000.0, false), 0);
+        assert!(plan.drives_anything());
+    }
+
+    /// Selecting a preset ignores the table, and selecting nothing ignores
+    /// both — the table stays on disk either way, so switching back and forth
+    /// to compare does not throw it away.
+    #[test]
+    fn a_preset_outranks_the_table_without_destroying_it() {
+        let mut cfg = HpsdrConfig {
+            filter_board: HpsdrFilterBoard::Alex,
+            oc_table: vec![HpsdrOcRow { band: Band::M40, rx: 0x7F, tx: 0x7F }],
+            ..HpsdrConfig::default()
+        };
+        assert_eq!(cfg.oc_plan().word(7_074_000.0, false), hpsdr_alex_oc(7_074_000.0));
+        cfg.filter_board = HpsdrFilterBoard::None;
+        assert_eq!(cfg.oc_plan().word(7_074_000.0, false), 0);
+        assert!(!cfg.oc_plan().drives_anything());
+        cfg.filter_board = HpsdrFilterBoard::Custom;
+        assert_eq!(cfg.oc_plan().word(7_074_000.0, false), 0x7F, "the table was still there");
+    }
+
+    /// Pouring a preset into the table reproduces it band for band, which is
+    /// what makes "start from the N2ADR mapping and change one pin" possible.
+    #[test]
+    fn a_poured_preset_reproduces_itself() {
+        for board in [HpsdrFilterBoard::N2adr, HpsdrFilterBoard::Alex] {
+            let cfg = HpsdrConfig {
+                filter_board: HpsdrFilterBoard::Custom,
+                oc_table: HpsdrOcRow::from_preset(board),
+                ..HpsdrConfig::default()
+            };
+            let poured = cfg.oc_plan();
+            let preset = HpsdrOcPlan::preset(board);
+            for band in Band::ALL {
+                if band == Band::Gen || band.edges().is_none() {
+                    continue;
+                }
+                let hz = band.default_entry().0;
+                assert_eq!(
+                    poured.word(hz, false),
+                    preset.word(hz, false) & 0x7F,
+                    "{board:?} on {} ({hz} Hz)",
+                    band.label()
+                );
+            }
+        }
+        // "None" and "Custom" have nothing to pour.
+        assert!(HpsdrOcRow::from_preset(HpsdrFilterBoard::None).is_empty());
+        assert!(HpsdrOcRow::from_preset(HpsdrFilterBoard::Custom).is_empty());
+    }
+
+    /// A table of zeros is not an accessory board, and must not be announced as
+    /// one — the log line at open is the operator's only warning that seven
+    /// general-purpose outputs are about to start moving.
+    #[test]
+    fn an_empty_table_drives_nothing() {
+        let cfg = HpsdrConfig { filter_board: HpsdrFilterBoard::Custom, ..HpsdrConfig::default() };
+        assert!(!cfg.oc_plan().drives_anything());
+        assert_eq!(cfg.oc_plan().word(7_074_000.0, true), 0);
     }
 }
 

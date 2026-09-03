@@ -909,10 +909,14 @@ pub(in crate::app) fn settings_hpsdr_tab(
 
         ui.label("Filter board").on_hover_text(
             "Accessory board on the Hermes-Lite 2's J16 header (or the open-collector \
-             outputs of any other openHPSDR board). \"N2ADR\" picks one relay per band; \
-             \"Alex / Hermes band code\" puts the band number on outputs 1-4, which is what \
-             an ANAN's Alex board, a Zeus SDR, a HiQSDR and Quisk expect. Leave this at \
-             \"None\" unless a filter board is actually fitted: those seven pins are \
+             outputs of any other openHPSDR board — Protocol 2 included). \"N2ADR\" picks \
+             one relay per band; \"Alex / Hermes band code\" puts the band number on \
+             outputs 1-4, which is what an ANAN's Alex board, a Zeus SDR, a HiQSDR and \
+             Quisk expect. \"Custom\" opens a table below where you state the seven \
+             outputs yourself, band by band, on receive and on transmit — for an antenna \
+             switch, an amplifier's band decoder or anything else neither preset fits; \
+             either preset can be poured into it as a starting point. Leave this at \
+             \"None\" unless something really is fitted: those seven pins are \
              general-purpose open-collector outputs, and operators also wire them to \
              amplifier PTT, antenna relays and transverter switching. Driving them from \
              band data would start operating whatever is connected. Applies on \
@@ -1058,6 +1062,7 @@ pub(in crate::app) fn settings_hpsdr_tab(
         });
         ui.end_row();
     });
+    hpsdr_oc_table(ui, cfg);
     ui.add_space(6.0);
     ui.label(
         RichText::new(
@@ -1065,6 +1070,151 @@ pub(in crate::app) fn settings_hpsdr_tab(
         )
         .weak(),
     );
+}
+
+/// The per-band open-collector table, shown when **Filter board** is *Custom*
+/// (issue #296).
+///
+/// Seven general-purpose outputs, two words per band — one asserted on receive,
+/// one while keyed — which is what drives the filter boards, antenna switches,
+/// band decoders and transverter sequencers that follow neither the N2ADR nor
+/// the Alex convention. Written in hexadecimal because that is how the
+/// hardware's documentation states a control word, with the bits spelled out
+/// beside it so nobody has to convert in their head.
+fn hpsdr_oc_table(ui: &mut egui::Ui, cfg: &mut sdroxide_types::RadioConfig) {
+    use sdroxide_types::{Band, HpsdrFilterBoard, HpsdrOcRow};
+
+    if cfg.hpsdr.filter_board != HpsdrFilterBoard::Custom {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Open-collector outputs by band")
+            .size(14.0)
+            .strong()
+            .color(crate::theme::CYAN()),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "One control word per band, as your hardware's documentation states it: bit 0 is \
+             output 1, bit 6 is output 7. RX is asserted while receiving on that band and TX \
+             while the transmitter is keyed — give them the same value for a filter, and \
+             different ones for anything that belongs on one side of the changeover only \
+             (an amplifier's key line, a receive preamplifier's bypass). Bands left at 00 \
+             assert nothing. Applies on Apply / reconnect.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        for (preset, name) in
+            [(HpsdrFilterBoard::N2adr, "N2ADR"), (HpsdrFilterBoard::Alex, "ALEX BAND CODE")]
+        {
+            if ui
+                .button(format!("FILL FROM {name}"))
+                .on_hover_text(
+                    "Replace the table with what this preset would send on every band, as a \
+                     starting point to edit. Nothing else in the configuration changes.",
+                )
+                .clicked()
+            {
+                cfg.hpsdr.oc_table = HpsdrOcRow::from_preset(preset);
+            }
+        }
+        if ui
+            .add_enabled(!cfg.hpsdr.oc_table.is_empty(), egui::Button::new("CLEAR"))
+            .on_hover_text("Every output off on every band, which is what \"None\" does.")
+            .clicked()
+        {
+            cfg.hpsdr.oc_table.clear();
+        }
+    });
+    ui.add_space(6.0);
+
+    // Only the bands the station's own region has: a row for one the operator
+    // can never reach is a row that can never do anything. The last row is
+    // everything *outside* the ham bands, which is where a short-wave listener
+    // sits — without it a custom table would leave them with no filter at all
+    // where a preset gives them the nearest one.
+    let bands: Vec<Band> =
+        Band::ALL.iter().copied().filter(|b| *b == Band::Gen || b.edges().is_some()).collect();
+    egui::Grid::new("hpsdr-oc-grid").num_columns(4).spacing([12.0, 4.0]).striped(true).show(
+        ui,
+        |ui| {
+            for h in ["Band", "RX", "TX", "Outputs asserted"] {
+                ui.label(RichText::new(h).weak().size(10.0));
+            }
+            ui.end_row();
+            for band in bands {
+                let i = cfg.hpsdr.oc_table.iter().position(|r| r.band == band);
+                let (mut rx, mut tx) = i
+                    .map(|i| (cfg.hpsdr.oc_table[i].rx, cfg.hpsdr.oc_table[i].tx))
+                    .unwrap_or((0, 0));
+                if band == Band::Gen {
+                    ui.label("Other").on_hover_text(
+                        "Everywhere outside the amateur bands — short-wave listening, and \
+                         anything a transverter's dial lands on that no band covers.",
+                    );
+                } else {
+                    ui.label(band.label());
+                }
+                let a = oc_byte_edit(ui, ("oc-rx", band), &mut rx);
+                let b = oc_byte_edit(ui, ("oc-tx", band), &mut tx);
+                ui.label(RichText::new(oc_pins(rx, tx)).weak());
+                if a || b {
+                    match i {
+                        Some(i) if rx == 0 && tx == 0 => {
+                            cfg.hpsdr.oc_table.remove(i);
+                        }
+                        Some(i) => {
+                            cfg.hpsdr.oc_table[i] = HpsdrOcRow { band, rx, tx };
+                        }
+                        None => cfg.hpsdr.oc_table.push(HpsdrOcRow { band, rx, tx }),
+                    }
+                }
+                ui.end_row();
+            }
+        },
+    );
+}
+
+/// One control word, typed and shown as two hexadecimal digits. Held to seven
+/// bits, because there is no eighth output.
+fn oc_byte_edit(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    word: &mut u8,
+) -> bool {
+    let mut v = *word as u16;
+    let changed = ui
+        .push_id(id, |ui| {
+            ui.add(
+                DragValue::new(&mut v)
+                    .speed(1.0)
+                    .range(0..=0x7F)
+                    .hexadecimal(2, false, true)
+                    .prefix("0x"),
+            )
+            .changed()
+        })
+        .inner;
+    *word = (v & 0x7F) as u8;
+    changed
+}
+
+/// "1, 3, 7" for the outputs a pair of words asserts — TX in parentheses when
+/// it differs, so the two directions can be read at a glance.
+fn oc_pins(rx: u8, tx: u8) -> String {
+    let list = |w: u8| -> String {
+        let pins: Vec<String> =
+            (0..7).filter(|b| w & (1 << b) != 0).map(|b| (b + 1).to_string()).collect();
+        if pins.is_empty() { "—".into() } else { pins.join(", ") }
+    };
+    if rx == tx { list(rx) } else { format!("{} / TX {}", list(rx), list(tx)) }
 }
 
 /// RTL-SDR interface: which dongle, sample rate, gain/AGC, frequency

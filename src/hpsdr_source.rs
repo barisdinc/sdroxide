@@ -88,7 +88,7 @@ pub struct HpsdrSource {
 impl HpsdrSource {
     /// Attach DDC `cfg.ddc` of the board at `ip`, connecting only if no radio
     /// in this process already holds that connection, and start streaming at
-    /// `center_hz`. The rate, initial front-end gain and J16 accessory board
+    /// `center_hz`. The rate, initial front-end gain and open-collector plan
     /// are connection-level: whoever connects first sets them, and a later
     /// attach runs with the established ones whatever its own config says.
     pub fn open(
@@ -102,7 +102,7 @@ impl HpsdrSource {
                     ip,
                     cfg.sample_rate_hz,
                     cfg.lna_gain_db,
-                    cfg.filter_board,
+                    cfg.oc_plan(),
                     cfg.invert_spectrum,
                     cfg.pa_enable,
                     cfg.io_rx_input,

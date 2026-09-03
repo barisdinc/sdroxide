@@ -34,7 +34,9 @@ use crate::net::{
     lna_gain_code, push_iq,
 };
 use crate::protocol2::be24_to_f32;
-use sdroxide_types::HpsdrFilterBoard;
+use sdroxide_types::HpsdrOcPlan;
+#[cfg(test)]
+use sdroxide_types::{HpsdrFilterBoard, hpsdr_alex_oc as alex_oc, hpsdr_n2adr_oc as n2adr_oc};
 
 const PORT: u16 = 1024;
 /// Samples per 512-byte OZY frame for one receiver (504 data bytes / 8).
@@ -109,61 +111,6 @@ fn config_cc(speed: u8, mox: u8, oc: u8) -> [u8; 5] {
     [CC_CONFIG | mox, speed, (oc & 0x7F) << 1, 0, CONFIG_C4]
 }
 
-/// Open-collector byte for the N2ADR filter board when tuned to `freq_hz`.
-///
-/// The board selects one-hot from its own documentation: bit 0 = 160 m LPF,
-/// 1 = 80 m, 2 = 60/40 m, 3 = 30/20 m, 4 = 17/15 m, 5 = 12/10 m, and bit 6 is a
-/// 3 MHz high-pass used on receive to keep broadcast AM out of the front end.
-/// The board switches that high-pass out itself while transmitting, so it can be
-/// asserted unconditionally above 3 MHz. Frequencies between the ham bands pick
-/// the lowest filter that still passes them, so short-wave listening is not
-/// filtered into silence.
-fn n2adr_oc(freq_hz: f64) -> u8 {
-    let lpf = match freq_hz {
-        f if f <= 2_000_000.0 => 0,
-        f if f <= 4_000_000.0 => 1,
-        f if f <= 7_300_000.0 => 2,
-        f if f <= 14_350_000.0 => 3,
-        f if f <= 21_450_000.0 => 4,
-        _ => 5,
-    };
-    let hpf = if freq_hz >= 3_000_000.0 { 1 << 6 } else { 0 };
-    (1 << lpf) | hpf
-}
-
-/// Open-collector byte for an Alex-style filter board when tuned to `freq_hz`.
-///
-/// Not one-hot like the N2ADR board above: this is the band as a four-bit
-/// number on outputs 1–4, which is the mapping a Hermes/ANAN's Alex board, a
-/// Zeus SDR, a HiQSDR and Quisk's own filter switching all share (issue #196).
-/// 160 m is 1 and the code counts upwards by band — except 60 m, which is 0,
-/// the same byte as "nothing selected", because that is what the boards
-/// expect.
-///
-/// Outputs 5–7 are left off: they carry no part of the band code, and on the
-/// boards that use this mapping they are the spare pins an operator wires to a
-/// preamplifier, an attenuator or a transverter.
-///
-/// Between the bands the boundary sits in the middle of the gap, so a
-/// short-wave listener gets the nearer of the two filters rather than silence,
-/// and everything below 160 m and above 10 m is carried by the band at that
-/// end.
-fn alex_oc(freq_hz: f64) -> u8 {
-    match freq_hz {
-        f if f < 2_750_000.0 => 0x01,  // 160 m
-        f if f < 4_650_000.0 => 0x02,  // 80 m
-        f if f < 6_200_000.0 => 0x00,  // 60 m — no pins, by the board's table
-        f if f < 8_700_000.0 => 0x03,  // 40 m
-        f if f < 12_100_000.0 => 0x04, // 30 m
-        f if f < 16_200_000.0 => 0x05, // 20 m
-        f if f < 19_600_000.0 => 0x06, // 17 m
-        f if f < 23_200_000.0 => 0x07, // 15 m
-        f if f < 26_500_000.0 => 0x08, // 12 m
-        f if f < 39_900_000.0 => 0x09, // 10 m
-        _ => 0x0A,                     // 6 m
-    }
-}
-
 /// Everything the rotating register slots need. `lna_gain` and `pa` are `None`
 /// on boards whose Hermes-Lite-specific register fields we must not touch.
 #[derive(Clone, Copy)]
@@ -181,7 +128,9 @@ struct Regs {
     /// not a Hermes-Lite (its register 0x09 C2 means Apollo/Alex things and is
     /// left at zero, as before).
     pa: Option<bool>,
-    filter_board: HpsdrFilterBoard,
+    /// The seven open-collector outputs, resolved for this connection — a
+    /// preset's convention or the operator's own per-band table (issue #296).
+    oc: HpsdrOcPlan,
     ptt: bool,
 }
 
@@ -209,11 +158,7 @@ impl Regs {
             Some(hz) => hz,
             None => (if self.ptt { self.tx_freq } else { self.rx_freq }) as f64,
         };
-        match self.filter_board {
-            HpsdrFilterBoard::None => 0,
-            HpsdrFilterBoard::N2adr => n2adr_oc(freq),
-            HpsdrFilterBoard::Alex => alex_oc(freq),
-        }
+        self.oc.word(freq, self.ptt)
     }
 
     /// C2 of the drive register (`0x09`). On a Hermes-Lite it carries the PA
@@ -512,7 +457,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
         board,
         rate_hz,
         lna_gain_db,
-        filter_board,
+        oc,
         invert_spectrum,
         pa_enable,
         io_rx_input,
@@ -547,7 +492,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
         band_dial: None,
         lna_gain: has_lna.then_some(lna_gain_db),
         pa: hermes_lite.then_some(pa_enable),
-        filter_board,
+        oc,
         ptt: false,
     };
 
@@ -935,7 +880,7 @@ mod tests {
             band_dial: None,
             lna_gain: None,
             pa: None,
-            filter_board: HpsdrFilterBoard::Alex,
+            oc: HpsdrOcPlan::preset(HpsdrFilterBoard::Alex),
             ptt: false,
         };
         // Without a dial, the I.F. is all there is.
@@ -957,7 +902,7 @@ mod tests {
             band_dial: None,
             lna_gain: None,
             pa: None,
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: false,
         };
         let mut rot = Rotation::new();
@@ -986,7 +931,7 @@ mod tests {
             band_dial: None,
             lna_gain: None,
             pa: None,
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: true,
         };
         let idle = Regs { ptt: false, ..keyed };
@@ -1008,7 +953,7 @@ mod tests {
             band_dial: None,
             lna_gain: Some(20.0),
             pa: Some(true),
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: false,
         };
         let cc = hl2.cc(Slot::Drive);
@@ -1079,7 +1024,7 @@ mod tests {
             band_dial: None,
             lna_gain: Some(0.0),
             pa: None,
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: false,
         };
         let cc = regs.cc(Slot::LnaGain);
@@ -1184,7 +1129,7 @@ mod tests {
             band_dial: None,
             lna_gain: Some(20.0),
             pa: None,
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: false,
         };
         assert_eq!(regs.oc(), 0);
@@ -1195,16 +1140,47 @@ mod tests {
             rx_freq: 14_074_000,
             tx_freq: 7_074_000,
             band_dial: None,
-            filter_board: HpsdrFilterBoard::N2adr,
+            oc: HpsdrOcPlan::preset(HpsdrFilterBoard::N2adr),
             ..regs
         };
         assert_eq!(split.oc(), n2adr_oc(14_074_000.0), "receiving: follows RX");
         assert_eq!(Regs { ptt: true, ..split }.oc(), n2adr_oc(7_074_000.0), "keyed: follows TX");
         // And the same rule on the band-code preset.
-        let alex = Regs { filter_board: HpsdrFilterBoard::Alex, ..split };
+        let alex = Regs { oc: HpsdrOcPlan::preset(HpsdrFilterBoard::Alex), ..split };
         assert_eq!(alex.oc(), 0x05, "receiving on 20 m");
         assert_eq!(Regs { ptt: true, ..alex }.oc(), 0x03, "keyed on 40 m");
         assert_eq!(config_cc(3, 0, alex.oc())[2], 0x05 << 1);
+    }
+
+    /// The operator's own table, on Protocol 1: their words, on their bands,
+    /// with receive and transmit told apart (issue #296). The register path is
+    /// unchanged — what is new is where the word comes from.
+    #[test]
+    fn a_custom_table_reaches_the_same_register() {
+        let cfg = sdroxide_types::HpsdrConfig {
+            filter_board: HpsdrFilterBoard::Custom,
+            oc_table: vec![sdroxide_types::HpsdrOcRow {
+                band: sdroxide_types::Band::M20,
+                rx: 0x12,
+                tx: 0x52,
+            }],
+            ..sdroxide_types::HpsdrConfig::default()
+        };
+        let regs = Regs {
+            rx_freq: 14_074_000,
+            tx_freq: 14_074_000,
+            band_dial: None,
+            lna_gain: None,
+            pa: None,
+            oc: cfg.oc_plan(),
+            ptt: false,
+        };
+        assert_eq!(regs.oc(), 0x12);
+        assert_eq!(config_cc(3, 0, regs.oc())[2], 0x12 << 1);
+        assert_eq!(Regs { ptt: true, ..regs }.oc(), 0x52, "keyed takes the transmit word");
+        // A band the operator said nothing about asserts nothing, rather than
+        // the nearest band's word.
+        assert_eq!(Regs { rx_freq: 7_074_000, ..regs }.oc(), 0);
     }
 
     #[test]
@@ -1215,7 +1191,7 @@ mod tests {
             band_dial: None,
             lna_gain: Some(20.0),
             pa: None,
-            filter_board: HpsdrFilterBoard::None,
+            oc: HpsdrOcPlan::none(),
             ptt: false,
         };
         let mut rot = Rotation::new();
