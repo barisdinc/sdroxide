@@ -163,13 +163,39 @@ impl SdroxideApp {
         // ── Header: speed, tuning, queue depth ──────────────────────────────
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("JS8").size(11.0).strong().color(crate::theme::CYAN()));
+            let multi = self.digi_cfg_edit.js8_multi_decode;
             for speed in Js8Speed::ALL {
-                if crate::chrome::chip(ui, js8.speed == speed, speed.label()).clicked()
+                // Lit as the transmit speed; with MULTI on, every one of them
+                // is also being listened for, which the chip's tooltip says
+                // rather than the highlight — the highlight is what goes out.
+                if crate::chrome::chip(ui, js8.speed == speed, speed.label())
+                    .on_hover_text(if multi {
+                        format!("Transmit at {} — every speed is being decoded", speed.label())
+                    } else {
+                        format!("Transmit and decode at {}", speed.label())
+                    })
+                    .clicked()
                     && js8.speed != speed
                 {
                     self.digi_cfg_edit.js8_speed = speed;
                     cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
                 }
+            }
+            // Decoding all four rather than the one being worked (issue #358).
+            // Beside the speed chips because that is the setting it qualifies:
+            // without it a station on another speed is simply not there, and
+            // nothing on this screen would say so.
+            if crate::chrome::chip(ui, multi, "MULTI")
+                .on_hover_text(
+                    "Decode every JS8 speed, not only the one you transmit at. The four \
+                     speeds share the sub-band and are four different waveforms, so without \
+                     this a station on another speed is invisible — and an exchange between \
+                     two speeds cannot happen at all. Costs about four times the receive CPU.",
+                )
+                .clicked()
+            {
+                self.digi_cfg_edit.js8_multi_decode = !multi;
+                cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
             }
             ui.label(RichText::new(format!("{audio_hz:.0} Hz")).monospace());
             if crate::chrome::chip(ui, false, "−").clicked() {

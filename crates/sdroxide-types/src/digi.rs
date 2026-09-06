@@ -1392,6 +1392,23 @@ pub struct DigiConfig {
     /// the decoder, since every speed is a different waveform.
     #[serde(default)]
     pub js8_speed: crate::Js8Speed,
+    /// JS8: decode **every** speed each cycle, not only the one being
+    /// transmitted at (issue #358).
+    ///
+    /// The four speeds are four different waveforms on four different slot
+    /// clocks — 30, 15, 10 and 6 seconds — sharing the same sub-band, so a
+    /// receiver listening for one is deaf to the other three. That is fine
+    /// while everyone on the band is on Normal and useless the moment they are
+    /// not: a Turbo station answering a Normal one is a QSO neither side can
+    /// hear, and there is no way to notice it happening from a screen that only
+    /// shows what one speed decoded.
+    ///
+    /// Off by default because it is not free: each speed is a separate decode
+    /// of a separate slot, so the receiver does roughly four times the work.
+    /// [`js8_speed`](Self::js8_speed) still decides what goes *out* — this is
+    /// about hearing, not transmitting.
+    #[serde(default)]
+    pub js8_multi_decode: bool,
     /// JS8: answer SNR? / GRID? / HEARING? / STATUS? addressed to us or to
     /// @ALLCALL. What makes a station worth leaving switched on.
     #[serde(default = "yes")]
@@ -1882,6 +1899,7 @@ impl Default for DigiConfig {
             fox_slots: 3,
             rade_mute_analog: false,
             js8_speed: crate::Js8Speed::Normal,
+            js8_multi_decode: false,
             js8_auto_reply: true,
             js8_heartbeat_min: 0,
             js8_hb_ack: false,

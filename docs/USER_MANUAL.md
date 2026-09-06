@@ -3991,9 +3991,21 @@ band's JS8 frequency — 14.078 on 20 m, and the traffic in the 3 kHz above it
 | TURBO | 6 s | 160 Hz | Local and VHF work |
 | SLOW | 30 s | 25 Hz | The weak-signal end |
 
-Both stations must be on the same speed — they are different waveforms, not
-different settings, and a NORMAL station cannot hear a TURBO one. Normal is
-what you want unless you have agreed otherwise.
+Both stations must be on the same speed to work each other — they are different
+waveforms on different slot clocks, not different settings of one receiver, so a
+station transmitting NORMAL is not something a TURBO receiver can hear. Normal
+is what you want unless you have agreed otherwise.
+
+**MULTI**, the chip beside the four speeds, decodes *all* of them at once
+(issue #358). The speed buttons then say only what you transmit at; everything
+on the band is decoded whatever speed it is on, so a station calling you from
+another one appears in the heard list instead of not existing, and you can drop
+onto its speed to answer. Without it there is nothing on screen to tell a quiet
+band from three quarters of a busy one. It costs about four times the receive
+CPU — four separate decodes on four separate slot clocks — which is why it is
+off by default; a slot that arrives while the decoder is still behind is dropped
+rather than queued, so a machine that cannot keep up loses decodes instead of
+falling further and further behind the band.
 
 ![The JS8 panel: stations heard on the left, the conversation on the right](images/js8call.jpg)
 
