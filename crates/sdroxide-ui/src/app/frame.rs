@@ -618,6 +618,14 @@ impl eframe::App for SdroxideApp {
                             // dials too and could follow, but each wants
                             // checking against real signals first.
                             line_on_cursor: false,
+                            // Where the window is centred is a separate
+                            // question from where the tuning line is drawn,
+                            // and RTTY has already been checked on the air for
+                            // this one: its tone pair is 2210 Hz off the dial,
+                            // so a click-tune zoomed in tighter than that left
+                            // the dial off the picture and the re-centring
+                            // carried the signal away with it.
+                            center_on_cursor: mode.holds_standard_tones(),
                         }),
                         if matches!(mode, Mode::Ft8 | Mode::Ft2) {
                             self.digi_status
@@ -796,6 +804,11 @@ impl eframe::App for SdroxideApp {
                 // With the readout reading the signal, the tuning line follows
                 // it there — see `UiSettings::cw_qrg`.
                 line_on_cursor: self.ui_settings.cw_qrg,
+                // And so does the middle of the window: with the readout and
+                // the line both on the cursor, a window still centred on the
+                // dial would be the one thing left disagreeing. Off by
+                // default, with the setting.
+                center_on_cursor: self.ui_settings.cw_qrg,
             });
             if show_wf {
                 ui.allocate_ui(egui::vec2(width, wf_h), |ui| {

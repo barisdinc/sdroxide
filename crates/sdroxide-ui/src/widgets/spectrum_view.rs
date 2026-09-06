@@ -1144,6 +1144,19 @@ pub struct AudioCursor {
     /// Display only: the dial is unchanged and everything that tunes, stores
     /// or checks a band edge still uses it.
     pub line_on_cursor: bool,
+    /// Centre the window on the cursor rather than on the dial.
+    ///
+    /// Set for the modes whose offset is a standard the whole band keeps —
+    /// RTTY's tone pair sits 2210 Hz up, and zoomed in tighter than that the
+    /// dial is off the picture entirely, so centring on it takes the signal
+    /// with it. Not set where the offset is a slot the operator (or the
+    /// engine) picks inside a sub-band: an FT8 window that chased its own
+    /// transmit tone would slide every time the engine moved it.
+    ///
+    /// The app applies the same rule to the re-centring that follows a retune
+    /// — see `SdroxideApp::panadapter_focus_hz`, where it is written out — so
+    /// the two paths agree about where the middle of the window is.
+    pub center_on_cursor: bool,
 }
 
 /// The panadapter: spectrum trace, frequency scale and waterfall, with the
@@ -1996,7 +2009,12 @@ pub fn show_ext(
     let centring_id = ui.id().with("centre-on-vfo");
     let centred_at: Option<f64> = ui.data(|d| d.get_temp(centring_id)).unwrap_or(None);
     if view.center_on_vfo {
-        let vfo = state.active_freq_hz();
+        // The cursor rather than the dial in the modes that hold their tones
+        // off it — see [`AudioCursor::center_on_cursor`]. Memoised on the
+        // anchor itself, not on the dial, so nudging an RTTY offset by 5 Hz
+        // brings the window along exactly as turning the dial does.
+        let vfo = state.active_freq_hz()
+            + cursor.filter(|c| c.center_on_cursor).map_or(0.0, |c| f64::from(c.hz));
         if centred_at.is_none_or(|was| (was - vfo).abs() > 0.5) {
             let over = center_on_dial(view, vfo, zoom_center, zoom_span, rect.width());
             pan_center(&mut dev_center, state, over, pan, cmds);
