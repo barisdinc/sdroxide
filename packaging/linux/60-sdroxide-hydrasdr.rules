@@ -4,9 +4,21 @@
 # libhydrasdr or libSoapySDR, but the kernel-level requirement is the same: the
 # invoking user needs write access to the usbfs node.
 #
-# TAG+="uaccess" hands an ACL to whoever is logged in at the active seat. That
-# is better than the older GROUP="plugdev" recipe, which needs a group to exist,
-# the user to be added to it, and a full re-login before it takes effect.
+# TAG+="uaccess" hands an ACL to whoever is logged in at the active seat, which
+# needs no group to exist and no re-login. It is the better half of this rule
+# and it is not the whole of it: uaccess grants nothing where there is no seat
+# to be logged in at — WSL2, a headless box reached over ssh, a container, or
+# sdroxide running as a systemd service — and the device stays root-owned and
+# unreachable for reasons nothing on screen explains (issue #350).
+#
+# So GROUP="plugdev" comes along as a fallback, taking effect for anyone in
+# that group when the ACL does not. Where the group does not exist, udev logs
+# one line and applies the rest of the rule, so nothing is lost by asking. To
+# use it:
+#
+#   sudo groupadd -f plugdev && sudo usermod -aG plugdev $USER
+#
+# then log out and back in (`newgrp plugdev` for the current shell).
 #
 # Install:
 #   sudo cp 60-sdroxide-hydrasdr.rules /usr/lib/udev/rules.d/
@@ -17,7 +29,7 @@
 # installed this file is harmless duplication, not a conflict.
 
 # Production boards: HydraSDR's own usb.org vendor id.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="38af", ATTRS{idProduct}=="0001", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="38af", ATTRS{idProduct}=="0001", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # Prototype boards, flashed before that vendor id existed. This is the Airspy R2
 # and Mini's own id, and 60-sdroxide-airspy.rules already covers it — the line
@@ -25,4 +37,4 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="38af", ATTRS{idProduct}=="0001", MODE="0660"
 # prototype, and so that removing the Airspy rule does not silently break one.
 # Two udev rules granting the same access to the same device is a no-op, not a
 # conflict.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60a1", MODE="0660", GROUP="plugdev", TAG+="uaccess"

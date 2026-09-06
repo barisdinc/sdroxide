@@ -5,9 +5,21 @@
 # libhackrf or libSoapySDR, but the kernel-level requirement is the same: the
 # invoking user needs write access to the usbfs node.
 #
-# TAG+="uaccess" hands an ACL to whoever is logged in at the active seat. That
-# is better than the older GROUP="plugdev" recipe, which needs a group to exist,
-# the user to be added to it, and a full re-login before it takes effect.
+# TAG+="uaccess" hands an ACL to whoever is logged in at the active seat, which
+# needs no group to exist and no re-login. It is the better half of this rule
+# and it is not the whole of it: uaccess grants nothing where there is no seat
+# to be logged in at — WSL2, a headless box reached over ssh, a container, or
+# sdroxide running as a systemd service — and the device stays root-owned and
+# unreachable for reasons nothing on screen explains (issue #350).
+#
+# So GROUP="plugdev" comes along as a fallback, taking effect for anyone in
+# that group when the ACL does not. Where the group does not exist, udev logs
+# one line and applies the rest of the rule, so nothing is lost by asking. To
+# use it:
+#
+#   sudo groupadd -f plugdev && sudo usermod -aG plugdev $USER
+#
+# then log out and back in (`newgrp plugdev` for the current shell).
 #
 # Install:
 #   sudo cp 60-sdroxide-hackrf.rules /usr/lib/udev/rules.d/
@@ -21,17 +33,17 @@
 # for both boards, so 6089 is the id for either. Nor is the board revision in
 # the descriptors (pre-rev-9 vs rev 9 and later) — sdroxide asks the opened
 # device for both facts, and neither affects the rule.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # Jawbreaker, the beta platform. 10 MHz - 6 GHz and no bias tee; sdroxide reads
 # the narrower range off the product id rather than offering a HackRF One's.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="604b", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="604b", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # rad1o, the CCC badge. 50 MHz - 4 GHz, no bias tee.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="cc15", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="cc15", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # The DFU bootloader. sdroxide never enters it and cannot flash firmware — use
 # hackrf_spiflash for that — but a radio stuck here after an interrupted
 # firmware write is otherwise invisible to a non-root user, and "the device
 # disappeared" is a worse thing to debug than a stray rule line.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="000c", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="000c", MODE="0660", GROUP="plugdev", TAG+="uaccess"

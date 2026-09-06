@@ -1172,6 +1172,20 @@ The `dvb_usb_rtl28xxu` DVB driver does **not** need blacklisting — sdroxide
 detaches it automatically and the kernel rebinds it when the dongle is
 unplugged.
 
+**No desktop session?** Every packaged rule grants access two ways: an ACL for
+whoever is logged in at the seat (`TAG+="uaccess"`), and `GROUP="plugdev"` for
+everyone else. The first grants nothing where there is no seat — **WSL2**, a
+headless machine over ssh, a container, or sdroxide running as a systemd
+service — and there the second is what makes the device reachable:
+
+```sh
+sudo groupadd -f plugdev
+sudo usermod -aG plugdev $USER
+```
+
+then log out and back in. This applies to every radio below, not just the
+RTL-SDR.
+
 **Windows.** The dongle must be bound to **WinUSB**, which you do once with
 [Zadig](https://zadig.akeo.ie/). This is the same step SDR#, gqrx and every
 libusb-based program require, so if the dongle already works with any of them

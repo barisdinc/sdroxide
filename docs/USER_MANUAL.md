@@ -11070,6 +11070,20 @@ sudo udevadm control --reload
 Serial relay boards need nothing from that file — they are serial ports, so add
 yourself to `dialout` as you would for a CAT cable.
 
+Every packaged rule — this one and every receiver's — grants access two ways: an
+ACL for whoever is logged in at the seat (`TAG+="uaccess"`), and a group for
+everyone else. The ACL grants nothing where there is no seat to be logged in at
+— WSL2, a headless machine over ssh, a container, or sdroxide running as a
+systemd service — and the device stays root-owned with nothing on screen saying
+why. In that case join the group the rule names (`plugdev` for USB receivers and
+HID relay boards, `gpio` for GPIO lines, `dialout` for serial), then log out and
+back in:
+
+```
+sudo groupadd -f plugdev && sudo usermod -aG plugdev $USER
+```
+
+
 #### 6.11.2 Contacts and the sequencer
 
 Each row in the **Contacts** table is one switched contact:
