@@ -708,6 +708,32 @@ fn grid_of(msg: &Js8Msg) -> Option<String> {
     })
 }
 
+/// The reception report a completed message is worth, or `None` when it names
+/// nobody (issue #357).
+///
+/// Once per completed message rather than once per frame, which is the
+/// difference between JS8 and every slotted mode here: a JS8 decode is
+/// seventy-two bits, a station's message can be a dozen of them, and only the
+/// last one to arrive has a whole message — and therefore a callsign — behind
+/// it. Reporting per frame would post a twelve-frame message as twelve
+/// receptions of the same station in the same minute.
+///
+/// Whether it is *our own* callsign is not decided here: the engine holds the
+/// station identity, and it applies the same test to every mode's reports.
+fn heard_report(msg: &Js8Msg, grid: Option<&str>) -> Option<DigiAction> {
+    let call = msg.from.trim();
+    if call.is_empty() {
+        return None;
+    }
+    Some(DigiAction::Heard {
+        call: call.to_string(),
+        grid: grid.unwrap_or_default().to_string(),
+        audio_hz: msg.audio_hz,
+        snr_db: msg.snr_db,
+        slot_utc: msg.last_slot_utc,
+    })
+}
+
 impl DigiEngine for Js8Controller {
     fn mode(&self) -> Mode {
         Mode::Js8
@@ -753,7 +779,16 @@ impl DigiEngine for Js8Controller {
             for d in &decodes {
                 if let Some(msg) = self.assembler.push(d, slot_utc) {
                     let grid = grid_of(&msg);
-                    self.note_heard(&msg.from, grid, msg.snr_db, msg.audio_hz, msg.last_slot_utc);
+                    self.note_heard(
+                        &msg.from,
+                        grid.clone(),
+                        msg.snr_db,
+                        msg.audio_hz,
+                        msg.last_slot_utc,
+                    );
+                    // ...and to the reporting networks, which is the same fact
+                    // said outwards (issue #357).
+                    actions.extend(heard_report(&msg, grid.as_deref()));
                     // Answer before storing, so a reply is queued even if the
                     // conversation list is already full.
                     let policy = ReplyPolicy {
@@ -1368,6 +1403,50 @@ mod tests {
             assert!(!hb.is_cq(), "{typed:?} came out as a CQ");
             assert_eq!(hb.grid().as_deref(), Some("FN42"), "{typed:?}");
         }
+    }
+
+    /// A station heard is reported outwards as well as listed on screen, so a
+    /// JS8 station appears on the PSK Reporter map like an FT8 one — issue #357
+    /// is that it never did, because a JS8 *decode* is one frame of a message
+    /// and names nobody.
+    #[test]
+    fn a_completed_message_is_worth_one_reception_report() {
+        let msg = Js8Msg {
+            from: "KN4CRD".into(),
+            to: "@ALLCALL".into(),
+            text: "EM73".into(),
+            cmd: Some("HB".into()),
+            snr_db: -11,
+            audio_hz: 1234.0,
+            first_slot_utc: 1000,
+            last_slot_utc: 1030,
+            frames: 12,
+            complete: true,
+            to_me: false,
+        };
+        let Some(DigiAction::Heard { call, grid, audio_hz, snr_db, slot_utc }) =
+            heard_report(&msg, grid_of(&msg).as_deref())
+        else {
+            panic!("a named station has to be reported");
+        };
+        assert_eq!(call, "KN4CRD");
+        assert_eq!(grid, "EM73");
+        assert_eq!(audio_hz, 1234.0);
+        assert_eq!(snr_db, -11);
+        assert_eq!(slot_utc, 1030, "the slot it finished in, not the one it opened in");
+
+        // A grid nobody sent is no grid; PSK Reporter places the station from
+        // its own database rather than from one we invented.
+        let plain = Js8Msg { text: "HELLO".into(), ..msg.clone() };
+        assert!(matches!(
+            heard_report(&plain, grid_of(&plain).as_deref()),
+            Some(DigiAction::Heard { ref grid, .. }) if grid.is_empty()
+        ));
+
+        // A message whose sender the assembler never recovered names nobody,
+        // and a report with no callsign in it is not a report.
+        let anon = Js8Msg { from: String::new(), ..msg };
+        assert!(heard_report(&anon, None).is_none());
     }
 
     #[test]

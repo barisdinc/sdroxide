@@ -94,6 +94,21 @@ pub enum DigiAction {
     /// the operator has a hand on the tuning — a beacon and its operator
     /// fighting over the dial is the failure this must not have.
     SetDial(f64),
+    /// A station this mode heard and could name, for the reception-report
+    /// networks — PSK Reporter's upload, in particular (issue #357).
+    ///
+    /// Its own action rather than a [`DigiAction::Decodes`] entry, because in
+    /// JS8 the two are genuinely different things. A JS8 decode is one *frame*:
+    /// seventy-two bits of a message that may run to a dozen of them, and only
+    /// the assembler — which sees the whole run — knows whose it was. The
+    /// activity list wants every frame as it lands and the reporting networks
+    /// want the station, once, when there is a callsign to give them, so the
+    /// two are reported separately rather than one being made to carry the
+    /// other.
+    ///
+    /// `audio_hz` is the tone offset, not a frequency: the engine knows the
+    /// dial and adds it, as it does for a slotted mode's decodes.
+    Heard { call: String, grid: String, audio_hz: f32, snr_db: i16, slot_utc: i64 },
     /// RADE: a remote station's callsign, recovered from its End-of-Over frame,
     /// with the SNR at the end of the over and the dial it was heard on.
     ///

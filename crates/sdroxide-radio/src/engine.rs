@@ -5811,26 +5811,50 @@ impl Engine {
     /// place is a reception report; free text and unresolved hashed callsigns
     /// name nobody, and our own callsign is not something we heard.
     fn psk_report_decodes(&self, decodes: &[sdroxide_types::Decode], dial_hz: f64) {
-        let mode = self.digi.as_ref().map(|d| d.mode().label().to_string()).unwrap_or_default();
-        let my_call = self.digi_config.my_call.trim();
         for d in decodes {
             let Some(call) = d.from.as_deref().filter(|c| !c.is_empty()) else { continue };
-            if call.eq_ignore_ascii_case(my_call) {
-                continue;
-            }
-            let freq = dial_hz + d.audio_hz as f64;
-            if freq <= 0.0 {
-                continue;
-            }
-            self.spots.psk_report(sdroxide_net::PskReport {
-                call: call.to_string(),
-                grid: d.grid.clone().unwrap_or_default(),
-                freq_hz: freq as u32,
-                snr_db: d.snr_db.clamp(-128, 127) as i8,
-                mode: mode.clone(),
-                when_utc: d.slot_utc.max(0) as u32,
-            });
+            self.psk_report_heard(
+                call,
+                d.grid.as_deref().unwrap_or_default(),
+                d.audio_hz,
+                d.snr_db,
+                d.slot_utc,
+                dial_hz,
+            );
         }
+    }
+
+    /// One station heard, as a reception report.
+    ///
+    /// Also reached by [`DigiAction::Heard`], which is how JS8 reports — its
+    /// decodes are single frames that name nobody, and the callsign only exists
+    /// once the assembler has put a whole message back together (issue #357).
+    /// `audio_hz` is the tone offset and `dial_hz` the dial it was heard on,
+    /// because that is the pair every mode here has.
+    fn psk_report_heard(
+        &self,
+        call: &str,
+        grid: &str,
+        audio_hz: f32,
+        snr_db: i16,
+        slot_utc: i64,
+        dial_hz: f64,
+    ) {
+        if call.eq_ignore_ascii_case(self.digi_config.my_call.trim()) {
+            return;
+        }
+        let freq = dial_hz + audio_hz as f64;
+        if freq <= 0.0 {
+            return;
+        }
+        self.spots.psk_report(sdroxide_net::PskReport {
+            call: call.to_string(),
+            grid: grid.to_string(),
+            freq_hz: freq as u32,
+            snr_db: snr_db.clamp(-128, 127) as i8,
+            mode: self.digi.as_ref().map(|d| d.mode().label().to_string()).unwrap_or_default(),
+            when_utc: slot_utc.max(0) as u32,
+        });
     }
 
     /// Start, retarget or stop the N1MM contactinfo broadcast to match its
@@ -6102,6 +6126,9 @@ impl Engine {
                     let _ = self.event_tx.send(RadioEvent::WsprSpots(spots));
                 }
                 DigiAction::SetDial(hz) => self.wspr_hop(hz),
+                DigiAction::Heard { call, grid, audio_hz, snr_db, slot_utc } => {
+                    self.psk_report_heard(&call, &grid, audio_hz, snr_db, slot_utc, dial);
+                }
                 DigiAction::RadeCallsign { call, snr_db, freq_hz } => {
                     // A RADE station identified itself in its End-of-Over
                     // frame: report hearing it. The reporter pairs the report

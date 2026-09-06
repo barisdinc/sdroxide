@@ -2667,7 +2667,7 @@ impl SdroxideApp {
                 crate::chrome::checkbox(
                     ui,
                     &mut io.net_edit.psk.report,
-                    "Upload my FT8/FT4/FT2 decodes",
+                    "Upload my FT8/FT4/FT2/JS8 decodes",
                 )
                 .on_hover_text(
                     "Report what this station hears to pskreporter.info, so it appears \

@@ -3313,10 +3313,14 @@ becomes the station's grid, so the map and the distance get the better answer.
 
 #### 3.2.6 Reporting what you hear
 
-Enable **Upload my FT8/FT4/FT2 decodes** on the Network settings tab to report every
-station you decode to [pskreporter.info](https://pskreporter.info), where your
-station then shows up as a receiver and your reports feed everyone else's
-propagation maps. Reports are batched and uploaded every five minutes (the
+Enable **Upload my FT8/FT4/FT2/JS8 decodes** on the Network settings tab to report
+every station you decode to [pskreporter.info](https://pskreporter.info), where
+your station then shows up as a receiver and your reports feed everyone else's
+propagation maps. JS8 is reported too (issue #357), and it is reported a little
+differently: a JS8 decode is a single frame that names nobody, so the report
+goes out once per *message*, when the frames have been reassembled and there is
+a callsign to send — a station's twelve-frame message is one reception, not
+twelve. Reports are batched and uploaded every five minutes (the
 interval the collector asks for), keeping the strongest report per station per
 band. The callsign and grid come from the General tab — both are required, since
 a report with no location can't be placed on the map. The optional **Antenna**
