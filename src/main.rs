@@ -134,6 +134,11 @@ struct Cli {
     /// A bare address reaches the station's first radio. To reach one of its
     /// others, name it: "host:4950/ws/1" — the server lists which id is which
     /// at http://host:4950/radios.
+    ///
+    /// A bare address is dialled as plain "ws://". Where the server sits behind
+    /// something that terminates HTTPS for it — a reverse proxy on 443 — give
+    /// the whole "wss://host/ws" instead; the GUI's Remote tab has a switch for
+    /// the same thing.
     #[arg(long, value_name = "HOST[:PORT]")]
     connect: Option<String>,
 

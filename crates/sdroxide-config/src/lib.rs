@@ -2376,7 +2376,11 @@ mod tests {
     #[test]
     fn the_remote_server_address_survives_a_write() {
         let s = Settings {
-            remote_server: sdroxide_types::RemoteServer { host: "shack.local".into(), port: 4951 },
+            remote_server: sdroxide_types::RemoteServer {
+                host: "shack.local".into(),
+                port: 4951,
+                tls: true,
+            },
             tx_ham_only: false,
             server_port: 4952,
             ..Settings::default()
@@ -2386,6 +2390,7 @@ mod tests {
         assert_eq!(back, s);
         assert_eq!(back.remote_server.host, "shack.local");
         assert_eq!(back.remote_server.port, 4951);
+        assert!(back.remote_server.tls, "the secure switch is part of the address (issue #360)");
         assert!(!back.tx_ham_only, "a value below a table must not become part of it");
         assert_eq!(back.server_port, 4952, "the port we listen on is not the one we dial");
         assert_eq!(back.speech, s.speech, "the table above must survive too");
@@ -2398,6 +2403,7 @@ mod tests {
         let s: Settings = toml::from_str("server_port = 4950").unwrap();
         assert!(s.remote_server.host.is_empty());
         assert_eq!(s.remote_server.port, 4950);
+        assert!(!s.remote_server.tls, "a link that was plain before must stay plain");
     }
 
     /// A `config.toml` written before this feature existed comes up silent,
