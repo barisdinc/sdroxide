@@ -2286,9 +2286,6 @@ struct Engine {
     mem_folders: Vec<MemoryFolder>,
     mic: Option<MicParams>,
     mic_resampler: Option<MonoResampler>,
-    /// The rate the digital-mode engine synthesises at — the receive tap's
-    /// rate, because a `DigiEngine` keeps one clock for both directions.
-    digi_rate: f64,
     /// Rate-matching for the digital modes' transmit audio, when the radio
     /// consumes it at a different rate from the one it was synthesised at.
     /// `None` when the two agree, which is the usual case.
@@ -3757,7 +3754,6 @@ fn engine_thread(
         mem_folders,
         mic: engine_cfg.mic,
         mic_resampler: None,
-        digi_rate: 48_000.0,
         digi_tx_rs: None,
         digi_tx_fifo: Vec::new(),
         digi_tx_scratch: Vec::new(),
@@ -6732,7 +6728,6 @@ impl Engine {
             _ => {}
         }
 
-        self.digi_rate = tap_rate;
         if want && !have {
             self.start_digi(mode, tap_rate);
             self.sync_audio_tap();
@@ -14546,32 +14541,39 @@ impl Engine {
                     // Rate-match the digital modes to whatever this radio
                     // actually plays.
                     //
-                    // A `DigiEngine` keeps one clock for both directions and
-                    // synthesises at the *receive* tap's rate; on some radios
-                    // that is not the rate the transmit stream runs at. An Icom
-                    // on its 12 kHz IF output is the case that found it (issue
-                    // #150): the IF arrives decimated to 24 kHz while transmit
-                    // audio goes back at the session's 48, so a packet burst
-                    // went out at exactly twice its baud rate — structurally
-                    // perfect, half as long, and undecodable by anything.
+                    // On some radios the transmit stream does not run at the
+                    // rate the modem synthesised at. An Icom on its 12 kHz IF
+                    // output is the case that found it (issue #150): the IF
+                    // arrives decimated to 24 kHz while transmit audio goes
+                    // back at the session's 48, so a packet burst went out at
+                    // exactly twice its baud rate — structurally perfect, half
+                    // as long, and undecodable by anything.
                     //
-                    // The target differs by path. Where the radio modulates the
-                    // audio we hand it, that is the rate it consumes. Where we
-                    // modulate it ourselves, `TxChain`'s upconverter is built
-                    // for 48 kHz and the device rate is downstream of it.
+                    // Both ends of the match are asked rather than assumed. The
+                    // target differs by path: where the radio modulates the
+                    // audio we hand it, that is the rate it consumes, and where
+                    // we modulate it ourselves `TxChain`'s upconverter is built
+                    // for 48 kHz with the device rate downstream of it. The
+                    // source is the modem's own transmit rate
+                    // (`DigiEngine::tx_rate`), which is 48 kHz for every mode
+                    // but the two AX.25 ones — taking the *receive* tap for it
+                    // instead is what stretched FT8 and FT4 on that same Icom
+                    // to twice their length, the mirror of the bug above
+                    // (issue #359).
                     let want =
                         if self.audio_mode || self.caps.tx_audio { tx_rate } else { 48_000.0 };
+                    let from = self.digi.as_ref().map_or(48_000.0, |d| d.tx_rate());
                     self.digi_tx_fifo.clear();
                     self.digi_tx_done = false;
-                    self.digi_tx_rs = if (want - self.digi_rate).abs() < 0.5 {
+                    self.digi_tx_rs = if (want - from).abs() < 0.5 {
                         None
                     } else {
                         info!(
-                            from = self.digi_rate,
+                            from,
                             to = want,
                             "digital transmit audio is being rate-matched to the radio"
                         );
-                        MonoResampler::new(self.digi_rate, want)
+                        MonoResampler::new(from, want)
                     };
                     // No modulator/DUC when the device transmits raw audio (a CAT
                     // rig, or a TCI rig with wideband-IQ RX + audio TX).

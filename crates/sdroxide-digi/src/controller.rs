@@ -984,6 +984,46 @@ mod tests {
         );
     }
 
+    /// The burst is 48 kHz audio whatever the receive tap runs at, and
+    /// [`crate::DigiEngine::tx_rate`] says so.
+    ///
+    /// The engine rate-matches this audio to whatever the radio plays, and it
+    /// has to be told the right rate to match *from*. An Icom on its 12 kHz IF
+    /// hands audio back at 24 kHz while taking transmit audio at 48: taking the
+    /// receive tap for the modem's rate resampled a burst that was already
+    /// 48 kHz up by a factor of two, and every FT8/FT4 over went out at half
+    /// speed and twice the length (issue #359).
+    #[test]
+    fn the_burst_is_48_khz_whatever_the_tap_runs_at() {
+        use crate::DigiEngine;
+
+        let burst_samples = |tap: f64| {
+            let mut c = DigiController::new(Mode::Ft8, cfg(), tap);
+            assert_eq!(DigiEngine::tx_rate(&c), 48_000.0, "at a {tap} Hz tap");
+            c.call_cq();
+            let now = UNIX_EPOCH + Duration::from_secs_f64(1_609_459_201.0);
+            c.poll(now, 14_074_000.0);
+            assert!(c.tx_burst_active(), "no burst to measure at a {tap} Hz tap");
+            let mut block = [0.0f32; 480];
+            let mut n = 0usize;
+            while !DigiController::fill_tx_block(&mut c, &mut block) {
+                n += block.len();
+                assert!(n < 48_000 * 60, "the burst never ended at a {tap} Hz tap");
+            }
+            n
+        };
+
+        // The tap an Icom on its 12 kHz IF gives, and the one every other rig
+        // gives. The transmission is the same length either way.
+        let at_24k = burst_samples(24_000.0);
+        assert_eq!(at_24k, burst_samples(48_000.0), "the tap rate changed the burst");
+        // FT8 is 79 symbols of 1920 samples at 12 kHz: 12.64 s on the air.
+        // Counted in whole blocks, so a hair under — the point of the figure is
+        // that it is one over and not two.
+        let secs = at_24k as f64 / 48_000.0;
+        assert!((secs - 12.64).abs() < 0.05, "the burst runs {secs:.3} s, not FT8's 12.64 s");
+    }
+
     #[test]
     fn no_burst_without_a_callsign() {
         let mut c = DigiController::new(Mode::Ft8, DigiConfig::default(), 12_000.0);
