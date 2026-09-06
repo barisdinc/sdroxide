@@ -399,11 +399,7 @@ impl SdroxideApp {
 
     /// The logbook overlay: a session-grouped list of all QSOs (digital and
     /// manual), with add / edit / delete and ADIF/TXT export.
-    pub(in crate::app) fn logbook_window(
-        &mut self,
-        ctx: &egui::Context,
-        cmds: &mut Vec<Command>,
-    ) {
+    pub(in crate::app) fn logbook_window(&mut self, ctx: &egui::Context, cmds: &mut Vec<Command>) {
         let mut open = self.show_logbook;
         let resp = egui::Window::new("LOGBOOK")
             .id(crate::layout::salted_id(ctx, "LOGBOOK"))

@@ -13049,6 +13049,37 @@ sdroxide stores its settings under the per-user config directory:
 | macOS | `~/Library/Application Support/org.sdroxide.sdroxide/` |
 | Windows | `%APPDATA%\sdroxide\sdroxide\config\` |
 
+### Moving settings to another installation
+
+You do not have to know any of that to copy a station's setup somewhere else.
+**Settings → General → Settings file** has **EXPORT…**, which writes every
+settings file below — the root ones and each radio's — into a single
+`sdroxide-settings.json`, and **IMPORT…**, which puts one back. Between two
+machines, two user accounts on one machine, or a laptop being rebuilt, that is
+the whole job.
+
+The files travel exactly as they are on the disk, so a bundle written by a newer
+sdroxide does not lose settings this one has never heard of. An import replaces
+what is here file for file and leaves anything the bundle does not mention
+alone — so a bundle from a one-radio station will not remove a second radio's
+configuration here — and it takes effect **the next time sdroxide starts**,
+because the settings already in memory would otherwise be written straight back
+over it.
+
+Two things are deliberately not in the file, and both because they are not
+settings:
+
+- **Your logbook** (`qso_log.json`). Two callsigns sharing a setup usually want
+  their contacts kept apart, and a log that really is to be moved should go as
+  ADIF from the **LOG** window, which every other program reads too.
+- **A saved server sign-in** (`remote_login.json`), which holds a password for a
+  server *this* machine connects to. A settings file is something people send
+  each other.
+
+Both buttons are on the machine the radio is attached to: a remote or browser
+client says so instead, because the settings it could reach are its own screen's
+and not the station's.
+
 | File | Format | Contents |
 | --- | --- | --- |
 | `config.toml` | TOML | General settings: `device_args`, `sample_rate`, `cal_offset_db`, `spectrum_fft`, `spectrum_fps`, `server_bind`, `server_port`, `tx_ham_only`, `swr_guard` and `swr_limit` (the SWR guard, [§6.1](#61-general-station-audio-and-remote-access)), `audio_output`, `audio_input`, `dismissed_update` (the published release whose update banner was dismissed, [§6.3](#63-ui-display-preferences-and-voice-announcements)), `region` (`"R1"` / `"R2"` / `"R3"` — the IARU region every band plan follows, [§6.1](#61-general-station-audio-and-remote-access)), plus the `[ui]` display preferences (including `theme`, `button_style` and `window_style`), the `[speech]` announcement settings ([§6.3](#63-ui-display-preferences-and-voice-announcements)), the `[remote_access]` sign-in that server mode demands ([§8.3](#83-sign-in-who-may-operate-the-station), stored in plaintext) and the `[remote_server]` address the **Remote** tab dials ([§8.2](#82-connect-a-native-remote-client)). Belongs to the machine the engine runs on — except `[ui]`, `[speech]` and `[remote_server]`, which belong to the screen in front of you. |

@@ -742,6 +742,16 @@ pub struct SdroxideApp {
     /// "Import" button — its own, beside the ADIF one, so a log import and a
     /// channel import cannot land in each other's parser.
     chirp_import_inbox: crate::download::LoadInbox,
+    /// Inbox for a settings bundle chosen on the General tab (issue #356).
+    /// Native only — the browser has no filesystem to pick one from, and the
+    /// settings it would replace are on the engine's machine anyway.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    settings_import_inbox: crate::download::LoadInbox,
+    /// What the last settings export or import did, shown beside the buttons
+    /// until the dialog is closed. Not persisted: it describes an action, not a
+    /// setting, and one from a previous session would be a lie about this one.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    settings_transfer_note: Option<String>,
     /// Callsigns queued for lookup, drained into commands each frame.
     pending_lookups: Vec<String>,
     /// Everything callsign lookup has resolved this session, by callsign. Kept
@@ -1374,6 +1384,8 @@ impl SdroxideApp {
             login_tests: std::collections::HashMap::new(),
             login_tests_pending: std::collections::HashSet::new(),
             adif_import_inbox: Arc::new(Mutex::new(None)),
+            settings_import_inbox: Arc::new(Mutex::new(None)),
+            settings_transfer_note: None,
             chirp_import_inbox: Arc::new(Mutex::new(None)),
             pending_lookups: Vec::new(),
             callsign_cache: Default::default(),

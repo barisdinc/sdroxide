@@ -81,7 +81,10 @@ pub(in crate::app) fn settings_wsjtx_tab(
     ui.separator();
     ui.add_space(6.0);
     ui.label(
-        RichText::new("N1MM+ contactinfo broadcast").size(13.0).strong().color(crate::theme::CYAN()),
+        RichText::new("N1MM+ contactinfo broadcast")
+            .size(13.0)
+            .strong()
+            .color(crate::theme::CYAN()),
     );
     ui.add_space(4.0);
     ui.label(

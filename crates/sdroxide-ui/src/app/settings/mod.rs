@@ -176,6 +176,10 @@ pub(in crate::app) struct SettingsIo<'a> {
     airspyhf_copy_report: &'a mut bool,
     hackrf_rescan: &'a mut bool,
     hackrf_copy_report: &'a mut bool,
+    /// The General tab's settings-file buttons, which touch the disk and so
+    /// have to wait for `&mut self` like everything else here (issue #356).
+    settings_export: &'a mut bool,
+    settings_import: &'a mut bool,
     airspy_rescan: &'a mut bool,
     airspy_copy_report: &'a mut bool,
     /// Re-enumerate the USB bus for HydraSDR RFOne receivers. Opens nothing.
@@ -954,6 +958,8 @@ impl SdroxideApp {
         let mut lime_copy_report = false;
         let mut hackrf_rescan = false;
         let mut hackrf_copy_report = false;
+        let mut settings_export = false;
+        let mut settings_import = false;
         let mut airspy_rescan = false;
         let mut airspy_copy_report = false;
         let mut hydrasdr_rescan = false;
@@ -1114,6 +1120,8 @@ impl SdroxideApp {
                             lime_rescan: &mut lime_rescan,
                             lime_copy_report: &mut lime_copy_report,
                             hackrf_rescan: &mut hackrf_rescan,
+                            settings_export: &mut settings_export,
+                            settings_import: &mut settings_import,
                             hackrf_copy_report: &mut hackrf_copy_report,
                             airspy_rescan: &mut airspy_rescan,
                             airspy_copy_report: &mut airspy_copy_report,
@@ -1361,6 +1369,7 @@ impl SdroxideApp {
         if hackrf_rescan {
             self.ask_device(ctx, P::HackRf);
         }
+        self.run_settings_transfer(settings_export, settings_import);
         if hackrf_copy_report {
             // Worth more on this backend than on the receive-only ones: a
             // transmit fault is about the *order* control transfers went out
@@ -1780,6 +1789,11 @@ impl SdroxideApp {
                 );
                 ui.add_space(6.0);
                 self.settings_band_plan_file(ui, cmds);
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                self.settings_transfer(ui, io.settings_export, io.settings_import);
 
                 ui.add_space(10.0);
                 ui.separator();

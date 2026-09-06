@@ -239,6 +239,144 @@ impl SdroxideApp {
         );
     }
 
+    /// Take this station's settings away as one file, and put one back.
+    ///
+    /// The answer to "how do I copy all this to my other machine" being
+    /// "screenshots" (issue #356). Native only, and only where the settings are
+    /// on *this* machine: a browser client has no filesystem, and a remote one
+    /// would be exporting its own laptop's configuration rather than the
+    /// station's, which is the opposite of what was asked for.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn settings_transfer(
+        &self,
+        ui: &mut egui::Ui,
+        export: &mut bool,
+        import: &mut bool,
+    ) {
+        ui.label(RichText::new("Settings file").strong());
+        if self.ctrl.engine_is_remote() {
+            ui.label(
+                RichText::new(
+                    "The settings are on the machine the radio is attached to. Export them \
+                     there.",
+                )
+                .size(10.5)
+                .color(crate::theme::gray(140)),
+            );
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if crate::chrome::chip(ui, false, RichText::new("EXPORT…").size(10.5))
+                .on_hover_text(
+                    "Write every setting at this station — the radios, the modes, the servers, \
+                     the memories, the band plan — to one file you can carry to another \
+                     installation. Your logbook and any saved server password stay here.",
+                )
+                .clicked()
+            {
+                *export = true;
+            }
+            if crate::chrome::chip(ui, false, RichText::new("IMPORT…").size(10.5))
+                .on_hover_text(
+                    "Replace this station's settings with the ones in a file exported from \
+                     another installation. Restart sdroxide afterwards.",
+                )
+                .clicked()
+            {
+                *import = true;
+            }
+        });
+        if let Some(note) = &self.settings_transfer_note {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(RichText::new(note).size(10.5).color(Color32::LIGHT_GREEN)).wrap(),
+            );
+        }
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "An import overwrites what is here, file for file, and takes effect the \
+                     next time sdroxide starts — the settings already in memory would \
+                     otherwise be written straight back over it. Anything the file does not \
+                     mention is left as it is, so a bundle from a one-radio station does not \
+                     remove a second radio here. Your logbook is never in the file: export it \
+                     as ADIF from the LOG window if you want to move that too.",
+                )
+                .size(10.5)
+                .color(crate::theme::gray(140)),
+            )
+            .wrap(),
+        );
+    }
+
+    /// The browser client has no filesystem, and the settings it would export
+    /// are on the engine's machine in any case.
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn settings_transfer(
+        &self,
+        _ui: &mut egui::Ui,
+        _export: &mut bool,
+        _import: &mut bool,
+    ) {
+    }
+
+    /// Carry out what [`Self::settings_transfer`]'s buttons asked for, after
+    /// the window closure has given `&mut self` back — see [`SettingsIo`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn run_settings_transfer(&mut self, export: bool, import: bool) {
+        if export {
+            self.settings_transfer_note = Some(match sdroxide_config::transfer::export_json() {
+                Ok(json) => {
+                    let note = sdroxide_config::transfer::export()
+                        .map(|b| b.summary())
+                        .unwrap_or_else(|_| "settings".into());
+                    crate::download::save("sdroxide-settings.json", json.as_bytes());
+                    format!("Exported {note} — choose where to save it.")
+                }
+                Err(e) => format!("Export failed: {e}"),
+            });
+        }
+        if import {
+            self.settings_transfer_note = None;
+            crate::download::load_text(
+                "sdroxide settings",
+                "json",
+                self.settings_import_inbox.clone(),
+            );
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn run_settings_transfer(&mut self, _export: bool, _import: bool) {}
+
+    /// Apply a settings bundle the operator picked, once the picker thread has
+    /// delivered it. Drained every frame beside the ADIF import.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::app) fn poll_settings_import(&mut self) {
+        let loaded = self.settings_import_inbox.lock().ok().and_then(|mut g| g.take());
+        let Some(loaded) = loaded else { return };
+        // Said on screen rather than on stderr: the operator who pressed the
+        // button is looking at the window, and on Windows there is no console
+        // behind it to print to.
+        self.settings_transfer_note = Some(match loaded {
+            Err(e) => format!("Import failed: {e}"),
+            Ok(loaded) => match sdroxide_config::transfer::import(&loaded.text) {
+                Err(e) => format!("Import failed: {e}"),
+                Ok(report) => {
+                    let mut msg = format!("{} — restart sdroxide to use them.", report.summary());
+                    for (path, why) in report.skipped.iter().take(4) {
+                        msg.push_str(&format!("\nSkipped {path}: {why}"));
+                    }
+                    msg
+                }
+            },
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(in crate::app) fn poll_settings_import(&mut self) {}
+
     /// The SWR guard: arm it, and set the ratio it stops transmitting at.
     ///
     /// Reads the live values out of the broadcast TX state rather than off

@@ -187,6 +187,7 @@ impl eframe::App for SdroxideApp {
         }
         self.drain_events(&ctx, now);
         self.poll_adif_import();
+        self.poll_settings_import();
         self.refresh_band_conditions(now);
 
         // A server that asks for a password gets the whole window until it has
