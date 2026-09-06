@@ -360,8 +360,14 @@ fn the_handshake_states_the_settings_in_dependency_order() {
     assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(6));
 }
 
-/// With the FFT lane on, its whole block lands between the I/Q settings and
+/// With the FFT lane on, its whole block lands between the I/Q lane's shape and
 /// the streaming mode — and the mode becomes the combined one.
+///
+/// The I/Q *frequency* is the exception, and it is deliberately last of the
+/// two windows: with this lane running the receiver follows the FFT window, and
+/// `IQ_FREQUENCY` only places the I/Q window inside the band the receiver is
+/// already on. Sending it first placed it against a band the receiver was about
+/// to leave.
 #[test]
 fn the_fft_block_is_configured_before_the_streaming_mode() {
     let fake = Fake::start(Spec::default());
@@ -373,6 +379,7 @@ fn the_fft_block_is_configured_before_the_streaming_mode() {
     let mode_at = fake.index_of(SETTING_STREAMING_MODE).expect("a streaming mode");
     let gain_at = fake.index_of(SETTING_GAIN).expect("a gain");
     let dgain_at = fake.index_of(SETTING_IQ_DIGITAL_GAIN).expect("a digital gain");
+    let shape_at = fake.index_of(SETTING_IQ_DECIMATION).expect("an I/Q decimation");
     let freq_at = fake.index_of(SETTING_IQ_FREQUENCY).expect("an I/Q frequency");
 
     for s in [
@@ -384,9 +391,14 @@ fn the_fft_block_is_configured_before_the_streaming_mode() {
         SETTING_FFT_DB_RANGE,
     ] {
         let at = fake.index_of(s).unwrap_or_else(|| panic!("setting {s} was never sent"));
-        assert!(at > freq_at, "setting {s} must follow the I/Q block");
+        assert!(at > shape_at, "setting {s} must follow the I/Q lane's shape");
         assert!(at < mode_at, "setting {s} must precede the streaming mode");
     }
+    let fft_freq_at = fake.index_of(SETTING_FFT_FREQUENCY).expect("an FFT frequency");
+    assert!(
+        fft_freq_at < freq_at,
+        "the window the receiver follows has to be placed before the window that sits inside it",
+    );
     assert!(mode_at < gain_at, "the streaming mode must precede the gain");
     assert!(gain_at < dgain_at, "the digital gain is computed from the gain index");
 

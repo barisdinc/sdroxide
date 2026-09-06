@@ -487,10 +487,13 @@ impl Client {
 
         self.set(proto::SETTING_IQ_FORMAT, proto::format_wire(self.iq_format))?;
         self.set(proto::SETTING_IQ_DECIMATION, self.iq_stage)?;
-        self.set(proto::SETTING_IQ_FREQUENCY, proto::freq_wire(self.center))?;
+        // The FFT window before the I/Q position, because the receiver follows
+        // the window and `IQ_FREQUENCY` is only a place inside the band the
+        // receiver is on — see [`flush_retune`].
         if self.fft_enabled {
             self.send_fft_config()?;
         }
+        self.set(proto::SETTING_IQ_FREQUENCY, proto::freq_wire(self.center))?;
         self.start_stream()
     }
 
@@ -584,8 +587,22 @@ impl Client {
         want.clamp(lo, hi.max(lo))
     }
 
-    /// The FFT window centred as near `hz` as its own slack allows.
+    /// Where the FFT window should be centred for the dial to be on `hz`.
+    ///
+    /// Where this client controls the receiver that is `hz` itself: with the
+    /// FFT lane running the receiver follows this window, so the window goes
+    /// where the dial goes. Clamping it into the slack around wherever the
+    /// server happened to be sitting is what parked whole sessions on the
+    /// server's own start-up frequency — at decimation stage 0 the window
+    /// covers the entire receiver and has no slack at all, so the clamp
+    /// collapsed to exactly that frequency and never let go.
+    ///
+    /// Where another client owns the receiver the device is theirs and does not
+    /// move, and all this end may do is slide the window inside it.
     fn clamped_fft_center(&self, hz: f64) -> f64 {
+        if self.can_control {
+            return hz;
+        }
         let slack = self.info.fft_slack_hz(self.fft_span);
         hz.clamp(self.device_center - slack, self.device_center + slack)
     }
@@ -598,7 +615,14 @@ impl Client {
         if !self.fft_enabled {
             return None;
         }
-        self.info.fft_recenter(self.center, self.fft_center, self.fft_span, self.device_center)
+        self.info.fft_recenter(
+            self.center,
+            self.fft_center,
+            self.fft_span,
+            self.device_center,
+            self.can_control,
+            self.info.iq_slack_hz(self.iq_rate),
+        )
     }
 
     /// Note an I/Q message's sequence number, reporting messages the server
@@ -734,7 +758,13 @@ fn apply(client: &mut Client, p: &Pending) -> Result<()> {
         // that changes what the server sends is worth.
         client.set(proto::SETTING_STREAMING_ENABLED, 0)?;
         if on {
+            // Where the window is *now*, not where it was left when the lane
+            // was last on: nothing has been maintaining it while it was off, so
+            // sending the stale centre would drag the receiver back to whatever
+            // band the operator was in then.
+            client.fft_center = client.clamped_fft_center(client.center);
             client.send_fft_config()?;
+            client.set(proto::SETTING_IQ_FREQUENCY, proto::freq_wire(client.center))?;
         }
         client.start_stream()?;
     }
@@ -772,20 +802,38 @@ fn flush_retune(client: &mut Client, shared: &Arc<Shared>) -> Result<()> {
     let sent = client.reachable_center(want);
     client.center = sent;
     shared.iq_center_milli_hz.store((sent * 1000.0) as i64, Ordering::Relaxed);
+
+    // The window moves first, and that ordering is load-bearing. On a server
+    // this client controls, the receiver follows the FFT window; `IQ_FREQUENCY`
+    // only places the I/Q window inside the band the receiver is already on, and
+    // a position outside it is clamped — and *stays* clamped, because the server
+    // holds it as an absolute frequency rather than as an offset. Placing the
+    // I/Q window before the receiver has moved therefore leaves it on the band
+    // being left behind.
+    move_fft_window(client)?;
     client.set(proto::SETTING_IQ_FREQUENCY, proto::freq_wire(sent))
 }
 
 /// Move the FFT window if the dial has reached its edge, or if the device
 /// moved out from under it.
 ///
-/// Runs every pass rather than only after a retune: on a server this client
-/// controls, tuning moves the *device* centre too, and the window's slack is
-/// measured against that — so a window that was in the middle of its range can
-/// find itself pinned to an edge without the dial having moved again.
+/// Runs every pass rather than only after a retune: on a shared server the
+/// owner can move the receiver with no dial move here at all, and the window's
+/// slack is measured against where they put it.
 fn maintain_fft(client: &mut Client) -> Result<()> {
     if client.last_fft_retune.elapsed() < RETUNE_MIN_INTERVAL {
         return Ok(());
     }
+    move_fft_window(client)
+}
+
+/// The move itself, without the rate limit.
+///
+/// [`flush_retune`] calls this directly: it has already paid the interval for
+/// the retune it is in the middle of, and on a server this client controls the
+/// window *is* the retune — a window held back by its own limiter would be a
+/// receiver held back with it.
+fn move_fft_window(client: &mut Client) -> Result<()> {
     let Some(target) = client.fft_target_center() else {
         return Ok(());
     };
@@ -1041,5 +1089,196 @@ mod tests {
         let h = header(proto::MSG_PONG, 0, 0);
         f.feed(&h[..5], &mut |_, _| panic!("not a whole header yet")).expect("partial");
         f.feed(&[], &mut |_, _| panic!("still nothing")).expect("empty");
+    }
+
+    // --- against a fake server -----------------------------------------------
+
+    /// The `(setting, value)` pairs a fake server has been sent, in order.
+    type SettingLog = std::sync::Arc<std::sync::Mutex<Vec<(u32, u32)>>>;
+
+    /// A fake SpyServer that records every setting a client sends it.
+    ///
+    /// Shaped like the one this was found on: an Airspy HF+ whose analog
+    /// bandwidth is its whole FFT stage-0 span — so the FFT window has no slack
+    /// of its own — sitting on `device_center_hz`, and which never restates its
+    /// `CLIENT_SYNC`. That last part is why nothing self-corrects: the client
+    /// only ever hears where the receiver is once.
+    fn recording_server(device_center_hz: u32, can_control: u32) -> (String, SettingLog) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&log);
+
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let msg = |kind: u16, body: &[u8]| {
+                let mut out = Vec::new();
+                out.extend_from_slice(&proto::PROTOCOL_VERSION.to_le_bytes());
+                out.extend_from_slice(&u32::from(kind).to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                out.extend_from_slice(body);
+                out
+            };
+            let words =
+                |ws: &[u32]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
+
+            // Airspy HF+: 768 ksps, 660 kHz of analog bandwidth, 8 stages, no
+            // decimation floor, tunable across everything the server offers.
+            let info =
+                words(&[2, 0x3933_3038, 768_000, 660_000, 8, 0, 0, 0, 1_700_000_000, 16, 0, 0]);
+            let sync = words(&[
+                can_control,
+                29,
+                device_center_hz,
+                device_center_hz,
+                device_center_hz,
+                0,
+                0,
+                0,
+                0,
+            ]);
+            if sock.write_all(&msg(proto::MSG_DEVICE_INFO, &info)).is_err()
+                || sock.write_all(&msg(proto::MSG_CLIENT_SYNC, &sync)).is_err()
+            {
+                return;
+            }
+
+            // Everything after the hello is commands; record the settings.
+            let mut buf = [0u8; 4096];
+            let mut carry: Vec<u8> = Vec::new();
+            loop {
+                let Ok(n) = sock.read(&mut buf) else { return };
+                if n == 0 {
+                    return;
+                }
+                carry.extend_from_slice(&buf[..n]);
+                while carry.len() >= proto::CMD_HEADER_LEN {
+                    let w = |i: usize| {
+                        u32::from_le_bytes([carry[i], carry[i + 1], carry[i + 2], carry[i + 3]])
+                    };
+                    let (cmd, body_size) = (w(0), w(4) as usize);
+                    if carry.len() < proto::CMD_HEADER_LEN + body_size {
+                        break;
+                    }
+                    if cmd == proto::CMD_SET_SETTING && body_size == 8 {
+                        seen.lock().expect("log").push((w(8), w(12)));
+                    }
+                    carry.drain(..proto::CMD_HEADER_LEN + body_size);
+                }
+            }
+        });
+
+        (addr, log)
+    }
+
+    /// Every `(setting, value)` recorded so far, waiting up to a second for at
+    /// least `at_least` of the given setting to turn up.
+    fn settings_sent(
+        log: &std::sync::Mutex<Vec<(u32, u32)>>,
+        setting: u32,
+        at_least: usize,
+    ) -> Vec<u32> {
+        for _ in 0..200 {
+            let values: Vec<u32> = log
+                .lock()
+                .expect("log")
+                .iter()
+                .filter(|&&(s, _)| s == setting)
+                .map(|&(_, v)| v)
+                .collect();
+            if values.len() >= at_least {
+                return values;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        log.lock().expect("log").iter().filter(|&&(s, _)| s == setting).map(|&(_, v)| v).collect()
+    }
+
+    fn cfg(addr: &str) -> SpyServerConfig {
+        SpyServerConfig { address: addr.into(), ..SpyServerConfig::default() }
+    }
+
+    /// The FFT window is where the receiver *is*: with the FFT lane running, a
+    /// SpyServer tunes to `FFT_FREQUENCY` and treats `IQ_FREQUENCY` as a
+    /// position inside the band it is already on. So opening the window on the
+    /// frequency the server happened to be sitting on parks the whole session
+    /// there, whatever the operator asked for — and nothing recovers, because
+    /// this server never says where the receiver went.
+    #[test]
+    fn the_fft_window_opens_on_the_dial_not_on_the_servers_own_frequency() {
+        let (addr, log) = recording_server(100_000_000, 1);
+        let handle = SpyServerHandle::connect_wideband(&cfg(&addr), 7_100_000.0).expect("connect");
+        let sent = settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 1);
+        drop(handle);
+        assert_eq!(
+            sent.first().copied(),
+            Some(7_100_000),
+            "the FFT window opened on the server's own frequency, which is where the \
+             receiver then stayed: {sent:?}"
+        );
+    }
+
+    /// ...and it follows the dial afterwards. At the top of the rate ladder the
+    /// I/Q window has no slack to slide within, so the receiver has to move,
+    /// and moving the receiver means moving this window.
+    #[test]
+    fn the_fft_window_follows_a_retune() {
+        let (addr, log) = recording_server(100_000_000, 1);
+        let handle = SpyServerHandle::connect_wideband(&cfg(&addr), 7_100_000.0).expect("connect");
+        settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 1);
+        handle.set_center_hz(14_100_000.0);
+        let sent = settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 2);
+        drop(handle);
+        assert_eq!(
+            sent.last().copied(),
+            Some(14_100_000),
+            "the receiver follows the FFT window, so a retune that leaves it behind is a \
+             retune that never happens: {sent:?}"
+        );
+    }
+
+    /// The opposite server: another client owns the receiver, so it does not
+    /// move for us and the window may only slide inside what they are already
+    /// receiving. At stage 0 that is nowhere at all — the window covers the
+    /// whole receiver — so it stays on their centre.
+    #[test]
+    fn a_shared_servers_fft_window_stays_inside_the_owners_band() {
+        let (addr, log) = recording_server(100_000_000, 0);
+        let handle = SpyServerHandle::connect_wideband(&cfg(&addr), 7_100_000.0).expect("connect");
+        let sent = settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 1);
+        drop(handle);
+        assert_eq!(
+            sent.first().copied(),
+            Some(100_000_000),
+            "the device belongs to another client; this end cannot tune it away: {sent:?}"
+        );
+    }
+
+    /// The receiver follows the FFT window, and `IQ_FREQUENCY` is only a
+    /// position inside the band it is on — a position the server clamps if it
+    /// is outside, and then keeps. So the window has to move first, or the I/Q
+    /// is placed against a band the receiver is about to leave.
+    #[test]
+    fn a_retune_moves_the_fft_window_before_it_places_the_iq_window() {
+        let (addr, log) = recording_server(100_000_000, 1);
+        let handle = SpyServerHandle::connect_wideband(&cfg(&addr), 7_100_000.0).expect("connect");
+        settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 1);
+        let before = log.lock().expect("log").len();
+        handle.set_center_hz(14_100_000.0);
+        settings_sent(&log, proto::SETTING_FFT_FREQUENCY, 2);
+        let after: Vec<(u32, u32)> = log.lock().expect("log")[before..].to_vec();
+        drop(handle);
+
+        let fft = after
+            .iter()
+            .position(|&(s, v)| s == proto::SETTING_FFT_FREQUENCY && v == 14_100_000)
+            .expect("the FFT window moved");
+        let iq = after
+            .iter()
+            .position(|&(s, v)| s == proto::SETTING_IQ_FREQUENCY && v == 14_100_000)
+            .expect("the I/Q window moved");
+        assert!(fft < iq, "the FFT window must move first: {after:?}");
     }
 }
