@@ -1230,6 +1230,23 @@ pub struct DigiConfig {
     /// exactly what it always did.
     #[serde(default = "yes")]
     pub sstv_fsk_id: bool,
+    /// Silence sent after keying the transmitter and before the picture's own
+    /// calibration header, in milliseconds (issue #351).
+    ///
+    /// An SSTV frame opens with about a second of leader and VIS code that
+    /// says which mode it is, and a decoder that misses any of it does not
+    /// show a late picture — it shows nothing, because it never learned there
+    /// was a picture coming. So the header is exactly the part of the
+    /// transmission that must not go out before the transmitter is really on
+    /// the air, and on a CAT rig that moment is not the one PTT was asked for:
+    /// the engine alone spends 165–240 ms getting there (measured, see
+    /// `crates/sdroxide-radio/tests/tx_turnaround.rs`) and the rig's own T/R
+    /// relay, PLL and PA settling are on top of that. Half a second by
+    /// default, which is nothing against a transmission of a minute or two and
+    /// covers every rig measured; an IQ SDR that keys in 7 ms can take it down
+    /// to zero.
+    #[serde(default = "default_sstv_txdelay_ms")]
+    pub sstv_txdelay_ms: u16,
 
     // ── The banner across the top of every transmitted picture ──
     //
@@ -1848,6 +1865,7 @@ impl Default for DigiConfig {
             max_tx_repeats: 10,
             sstv_tx_ppm: 0.0,
             sstv_fsk_id: true,
+            sstv_txdelay_ms: default_sstv_txdelay_ms(),
             sstv_banner: true,
             sstv_banner_left: sstv_default_banner_left(),
             sstv_banner_right: sstv_default_banner_right(),
@@ -3002,6 +3020,12 @@ fn default_packet_maxframe() -> u8 {
     4
 }
 fn default_packet_txdelay_ms() -> u16 {
+    500
+}
+/// Default for [`DigiConfig::sstv_txdelay_ms`] — half a second of dead air
+/// before the calibration header, which is enough for every rig measured and
+/// invisible against a transmission that runs for minutes.
+fn default_sstv_txdelay_ms() -> u16 {
     500
 }
 fn default_packet_txtail_ms() -> u16 {

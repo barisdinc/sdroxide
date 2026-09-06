@@ -3761,6 +3761,16 @@ one of the two.
   the mode readout, and stays there until another station sends one. A receiver
   that tuned in halfway through a picture still gets it, because the ID does not
   depend on having caught the header.
+- **TX lead** is how long sdroxide sends silence after keying the transmitter
+  before the picture's own leader and VIS code go out — 500 ms by default. That
+  header is what tells the far end a picture is coming and which mode it is in,
+  and a decoder that misses part of it does not draw a late picture, it draws
+  nothing at all. On a CAT-controlled rig the moment PTT is asked for and the
+  moment RF is really on the air are not the same one — sdroxide alone spends
+  165–240 ms getting there, and the rig's T/R relay, PLL and PA settling come on
+  top — so the header goes out into the gap unless something covers it. Turn it
+  up if a WebSDR or OpenWebRX on the far end hears your transmission but shows no
+  image; turn it down to 0 on an SDR that keys in milliseconds.
 
 > **Note:** SSTV decode/encode runs in the server engine, so the panel works the
 > same in the native app and the browser client. RX quality depends on signal

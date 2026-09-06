@@ -46,6 +46,18 @@ pub struct SstvController {
     /// Auto mode: RX auto-detects; TX defaults to Martin 1 until a mode is heard.
     auto: bool,
     keyed: bool,
+    /// Samples of silence still owed before the picture's calibration header
+    /// goes out, from [`DigiConfig::sstv_txdelay_ms`] (issue #351).
+    ///
+    /// Keying the transmitter and being on the air are not the same instant on
+    /// a CAT rig, and the part of an SSTV frame that lands in the gap between
+    /// them is the leader and VIS code — the part a decoder needs *before* it
+    /// will start a picture at all. Losing it does not shorten the image, it
+    /// loses the whole transmission, which is what an OpenWebRX on the far end
+    /// showed: nothing. Counted down in [`Self::fill_tx_block`] rather than
+    /// waited out in `poll`, so the block cadence is untouched and the rig
+    /// simply carries dead air for as long as it needs.
+    tx_lead: usize,
 
     // Actions queued for the next `poll`.
     queued: Vec<DigiAction>,
@@ -76,6 +88,7 @@ impl SstvController {
             tx_mode: SstvMode::Martin1,
             auto: true,
             keyed: false,
+            tx_lead: 0,
             queued: Vec::new(),
             status_dirty: true,
             last_status: None,
@@ -223,6 +236,15 @@ impl DigiEngine for SstvController {
     }
 
     fn fill_tx_block(&mut self, out: &mut [f32]) -> bool {
+        // Dead air first, and only what is left of this block after it: rounding
+        // the lead up to a whole block would put the header where the block
+        // cadence happened to fall, and on a sound-card rig a block is 341 ms.
+        let lead = self.tx_lead.min(out.len());
+        if lead > 0 {
+            self.tx_lead -= lead;
+            out[..lead].fill(0.0);
+        }
+        let out = &mut out[lead..];
         match &mut self.tx {
             Some(tx) => {
                 tx.next_block(out);
@@ -230,9 +252,7 @@ impl DigiEngine for SstvController {
                 tx.done()
             }
             None => {
-                for s in out.iter_mut() {
-                    *s = 0.0;
-                }
+                out.fill(0.0);
                 true
             }
         }
@@ -240,6 +260,7 @@ impl DigiEngine for SstvController {
 
     fn on_burst_done(&mut self) {
         self.tx = None;
+        self.tx_lead = 0;
         self.keyed = false;
         self.status_dirty = true;
     }
@@ -250,6 +271,7 @@ impl DigiEngine for SstvController {
 
     fn abort_tx(&mut self) {
         self.tx = None;
+        self.tx_lead = 0;
         self.keyed = false;
         self.status_dirty = true;
     }
@@ -294,6 +316,77 @@ impl DigiEngine for SstvController {
         // "no ID" rather than transmitting a header with nothing in it.
         let id = if self.cfg.sstv_fsk_id { self.cfg.my_call.trim() } else { "" };
         self.tx = Some(tx.with_fsk_id(id));
+        self.tx_lead = (OUT_RATE * self.cfg.sstv_txdelay_ms as f64 / 1000.0) as usize;
         self.status_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DigiEngine;
+
+    /// A grey 8×8 picture, which is all the encoder needs to build a plan.
+    fn image() -> (Vec<u8>, u16, u16) {
+        (vec![128u8; 8 * 8 * 3], 8, 8)
+    }
+
+    fn controller(txdelay_ms: u16) -> SstvController {
+        let cfg = DigiConfig { sstv_txdelay_ms: txdelay_ms, ..Default::default() };
+        SstvController::new(Mode::SstvFm, cfg, 48_000.0)
+    }
+
+    /// The calibration header must not go out before the transmitter is really
+    /// on the air: a decoder that misses it draws no picture at all, which is
+    /// what an OpenWebRX on the far end of an IC-9700 showed (issue #351). So
+    /// the configured lead comes out as silence first, to the sample.
+    #[test]
+    fn the_picture_starts_only_after_the_configured_lead() {
+        let mut c = controller(500);
+        let (rgb, w, h) = image();
+        c.set_sstv_image(SstvMode::Martin1, rgb, w, h);
+        let lead = (OUT_RATE * 0.5) as usize;
+
+        // Blocks that do not divide the lead, so a lead rounded up to a whole
+        // block would show as extra silence and fail the count below.
+        let mut silent = 0usize;
+        let mut block = vec![0.0f32; 1024];
+        let mut first_tone = None;
+        for i in 0..64 {
+            block.fill(f32::NAN); // every sample has to be written by the fill
+            c.fill_tx_block(&mut block);
+            assert!(block.iter().all(|s| s.is_finite()), "block {i} was left half-written");
+            match block.iter().position(|&s| s != 0.0) {
+                Some(at) => {
+                    first_tone = Some(silent + at);
+                    break;
+                }
+                None => silent += block.len(),
+            }
+        }
+        assert_eq!(first_tone, Some(lead), "the header goes out the sample the lead ends");
+    }
+
+    /// ...and a station that does not need it — an SDR that keys in
+    /// milliseconds — gets the picture immediately, as before.
+    #[test]
+    fn no_lead_means_the_picture_starts_at_once() {
+        let mut c = controller(0);
+        let (rgb, w, h) = image();
+        c.set_sstv_image(SstvMode::Martin1, rgb, w, h);
+        let mut block = vec![0.0f32; 1024];
+        c.fill_tx_block(&mut block);
+        assert!(block.iter().any(|&s| s != 0.0), "nothing should be waited for");
+    }
+
+    /// Aborting mid-lead leaves nothing owed, or the next picture would open
+    /// with the dead air the abandoned one never spent.
+    #[test]
+    fn aborting_during_the_lead_forgets_it() {
+        let mut c = controller(500);
+        let (rgb, w, h) = image();
+        c.set_sstv_image(SstvMode::Martin1, rgb, w, h);
+        c.abort_tx();
+        assert_eq!(c.tx_lead, 0);
     }
 }

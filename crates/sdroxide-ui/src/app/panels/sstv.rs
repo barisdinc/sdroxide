@@ -824,6 +824,35 @@ impl SdroxideApp {
                                     {
                                         cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
                                     }
+                                    ui.separator();
+                                    // Dead air before the calibration header, so
+                                    // the rig is really on the air by the time
+                                    // the VIS code goes out. Here rather than in
+                                    // the setup window because it is the same
+                                    // kind of per-station trim as the slant
+                                    // beside it, and the operator who needs it
+                                    // finds out by transmitting.
+                                    ui.label(RichText::new("TX lead").size(10.0).weak());
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(
+                                                &mut self.digi_cfg_edit.sstv_txdelay_ms,
+                                            )
+                                            .range(0..=3000)
+                                            .speed(10.0)
+                                            .suffix(" ms"),
+                                        )
+                                        .on_hover_text(
+                                            "Silence sent after keying and before the picture's \
+                                             leader and VIS code. A decoder that misses any of \
+                                             that header shows no picture at all, so this covers \
+                                             the gap between asking a rig for PTT and it really \
+                                             being on the air. 0 for an SDR that keys instantly.",
+                                        )
+                                        .changed()
+                                    {
+                                        cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
+                                    }
                                 });
                             });
                         });
