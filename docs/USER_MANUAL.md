@@ -8815,9 +8815,11 @@ radio stays in it until you unplug it and sdroxide will show noise.
 **Sample rate.** 2 Msps is the default and the gentlest on the host. Everything
 below 8 Msps is outside the MAX5864's specified range — it is what everyone
 uses regardless, and it is the rate the LO-offset behaviour was measured at, so
-it is offered with a note rather than hidden. 20 Msps is 40 MB/s and wants a
-real SuperSpeed port; on a USB 2.0 link sdroxide says so at open rather than
-leaving you to diagnose dropped samples. Changing the rate reopens the radio.
+it is offered with a note rather than hidden. 20 Msps is 40 MB/s, which is what
+the High-Speed USB 2.0 link every HackRF has is rated for; there is no
+SuperSpeed HackRF to move it to, and sdroxide only says something about the
+link if the board has enumerated *below* high speed — a cable or hub problem,
+and one no sample rate will survive. Changing the rate reopens the radio.
 
 A **HackRF Pro** is offered four extra rates below that — 250 and 500 ksps, 1
 and 1.5 Msps — and only a Pro, because only a Pro can use them. On the other

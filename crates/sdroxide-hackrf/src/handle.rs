@@ -415,8 +415,8 @@ pub(crate) struct DeviceInfo {
     /// Surfaced through `IqSource::open_status` rather than logged and
     /// forgotten.
     pub snapped_from: Option<f64>,
-    /// Set when the link cannot carry the chosen rate — 20 Msps is 40 MB/s,
-    /// which a high-speed port will not sustain.
+    /// Set when the board has enumerated below the high-speed link every
+    /// HackRF is built for, which no rate it offers will survive.
     pub link_warning: Option<String>,
 }
 

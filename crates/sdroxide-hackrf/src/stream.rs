@@ -293,7 +293,8 @@ fn run(
             return;
         }
     };
-    let superspeed = usb.is_superspeed();
+    let slow_link = !usb.is_high_speed_or_better();
+    let speed_name = usb.speed_name();
     let serial = usb.serial().map(str::to_string);
 
     let mut dev = match Device::open(usb, &cfg, center_hz) {
@@ -311,13 +312,16 @@ fn run(
     shared.set_gain(GainSetter::TxVga, txvga);
 
     let rate = dev.rate_hz();
-    // 20 Msps is 40 MB/s. A high-speed link tops out at 60 MB/s in theory and
-    // well under it in practice, so this is worth saying at open rather than
-    // leaving somebody to diagnose dropped samples.
-    let link_warning = (!superspeed && rate > 8.0e6).then(|| {
+    // Only when the link is slower than the board's own. A HackRF is a
+    // High-Speed USB 2.0 device and there is no other kind, so high speed is
+    // not a shortfall to complain about — 20 Msps is 40 MB/s and that is what
+    // the link is rated for. Landing below it means a cable or a hub is at
+    // fault, and no rate will work until that is sorted (issue #349).
+    let link_warning = slow_link.then(|| {
         format!(
-            "{:.1} Msps is {:.0} MB/s and this radio is on a high-speed (USB 2.0) link — \
-             expect dropped samples. Move it to a SuperSpeed port or pick a lower rate.",
+            "this radio has enumerated at {speed_name} rather than the high speed (USB 2.0) \
+             every HackRF uses — {:.1} Msps is {:.0} MB/s and nothing like that will fit. \
+             Check the cable and the hub.",
             rate / 1e6,
             rate * BYTES_PER_SAMPLE as f64 / 1e6
         )
