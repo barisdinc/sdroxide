@@ -146,7 +146,7 @@ impl AudioCatSource {
         // more silence either side of it.
         let opened = match cfg.format {
             SoundFormat::Iq => sdroxide_audio::start_input_stereo(audio_in, cfg.iq_rate_hz),
-            SoundFormat::DemodAudio => sdroxide_audio::start_input(audio_in, 48_000),
+            SoundFormat::DemodAudio => sdroxide_audio::start_input_buffered(audio_in, 48_000),
         };
         let dev_label = audio_in.unwrap_or("system default");
         // A dummy, always-empty ring keeps `read` returning silence when RX is

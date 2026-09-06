@@ -2,8 +2,8 @@
 //! lock-free ring buffer. The DSP engine owns the producer side.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -764,9 +764,47 @@ fn pick_device(
 /// Open an input device (microphone) by name (`None` = system default) and
 /// stream mono f32 samples into the returned consumer's ring (channel 0).
 /// Accepts any native sample format (i16/i32/u16/u8/f32), converting to f32.
+///
+/// The driver's own period is left alone, because a microphone is
+/// latency-critical: what it hears is monitored, keyed and put on the air while
+/// the operator is still speaking. A capture nobody is waiting on in real time
+/// wants [`start_input_buffered`] instead.
 pub fn start_input(
     device_name: Option<&str>,
     preferred_rate: u32,
+) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
+    start_input_mono(device_name, preferred_rate, false, "mic input")
+}
+
+/// [`start_input`] with the same generous, rate-independent capture period as
+/// [`start_input_stereo`] (see [`CAPTURE_BUFFER_MS`]) rather than the driver's
+/// own default.
+///
+/// For a transceiver's demodulated audio, not a microphone. That stream is read
+/// on somebody else's clock — once per block the *attached receiver* hands back,
+/// where a rig's audio arrives beside an SDR's I/Q (`PanadapterAudio::Transceiver`)
+/// — and nothing downstream is waiting on it in real time the way a monitored
+/// microphone is. Left at the driver's default, a short negotiated period
+/// (PipeWire's desktop-interactive quantum can be a few milliseconds) leaves no
+/// margin for scheduling jitter, and a capture callback that misses its own
+/// deadline is a stream-level underrun rather than merely the software ring
+/// this feeds falling behind (issue #354).
+pub fn start_input_buffered(
+    device_name: Option<&str>,
+    preferred_rate: u32,
+) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
+    start_input_mono(device_name, preferred_rate, true, "radio audio input")
+}
+
+/// The body both mono capture openers share. `buffered` asks for the
+/// [`CAPTURE_BUFFER_MS`] period; `what` names the stream in the log, because
+/// "mic input refused" against a rig's sound card would send the reader looking
+/// at the wrong cable.
+fn start_input_mono(
+    device_name: Option<&str>,
+    preferred_rate: u32,
+    buffered: bool,
+    what: &'static str,
 ) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
     let host = cpal::default_host();
     let (device, label) = pick_device(&host, device_name, false)?;
@@ -774,7 +812,16 @@ pub fn start_input(
     let picked = device
         .supported_input_configs()
         .ok()
-        .and_then(|configs| choose_config(configs, preferred_rate, 1));
+        .and_then(|configs| choose_config(configs, preferred_rate, 1))
+        .map(|(cfg, fmt)| {
+            if !buffered {
+                return (cfg, fmt);
+            }
+            // `config_candidates` retries without the period for a device that
+            // will not take the one asked for.
+            let period = capture_period_frames(cfg.sample_rate);
+            (cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(period), ..cfg }, fmt)
+        });
     let mut last = AudioError::NoConfig;
     for (config, fmt) in config_candidates(picked, device.default_input_config()) {
         let rate = config.sample_rate;
@@ -791,11 +838,11 @@ pub fn start_input(
             producer,
             dropped.clone(),
             glitches.clone(),
-            "mic input",
+            what,
             label.clone(),
         ) {
             Ok(stream) => {
-                info!(rate, format = ?fmt, device = %label, "mic input running");
+                info!(rate, buffer = ?config.buffer_size, format = ?fmt, device = %label, "{what} running");
                 return Ok((
                     AudioInput {
                         _stream: stream,
@@ -808,7 +855,7 @@ pub fn start_input(
                 ));
             }
             Err(e) => {
-                warn!("mic input {channels}ch {rate} Hz {fmt:?} refused: {e}");
+                warn!("{what} {channels}ch {rate} Hz {fmt:?} refused: {e}");
                 last = e;
                 if slow_refusal(&label, started.elapsed()) {
                     break;

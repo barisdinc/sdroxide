@@ -49,6 +49,7 @@
 //! per-mode override.
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use sdroxide_radio::{Complex32, ControlUpdate, IqSource, Result};
 use sdroxide_types::{DeviceCaps, Mode, PanadapterAudio, PanadapterConfig};
@@ -101,6 +102,11 @@ pub struct PanadapterSource {
     ctrl_buf: Vec<Complex32>,
     /// Transceiver audio waiting to be played, when it is what is being heard.
     audio_q: VecDeque<f32>,
+    /// Wall-clock time [`Self::rx_audio`] last drew from `audio_q`, so what it
+    /// takes tracks how much audio could plausibly have arrived since — rather
+    /// than a guess at how often it is being called. `None` before the first
+    /// draw. See [`Self::rx_audio`] for what the guess cost (issue #354).
+    last_audio_pull: Option<Instant>,
     /// True while the transmitter is keyed, so the receive side knows to stop
     /// handing over what it hears of our own signal.
     keyed: bool,
@@ -134,6 +140,7 @@ impl PanadapterSource {
             dial_known: false,
             ctrl_buf: vec![Complex32::new(0.0, 0.0); 4096],
             audio_q: VecDeque::new(),
+            last_audio_pull: None,
             keyed: false,
             label,
         }
@@ -426,11 +433,35 @@ impl IqSource for PanadapterSource {
         if self.cfg.audio != PanadapterAudio::Transceiver {
             return None;
         }
-        // A block's worth, paced by whatever has arrived; silence rather than
-        // nothing when the rig is momentarily behind, so the speaker path keeps
-        // its cadence instead of stalling and letting the sub receiver's ear
-        // run away from it.
-        let want = (self.ctrl.sample_rate() * AUDIO_QUEUE_MS / 1000.0 / 4.0).max(1.0) as usize;
+        // How much to take is how much wall-clock time has passed since the
+        // last call, not a guess at how often this is called. It runs once per
+        // block the *attached receiver* hands back, and a fixed quarter of
+        // `AUDIO_QUEUE_MS` assumed that landed close to forty times a second.
+        // On a fast SDR it does not: an RSP1B at 2 Msps hands back a few
+        // thousand samples at a time, a few milliseconds apart, so every call
+        // over-drew a queue that could not possibly have filled 25 ms since the
+        // one before it and most of every block came back silence-padded —
+        // continuous stutter rather than the occasional glitch clock drift
+        // alone would cause (issue #354). The reverse mismatch is no better: a
+        // receiver with a coarser block interval than the guess would hit the
+        // queue cap every call and trim the oldest samples instead.
+        //
+        // Silence still pads what is short, so the speaker path keeps its
+        // cadence when the rig is momentarily behind instead of stalling and
+        // letting the sub receiver's ear run away from it.
+        //
+        // Clamped to the queue's own span: a pause longer than
+        // `AUDIO_QUEUE_MS` — the first call, a stall, an over and back — cannot
+        // have left more than that much genuinely waiting, and asking for more
+        // only pads the excess with silence a fresh block should not carry.
+        let now = Instant::now();
+        let elapsed = self
+            .last_audio_pull
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(AUDIO_QUEUE_MS / 1000.0)
+            .min(AUDIO_QUEUE_MS / 1000.0);
+        self.last_audio_pull = Some(now);
+        let want = ((self.ctrl.sample_rate() * elapsed) as usize).max(1);
         let take = self.audio_q.len().min(want);
         out.extend(self.audio_q.drain(..take));
         out.resize(want, 0.0);
@@ -1021,12 +1052,28 @@ mod tests {
         assert_eq!(rate, 48_000.0);
         assert!(!out.is_empty());
         assert!(out.iter().take(600).all(|&s| s == 0.5), "the rig's samples, not the receiver's");
-        // A block always comes out the same length, padded with silence, so the
-        // speaker path keeps its cadence when the rig falls behind.
-        let mut later = Vec::new();
-        src.rx_audio(&mut later).unwrap();
-        assert_eq!(later.len(), out.len());
-        assert!(later.iter().all(|&s| s == 0.0));
+        // A tight loop of further calls — the shape a fast SDR's block rate puts
+        // this under, once per block it hands back — must not stretch the rig's
+        // 600 samples into more than there were. Each call's length tracks the
+        // wall-clock time that has actually passed rather than a fixed guess at
+        // how often it is called, so an empty queue with no time behind it comes
+        // back with almost nothing in it instead of a whole block of padding
+        // (issue #354).
+        let mut nonzero = 0usize;
+        let mut padded = 0usize;
+        for _ in 0..50 {
+            let mut chunk = Vec::new();
+            src.rx_audio(&mut chunk).unwrap();
+            nonzero += chunk.iter().filter(|&&s| s != 0.0).count();
+            padded += chunk.len();
+        }
+        assert_eq!(nonzero, 0, "nothing further arrived, so nothing further plays");
+        assert!(
+            padded < out.len(),
+            "fifty calls in no time at all asked for {padded} samples, more than the \
+             {} one call used to demand on its own",
+            out.len()
+        );
     }
 
     /// Listening to the receiver: nothing is offered as external audio, but the
