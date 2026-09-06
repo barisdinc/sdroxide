@@ -553,6 +553,20 @@ pub(crate) mod fake {
             self
         }
 
+        /// Start refusing `req` on an already-open device. [`Self::stalling`]
+        /// consumes the transport because it is used at construction; this is
+        /// for a test that has to get the radio open first and only then have
+        /// it start saying no.
+        pub fn refuse(&self, req: Request) {
+            self.stalls.lock().unwrap().push(req.code());
+        }
+
+        /// Stop refusing `req`, so a test can watch a change land once the
+        /// radio stops saying no.
+        pub fn accept(&self, req: Request) {
+            self.stalls.lock().unwrap().retain(|&c| c != req.code());
+        }
+
         fn stalls(&self, req: Request) -> bool {
             self.stalls.lock().unwrap().contains(&req.code())
         }
