@@ -359,15 +359,54 @@ impl DeviceInfo {
         }
     }
 
+    /// The span the receiver actually hears, in Hz.
+    ///
+    /// `MaximumBandwidth` wherever a server states one, because that is the
+    /// analog passband and everything between it and the sample rate is
+    /// roll-off. On an Airspy HF+ the two are 660 kHz and 768 kHz, and the
+    /// 54 kHz either side of the difference is the same roll-off
+    /// [`Self::digital_gain_db`] swept the noise floor climbing into.
+    ///
+    /// Guarded rather than trusted. A server that leaves the field at zero
+    /// would otherwise read as a receiver that hears nothing, which would pin
+    /// every window to the device centre and refuse the operator's first tune
+    /// — so a server with nothing to say for itself is taken at its sample
+    /// rate, exactly as it was before this figure existed. A bandwidth wider
+    /// than the sample rate is the same nonsense from the other end: nothing
+    /// is heard that was never sampled.
+    ///
+    /// [`Self::fft_slack_hz`] deliberately does not come through here. The FFT
+    /// spans are quoted in `MaximumBandwidth` to begin with, so its slack has
+    /// to be measured in the same units, and a server that states no bandwidth
+    /// has already had its FFT lane switched off for want of a span.
+    pub fn usable_bandwidth_hz(&self) -> f64 {
+        let rate = f64::from(self.maximum_sample_rate);
+        match f64::from(self.maximum_bandwidth) {
+            bw if bw > 0.0 => bw.min(rate),
+            _ => rate,
+        }
+    }
+
     /// How far the I/Q window may slide either side of the device centre
     /// without the device itself having to move, in Hz.
+    ///
+    /// Measured against [`Self::usable_bandwidth_hz`] and not the sample rate,
+    /// because room in the roll-off is not room. On an HF+ at 384 ksps the
+    /// rate says 192 kHz of slack and the passband says 138 kHz, and the
+    /// 54 kHz between the two answers is a dial that keeps moving onto signals
+    /// getting quieter for a reason nothing on screen accounts for. Narrower is
+    /// also the safe side of the server's own clamp: where a server holds
+    /// `IQ_FREQUENCY` to its passband rather than its rate, asking past that is
+    /// a position it pulls back without saying so — and per
+    /// [`Self::fft_recenter`] the pull-back sticks, because the server keeps it
+    /// as an absolute frequency.
     ///
     /// Computed from the geometry rather than read from
     /// `Min/MaximumIQCenterFrequency`, which several servers leave zeroed —
     /// trusting those would pin the window to the device centre on exactly the
     /// servers where sliding it matters most.
     pub fn iq_slack_hz(&self, iq_rate_hz: f64) -> f64 {
-        (f64::from(self.maximum_sample_rate) - iq_rate_hz).max(0.0) / 2.0
+        (self.usable_bandwidth_hz() - iq_rate_hz).max(0.0) / 2.0
     }
 
     /// The same for the FFT window, against the analog bandwidth its spans are
@@ -563,12 +602,16 @@ mod tests {
     use super::*;
 
     /// A `DeviceInfo` as an Airspy HF+ Discovery's server reports it.
+    ///
+    /// The two widths differ and that is the point of using this one: a real
+    /// HF+ samples 768 kHz and hears 660 kHz of it, so every figure derived
+    /// from the wrong one of the two is wrong here by 54 kHz either side.
     fn hf_plus() -> DeviceInfo {
         DeviceInfo {
             device_type: 2,
             serial: 0x1234_5678,
             maximum_sample_rate: 768_000,
-            maximum_bandwidth: 768_000,
+            maximum_bandwidth: 660_000,
             decimation_stage_count: 8,
             gain_stage_count: 1,
             maximum_gain_index: 8,
@@ -763,6 +806,65 @@ mod tests {
         assert_eq!(r2.iq_slack_hz(20_000_000.0), 0.0);
     }
 
+    /// The room the I/Q window has is the analog passband's, not the sample
+    /// rate's. On a receiver where the two differ that is the whole difference:
+    /// a window sat as far out as the rate allows is a window half in the
+    /// roll-off, receiving a band that is quiet for reasons the operator cannot
+    /// see.
+    #[test]
+    fn the_iq_slack_stops_where_the_passband_does_not_where_the_sampling_does() {
+        let hf = hf_plus();
+        assert_eq!(hf.usable_bandwidth_hz(), 660_000.0);
+        // Stage 1: 384 ksps inside 660 kHz of passband, not inside 768 kHz of
+        // sample rate. The 54 kHz between the two answers is the roll-off.
+        assert_eq!(hf.iq_slack_hz(384_000.0), 138_000.0);
+        // At the top of the ladder the window is wider than the passband, and
+        // wider than the receiver is not negative slack.
+        assert_eq!(hf.iq_slack_hz(768_000.0), 0.0);
+        // A receiver whose passband is its sample rate is untouched by any of
+        // this, which is most of them.
+        assert_eq!(airspy_r2().iq_slack_hz(2_500_000.0), 3_750_000.0);
+    }
+
+    /// A server that states no bandwidth must not read as a receiver that hears
+    /// nothing: that would pin the window to the device centre and refuse the
+    /// first tune, on exactly the servers with the least to say for themselves.
+    /// One claiming more than it samples is the same nonsense reversed.
+    #[test]
+    fn a_server_that_states_no_bandwidth_is_taken_at_its_sample_rate() {
+        let silent = DeviceInfo { maximum_bandwidth: 0, ..hf_plus() };
+        assert_eq!(silent.usable_bandwidth_hz(), 768_000.0);
+        assert_eq!(silent.iq_slack_hz(96_000.0), 336_000.0, "exactly as it was before");
+
+        let boastful = DeviceInfo { maximum_bandwidth: 5_000_000, ..hf_plus() };
+        assert_eq!(boastful.usable_bandwidth_hz(), 768_000.0, "nothing unsampled is heard");
+    }
+
+    /// The corner the two figures made, and the reason the narrower one has to
+    /// be the one used. On a controlled HF+ at stage 1 the hysteresis is 231 kHz
+    /// and the sample rate claimed the I/Q could follow the dial for 192 of
+    /// them, so the strip held still while the dial walked out past the 138 kHz
+    /// the passband actually reaches — the hold being the narrower of the two is
+    /// only a safe rule while both figures are true.
+    #[test]
+    fn a_controlled_receivers_hold_stops_where_its_passband_does() {
+        let info = hf_plus();
+        let span = f64::from(info.maximum_bandwidth);
+        let slack = info.iq_slack_hz(384_000.0);
+        assert_eq!(slack, 138_000.0);
+        let fft = 7_100_000.0;
+        let hold = |iq: f64| info.fft_recenter(iq, fft, span, 100_000_000.0, true, slack);
+
+        // Inside what the I/Q window can reach, the strip is free to hold.
+        assert_eq!(hold(fft + 130_000.0), None, "the I/Q window can still be placed there");
+        // Past it the window moves, and the receiver moves with it — rather
+        // than the dial being left where the I/Q window cannot follow.
+        assert_eq!(hold(fft + 150_000.0), Some(fft + 150_000.0));
+        // 192 kHz is what the sample rate used to allow, and it sits inside the
+        // hysteresis' own 231 kHz — so nothing else would have caught it.
+        assert_eq!(hold(fft + 192_000.0), Some(fft + 192_000.0), "the gap this closes");
+    }
+
     #[test]
     fn a_forced_int24_server_is_refused_by_name() {
         let mut info = hf_plus();
@@ -872,14 +974,15 @@ mod tests {
     fn a_controlled_receiver_holds_the_window_while_the_iq_can_still_reach() {
         let info = hf_plus();
         let span = f64::from(info.maximum_bandwidth);
-        // I/Q at stage 3 — 96 ksps of 768 — leaves 336 kHz either side.
+        // I/Q at stage 3 — 96 ksps inside 660 kHz of passband — leaves 282 kHz
+        // either side.
         let iq_slack = info.iq_slack_hz(96_000.0);
-        assert_eq!(iq_slack, 336_000.0);
+        assert_eq!(iq_slack, 282_000.0);
         let fft = 7_100_000.0;
         let hold = |iq: f64| info.fft_recenter(iq, fft, span, 100_000_000.0, true, iq_slack);
 
         // The hysteresis is the narrower of the two here: 70 % of half the
-        // 660 kHz span, so ±231 kHz against the I/Q window's 336 kHz.
+        // 660 kHz span, so ±231 kHz against the I/Q window's 282 kHz.
         assert_eq!(hold(fft + 200_000.0), None, "still well inside the strip");
         assert_eq!(hold(fft + 300_000.0), Some(fft + 300_000.0), "past the strip's edge");
 
