@@ -610,6 +610,56 @@ fn the_configured_gain_survives_the_servers_opening_sync() {
     assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(24));
 }
 
+/// An Airspy HF+ sent as 8-bit needs 44 dB of digital gain or its quiet-band
+/// I/Q arrives as three sample values — and the boost was keyed on the ADC
+/// width the server reports, which for a real HF+ is 16 or 18, never 8, so it
+/// was never sent. It is keyed on the stream format now; the format is the
+/// only thing that decides whether the samples have the room.
+#[test]
+fn an_hf_plus_sent_as_eight_bit_is_asked_for_its_forty_four_db() {
+    // As a real HF+ server describes itself: 768 ksps, 660 kHz of analog
+    // bandwidth, no gain stages, and a 16-bit ADC.
+    let hf_plus = Spec {
+        device_type: 2,
+        max_rate: 768_000,
+        max_bw: 660_000,
+        stages: 8,
+        min_decim: 0,
+        max_gain: 0,
+        min_freq: 0,
+        max_freq: 1_700_000_000,
+        resolution: 16,
+        ..Spec::default()
+    };
+
+    let fake = Fake::start(hf_plus);
+    let cfg = SpyServerConfig {
+        iq_format: SpyServerFormat::Uint8,
+        iq_decimation: 0,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+    assert!(eventually(Duration::from_secs(2), || fake
+        .value_of(SETTING_IQ_DIGITAL_GAIN)
+        .is_some()));
+    assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(44), "8-bit at stage 0");
+
+    // The same receiver sent as 16-bit has 48 dB more room and gets none of it.
+    let fake = Fake::start(hf_plus);
+    let cfg = SpyServerConfig {
+        iq_format: SpyServerFormat::Int16,
+        iq_decimation: 0,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+    assert!(eventually(Duration::from_secs(2), || fake
+        .value_of(SETTING_IQ_DIGITAL_GAIN)
+        .is_some()));
+    assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(0), "16-bit at stage 0");
+}
+
 /// The opposite case: where another client owns the receiver, the gain is
 /// theirs and what they set is the only true answer.
 #[test]

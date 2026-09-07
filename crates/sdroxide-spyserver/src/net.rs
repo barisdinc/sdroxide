@@ -538,7 +538,7 @@ impl Client {
     /// whatever the operator pinned it to.
     fn digital_gain_wire(&self) -> u32 {
         let db = if self.auto_digital_gain {
-            self.info.digital_gain_db(self.gain_index, self.iq_stage)
+            self.info.digital_gain_db(self.gain_index, self.iq_stage, self.iq_format)
         } else {
             self.digital_gain_db
         };

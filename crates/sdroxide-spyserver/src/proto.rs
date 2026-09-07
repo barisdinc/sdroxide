@@ -309,27 +309,52 @@ impl DeviceInfo {
             .unwrap_or(self.minimum_iq_decimation)
     }
 
-    /// The digital gain to ask for, in dB, given the server's gain index and
-    /// the I/Q decimation stage.
+    /// The digital gain to ask for, in dB, given the server's gain index, the
+    /// I/Q decimation stage, and the format the samples will be sent in.
     ///
     /// Every decimation stage halves the bandwidth and so buys about 3 dB of
     /// processing gain that would otherwise be thrown away when the samples
-    /// are quantised for the wire. The device-specific parts are what the
-    /// reference client does, transcribed:
+    /// are quantised for the wire. That part, and the Airspy R2's, are what
+    /// SDR++'s client computes:
     ///
     /// * An Airspy R2's gain index counts *down* from its maximum, so a low
     ///   index means a quiet signal that needs the headroom back.
-    /// * An Airspy HF+ sending 8-bit needs a further 32 dB. Its analog dynamic
-    ///   range is so large that its I/Q sits far below digital full scale, and
-    ///   eight bits of a signal that only reaches a fraction of full scale is
-    ///   not eight bits of signal.
-    pub fn digital_gain_db(&self, gain_index: u32, decimation_stage: u32) -> f64 {
+    ///
+    /// The HF+ part is not from there — SDR++ gives it decimation gain only —
+    /// it is from measuring what an HF+ actually puts on the wire as **8-bit**.
+    /// Its analog dynamic range is so large that on a quiet band its I/Q sits
+    /// below one eighth-bit LSB: at 0 dB a real one over SpyServer sent
+    /// *three* distinct sample values (mid-scale 97.7 % of the time, ±1 for
+    /// the rest), and the spectrum of that is a flat slicer-noise floor 23 dB
+    /// above the receiver's own with a dip at DC, which reads on screen as a
+    /// band that is quiet only where the dial is.
+    ///
+    /// How much is enough was swept against a 16-bit capture of the same band,
+    /// floor by distance from the centre. At 32 dB the noise is ±2 LSB and the
+    /// quantiser is still a nonlinearity rather than a noise source: the floor
+    /// rose 3.4 dB towards the band edges and filled the receiver's roll-off
+    /// beyond ±330 kHz 14 dB above the truth — a bathtub on the panadapter. At
+    /// 38 dB, 1 dB and 8 dB. At 44 dB the passband matched 16-bit to 0.1 dB
+    /// and the roll-off to 3 dB, with the strongest signal in the band at 20
+    /// of 127 — 16 dB of headroom. 50 dB bought another 2 dB in the roll-off
+    /// for 6 dB of headroom, so 44 it is. The boost is keyed on the *stream*
+    /// being 8-bit and on nothing else: `resolution` is the ADC's width as the
+    /// server reports it — 16 or 18 for an HF+ — and keying on that instead
+    /// is what left the boost never applied. A 16-bit stream has 48 dB more
+    /// room and needs none of this; it is also the answer for a band with a
+    /// station strong enough to clip eight bits at this gain.
+    pub fn digital_gain_db(
+        &self,
+        gain_index: u32,
+        decimation_stage: u32,
+        format: SpyServerFormat,
+    ) -> f64 {
         let stage_gain = f64::from(decimation_stage) * 3.01;
         match self.kind() {
             DeviceKind::AirspyOne => {
                 f64::from(self.maximum_gain_index.saturating_sub(gain_index)) + stage_gain
             }
-            DeviceKind::AirspyHf if self.resolution <= 8 => 32.0 + stage_gain,
+            DeviceKind::AirspyHf if format == SpyServerFormat::Uint8 => 44.0 + stage_gain,
             _ => stage_gain,
         }
     }
@@ -683,26 +708,47 @@ mod tests {
         assert_eq!(r2.stage_for_rate(1.0, false), 8);
     }
 
-    /// Each branch of the reference client's formula, including the HF+
-    /// baseline that only applies to an 8-bit server.
+    /// Each branch of the formula, including the HF+ baseline that applies to
+    /// an 8-bit *stream* — and to nothing else.
     #[test]
     fn the_digital_gain_formula_matches_the_reference() {
+        use SpyServerFormat::{Int16, Uint8};
+
         // Airspy R2: the index counts down from the maximum.
         let r2 = airspy_r2();
-        assert!((r2.digital_gain_db(21, 0) - 0.0).abs() < 1e-9, "full gain needs no help");
-        assert!((r2.digital_gain_db(0, 0) - 21.0).abs() < 1e-9);
-        assert!((r2.digital_gain_db(21, 4) - 12.04).abs() < 1e-9, "four stages of 3.01 dB");
+        assert!((r2.digital_gain_db(21, 0, Uint8) - 0.0).abs() < 1e-9, "full gain needs no help");
+        assert!((r2.digital_gain_db(0, 0, Uint8) - 21.0).abs() < 1e-9);
+        assert!((r2.digital_gain_db(21, 4, Uint8) - 12.04).abs() < 1e-9, "four stages of 3.01 dB");
 
-        // HF+ at its real 18-bit resolution: decimation only.
+        // HF+ sending 16-bit: decimation only, there is room to spare.
         let hf = hf_plus();
-        assert!((hf.digital_gain_db(4, 3) - 9.03).abs() < 1e-9);
+        assert!((hf.digital_gain_db(4, 3, Int16) - 9.03).abs() < 1e-9);
 
-        // The same HF+ behind an 8-bit server: 32 dB of baseline on top.
-        let hf8 = DeviceInfo { resolution: 8, ..hf_plus() };
-        assert!((hf8.digital_gain_db(4, 3) - 41.03).abs() < 1e-9);
+        // The same HF+ sending 8-bit: 44 dB of baseline on top.
+        assert!((hf.digital_gain_db(4, 3, Uint8) - 53.03).abs() < 1e-9);
 
-        // RTL-SDR: decimation only, whatever its resolution.
-        assert!((rtlsdr().digital_gain_db(28, 2) - 6.02).abs() < 1e-9);
+        // RTL-SDR: decimation only, whatever the format.
+        assert!((rtlsdr().digital_gain_db(28, 2, Uint8) - 6.02).abs() < 1e-9);
+        assert!((rtlsdr().digital_gain_db(28, 2, Int16) - 6.02).abs() < 1e-9);
+    }
+
+    /// The boost is keyed on the stream, not on the ADC width the server
+    /// reports. A real HF+ server says 16 (the fixture above says 18; neither
+    /// is ever 8), and keying on that left an 8-bit stream at 0 dB — three
+    /// distinct sample values, and a noise floor 23 dB above the receiver's.
+    #[test]
+    fn an_hf_plus_gets_its_eight_bit_boost_whatever_resolution_the_server_claims() {
+        for resolution in [8, 16, 18] {
+            let hf = DeviceInfo { resolution, ..hf_plus() };
+            assert!(
+                (hf.digital_gain_db(0, 0, SpyServerFormat::Uint8) - 44.0).abs() < 1e-9,
+                "an 8-bit stream from an HF+ reporting {resolution}-bit needs the boost"
+            );
+            assert!(
+                hf.digital_gain_db(0, 0, SpyServerFormat::Int16).abs() < 1e-9,
+                "a 16-bit stream from an HF+ reporting {resolution}-bit does not"
+            );
+        }
     }
 
     /// The slack is what lets the window sit off the device centre, and it is
