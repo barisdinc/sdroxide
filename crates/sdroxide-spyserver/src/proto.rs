@@ -309,27 +309,52 @@ impl DeviceInfo {
             .unwrap_or(self.minimum_iq_decimation)
     }
 
-    /// The digital gain to ask for, in dB, given the server's gain index and
-    /// the I/Q decimation stage.
+    /// The digital gain to ask for, in dB, given the server's gain index, the
+    /// I/Q decimation stage, and the format the samples will be sent in.
     ///
     /// Every decimation stage halves the bandwidth and so buys about 3 dB of
     /// processing gain that would otherwise be thrown away when the samples
-    /// are quantised for the wire. The device-specific parts are what the
-    /// reference client does, transcribed:
+    /// are quantised for the wire. That part, and the Airspy R2's, are what
+    /// SDR++'s client computes:
     ///
     /// * An Airspy R2's gain index counts *down* from its maximum, so a low
     ///   index means a quiet signal that needs the headroom back.
-    /// * An Airspy HF+ sending 8-bit needs a further 32 dB. Its analog dynamic
-    ///   range is so large that its I/Q sits far below digital full scale, and
-    ///   eight bits of a signal that only reaches a fraction of full scale is
-    ///   not eight bits of signal.
-    pub fn digital_gain_db(&self, gain_index: u32, decimation_stage: u32) -> f64 {
+    ///
+    /// The HF+ part is not from there — SDR++ gives it decimation gain only —
+    /// it is from measuring what an HF+ actually puts on the wire as **8-bit**.
+    /// Its analog dynamic range is so large that on a quiet band its I/Q sits
+    /// below one eighth-bit LSB: at 0 dB a real one over SpyServer sent
+    /// *three* distinct sample values (mid-scale 97.7 % of the time, ±1 for
+    /// the rest), and the spectrum of that is a flat slicer-noise floor 23 dB
+    /// above the receiver's own with a dip at DC, which reads on screen as a
+    /// band that is quiet only where the dial is.
+    ///
+    /// How much is enough was swept against a 16-bit capture of the same band,
+    /// floor by distance from the centre. At 32 dB the noise is ±2 LSB and the
+    /// quantiser is still a nonlinearity rather than a noise source: the floor
+    /// rose 3.4 dB towards the band edges and filled the receiver's roll-off
+    /// beyond ±330 kHz 14 dB above the truth — a bathtub on the panadapter. At
+    /// 38 dB, 1 dB and 8 dB. At 44 dB the passband matched 16-bit to 0.1 dB
+    /// and the roll-off to 3 dB, with the strongest signal in the band at 20
+    /// of 127 — 16 dB of headroom. 50 dB bought another 2 dB in the roll-off
+    /// for 6 dB of headroom, so 44 it is. The boost is keyed on the *stream*
+    /// being 8-bit and on nothing else: `resolution` is the ADC's width as the
+    /// server reports it — 16 or 18 for an HF+ — and keying on that instead
+    /// is what left the boost never applied. A 16-bit stream has 48 dB more
+    /// room and needs none of this; it is also the answer for a band with a
+    /// station strong enough to clip eight bits at this gain.
+    pub fn digital_gain_db(
+        &self,
+        gain_index: u32,
+        decimation_stage: u32,
+        format: SpyServerFormat,
+    ) -> f64 {
         let stage_gain = f64::from(decimation_stage) * 3.01;
         match self.kind() {
             DeviceKind::AirspyOne => {
                 f64::from(self.maximum_gain_index.saturating_sub(gain_index)) + stage_gain
             }
-            DeviceKind::AirspyHf if self.resolution <= 8 => 32.0 + stage_gain,
+            DeviceKind::AirspyHf if format == SpyServerFormat::Uint8 => 44.0 + stage_gain,
             _ => stage_gain,
         }
     }
@@ -360,22 +385,43 @@ impl DeviceInfo {
     /// [`FFT_EDGE_FRAC`] of the span, and when it does move it puts the dial
     /// back in the middle — so the next move is most of a span away.
     ///
-    /// At decimation stage 0 the slack is zero and the window is pinned to the
-    /// device centre, so this only ever returns that. Which is correct: a
-    /// window already covering the whole receiver has nowhere else to go.
+    /// `controls_device` is what all of that has to be qualified by, and the
+    /// difference is not cosmetic. With the FFT lane running, a SpyServer tunes
+    /// its *receiver* to the FFT window and treats `IQ_FREQUENCY` as a position
+    /// inside the band the receiver is already on. So where this client controls
+    /// the receiver, holding this window still holds the receiver still, and the
+    /// dial can only stray as far as `iq_slack_hz` — the room the I/Q window has
+    /// to slide on its own. At the top of the rate ladder there is none, and the
+    /// window simply follows the dial.
+    ///
+    /// Where another client owns the receiver none of that applies: the device
+    /// does not move for us at all, the window only slides inside what they are
+    /// receiving, and the hysteresis is free to run its full width.
     pub fn fft_recenter(
         &self,
         iq_center: f64,
         fft_center: f64,
         fft_span: f64,
         device_center: f64,
+        controls_device: bool,
+        iq_slack_hz: f64,
     ) -> Option<f64> {
         let half = fft_span / 2.0;
         if half <= 0.0 {
             return None;
         }
-        if (iq_center - fft_center).abs() <= half * (1.0 - FFT_EDGE_FRAC) {
+        let mut hold = half * (1.0 - FFT_EDGE_FRAC);
+        if controls_device {
+            hold = hold.min(iq_slack_hz);
+        }
+        if (iq_center - fft_center).abs() <= hold {
             return None;
+        }
+        if controls_device {
+            // The receiver goes wherever this window goes, so it goes to the
+            // dial. Nothing to clamp against: the window is not sliding inside
+            // a band somebody else chose, it is choosing the band.
+            return Some(iq_center);
         }
         let slack = self.fft_slack_hz(fft_span);
         Some(iq_center.clamp(device_center - slack, device_center + slack))
@@ -662,26 +708,47 @@ mod tests {
         assert_eq!(r2.stage_for_rate(1.0, false), 8);
     }
 
-    /// Each branch of the reference client's formula, including the HF+
-    /// baseline that only applies to an 8-bit server.
+    /// Each branch of the formula, including the HF+ baseline that applies to
+    /// an 8-bit *stream* — and to nothing else.
     #[test]
     fn the_digital_gain_formula_matches_the_reference() {
+        use SpyServerFormat::{Int16, Uint8};
+
         // Airspy R2: the index counts down from the maximum.
         let r2 = airspy_r2();
-        assert!((r2.digital_gain_db(21, 0) - 0.0).abs() < 1e-9, "full gain needs no help");
-        assert!((r2.digital_gain_db(0, 0) - 21.0).abs() < 1e-9);
-        assert!((r2.digital_gain_db(21, 4) - 12.04).abs() < 1e-9, "four stages of 3.01 dB");
+        assert!((r2.digital_gain_db(21, 0, Uint8) - 0.0).abs() < 1e-9, "full gain needs no help");
+        assert!((r2.digital_gain_db(0, 0, Uint8) - 21.0).abs() < 1e-9);
+        assert!((r2.digital_gain_db(21, 4, Uint8) - 12.04).abs() < 1e-9, "four stages of 3.01 dB");
 
-        // HF+ at its real 18-bit resolution: decimation only.
+        // HF+ sending 16-bit: decimation only, there is room to spare.
         let hf = hf_plus();
-        assert!((hf.digital_gain_db(4, 3) - 9.03).abs() < 1e-9);
+        assert!((hf.digital_gain_db(4, 3, Int16) - 9.03).abs() < 1e-9);
 
-        // The same HF+ behind an 8-bit server: 32 dB of baseline on top.
-        let hf8 = DeviceInfo { resolution: 8, ..hf_plus() };
-        assert!((hf8.digital_gain_db(4, 3) - 41.03).abs() < 1e-9);
+        // The same HF+ sending 8-bit: 44 dB of baseline on top.
+        assert!((hf.digital_gain_db(4, 3, Uint8) - 53.03).abs() < 1e-9);
 
-        // RTL-SDR: decimation only, whatever its resolution.
-        assert!((rtlsdr().digital_gain_db(28, 2) - 6.02).abs() < 1e-9);
+        // RTL-SDR: decimation only, whatever the format.
+        assert!((rtlsdr().digital_gain_db(28, 2, Uint8) - 6.02).abs() < 1e-9);
+        assert!((rtlsdr().digital_gain_db(28, 2, Int16) - 6.02).abs() < 1e-9);
+    }
+
+    /// The boost is keyed on the stream, not on the ADC width the server
+    /// reports. A real HF+ server says 16 (the fixture above says 18; neither
+    /// is ever 8), and keying on that left an 8-bit stream at 0 dB — three
+    /// distinct sample values, and a noise floor 23 dB above the receiver's.
+    #[test]
+    fn an_hf_plus_gets_its_eight_bit_boost_whatever_resolution_the_server_claims() {
+        for resolution in [8, 16, 18] {
+            let hf = DeviceInfo { resolution, ..hf_plus() };
+            assert!(
+                (hf.digital_gain_db(0, 0, SpyServerFormat::Uint8) - 44.0).abs() < 1e-9,
+                "an 8-bit stream from an HF+ reporting {resolution}-bit needs the boost"
+            );
+            assert!(
+                hf.digital_gain_db(0, 0, SpyServerFormat::Int16).abs() < 1e-9,
+                "a 16-bit stream from an HF+ reporting {resolution}-bit does not"
+            );
+        }
     }
 
     /// The slack is what lets the window sit off the device centre, and it is
@@ -719,11 +786,13 @@ mod tests {
         assert_eq!(freq_wire(1e12), u32::MAX);
     }
 
-    /// The band view holds while the dial roams inside it, and only jumps when
-    /// the dial reaches the outer third — which is what makes it a picture to
-    /// tune *across* rather than one that slides on every nudge.
+    /// On a *shared* server the band view holds while the dial roams inside it,
+    /// and only jumps when the dial reaches the outer third — which is what
+    /// makes it a picture to tune across rather than one that slides on every
+    /// nudge. The receiver belongs to another client and does not move, so
+    /// holding the window costs nothing.
     #[test]
-    fn the_fft_window_holds_until_the_dial_reaches_its_edge() {
+    fn a_shared_servers_fft_window_holds_until_the_dial_reaches_its_edge() {
         let mut info = airspy_r2();
         info.maximum_bandwidth = 10_000_000;
         // A 2.5 MHz window (stage 2) inside a 10 MHz receiver: 3.75 MHz of
@@ -731,37 +800,96 @@ mod tests {
         let span = 2_500_000.0;
         let dc = 100_000_000.0;
         let fft = 100_000_000.0;
+        let held = |iq: f64, from: f64| info.fft_recenter(iq, from, span, dc, false, 0.0);
 
         // Anywhere in the middle 70 % — ±875 kHz — and it does not move.
-        assert_eq!(info.fft_recenter(dc, fft, span, dc), None);
-        assert_eq!(info.fft_recenter(dc + 800_000.0, fft, span, dc), None);
-        assert_eq!(info.fft_recenter(dc - 800_000.0, fft, span, dc), None);
+        assert_eq!(held(dc, fft), None);
+        assert_eq!(held(dc + 800_000.0, fft), None);
+        assert_eq!(held(dc - 800_000.0, fft), None);
 
         // Past it, and the window re-centres on the dial.
-        let moved = info.fft_recenter(dc + 1_000_000.0, fft, span, dc).expect("past the edge");
+        let moved = held(dc + 1_000_000.0, fft).expect("past the edge");
         assert_eq!(moved, dc + 1_000_000.0);
 
         // And having moved, it holds again around the new centre.
-        assert_eq!(info.fft_recenter(dc + 1_100_000.0, moved, span, dc), None);
+        assert_eq!(held(dc + 1_100_000.0, moved), None);
 
         // The slack is a hard limit: the window cannot leave the receiver.
-        let far = info.fft_recenter(dc + 9_000_000.0, fft, span, dc).expect("past the edge");
+        let far = held(dc + 9_000_000.0, fft).expect("past the edge");
         assert_eq!(far, dc + 3_750_000.0, "clamped to the device's own bandwidth");
     }
 
-    /// A window already covering the whole receiver has nowhere to go, so the
-    /// hysteresis never fires — it just stays on the device centre.
+    /// A window already covering the whole of *another client's* receiver has
+    /// nowhere to go, so the hysteresis never fires — it just stays on their
+    /// centre.
     #[test]
-    fn a_full_span_fft_window_is_pinned_to_the_device_centre() {
+    fn a_full_span_fft_window_is_pinned_to_a_shared_device_centre() {
         let info = airspy_r2();
         let span = f64::from(info.maximum_bandwidth);
         let dc = 100_000_000.0;
         assert_eq!(info.fft_slack_hz(span), 0.0);
         // Far off centre, so the hysteresis says "move" — and the clamp puts it
         // straight back where it was, which the caller reads as no change.
-        assert_eq!(info.fft_recenter(dc + 4_000_000.0, dc, span, dc), Some(dc));
+        assert_eq!(info.fft_recenter(dc + 4_000_000.0, dc, span, dc, false, 0.0), Some(dc));
         // A span of zero is the FFT lane switched off.
-        assert_eq!(info.fft_recenter(dc, dc, 0.0, dc), None);
+        assert_eq!(info.fft_recenter(dc, dc, 0.0, dc, false, 0.0), None);
+    }
+
+    /// On a server this client controls, the window *is* the receiver, and the
+    /// dial may only stray as far as the I/Q window can follow it. At the top of
+    /// the rate ladder that is nowhere, so the window tracks the dial exactly —
+    /// and the device centre it is handed is stale by definition, so it must
+    /// have no say in the answer.
+    #[test]
+    fn a_controlled_receivers_fft_window_follows_the_dial() {
+        let info = hf_plus();
+        // Stage 0: the window is the whole receiver, and the I/Q at full rate
+        // has no room to slide inside it.
+        let span = f64::from(info.maximum_bandwidth);
+        let iq_slack = info.iq_slack_hz(f64::from(info.maximum_sample_rate));
+        assert_eq!(iq_slack, 0.0);
+
+        // The server was left on 100 MHz; the operator wants 7.1. The window
+        // goes to the dial, not to where the server happened to be.
+        let stale = 100_000_000.0;
+        assert_eq!(
+            info.fft_recenter(7_100_000.0, stale, span, stale, true, iq_slack),
+            Some(7_100_000.0),
+        );
+        // Once there, it holds — an unchanged dial is not a reason to retune.
+        assert_eq!(info.fft_recenter(7_100_000.0, 7_100_000.0, span, stale, true, iq_slack), None,);
+        // And a dial move of any size takes it along, because the I/Q window
+        // cannot reach a hertz on its own.
+        assert_eq!(
+            info.fft_recenter(7_101_000.0, 7_100_000.0, span, stale, true, iq_slack),
+            Some(7_101_000.0),
+        );
+    }
+
+    /// With room for the I/Q window to slide, the hysteresis comes back: the
+    /// strip holds still while the dial roams whatever the I/Q can still reach.
+    #[test]
+    fn a_controlled_receiver_holds_the_window_while_the_iq_can_still_reach() {
+        let info = hf_plus();
+        let span = f64::from(info.maximum_bandwidth);
+        // I/Q at stage 3 — 96 ksps of 768 — leaves 336 kHz either side.
+        let iq_slack = info.iq_slack_hz(96_000.0);
+        assert_eq!(iq_slack, 336_000.0);
+        let fft = 7_100_000.0;
+        let hold = |iq: f64| info.fft_recenter(iq, fft, span, 100_000_000.0, true, iq_slack);
+
+        // The hysteresis is the narrower of the two here: 70 % of half the
+        // 660 kHz span, so ±231 kHz against the I/Q window's 336 kHz.
+        assert_eq!(hold(fft + 200_000.0), None, "still well inside the strip");
+        assert_eq!(hold(fft + 300_000.0), Some(fft + 300_000.0), "past the strip's edge");
+
+        // And when the I/Q slack is the narrower of the two, it is what bites.
+        let tight = 100_000.0;
+        assert_eq!(
+            info.fft_recenter(fft + 150_000.0, fft, span, 100_000_000.0, true, tight),
+            Some(fft + 150_000.0),
+            "the I/Q window cannot reach 150 kHz with 100 kHz of slack",
+        );
     }
 
     #[test]
