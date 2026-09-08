@@ -45,6 +45,10 @@ pub struct IqWavWriter {
     path: PathBuf,
     /// Byte offset of the `data` chunk's own 32-bit size field.
     data_size_at: u64,
+    /// Byte offset of the `auxi` chunk's `StopTime` `SYSTEMTIME` — patched at
+    /// [`Self::finish`] the same way [`Self::data_size_at`] already is. See
+    /// [`auxi_payload`]'s own doc for why this needs a second patch at all.
+    auxi_stop_time_at: u64,
     /// Frames written so far.
     frames: u64,
     scratch: Vec<u8>,
@@ -62,6 +66,7 @@ impl IqWavWriter {
             file: w,
             path: path.to_path_buf(),
             data_size_at: header.data_size_at,
+            auxi_stop_time_at: header.auxi_stop_time_at,
             frames: 0,
             scratch: Vec::new(),
         })
@@ -125,6 +130,16 @@ impl IqWavWriter {
             f.seek(SeekFrom::Start(self.data_size_at))?;
             f.write_all(&(data_bytes as u32).to_le_bytes())?;
         }
+        // The `auxi` chunk's own StopTime — written equal to StartTime when
+        // the header went out, since nothing was over yet. Patched here for
+        // the same reason the sizes above are: a reader that takes this
+        // chunk at its word sees a real elapsed time instead of a capture
+        // that claims to have taken zero seconds regardless of how much data
+        // actually follows it.
+        f.seek(SeekFrom::Start(self.auxi_stop_time_at))?;
+        for v in systemtime_fields(now_unix_secs()) {
+            f.write_all(&v.to_le_bytes())?;
+        }
         f.flush()?;
         Ok(self.path)
     }
@@ -133,6 +148,9 @@ impl IqWavWriter {
 struct Header {
     bytes: Vec<u8>,
     data_size_at: u64,
+    /// Byte offset of the `auxi` chunk's `StopTime` field — see
+    /// [`IqWavWriter::auxi_stop_time_at`]'s own doc.
+    auxi_stop_time_at: u64,
 }
 
 /// The whole header, up to and including the `data` chunk's size field.
@@ -164,12 +182,26 @@ fn header_bytes(rate_hz: u32, center_hz: f64) -> Header {
     b.extend_from_slice(b"auxi");
     let auxi = auxi_payload(center_hz);
     b.extend_from_slice(&(auxi.len() as u32).to_le_bytes());
+    // StartTime is the first SYSTEMTIME in the payload; StopTime is the one
+    // right after it — see `auxi_payload`'s own doc for the field layout.
+    let auxi_stop_time_at = b.len() as u64 + 16;
     b.extend_from_slice(&auxi);
 
     b.extend_from_slice(b"data");
     let data_size_at = b.len() as u64;
     b.extend_from_slice(&0u32.to_le_bytes()); // patched on close
-    Header { bytes: b, data_size_at }
+    Header { bytes: b, data_size_at, auxi_stop_time_at }
+}
+
+/// Now, as the whole seconds [`systemtime_fields`] wants — clamped to the
+/// epoch on a clock that has somehow gone backward rather than panicking or
+/// propagating an error nobody at a `finish()`/header-build call site could
+/// usefully act on.
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// The `auxi` chunk SDR#/HDSDR write: two `SYSTEMTIME`s, then the tuning.
@@ -180,13 +212,18 @@ fn header_bytes(rate_hz: u32, center_hz: f64) -> Header {
 /// timestamp pair and the ADC width. Only the centre frequency is read by
 /// anything that matters, and it is the whole reason to write the chunk; the
 /// rest is filled in so the layout is the one those programs parse.
+///
+/// StopTime is written equal to StartTime here — nothing is over yet at
+/// header-build time — and [`IqWavWriter::finish`] patches the real value in
+/// afterward, the same way it already patches the RIFF/data sizes. Written
+/// out as two full `SYSTEMTIME`s up front rather than left zeroed, so a
+/// reader that opens the file mid-capture (or one that never gets a
+/// `finish()` at all, on a hard crash) still sees an internally consistent
+/// pair, just an as-yet-unfinished one, rather than an obviously-wrong
+/// all-zero stop time.
 fn auxi_payload(center_hz: f64) -> Vec<u8> {
     let mut b = Vec::with_capacity(164);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let st = systemtime_fields(now);
+    let st = systemtime_fields(now_unix_secs());
     for _ in 0..2 {
         for v in st {
             b.extend_from_slice(&v.to_le_bytes());
@@ -454,6 +491,41 @@ mod tests {
         let at = info.data_start as usize;
         assert_eq!(f32::from_le_bytes(raw[at..at + 4].try_into().unwrap()), 0.25);
         assert_eq!(f32::from_le_bytes(raw[at + 4..at + 8].try_into().unwrap()), -0.75);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The real-world bug this exists to catch: a finished capture's `auxi`
+    /// chunk used to report the exact same instant for both `StartTime` and
+    /// `StopTime`, regardless of how much data the file actually held —
+    /// nothing patched `StopTime` at [`IqWavWriter::finish`] the way the
+    /// RIFF/data sizes already were. Confirmed on a real ~14-minute, 12+ GB
+    /// capture: its own `auxi` chunk claimed zero elapsed time, which a
+    /// reader that trusts the chunk rather than the data size sees as an
+    /// empty or otherwise invalid recording.
+    #[test]
+    fn a_finished_capture_records_a_real_stop_time() {
+        let dir = std::env::temp_dir().join(format!("sdroxide-iqwav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stoptime.wav");
+        let mut w = IqWavWriter::create(&path, 48_000, 14_074_000.0).unwrap();
+        w.write(&[crate::Complex32::new(0.1, 0.1); 8]).unwrap();
+        // `SYSTEMTIME`'s own resolution here is whole seconds (the
+        // millisecond field is always written as 0) -- real elapsed time is
+        // the only way to tell StartTime and StopTime apart at all.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        w.finish().unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        let auxi = find_chunk(&raw, b"auxi").expect("auxi chunk");
+        let payload = auxi + 8;
+        let start_time = &raw[payload..payload + 16];
+        let stop_time = &raw[payload + 16..payload + 32];
+        assert_ne!(
+            start_time, stop_time,
+            "StopTime must not be written identical to StartTime -- that is exactly \
+             the bug this test exists to catch: a finished capture whose own header \
+             claims zero elapsed time no matter how much data actually follows it"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
