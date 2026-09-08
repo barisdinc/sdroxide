@@ -79,6 +79,10 @@ struct Spec {
     device_center: u32,
     /// Send an 8-bit I/Q burst once the stream is enabled.
     stream_iq: bool,
+    /// The byte both components of every 8-bit I/Q sample carry, and the whole
+    /// dB the header claims was applied to them. `None` keeps the burst the
+    /// framing tests want: mid-scale and both extremes.
+    iq_fill: Option<(u8, u16)>,
     /// Send an 8-bit FFT frame once the stream is enabled.
     stream_fft: bool,
 }
@@ -100,6 +104,7 @@ impl Default for Spec {
             can_control: 1,
             device_center: 100_000_000,
             stream_iq: false,
+            iq_fill: None,
             stream_fft: false,
         }
     }
@@ -256,14 +261,13 @@ impl Fake {
                 if streaming {
                     let mut out = Vec::new();
                     if spec.stream_iq {
-                        // Four complex samples: mid-scale, then the extremes.
-                        out.extend_from_slice(&msg(
-                            MSG_UINT8_IQ,
-                            0,
-                            1,
-                            seq,
-                            &[128, 128, 255, 0, 128, 128, 0, 255],
-                        ));
+                        // Four complex samples: mid-scale, then the extremes —
+                        // or whatever byte the test asked to be flooded with.
+                        let (body, flags) = match spec.iq_fill {
+                            Some((byte, db)) => (vec![byte; 8], db),
+                            None => (vec![128, 128, 255, 0, 128, 128, 0, 255], 0),
+                        };
+                        out.extend_from_slice(&msg(MSG_UINT8_IQ, flags, 1, seq, &body));
                     }
                     if spec.stream_fft {
                         let bins: Vec<u8> = (0..64u32).map(|i| (i * 4) as u8).collect();
@@ -610,13 +614,14 @@ fn the_configured_gain_survives_the_servers_opening_sync() {
     assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(24));
 }
 
-/// An Airspy HF+ sent as 8-bit needs 44 dB of digital gain or its quiet-band
-/// I/Q arrives as three sample values — and the boost was keyed on the ADC
-/// width the server reports, which for a real HF+ is 16 or 18, never 8, so it
-/// was never sent. It is keyed on the stream format now; the format is the
-/// only thing that decides whether the samples have the room.
+/// An Airspy HF+ gets the reference client's digital gain and nothing more:
+/// decimation gain, and at stage 0 that is nothing at all. A constant boost
+/// keyed on the stream being 8-bit was tried and reverted — the gain a band
+/// needs is a property of the band, and 44 dB drove the quantiser twenty-odd
+/// dB past full scale on every band with a signal on it, which is not a level
+/// error but a stream of rails with no information left in it.
 #[test]
-fn an_hf_plus_sent_as_eight_bit_is_asked_for_its_forty_four_db() {
+fn an_hf_plus_is_asked_for_the_reference_digital_gain_in_either_format() {
     // As a real HF+ server describes itself: 768 ksps, 660 kHz of analog
     // bandwidth, no gain stages, and a 16-bit ADC.
     let hf_plus = Spec {
@@ -643,9 +648,10 @@ fn an_hf_plus_sent_as_eight_bit_is_asked_for_its_forty_four_db() {
     assert!(eventually(Duration::from_secs(2), || fake
         .value_of(SETTING_IQ_DIGITAL_GAIN)
         .is_some()));
-    assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(44), "8-bit at stage 0");
+    assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(0), "8-bit at stage 0");
 
-    // The same receiver sent as 16-bit has 48 dB more room and gets none of it.
+    // The same receiver sent as 16-bit: the same figure, the format is not
+    // an input.
     let fake = Fake::start(hf_plus);
     let cfg = SpyServerConfig {
         iq_format: SpyServerFormat::Int16,
@@ -658,6 +664,168 @@ fn an_hf_plus_sent_as_eight_bit_is_asked_for_its_forty_four_db() {
         .value_of(SETTING_IQ_DIGITAL_GAIN)
         .is_some()));
     assert_eq!(fake.value_of(SETTING_IQ_DIGITAL_GAIN), Some(0), "16-bit at stage 0");
+}
+
+// --- the digital-gain loop ---------------------------------------------------
+
+/// An HF+ as a real server describes one: 768 ksps, 660 kHz of analog
+/// bandwidth, no gain stages, a 16-bit ADC — streaming whatever byte the test
+/// asks for, with whatever gain the header claims.
+fn hf_plus_streaming(byte: u8, header_db: u16) -> Spec {
+    Spec {
+        device_type: 2,
+        max_rate: 768_000,
+        max_bw: 660_000,
+        stages: 8,
+        min_decim: 0,
+        max_gain: 0,
+        min_freq: 0,
+        max_freq: 1_700_000_000,
+        resolution: 16,
+        stream_iq: true,
+        iq_fill: Some((byte, header_db)),
+        ..Spec::default()
+    }
+}
+
+/// The digital gain is a closed loop on an 8-bit stream: a server sending
+/// rails is a server being driven past full scale, and the client has to back
+/// off rather than divide the wreckage by an ever larger number. Nothing the
+/// loop does shows up in the level — the decoder divides by the gain the
+/// header states, so the samples come out the same amplitude either side of a
+/// change; what moves is how many of the eight bits the signal is using.
+///
+/// It comes down a step at a time rather than in one jump, because a rail
+/// hides how far past full scale it is: a byte pinned at 255 reads the same
+/// 6 dB over as 30 dB over. Each step is what would put a rail at the target,
+/// and the next step sees an honest peak as soon as the rail lets go.
+#[test]
+fn an_eight_bit_stream_that_arrives_clipped_walks_the_digital_gain_down() {
+    let fake = Fake::start(hf_plus_streaming(255, 12));
+    let cfg = SpyServerConfig {
+        // Stage 4, so the reference formula opens at 12 dB and the loop has
+        // somewhere to go. At stage 0 it opens at nothing and the test would
+        // pass without a loop at all.
+        iq_format: SpyServerFormat::Uint8,
+        iq_decimation: 4,
+        auto_digital_gain: true,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+
+    assert!(
+        eventually(Duration::from_secs(2), || fake.value_of(SETTING_IQ_DIGITAL_GAIN) == Some(12)),
+        "it opens at the reference formula's figure"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || fake
+            .values_of(SETTING_IQ_DIGITAL_GAIN)
+            .last()
+            .copied()
+            == Some(0)),
+        "the rails never walked it down to the floor: {:?}",
+        fake.values_of(SETTING_IQ_DIGITAL_GAIN)
+    );
+    // 6 dB a step: a rail at full scale, brought to the target of half.
+    assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![12, 6, 0]);
+
+    // And at the floor it stops asking. Repeating a figure the server already
+    // has costs one of the eight settings a second it will take.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![12, 6, 0], "still at the stop");
+}
+
+/// The other half of the loop, and the reason it exists at all: on a quiet
+/// band an HF+'s 8-bit I/Q sits below one LSB and arrives as mid-scale, every
+/// sample, which is no information at all. That stream *has* arrived, and it
+/// is the strongest possible argument for more gain — a loop that read an
+/// all-zero peak as "nothing to judge by" would leave the band dead forever.
+///
+/// It goes up slowly: a step at a time, and only after the peak has been below
+/// target for a whole two seconds, so a pause in the traffic does not pump the
+/// gain up for the next syllable to clip on.
+#[test]
+fn an_eight_bit_stream_that_arrives_below_one_lsb_walks_the_digital_gain_up_slowly() {
+    let fake = Fake::start(hf_plus_streaming(128, 0));
+    let cfg = SpyServerConfig {
+        iq_format: SpyServerFormat::Uint8,
+        iq_decimation: 0,
+        auto_digital_gain: true,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 14_100_000.0).expect("connect");
+    assert!(
+        eventually(Duration::from_secs(2), || fake.value_of(SETTING_IQ_DIGITAL_GAIN) == Some(0))
+    );
+
+    // Not yet: room to spare has to be a settled fact before it is acted on.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![0], "raised before the quiet time");
+
+    assert!(
+        eventually(Duration::from_secs(4), || fake
+            .values_of(SETTING_IQ_DIGITAL_GAIN)
+            .last()
+            .copied()
+            == Some(3)),
+        "a stream of mid-scale never raised the gain: {:?}",
+        fake.values_of(SETTING_IQ_DIGITAL_GAIN)
+    );
+    // One step, not a leap, however far below target the peak is.
+    assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![0, 3]);
+}
+
+/// The loop is for 8-bit streams and nothing else. A 16-bit one has 48 dB of
+/// room it will never need, and moving its gain would spend the server's
+/// settings budget for no gain in the samples.
+///
+/// The fake still sends 8-bit messages here, on purpose: the client reads the
+/// body in the format it *asked* for, so what the bytes mean is beside the
+/// point — what matters is that a stream is flowing and the loop leaves it be.
+#[test]
+fn a_sixteen_bit_stream_is_left_at_the_reference_figure() {
+    let fake = Fake::start(hf_plus_streaming(255, 12));
+    let cfg = SpyServerConfig {
+        iq_format: SpyServerFormat::Int16,
+        iq_decimation: 4,
+        auto_digital_gain: true,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+    assert!(
+        eventually(Duration::from_secs(2), || fake.value_of(SETTING_IQ_DIGITAL_GAIN) == Some(12))
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        fake.values_of(SETTING_IQ_DIGITAL_GAIN),
+        vec![12],
+        "a 16-bit stream keeps the figure the formula gave it, and is asked once"
+    );
+}
+
+/// The operator's own figure is never touched. Automatic off means a number
+/// was typed, and the loop has no business second-guessing it — including the
+/// right to clip a whole band flat.
+#[test]
+fn a_manual_digital_gain_is_sent_as_typed_and_left_alone() {
+    let fake = Fake::start(hf_plus_streaming(255, 40));
+    let cfg = SpyServerConfig {
+        iq_format: SpyServerFormat::Uint8,
+        iq_decimation: 0,
+        auto_digital_gain: false,
+        digital_gain_db: 40.0,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+    assert!(
+        eventually(Duration::from_secs(2), || fake.value_of(SETTING_IQ_DIGITAL_GAIN) == Some(40))
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![40], "the rails are the operator's");
 }
 
 /// The opposite case: where another client owns the receiver, the gain is
