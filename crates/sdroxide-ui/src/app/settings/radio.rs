@@ -1979,12 +1979,15 @@ pub(in crate::app) fn settings_spyserver_tab(
 
         ui.label("Digital gain").on_hover_text(
             "How far the server scales its samples up before quantising them \
-             for the wire. Automatic computes it the way every other client \
-             does — from the receiver type, the gain index and the decimation \
-             stage — and is almost always right.\n\n\
-             It matters most at 8 bits: a signal sitting far below full scale \
-             loses its lower bits to the quantiser, and the scaling is what \
-             puts it back. Applies immediately.",
+             for the wire. Automatic watches what actually arrives and holds \
+             the peak at half of full scale, which is the only thing that can \
+             be right on both a dead band and a crowded one — the two are \
+             thirty decibels apart and no fixed figure serves both.\n\n\
+             It matters only at 8 bits, where a signal far below full scale \
+             loses its lower bits to the quantiser and one above it is clipped \
+             flat. Wider formats have room to spare and get the figure every \
+             other client computes, from the gain index and the decimation \
+             stage. Applies immediately.",
         );
         ui.horizontal(|ui| {
             let mut auto = cfg.auto_digital_gain;

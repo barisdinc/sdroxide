@@ -71,6 +71,35 @@ const RETUNE_MIN_INTERVAL: Duration = Duration::from_millis(125);
 /// what actually catches a dead link is `SpyServerHandle::silent_for`.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Where the digital-gain loop parks the peak of an 8-bit stream: half of
+/// full scale, so 6 dB of headroom for whatever turns on next. See
+/// [`maintain_digital_gain`].
+const GAIN_TARGET_PEAK: f32 = 0.5;
+
+/// A peak at or above this is a rail, and a rail means the quantiser is being
+/// driven past full scale rather than merely close to it.
+const GAIN_CLIP_PEAK: f32 = 0.98;
+
+/// Corrections smaller than this are not worth a setting on the wire: the
+/// gain goes out as whole dB, so a tighter deadband is a client that hunts.
+const GAIN_DEADBAND_DB: f64 = 3.0;
+
+/// The most one step may add. Coming down is not limited — a clipped stream
+/// is already carrying nothing, and dawdling about it costs seconds of audio.
+const GAIN_STEP_UP_DB: f64 = 3.0;
+
+/// The floor between gain changes. The server takes about eight settings a
+/// second in total and the retune lane is already spending some of them; it
+/// is also how long the last figure gets to reach the samples before they are
+/// judged against it.
+const GAIN_MIN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long the peak must stay below target before the gain is raised.
+const GAIN_QUIET_BEFORE_RAISE: Duration = Duration::from_secs(2);
+
+/// The ceiling on `IQ_DIGITAL_GAIN`, in dB.
+const GAIN_MAX_DB: f64 = 60.0;
+
 /// Bins to ask the server for.
 ///
 /// Matched to the engine's `DISPLAY_BINS`, which is what the full-band strip
@@ -155,6 +184,10 @@ pub(crate) fn probe(cfg: &SpyServerConfig, timeout: Duration) -> Result<(DeviceI
         gain_index: 0,
         auto_digital_gain: true,
         digital_gain_db: 0.0,
+        servo_db: 0.0,
+        peak_fraction: None,
+        last_gain_move: Instant::now(),
+        quiet_since: None,
         fft_enabled: false,
         fft_stage: 0,
         fft_span: 0.0,
@@ -265,7 +298,24 @@ struct Client {
     gain_index: u32,
 
     auto_digital_gain: bool,
+    /// The operator's own figure, in dB, for when automatic is off.
     digital_gain_db: f64,
+    /// The digital gain the loop has settled on, in dB. Only an 8-bit stream
+    /// in automatic runs the loop — see [`Client::loop_runs`] — and this is
+    /// where it starts from: the reference formula's figure.
+    servo_db: f64,
+    /// The largest sample since the loop last looked, as a fraction of full
+    /// scale: one is a rail. `None` is nothing having arrived, which is not
+    /// the same thing as `Some(0.0)` — that is a stream of mid-scale having
+    /// arrived, and it is the strongest possible case for more gain.
+    peak_fraction: Option<f32>,
+    /// When a digital gain last went out, whoever sent it. The loop waits on
+    /// this before judging the samples, so that they are the ones that figure
+    /// made rather than the ones already in flight when it was sent.
+    last_gain_move: Instant,
+    /// Since when the peak has been continuously below target. Raising the
+    /// gain waits on this so a pause in the traffic does not pump it up.
+    quiet_since: Option<Instant>,
 
     fft_enabled: bool,
     fft_stage: u32,
@@ -318,6 +368,11 @@ impl Client {
             gain_index: cfg.gain_index,
             auto_digital_gain: cfg.auto_digital_gain,
             digital_gain_db: cfg.digital_gain_db,
+            // Overwritten in `plan`, once the stage is known.
+            servo_db: 0.0,
+            peak_fraction: None,
+            last_gain_move: Instant::now(),
+            quiet_since: None,
             fft_enabled: cfg.fft_enabled,
             fft_stage: cfg.fft_decimation,
             fft_span: 0.0,
@@ -466,6 +521,7 @@ impl Client {
         // The FFT starts where the dial is, clamped into whatever room the
         // window has beside the device centre.
         self.fft_center = self.clamped_fft_center(self.center);
+        self.reset_servo();
     }
 
     /// Send the whole configuration, in the order the protocol wants it.
@@ -530,19 +586,47 @@ impl Client {
             if self.fft_enabled { proto::STREAM_MODE_FFT_IQ } else { proto::STREAM_MODE_IQ_ONLY };
         self.set(proto::SETTING_STREAMING_MODE, mode)?;
         self.set(proto::SETTING_GAIN, self.gain_index)?;
-        self.set(proto::SETTING_IQ_DIGITAL_GAIN, self.digital_gain_wire())?;
+        self.send_digital_gain()?;
         self.set(proto::SETTING_STREAMING_ENABLED, 1)
     }
 
-    /// The digital gain to ask for: computed from the device and the stage, or
-    /// whatever the operator pinned it to.
+    /// The digital gain to ask for: what the loop has settled on for an 8-bit
+    /// stream, the reference formula for anything wider, or whatever the
+    /// operator pinned it to.
     fn digital_gain_wire(&self) -> u32 {
-        let db = if self.auto_digital_gain {
-            self.info.digital_gain_db(self.gain_index, self.iq_stage, self.iq_format)
-        } else {
+        let db = if !self.auto_digital_gain {
             self.digital_gain_db
+        } else if self.loop_runs() {
+            self.servo_db
+        } else {
+            self.info.digital_gain_db(self.gain_index, self.iq_stage)
         };
-        db.round().clamp(0.0, 60.0) as u32
+        db.round().clamp(0.0, GAIN_MAX_DB) as u32
+    }
+
+    /// Whether the closed loop is the authority on the digital gain: only an
+    /// 8-bit stream in automatic. Everything wider has 48 dB of room it will
+    /// never need, and moving its gain would spend the server's settings
+    /// budget for nothing in the samples. The operator's manual figure is
+    /// never touched — automatic off means a number was typed.
+    fn loop_runs(&self) -> bool {
+        self.auto_digital_gain && self.iq_format == SpyServerFormat::Uint8
+    }
+
+    /// Send the digital gain, and note when, so the loop does not judge
+    /// samples the new figure has not reached yet.
+    fn send_digital_gain(&mut self) -> Result<()> {
+        self.last_gain_move = Instant::now();
+        self.set(proto::SETTING_IQ_DIGITAL_GAIN, self.digital_gain_wire())
+    }
+
+    /// Put the loop back at its starting point and forget its evidence. For
+    /// wherever its basis moves: a fresh connection, the gain index on an R2,
+    /// automatic being switched on.
+    fn reset_servo(&mut self) {
+        self.servo_db = self.info.digital_gain_db(self.gain_index, self.iq_stage);
+        self.peak_fraction = None;
+        self.quiet_since = None;
     }
 
     fn set(&mut self, setting: u32, value: u32) -> Result<()> {
@@ -779,11 +863,14 @@ fn apply(client: &mut Client, p: &Pending) -> Result<()> {
         if let Some(v) = p.digital_gain {
             client.digital_gain_db = v;
         }
+        // The loop's starting point moves with the gain index on an R2, and a
+        // loop that has just been switched on has no evidence yet.
+        client.reset_servo();
         // Always resent alongside the gain index, never on its own. On an
         // Airspy R2 the computed digital gain is a function of the gain index,
         // so sending one without the other leaves the level wrong by as much
         // as the whole gain range.
-        client.set(proto::SETTING_IQ_DIGITAL_GAIN, client.digital_gain_wire())?;
+        client.send_digital_gain()?;
     }
     Ok(())
 }
@@ -845,6 +932,77 @@ fn move_fft_window(client: &mut Client) -> Result<()> {
     client.set(proto::SETTING_FFT_FREQUENCY, proto::freq_wire(target))
 }
 
+/// Walk the digital gain towards a peak that fits, on the evidence of what has
+/// arrived since the last look.
+///
+/// Only an 8-bit stream in automatic — see [`Client::loop_runs`]. Nothing the
+/// loop does is visible in the level: the decoder divides by the gain the
+/// *header* states, so a stream whose gain changed mid-flight comes out at the
+/// same amplitude either side of the change. What moves is how many of the
+/// eight bits the signal is using, and that is the whole point. How much gain
+/// a band needs is a property of the band — a dead 20 m and 80 m at night are
+/// thirty decibels apart — so no fixed figure serves both, and the one that was
+/// tried clipped every band that had a signal on it.
+///
+/// Asymmetric on purpose. Down is immediate and as far as the peak says: a
+/// clipped stream is carrying nothing, and every message spent on it is lost
+/// audio. A rail hides how far past full scale it is, so a clipped stream comes
+/// down a step at a time — 6 dB, what would put a rail on target — and the next
+/// step sees an honest peak the moment the rail lets go. Up is slow and small:
+/// only after the peak has sat below target for [`GAIN_QUIET_BEFORE_RAISE`],
+/// and by no more than [`GAIN_STEP_UP_DB`], so a pause in the traffic is not
+/// mistaken for room and the next syllable does not land on a rail.
+fn maintain_digital_gain(client: &mut Client) -> Result<()> {
+    if !client.loop_runs() {
+        return Ok(());
+    }
+    // Nothing arrived is not an argument for anything. A stream of mid-scale
+    // is: that is `Some(0.0)`, and the strongest case there is for more gain.
+    let Some(peak) = client.peak_fraction.take() else {
+        return Ok(());
+    };
+
+    // The move that would put this peak on target. Positive is room to spare;
+    // infinite when nothing in the stream cleared mid-scale, which the step
+    // limit below makes finite.
+    let want = 20.0 * f64::from(GAIN_TARGET_PEAK / peak).log10();
+    if want > 0.0 {
+        // Room to spare. Wait for it to be a settled fact rather than a gap in
+        // the traffic, and then take it a step at a time.
+        let quiet = *client.quiet_since.get_or_insert_with(Instant::now);
+        if quiet.elapsed() < GAIN_QUIET_BEFORE_RAISE || want < GAIN_DEADBAND_DB {
+            return Ok(());
+        }
+    } else {
+        client.quiet_since = None;
+        if peak < GAIN_CLIP_PEAK && -want < GAIN_DEADBAND_DB {
+            return Ok(());
+        }
+    }
+    if client.last_gain_move.elapsed() < GAIN_MIN_INTERVAL {
+        // The last figure may not have reached these samples yet. Judging
+        // them against it would take the same step twice.
+        return Ok(());
+    }
+
+    let step = want.min(GAIN_STEP_UP_DB);
+    let next = (client.servo_db + step).round().clamp(0.0, GAIN_MAX_DB);
+    if next == client.servo_db.round() {
+        // Already against a stop. Saying so again costs a setting.
+        return Ok(());
+    }
+    tracing::debug!(
+        "SpyServer {}: 8-bit peak at {:.0} % of full scale, digital gain {:.0} -> {:.0} dB",
+        client.endpoint,
+        peak * 100.0,
+        client.servo_db,
+        next,
+    );
+    client.servo_db = next;
+    client.quiet_since = None;
+    client.send_digital_gain()
+}
+
 /// Everything one completed message does.
 #[allow(clippy::too_many_arguments)]
 fn on_message(
@@ -862,6 +1020,18 @@ fn on_message(
         proto::MSG_UINT8_IQ | proto::MSG_INT16_IQ | proto::MSG_FLOAT_IQ => {
             let pairs = iq_to_f32(client.iq_format, body, h.digital_gain(), iq_scratch);
             if pairs > 0 {
+                if client.loop_runs() {
+                    // The peak as a fraction of full scale, which is what the
+                    // loop needs and what the decoder has just divided out:
+                    // the samples are `raw / (gain * full scale)`, so putting
+                    // the gain back gives the raw fraction, in any format.
+                    // The *header's* gain — what the server did — so a message
+                    // from before the last change still reports where its own
+                    // bytes sat.
+                    let peak = iq_scratch.iter().fold(0f32, |m, v| m.max(v.abs()));
+                    let peak = peak * h.digital_gain();
+                    client.peak_fraction = Some(client.peak_fraction.map_or(peak, |p| p.max(peak)));
+                }
                 client.note_sequence(h.sequence, stats);
                 stats.on_iq(pairs);
                 push_iq(rx, iq_scratch, stats, shared.rx_paused.load(Ordering::Relaxed));
@@ -963,6 +1133,7 @@ fn pump(
         }
         flush_retune(client, shared)?;
         maintain_fft(client)?;
+        maintain_digital_gain(client)?;
         if client.last_ping.elapsed() >= PING_INTERVAL {
             client.last_ping = Instant::now();
             client.ping()?;
