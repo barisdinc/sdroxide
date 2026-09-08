@@ -180,7 +180,7 @@ fn header_bytes(rate_hz: u32, center_hz: f64) -> Header {
     b.extend_from_slice(&bits.to_le_bytes());
 
     b.extend_from_slice(b"auxi");
-    let auxi = auxi_payload(center_hz);
+    let auxi = auxi_payload(rate_hz, center_hz);
     b.extend_from_slice(&(auxi.len() as u32).to_le_bytes());
     // StartTime is the first SYSTEMTIME in the payload; StopTime is the one
     // right after it — see `auxi_payload`'s own doc for the field layout.
@@ -204,14 +204,27 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-/// The `auxi` chunk SDR#/HDSDR write: two `SYSTEMTIME`s, then the tuning.
+/// The `auxi` chunk SDR#/HDSDR write: two `SYSTEMTIME`s, nine `u32` tuning
+/// fields, then a fixed-size "next file" name — **164 bytes total**, not the
+/// 64 this used to stop at.
 ///
-/// Sixteen little-endian `u16`s of start and stop time (year, month, day of
-/// week, day, hour, minute, second, millisecond — Windows' `SYSTEMTIME`, which
-/// is what the format is), then centre, dial and low-edge frequencies, a
-/// timestamp pair and the ADC width. Only the centre frequency is read by
-/// anything that matters, and it is the whole reason to write the chunk; the
-/// rest is filled in so the layout is the one those programs parse.
+/// The shape (and the exact 164-byte length) came from decoding a real
+/// HDSDR capture byte-for-byte
+/// (`HDSDR_20171123_005716Z_1130kHz_RF.wav`, on hand from prior DXing —
+/// `StartTime` 2017-11-23 00:57:16, `dayOfWeek` 4, a Thursday, which it was,
+/// and `centerFreq` 1130000, all matching the file's own name), not
+/// recalled: two 16-byte `SYSTEMTIME`s (year, month, day of week, day, hour,
+/// minute, second, millisecond), then centre frequency, A/D sample rate, IF
+/// frequency, bandwidth, IQ offset, dB offset, max value and two "initial
+/// gain" fields (nine `u32`s, 36 bytes), then a 96-byte NUL-terminated "next
+/// file" name — which this writes empty and zero-padded, since there is no
+/// next file to name, but a reader stepping through the chunk by its
+/// documented shape still finds exactly what it expects there rather than
+/// running off the end into whatever chunk happens to follow. Only the
+/// centre frequency is read by anything that matters here, and it's the
+/// whole reason to write the chunk at all; the rest is filled in, at its
+/// real size, so the layout is the one those programs actually parse rather
+/// than one that merely resembles it.
 ///
 /// StopTime is written equal to StartTime here — nothing is over yet at
 /// header-build time — and [`IqWavWriter::finish`] patches the real value in
@@ -221,7 +234,7 @@ fn now_unix_secs() -> u64 {
 /// `finish()` at all, on a hard crash) still sees an internally consistent
 /// pair, just an as-yet-unfinished one, rather than an obviously-wrong
 /// all-zero stop time.
-fn auxi_payload(center_hz: f64) -> Vec<u8> {
+fn auxi_payload(rate_hz: u32, center_hz: f64) -> Vec<u8> {
     let mut b = Vec::with_capacity(164);
     let st = systemtime_fields(now_unix_secs());
     for _ in 0..2 {
@@ -230,14 +243,17 @@ fn auxi_payload(center_hz: f64) -> Vec<u8> {
         }
     }
     let hz = center_hz.max(0.0) as u32;
-    b.extend_from_slice(&hz.to_le_bytes()); // centre
-    b.extend_from_slice(&hz.to_le_bytes()); // dial ("frequency")
+    b.extend_from_slice(&hz.to_le_bytes()); // centre frequency
+    b.extend_from_slice(&rate_hz.to_le_bytes()); // A/D sample rate
     b.extend_from_slice(&0u32.to_le_bytes()); // IF frequency
-    b.extend_from_slice(&0u32.to_le_bytes()); // bandwidth
+    b.extend_from_slice(&rate_hz.to_le_bytes()); // bandwidth
     b.extend_from_slice(&0u32.to_le_bytes()); // IQ offset
-    b.extend_from_slice(&0u32.to_le_bytes()); // db offset
+    b.extend_from_slice(&0u32.to_le_bytes()); // dB offset
     b.extend_from_slice(&0u32.to_le_bytes()); // max value
-    b.extend_from_slice(&32u32.to_le_bytes()); // significant bits
+    b.extend_from_slice(&0u32.to_le_bytes()); // initial gain 1
+    b.extend_from_slice(&0u32.to_le_bytes()); // initial gain 2
+    b.extend_from_slice(&[0u8; 96]); // next file name, empty
+    debug_assert_eq!(b.len(), 164, "the auxi chunk's real, observed size");
     b
 }
 
@@ -432,6 +448,49 @@ mod tests {
             u32::from_le_bytes(raw[payload + 32..payload + 36].try_into().unwrap()),
             14_074_000
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The real-world bug this exists to catch: the `auxi` chunk this used to
+    /// write stopped at 64 bytes — two `SYSTEMTIME`s and eight `u32` fields,
+    /// missing the trailing "next file name" buffer entirely. A real HDSDR
+    /// capture on hand (`HDSDR_20171123_005716Z_1130kHz_RF.wav`) has one that
+    /// is 164 bytes, and a WavViewDX rejection of a real sdroxide recording
+    /// traced back to exactly this: this chunk's declared size told a reader
+    /// stepping through it by that documented shape to keep reading 100 bytes
+    /// past where the payload actually ended, into whatever chunk came next.
+    #[test]
+    fn the_auxi_chunk_is_the_real_164_byte_shape() {
+        let dir = std::env::temp_dir().join(format!("sdroxide-iqwav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auxi_shape.wav");
+        IqWavWriter::create(&path, 2_048_000, 6_070_000.0).unwrap().finish().unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        let auxi = find_chunk(&raw, b"auxi").expect("auxi chunk");
+        let declared = u32::from_le_bytes(raw[auxi + 4..auxi + 8].try_into().unwrap());
+        assert_eq!(declared, 164, "the auxi chunk's declared size must match HDSDR's own");
+
+        let payload = auxi + 8;
+        // Centre frequency, then the A/D sample rate and bandwidth this used
+        // to leave unwritten (0) entirely.
+        assert_eq!(
+            u32::from_le_bytes(raw[payload + 32..payload + 36].try_into().unwrap()),
+            6_070_000
+        );
+        assert_eq!(
+            u32::from_le_bytes(raw[payload + 36..payload + 40].try_into().unwrap()),
+            2_048_000,
+            "A/D sample rate"
+        );
+        assert_eq!(
+            u32::from_le_bytes(raw[payload + 44..payload + 48].try_into().unwrap()),
+            2_048_000,
+            "bandwidth"
+        );
+        // The trailing "next file name" buffer this used to not write at
+        // all — present, and empty, rather than absent.
+        assert_eq!(&raw[payload + 68..payload + 164], &[0u8; 96][..]);
         let _ = std::fs::remove_file(&path);
     }
 
