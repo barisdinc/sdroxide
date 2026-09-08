@@ -1,14 +1,18 @@
 //! The AtCHAT NET panel: the roster, the conversation, the transfers in flight
 //! and a viewer for the images that have arrived over the air.
 //!
-//! Two panes an operator watches move independently: CHAT is who is on the net
-//! and what has been said (common channel or a directed line to one station);
-//! FILES is the block-CRC-ARQ transfers still running and the received-image
-//! viewer, which shows who sent each picture and when, with ◀ ▶ between them.
+//! Two panes an operator watches move independently. CHAT is who is on the net
+//! and what has been said: a tab row sits above the transcript — the common
+//! "CHAT" tab carries the ALL traffic, and a direct message from a station
+//! opens a closable per-station tab beside it (one per correspondent). What is
+//! typed goes wherever the active tab points: ALL from CHAT, that one station
+//! from a DM tab. FILES is the block-CRC-ARQ transfers still running and the
+//! received-image viewer, which shows who sent each picture and when, with
+//! ◀ ▶ between them.
 //!
 //! The mode runs a whole NET protocol station on its own thread — master
 //! election, roster ageing, ARQ — so this panel only reads
-//! [`sdroxide_types::AtChatStatus`] and pushes the four `Command::AtChat*`.
+//! [`sdroxide_types::AtChatStatus`] and pushes the `Command::AtChat*`.
 
 use eframe::egui::{self, RichText};
 use sdroxide_types::{AtChatStatus, Command};
@@ -55,6 +59,12 @@ impl SdroxideApp {
         });
     }
 
+    /// The station the active chat tab points at — empty for the common "CHAT"
+    /// tab (ALL), a callsign for a direct-message tab.
+    fn atchat_target(&self) -> String {
+        self.atchat_chat_tab.clone().unwrap_or_default()
+    }
+
     /// Title, join state, role, master, carrier, and the virtual-channel field.
     fn atchat_header(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, st: &AtChatStatus) {
         ui.horizontal_wrapped(|ui| {
@@ -65,11 +75,33 @@ impl SdroxideApp {
                     .color(theme::CYAN_DIM()),
             );
 
-            if st.connected {
-                ui.label(RichText::new(" ON NET ").size(10.5).strong().color(theme::GREEN()));
+            // The join badge doubles as the leave/rejoin control: green "ON NET"
+            // while joined, plain "REJOIN" once off. Clicking it drops the link
+            // (state is kept) or rejoins — sometimes you just need to cycle.
+            let (face, hover) = if st.connected {
+                (" ON NET ", "On the net — click to leave (state is kept; click again to rejoin)")
             } else {
-                ui.label(RichText::new(" JOINING ").size(10.5).strong().color(theme::YELLOW()));
+                (" REJOIN ", "Off the net — click to rejoin")
+            };
+            let resp = crate::chrome::chip_accent(
+                ui,
+                st.connected,
+                RichText::new(face).size(10.5).strong(),
+                theme::GREEN(),
+                theme::INK_ON_CYAN(),
+            );
+            if resp.clicked() {
+                cmds.push(if st.connected {
+                    Command::AtChatDrop
+                } else {
+                    Command::AtChatReconnect
+                });
             }
+            resp.on_hover_text(hover);
+            if !st.connected {
+                ui.label(RichText::new("off net").size(10.0).color(theme::YELLOW()));
+            }
+
             if let Some(role) = &st.role {
                 let colour = match role.as_str() {
                     "MASTER" => theme::GREEN(),
@@ -137,7 +169,7 @@ impl SdroxideApp {
         });
     }
 
-    /// The roster strip and the conversation.
+    /// The roster strip, the CHAT / per-station tab row, and the conversation.
     fn atchat_chat_pane(
         &mut self,
         ui: &mut egui::Ui,
@@ -146,6 +178,33 @@ impl SdroxideApp {
         panel_h: f32,
         tx_ok: bool,
     ) {
+        // Open a DM tab for any incoming private line newer than the newest we
+        // have already turned into a tab for that peer. Closing a tab does not
+        // clear that mark, so an old message never reopens it — a genuinely new
+        // one does.
+        for c in &st.chat {
+            if c.private && !c.own {
+                let seen = self.atchat_dm_seen.get(&c.from).copied().unwrap_or(0);
+                if c.when > seen {
+                    if !self.atchat_dm_tabs.iter().any(|p| p == &c.from) {
+                        self.atchat_dm_tabs.push(c.from.clone());
+                    }
+                    self.atchat_dm_seen.insert(c.from.clone(), c.when);
+                }
+            }
+        }
+        // A tab whose peer has left the roster and holds no history is stale.
+        self.atchat_dm_tabs.retain(|peer| {
+            st.roster.iter().any(|r| &r.call == peer)
+                || st.chat.iter().any(|c| c.private && (&c.from == peer || &c.dst == peer))
+        });
+        if let Some(cur) = self.atchat_chat_tab.clone()
+            && !self.atchat_dm_tabs.iter().any(|p| p == &cur)
+        {
+            self.atchat_chat_tab = None;
+        }
+
+        // Roster strip — a click opens/focuses that station's DM tab.
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("ROSTER").strong().size(10.5).color(theme::CYAN()));
             if st.roster.is_empty() {
@@ -156,73 +215,129 @@ impl SdroxideApp {
                 let face = RichText::new(&r.call).monospace().size(10.5).color(colour);
                 if ui
                     .add(egui::Label::new(face).sense(egui::Sense::click()))
-                    .on_hover_text(format!("{} — last heard {:.0}s ago", r.status, r.age_s))
+                    .on_hover_text(format!(
+                        "{} — last heard {:.0}s ago · click to open a direct-message tab",
+                        r.status, r.age_s
+                    ))
                     .clicked()
                 {
-                    self.atchat_dst = r.call.clone();
+                    if !self.atchat_dm_tabs.iter().any(|p| p == &r.call) {
+                        self.atchat_dm_tabs.push(r.call.clone());
+                    }
+                    self.atchat_chat_tab = Some(r.call.clone());
                 }
             }
         });
         ui.add_space(4.0);
 
+        // Tab row: CHAT (common) + one closable tab per DM correspondent.
+        let mut to_close: Option<String> = None;
+        ui.horizontal_wrapped(|ui| {
+            if crate::chrome::chip(
+                ui,
+                self.atchat_chat_tab.is_none(),
+                RichText::new(" CHAT ").size(10.5),
+            )
+            .on_hover_text("The common channel — lines here go to everyone (ALL)")
+            .clicked()
+            {
+                self.atchat_chat_tab = None;
+            }
+            for peer in self.atchat_dm_tabs.clone() {
+                let active = self.atchat_chat_tab.as_deref() == Some(peer.as_str());
+                // Unread when the newest incoming line from this peer is newer
+                // than the last one seen while its tab was open.
+                let newest_in = st
+                    .chat
+                    .iter()
+                    .filter(|c| c.private && !c.own && c.from == peer)
+                    .map(|c| c.when)
+                    .max()
+                    .unwrap_or(0);
+                let unread = !active && newest_in > self.atchat_dm_read.get(&peer).copied().unwrap_or(0);
+                let face = if unread { format!("● {peer} ") } else { format!(" {peer} ") };
+                if crate::chrome::chip(ui, active, RichText::new(face).size(10.5)).clicked() {
+                    self.atchat_chat_tab = Some(peer.clone());
+                }
+                if ui
+                    .add(egui::Label::new(RichText::new("✕").size(9.5).color(theme::gray(130))).sense(egui::Sense::click()))
+                    .on_hover_text(format!("close the {peer} tab"))
+                    .clicked()
+                {
+                    to_close = Some(peer.clone());
+                }
+            }
+        });
+        if let Some(peer) = to_close {
+            self.atchat_dm_tabs.retain(|p| p != &peer);
+            if self.atchat_chat_tab.as_deref() == Some(peer.as_str()) {
+                self.atchat_chat_tab = None;
+            }
+        }
+        ui.add_space(4.0);
+
+        // Transcript for the active tab.
+        let active = self.atchat_chat_tab.clone();
+        let salt = active.clone().unwrap_or_else(|| "__common__".into());
         let input_h = 30.0;
         egui::ScrollArea::vertical()
-            .id_salt("atchat-chat")
-            .max_height((panel_h - 96.0 - input_h).max(60.0))
+            .id_salt(("atchat-chat", salt))
+            .max_height((panel_h - 128.0 - input_h).max(60.0))
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if st.chat.is_empty() {
-                    ui.label(RichText::new("No messages yet.").weak());
-                }
+                let mut shown = 0usize;
                 for c in &st.chat {
+                    let in_tab = match &active {
+                        None => !c.private,
+                        Some(peer) => {
+                            c.private
+                                && ((c.own && &c.dst == peer) || (!c.own && &c.from == peer))
+                        }
+                    };
+                    if !in_tab {
+                        continue;
+                    }
+                    shown += 1;
                     let when = hms(c.when);
                     let who = if c.own { "me".to_string() } else { c.from.clone() };
-                    let tag = if c.private {
-                        format!("[{}→{}]", who, if c.own { c.dst.clone() } else { "me".into() })
-                    } else {
-                        format!("<{who}>")
-                    };
-                    let colour = if c.own {
-                        theme::GREEN()
-                    } else if c.private {
-                        theme::YELLOW()
-                    } else {
-                        theme::TEXT()
-                    };
+                    let tag = format!("<{who}>");
+                    let colour = if c.own { theme::GREEN() } else { theme::TEXT() };
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(when).monospace().size(9.5).color(theme::gray(110)));
                         ui.label(RichText::new(tag).monospace().size(10.5).color(colour));
                         ui.label(RichText::new(&c.text).size(11.0).color(colour));
                     });
                 }
+                if shown == 0 {
+                    ui.label(RichText::new("No messages yet.").weak());
+                }
             });
 
-        // Destination + the line to type on.
+        // Viewing a DM tab marks it read up to its newest incoming line.
+        if let Some(peer) = &active {
+            let newest_in = st
+                .chat
+                .iter()
+                .filter(|c| c.private && !c.own && &c.from == peer)
+                .map(|c| c.when)
+                .max()
+                .unwrap_or(0);
+            self.atchat_dm_read.insert(peer.clone(), newest_in);
+        }
+
+        // The line to type on — its destination is the active tab.
         let mut send = false;
+        let hint = match &active {
+            None => "message to everyone (ALL)".to_string(),
+            Some(p) => format!("direct message to {p}"),
+        };
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("atchat-dst")
-                .selected_text(if self.atchat_dst.is_empty() {
-                    "ALL".to_string()
-                } else {
-                    self.atchat_dst.clone()
-                })
-                .width(74.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.atchat_dst, String::new(), "ALL");
-                    for r in &st.roster {
-                        ui.selectable_value(&mut self.atchat_dst, r.call.clone(), &r.call);
-                    }
-                });
             let room = (ui.available_width() - 52.0).max(80.0);
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.atchat_draft)
                     .desired_width(room)
-                    .hint_text(if self.atchat_dst.is_empty() {
-                        "message to everyone"
-                    } else {
-                        "private message"
-                    }),
+                    .hint_text(hint),
             );
             send |= resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if tx_gated(ui, tx_ok, |ui| {
@@ -242,7 +357,7 @@ impl SdroxideApp {
 
         if send && tx_ok && !self.atchat_draft.trim().is_empty() {
             cmds.push(Command::AtChatSendChat {
-                to: self.atchat_dst.trim().to_string(),
+                to: self.atchat_target(),
                 text: self.atchat_draft.trim().to_string(),
             });
             self.atchat_draft.clear();
@@ -258,8 +373,19 @@ impl SdroxideApp {
         panel_h: f32,
         tx_ok: bool,
     ) {
+        let target = self.atchat_target();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("TRANSFERS").strong().size(10.5).color(theme::CYAN()));
+            ui.label(
+                RichText::new(if target.is_empty() {
+                    "→ ALL".to_string()
+                } else {
+                    format!("→ {target}")
+                })
+                .size(9.5)
+                .color(theme::gray(130)),
+            )
+            .on_hover_text("A sent file follows the active chat tab");
             crate::chrome::row_tail(ui, |ui| {
                 if tx_gated(ui, tx_ok, |ui| {
                     crate::chrome::chip(ui, false, RichText::new(" SEND FILE ").size(10.0))
@@ -269,7 +395,7 @@ impl SdroxideApp {
                     && let Some(path) = rfd::FileDialog::new().pick_file()
                 {
                     cmds.push(Command::AtChatSendFile {
-                        to: self.atchat_dst.trim().to_string(),
+                        to: target.clone(),
                         path: path.to_string_lossy().into_owned(),
                     });
                 }
