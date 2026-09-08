@@ -543,6 +543,18 @@ pub struct SdroxideApp {
     /// Packet: how far back through [`Self::packet_history`] the operator has
     /// walked. `None` means they are typing something new.
     packet_history_at: Option<usize>,
+    /// AtCHAT: the chat line's destination — empty is the common channel, a
+    /// callsign is a directed (private) message.
+    atchat_dst: String,
+    /// AtCHAT: what is typed on the chat line but not yet sent.
+    atchat_draft: String,
+    /// AtCHAT: which received image the viewer is showing — an index into the
+    /// image-only subset of the status file list, oldest first.
+    atchat_img_at: usize,
+    /// AtCHAT: received images decoded from disk once and kept as textures,
+    /// keyed by file path. `None` marks a path that would not decode, so it is
+    /// not retried every frame.
+    atchat_img_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// APRS: the station icons, decoded once and kept as textures.
     aprs_icons: crate::aprs_icons::AprsIcons,
     /// APRS: the map's centre, zoom and selected station.
@@ -1324,6 +1336,10 @@ impl SdroxideApp {
             packet_draft: String::new(),
             packet_history: Vec::new(),
             packet_history_at: None,
+            atchat_dst: String::new(),
+            atchat_draft: String::new(),
+            atchat_img_at: 0,
+            atchat_img_cache: std::collections::HashMap::new(),
             aprs_show_traffic: false,
             aprs_filter: String::new(),
             aprs_lat_buf: String::new(),
