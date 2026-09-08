@@ -304,8 +304,9 @@ struct Client {
     /// in automatic runs the loop — see [`Client::loop_runs`] — and this is
     /// where it starts from: the reference formula's figure.
     servo_db: f64,
-    /// The largest sample since the loop last looked, as a fraction of full
-    /// scale: one is a rail. `None` is nothing having arrived, which is not
+    /// The largest sample since the loop last looked — a whole
+    /// [`GAIN_MIN_INTERVAL`] of them, not just the read that ended it — as a
+    /// fraction of full scale: one is a rail. `None` is nothing having arrived, which is not
     /// the same thing as `Some(0.0)` — that is a stream of mid-scale having
     /// arrived, and it is the strongest possible case for more gain.
     peak_fraction: Option<f32>,
@@ -956,6 +957,13 @@ fn maintain_digital_gain(client: &mut Client) -> Result<()> {
     if !client.loop_runs() {
         return Ok(());
     }
+    if client.last_gain_move.elapsed() < GAIN_MIN_INTERVAL {
+        // Too soon to spend a setting, so do not spend the evidence either.
+        // Left where it is, the peak goes on accumulating and the next look
+        // judges the whole interval rather than whatever happened to arrive in
+        // the last few milliseconds of it.
+        return Ok(());
+    }
     // Nothing arrived is not an argument for anything. A stream of mid-scale
     // is: that is `Some(0.0)`, and the strongest case there is for more gain.
     let Some(peak) = client.peak_fraction.take() else {
@@ -974,17 +982,14 @@ fn maintain_digital_gain(client: &mut Client) -> Result<()> {
             return Ok(());
         }
     } else {
+        // A loud moment anywhere in the interval is in the accumulated peak,
+        // so this still cancels a pending raise even though the loop now only
+        // looks at the end of one.
         client.quiet_since = None;
         if peak < GAIN_CLIP_PEAK && -want < GAIN_DEADBAND_DB {
             return Ok(());
         }
     }
-    if client.last_gain_move.elapsed() < GAIN_MIN_INTERVAL {
-        // The last figure may not have reached these samples yet. Judging
-        // them against it would take the same step twice.
-        return Ok(());
-    }
-
     let step = want.min(GAIN_STEP_UP_DB);
     let next = (client.servo_db + step).round().clamp(0.0, GAIN_MAX_DB);
     if next == client.servo_db.round() {
