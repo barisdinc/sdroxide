@@ -336,7 +336,7 @@ async fn session_main(
         let station = match build_station(&call, &virtual_addr, &bridge).await {
             Ok(s) => s,
             Err(e) => {
-                push_log(&snap, format!("başlatılamadı: {e}"));
+                push_log(&snap, format!("could not start: {e}"));
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -349,8 +349,8 @@ async fn session_main(
         push_log(
             &snap,
             match &virtual_addr {
-                Some(a) => format!("{call} — virtual kanal {a}"),
-                None => format!("{call} — telsiz (RF)"),
+                Some(a) => format!("{call} — virtual channel {a}"),
+                None => format!("{call} — radio (RF)"),
             },
         );
 
@@ -368,7 +368,7 @@ async fn session_main(
                         let private = scope == ChatScope::Private;
                         push_chat_dedup(&snap, ChatLine {
                             from,
-                            dst: if private { "(özel)".into() } else { "ALL".into() },
+                            dst: if private { "(private)".into() } else { "ALL".into() },
                             text, own: false, private, when: now_unix(),
                         });
                     }
@@ -408,7 +408,7 @@ async fn session_main(
                                 o.files.push(RecvFile {
                                     from: call.clone(),
                                     filename: path.file_name()
-                                        .and_then(|s| s.to_str()).unwrap_or("dosya").into(),
+                                        .and_then(|s| s.to_str()).unwrap_or("file").into(),
                                     path: path.to_string_lossy().into_owned(),
                                     is_image: true,
                                     when: now_unix(),
@@ -461,7 +461,7 @@ mod tests {
         // Synthesise a CHAT frame from TA2DEF and feed it as demodulated audio.
         let modem = Modem::new();
         let frame =
-            br#"{"type":"CHAT","src":"TA2DEF","dst":"ALL","text":"telsiz uzerinden merhaba"}"#;
+            br#"{"type":"CHAT","src":"TA2DEF","dst":"ALL","text":"hello over the radio"}"#;
         let wave = modem.modulate(frame, MMode::Qpsk);
         // Pre- and post-roll silence so the segmenter frames it as one burst.
         let sil = vec![0i16; 4000];
@@ -476,7 +476,7 @@ mod tests {
             wait(&s, 10, |sn| sn
                 .chat
                 .iter()
-                .any(|c| c.text == "telsiz uzerinden merhaba" && !c.own)),
+                .any(|c| c.text == "hello over the radio" && !c.own)),
             "the demodulated CHAT frame should land in the transcript"
         );
     }
@@ -520,7 +520,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        s.send_chat("ALL", "giden mesaj");
+        s.send_chat("ALL", "outgoing message");
 
         // Collect ~6 s of modulated transmit audio, then segment + demodulate.
         let mut all: Vec<i16> = Vec::new();
@@ -537,7 +537,7 @@ mod tests {
                 .and_then(|p| serde_json::from_slice::<serde_json::Value>(&p).ok())
                 .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
                 .as_deref()
-                == Some("giden mesaj")
+                == Some("outgoing message")
         });
         assert!(got, "send_chat should produce a modulated burst that demodulates back");
     }

@@ -1,5 +1,5 @@
-//! `client.py` senaryolarının in-process (gerçek modem + gerçek kanal, GUI
-//! yok) karşılıkları — CLAUDE.md "doğrulanmış senaryolar" listesi.
+//! In-process equivalents of the `client.py` scenarios (real modem + real
+//! channel, no GUI) — CLAUDE.md's "verified scenarios" list.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,8 +12,9 @@ use tokio::sync::broadcast;
 type Sta = sdroxide_atchat::protocol::Station<InProcConnector>;
 
 fn fast_cfg(dir: &std::path::Path) -> StationConfig {
-    // Gerçek değerlerin küçültülmüş hâli — ama beacon'ı kanalı boğmayacak
-    // kadar seyrek tutuyoruz (CLAUDE.md hata #3'ün test tarafı karşılığı).
+    // Shrunk-down versions of the real values — but the beacon is kept sparse
+    // enough not to choke the channel (the test-side counterpart of CLAUDE.md
+    // bug #3).
     StationConfig {
         beacon_interval: Duration::from_millis(2500),
         beacon_timeout: Duration::from_millis(6000),
@@ -25,8 +26,8 @@ fn fast_cfg(dir: &std::path::Path) -> StationConfig {
     }
 }
 
-/// Beacon/master mekanizmasını uykuya alır — transfer senaryolarını
-/// election churn'ünden izole etmek için.
+/// Puts the beacon/master machinery to sleep — to isolate the transfer
+/// scenarios from election churn.
 fn quiet_cfg(dir: &std::path::Path) -> StationConfig {
     StationConfig {
         beacon_interval: Duration::from_secs(3600),
@@ -103,7 +104,7 @@ async fn single_station_elects_itself_master() {
         station(&core, "TA1ABC", sdroxide_atchat::netproto::Mode::Qpsk, fast_cfg(dir.path())).await;
 
     assert_eq!(a.role(), Role::Listener);
-    assert!(wait_role(&a, 15, Role::Master).await, "istasyon ~6 sn sonra MASTER olmalıydı");
+    assert!(wait_role(&a, 15, Role::Master).await, "the station should be MASTER after ~6 s");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -117,15 +118,15 @@ async fn chat_broadcast_reaches_peer_over_modem() {
     let mut b_ev = b.subscribe();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert!(a.chat("merhaba dunya", "ALL").await);
+    assert!(a.chat("hello world", "ALL").await);
 
     let ev = wait_for(
         &mut b_ev,
         12,
-        |e| matches!(e, StationEvent::Chat { text, .. } if text == "merhaba dunya"),
+        |e| matches!(e, StationEvent::Chat { text, .. } if text == "hello world"),
     )
     .await
-    .expect("TA2DEF sohbeti çözüp yayınlamalıydı");
+    .expect("TA2DEF should have decoded and published the chat");
     match ev {
         StationEvent::Chat { from, scope, .. } => {
             assert_eq!(from, "TA1ABC");
@@ -138,8 +139,8 @@ async fn chat_broadcast_reaches_peer_over_modem() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bulk_transfer_is_bit_exact_on_clean_channel() {
     let dir = tempfile::tempdir().unwrap();
-    let src_path = dir.path().join("veri.bin");
-    let payload: Vec<u8> = (0..2200u32).map(|i| (i * 37 + 11) as u8).collect(); // 10 blok
+    let src_path = dir.path().join("data.bin");
+    let payload: Vec<u8> = (0..2200u32).map(|i| (i * 37 + 11) as u8).collect(); // 10 blocks
     std::fs::write(&src_path, &payload).unwrap();
 
     let core = ChannelCore::spawn(ChannelConfig::default());
@@ -156,22 +157,22 @@ async fn bulk_transfer_is_bit_exact_on_clean_channel() {
         matches!(e, StationEvent::Transfer { done: true, saved_path: Some(_), .. })
     })
     .await
-    .expect("transfer tamamlanmalıydı");
+    .expect("the transfer should have completed");
     if let StationEvent::Transfer { saved_path: Some(p), .. } = saved {
-        assert_eq!(std::fs::read(&p).unwrap(), payload, "kaydedilen dosya bit-birebir değil");
+        assert_eq!(std::fs::read(&p).unwrap(), payload, "the saved file is not bit-exact");
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arq_recovers_from_lost_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let src_path = dir.path().join("veri.bin");
-    let payload: Vec<u8> = (0..1700u32).map(|i| (i * 53 + 7) as u8).collect(); // 8 blok
+    let src_path = dir.path().join("data.bin");
+    let payload: Vec<u8> = (0..1700u32).map(|i| (i * 53 + 7) as u8).collect(); // 8 blocks
     std::fs::write(&src_path, &payload).unwrap();
 
-    // Deterministik: burst 6 ve 9'u sıfırla. Burst sırası (beacon kapalı,
-    // B önce başlar): 1=JOIN(B) 2=JOIN(A) 3=BULK_META 4..11=BLOCK0..7 12=BULK_END
-    // -> BLOCK2 ve BLOCK5 kaybolur; BULK_END sağlam gelir -> B eksikleri ister.
+    // Deterministic: zero bursts 6 and 9. Burst order (beacon off, B starts
+    // first): 1=JOIN(B) 2=JOIN(A) 3=BULK_META 4..11=BLOCK0..7 12=BULK_END
+    // -> BLOCK2 and BLOCK5 are lost; BULK_END arrives intact -> B requests the misses.
     let core =
         ChannelCore::spawn(ChannelConfig { corrupt_burst_nums: vec![6, 9], ..Default::default() });
     let b = station(&core, "TA2DEF", sdroxide_atchat::netproto::Mode::Qpsk, quiet_cfg(dir.path()))
@@ -184,7 +185,7 @@ async fn arq_recovers_from_lost_blocks() {
 
     a.send_file(src_path, "TA2DEF");
 
-    // ARQ turu gözlenmeli.
+    // An ARQ round should be observed.
     let saw_arq = {
         let mut a2 = a.subscribe();
         tokio::spawn(async move {
@@ -196,7 +197,7 @@ async fn arq_recovers_from_lost_blocks() {
                 )
                 .await
                 {
-                    Ok(Ok(StationEvent::Log(l))) if l.contains("yeniden gönderiliyor") => {
+                    Ok(Ok(StationEvent::Log(l))) if l.contains("resending") => {
                         return true;
                     }
                     Ok(Ok(_)) => continue,
@@ -210,18 +211,18 @@ async fn arq_recovers_from_lost_blocks() {
         matches!(e, StationEvent::Transfer { done: true, saved_path: Some(_), .. })
     })
     .await
-    .expect("ARQ ile transfer tamamlanmalıydı");
+    .expect("the transfer should have completed via ARQ");
     if let StationEvent::Transfer { saved_path: Some(p), .. } = saved {
         assert_eq!(std::fs::read(&p).unwrap(), payload);
     }
-    assert!(saw_arq.await.unwrap(), "en az bir ARQ yeniden gönderim turu beklenirdi");
+    assert!(saw_arq.await.unwrap(), "expected at least one ARQ resend round");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_and_reconnect_resumes_transfer() {
     let dir = tempfile::tempdir().unwrap();
-    let src_path = dir.path().join("veri.bin");
-    let payload: Vec<u8> = (0..2200u32).map(|i| (i * 29 + 5) as u8).collect(); // ~10 blok
+    let src_path = dir.path().join("data.bin");
+    let payload: Vec<u8> = (0..2200u32).map(|i| (i * 29 + 5) as u8).collect(); // ~10 blocks
     std::fs::write(&src_path, &payload).unwrap();
 
     let core = ChannelCore::spawn(ChannelConfig::default());
@@ -233,7 +234,7 @@ async fn drop_and_reconnect_resumes_transfer() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     a.send_file(src_path, "TA2DEF");
-    // Birkaç blok gitsin, sonra gönderende kopma.
+    // Let a few blocks go out, then drop the link on the sender.
     tokio::time::sleep(Duration::from_secs(4)).await;
     a.drop_link().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -243,7 +244,7 @@ async fn drop_and_reconnect_resumes_transfer() {
         matches!(e, StationEvent::Transfer { done: true, saved_path: Some(_), .. })
     })
     .await
-    .expect("kopma/yeniden bağlanma sonrası transfer tamamlanmalıydı");
+    .expect("the transfer should complete after drop/reconnect");
     if let StationEvent::Transfer { saved_path: Some(p), .. } = saved {
         assert_eq!(std::fs::read(&p).unwrap(), payload);
     }
@@ -256,26 +257,26 @@ async fn backup_master_takes_over_after_master_drop() {
 
     let a =
         station(&core, "TA1ABC", sdroxide_atchat::netproto::Mode::Qpsk, fast_cfg(dir.path())).await;
-    assert!(wait_role(&a, 10, Role::Master).await, "TA1ABC master olmalıydı");
+    assert!(wait_role(&a, 10, Role::Master).await, "TA1ABC should be master");
 
-    // Master kurulduktan SONRA B katılır -> temiz backup ataması.
+    // B joins AFTER the master is established -> a clean backup assignment.
     let b =
         station(&core, "TA2DEF", sdroxide_atchat::netproto::Mode::Qpsk, fast_cfg(dir.path())).await;
     assert!(
         wait_role(&b, 12, Role::Backup).await,
-        "TA2DEF, master'ın beacon'ıyla BACKUP olmalıydı"
+        "TA2DEF should become BACKUP from the master's beacon"
     );
 
     a.drop_link().await;
-    assert!(wait_role(&b, 15, Role::Master).await, "TA2DEF, master düşünce devralmalıydı");
+    assert!(wait_role(&b, 15, Role::Master).await, "TA2DEF should take over when the master drops");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "gerçek boyut: ~75 sn (grup_gorseli.bin, 55 blok)"]
+#[ignore = "full size: ~75 s (grup_gorseli.bin, 55 blocks)"]
 async fn full_size_image_transfer_bit_exact() {
     let dir = tempfile::tempdir().unwrap();
     let src = root_fixture("grup_gorseli.bin");
-    let original = std::fs::read(&src).expect("grup_gorseli.bin kökte olmalı");
+    let original = std::fs::read(&src).expect("grup_gorseli.bin must be at the repo root");
 
     let core = ChannelCore::spawn(ChannelConfig::default());
     let a =
@@ -290,7 +291,7 @@ async fn full_size_image_transfer_bit_exact() {
         matches!(e, StationEvent::Transfer { done: true, saved_path: Some(_), .. })
     })
     .await
-    .expect("tamamlanmalıydı");
+    .expect("should have completed");
     if let StationEvent::Transfer { saved_path: Some(p), .. } = saved {
         assert_eq!(std::fs::read(&p).unwrap(), original);
     }
