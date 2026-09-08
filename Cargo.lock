@@ -4888,6 +4888,7 @@ version = "1.6.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "clap",
  "crc32fast",
  "hound",
  "num-complex",
@@ -4899,6 +4900,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6191,6 +6193,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
