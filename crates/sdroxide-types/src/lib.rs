@@ -7,6 +7,7 @@ mod access;
 mod adsb;
 mod ais;
 mod aprs;
+mod atchat;
 mod awards;
 mod band;
 mod band_segments;
@@ -83,6 +84,9 @@ pub use aprs::{
     APRS_MESSAGE_MAX, APRS_MSG_RETRIES, APRS_STATION_MAX, APRS_TRACK_MAX, APRS_TRAFFIC_MAX,
     AprsEntryKind, AprsMessage, AprsMsgState, AprsPosition, AprsStation, AprsStatus, AprsSymbol,
     AprsSymbolKind, AprsTraffic, AprsWeather,
+};
+pub use atchat::{
+    AtChatChatLine, AtChatFile, AtChatRosterEntry, AtChatStatus, AtChatTransfer,
 };
 pub use awards::{
     Awards, Coverage, EntitySlot, Highlight, LogIndex, Novelty, Status as AwardStatus, US_STATES,

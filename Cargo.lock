@@ -4972,6 +4972,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "sdroxide-aprs",
+ "sdroxide-atchat",
  "sdroxide-ax25",
  "sdroxide-deepcw",
  "sdroxide-dsp",
