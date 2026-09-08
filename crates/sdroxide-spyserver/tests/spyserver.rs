@@ -79,10 +79,15 @@ struct Spec {
     device_center: u32,
     /// Send an 8-bit I/Q burst once the stream is enabled.
     stream_iq: bool,
-    /// The byte both components of every 8-bit I/Q sample carry, and the whole
-    /// dB the header claims was applied to them. `None` keeps the burst the
-    /// framing tests want: mid-scale and both extremes.
-    iq_fill: Option<(u8, u16)>,
+    /// The byte both components of every 8-bit I/Q sample carry. `None` keeps
+    /// the burst the framing tests want: mid-scale and both extremes. Either
+    /// way the header states the digital gain the server was last set to, as
+    /// a real one does.
+    iq_fill: Option<u8>,
+    /// Keep stating the first digital gain ever set, however many arrive
+    /// after it: a link on which every sample the client judges was sent
+    /// under a figure it has already moved on from.
+    stale_iq_gain: bool,
     /// Send an 8-bit FFT frame once the stream is enabled.
     stream_fft: bool,
 }
@@ -105,6 +110,7 @@ impl Default for Spec {
             device_center: 100_000_000,
             stream_iq: false,
             iq_fill: None,
+            stale_iq_gain: false,
             stream_fft: false,
         }
     }
@@ -193,6 +199,7 @@ impl Fake {
             let mut streaming = false;
             let mut seq = 0u32;
             let mut gain = 0u32;
+            let mut digital_gain: Option<u16> = None;
 
             loop {
                 if thread_stopped.load(Ordering::Relaxed) {
@@ -245,6 +252,15 @@ impl Fake {
                             if setting == SETTING_GAIN {
                                 gain = value;
                             }
+                            // Echoed back in every I/Q header from here on,
+                            // which is what a real server does and what lets a
+                            // client tell a figure that has landed from one
+                            // still in flight.
+                            if setting == SETTING_IQ_DIGITAL_GAIN
+                                && !(spec.stale_iq_gain && digital_gain.is_some())
+                            {
+                                digital_gain = Some(value as u16);
+                            }
                             if setting == SETTING_STREAMING_ENABLED {
                                 streaming = value != 0;
                             }
@@ -263,10 +279,11 @@ impl Fake {
                     if spec.stream_iq {
                         // Four complex samples: mid-scale, then the extremes —
                         // or whatever byte the test asked to be flooded with.
-                        let (body, flags) = match spec.iq_fill {
-                            Some((byte, db)) => (vec![byte; 8], db),
-                            None => (vec![128, 128, 255, 0, 128, 128, 0, 255], 0),
+                        let body = match spec.iq_fill {
+                            Some(byte) => vec![byte; 8],
+                            None => vec![128, 128, 255, 0, 128, 128, 0, 255],
                         };
+                        let flags = digital_gain.unwrap_or(0);
                         out.extend_from_slice(&msg(MSG_UINT8_IQ, flags, 1, seq, &body));
                     }
                     if spec.stream_fft {
@@ -432,11 +449,15 @@ fn iq_arrives_through_a_stream_split_across_segments() {
         "no I/Q arrived",
     );
     assert_eq!(n % 2, 0, "I and Q must stay paired");
-    // The fake sends mid-scale, then the extremes: 128 -> 0, 255 -> ~+1, 0 -> -1.
+    // The fake sends mid-scale, then the extremes: 128 -> 0, 255 -> ~+1, 0 -> -1,
+    // divided back down by the digital gain its header states — which at the
+    // ladder's stage is not zero, and undoing it is the decoder's contract.
+    let gain =
+        10f32.powf(fake.value_of(SETTING_IQ_DIGITAL_GAIN).expect("a gain was set") as f32 / 20.0);
     assert_eq!(got[0], 0.0);
     assert_eq!(got[1], 0.0);
-    assert!((got[2] - 127.0 / 128.0).abs() < 1e-6);
-    assert_eq!(got[3], -1.0);
+    assert!((got[2] - (127.0 / 128.0) / gain).abs() < 1e-6, "got {}", got[2]);
+    assert!((got[3] + 1.0 / gain).abs() < 1e-6, "got {}", got[3]);
 }
 
 /// The FFT lane's contract in one test: bins mapped against the window that was
@@ -670,8 +691,8 @@ fn an_hf_plus_is_asked_for_the_reference_digital_gain_in_either_format() {
 
 /// An HF+ as a real server describes one: 768 ksps, 660 kHz of analog
 /// bandwidth, no gain stages, a 16-bit ADC — streaming whatever byte the test
-/// asks for, with whatever gain the header claims.
-fn hf_plus_streaming(byte: u8, header_db: u16) -> Spec {
+/// asks for, under whatever digital gain it was last set to.
+fn hf_plus_streaming(byte: u8) -> Spec {
     Spec {
         device_type: 2,
         max_rate: 768_000,
@@ -683,7 +704,7 @@ fn hf_plus_streaming(byte: u8, header_db: u16) -> Spec {
         max_freq: 1_700_000_000,
         resolution: 16,
         stream_iq: true,
-        iq_fill: Some((byte, header_db)),
+        iq_fill: Some(byte),
         ..Spec::default()
     }
 }
@@ -701,7 +722,7 @@ fn hf_plus_streaming(byte: u8, header_db: u16) -> Spec {
 /// and the next step sees an honest peak as soon as the rail lets go.
 #[test]
 fn an_eight_bit_stream_that_arrives_clipped_walks_the_digital_gain_down() {
-    let fake = Fake::start(hf_plus_streaming(255, 12));
+    let fake = Fake::start(hf_plus_streaming(255));
     let cfg = SpyServerConfig {
         // Stage 4, so the reference formula opens at 12 dB and the loop has
         // somewhere to go. At stage 0 it opens at nothing and the test would
@@ -736,6 +757,44 @@ fn an_eight_bit_stream_that_arrives_clipped_walks_the_digital_gain_down() {
     assert_eq!(fake.values_of(SETTING_IQ_DIGITAL_GAIN), vec![12, 6, 0], "still at the stop");
 }
 
+/// Every step is measured from the gain the samples' *own header* states, so a
+/// link with something in flight cannot make the loop answer the same rail
+/// twice. The fake here never stops claiming the figure it opened at — a
+/// message always in flight, which is the case on exactly the slow uplinks an
+/// 8-bit stream is chosen for — and the loop takes its one honest step and then
+/// waits for samples that step actually reached, rather than reading its own
+/// unanswered rails as an argument for walking the gain to the floor.
+#[test]
+fn a_rail_sent_under_a_superseded_gain_is_not_answered_twice() {
+    let fake = Fake::start(Spec { stale_iq_gain: true, ..hf_plus_streaming(255) });
+    let cfg = SpyServerConfig {
+        // Stage 4, so the reference formula opens at 12 dB and there is room
+        // below to walk into if the loop double-counts.
+        iq_format: SpyServerFormat::Uint8,
+        iq_decimation: 4,
+        auto_digital_gain: true,
+        fft_enabled: false,
+        ..fake.cfg()
+    };
+    let _h = SpyServerHandle::connect_wideband(&cfg, 1_081_400.0).expect("connect");
+    assert!(
+        eventually(Duration::from_secs(2), || fake
+            .values_of(SETTING_IQ_DIGITAL_GAIN)
+            .last()
+            .copied()
+            == Some(6)),
+        "the rail was never answered at all: {:?}",
+        fake.values_of(SETTING_IQ_DIGITAL_GAIN)
+    );
+    // Long enough for four more steps at `GAIN_MIN_INTERVAL`, had it taken any.
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        fake.values_of(SETTING_IQ_DIGITAL_GAIN),
+        vec![12, 6],
+        "a rail already answered walked the gain down again"
+    );
+}
+
 /// The other half of the loop, and the reason it exists at all: on a quiet
 /// band an HF+'s 8-bit I/Q sits below one LSB and arrives as mid-scale, every
 /// sample, which is no information at all. That stream *has* arrived, and it
@@ -747,7 +806,7 @@ fn an_eight_bit_stream_that_arrives_clipped_walks_the_digital_gain_down() {
 /// gain up for the next syllable to clip on.
 #[test]
 fn an_eight_bit_stream_that_arrives_below_one_lsb_walks_the_digital_gain_up_slowly() {
-    let fake = Fake::start(hf_plus_streaming(128, 0));
+    let fake = Fake::start(hf_plus_streaming(128));
     let cfg = SpyServerConfig {
         iq_format: SpyServerFormat::Uint8,
         iq_decimation: 0,
@@ -786,7 +845,7 @@ fn an_eight_bit_stream_that_arrives_below_one_lsb_walks_the_digital_gain_up_slow
 /// point — what matters is that a stream is flowing and the loop leaves it be.
 #[test]
 fn a_sixteen_bit_stream_is_left_at_the_reference_figure() {
-    let fake = Fake::start(hf_plus_streaming(255, 12));
+    let fake = Fake::start(hf_plus_streaming(255));
     let cfg = SpyServerConfig {
         iq_format: SpyServerFormat::Int16,
         iq_decimation: 4,
@@ -811,7 +870,7 @@ fn a_sixteen_bit_stream_is_left_at_the_reference_figure() {
 /// right to clip a whole band flat.
 #[test]
 fn a_manual_digital_gain_is_sent_as_typed_and_left_alone() {
-    let fake = Fake::start(hf_plus_streaming(255, 40));
+    let fake = Fake::start(hf_plus_streaming(255));
     let cfg = SpyServerConfig {
         iq_format: SpyServerFormat::Uint8,
         iq_decimation: 0,

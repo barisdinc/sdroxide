@@ -89,9 +89,10 @@ const GAIN_DEADBAND_DB: f64 = 3.0;
 const GAIN_STEP_UP_DB: f64 = 3.0;
 
 /// The floor between gain changes. The server takes about eight settings a
-/// second in total and the retune lane is already spending some of them; it
-/// is also how long the last figure gets to reach the samples before they are
-/// judged against it.
+/// second in total and the retune lane is already spending some of them. It is
+/// a budget and nothing more: what keeps a figure still in flight from being
+/// counted twice is that every step is measured from the gain the samples'
+/// own header states.
 const GAIN_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long the peak must stay below target before the gain is raised.
@@ -185,7 +186,7 @@ pub(crate) fn probe(cfg: &SpyServerConfig, timeout: Duration) -> Result<(DeviceI
         auto_digital_gain: true,
         digital_gain_db: 0.0,
         servo_db: 0.0,
-        peak_fraction: None,
+        peak: None,
         last_gain_move: Instant::now(),
         quiet_since: None,
         fft_enabled: false,
@@ -276,6 +277,20 @@ impl Framer {
     }
 }
 
+/// The loudest thing to arrive since the loop last looked, and the gain the
+/// server said it had already applied to it.
+///
+/// The two travel together because a step is only meaningful relative to the
+/// figure that produced the peak. See [`maintain_digital_gain`].
+#[derive(Debug, Clone, Copy)]
+struct Peak {
+    /// Fraction of full scale: one is a rail.
+    fraction: f32,
+    /// The whole dB this message's own header claimed, which on a link with
+    /// anything in flight is not always what has most recently been asked for.
+    gain_db: f64,
+}
+
 /// The far end, and everything this end believes about it.
 struct Client {
     sock: TcpStream,
@@ -304,15 +319,16 @@ struct Client {
     /// in automatic runs the loop — see [`Client::loop_runs`] — and this is
     /// where it starts from: the reference formula's figure.
     servo_db: f64,
-    /// The largest sample since the loop last looked — a whole
-    /// [`GAIN_MIN_INTERVAL`] of them, not just the read that ended it — as a
-    /// fraction of full scale: one is a rail. `None` is nothing having arrived, which is not
-    /// the same thing as `Some(0.0)` — that is a stream of mid-scale having
-    /// arrived, and it is the strongest possible case for more gain.
-    peak_fraction: Option<f32>,
+    /// The loudest sample since the loop last looked — a whole
+    /// [`GAIN_MIN_INTERVAL`] of them, not just the read that ended it — with
+    /// the gain its own message was sent under. `None` is nothing having
+    /// arrived, which is not the same thing as a `fraction` of 0.0 — that is a
+    /// stream of mid-scale having arrived, and it is the strongest possible
+    /// case for more gain.
+    peak: Option<Peak>,
     /// When a digital gain last went out, whoever sent it. The loop waits on
-    /// this before judging the samples, so that they are the ones that figure
-    /// made rather than the ones already in flight when it was sent.
+    /// this so it spends no more of the server's settings budget than
+    /// [`GAIN_MIN_INTERVAL`] allows.
     last_gain_move: Instant,
     /// Since when the peak has been continuously below target. Raising the
     /// gain waits on this so a pause in the traffic does not pump it up.
@@ -371,7 +387,7 @@ impl Client {
             digital_gain_db: cfg.digital_gain_db,
             // Overwritten in `plan`, once the stage is known.
             servo_db: 0.0,
-            peak_fraction: None,
+            peak: None,
             last_gain_move: Instant::now(),
             quiet_since: None,
             fft_enabled: cfg.fft_enabled,
@@ -626,7 +642,7 @@ impl Client {
     /// automatic being switched on.
     fn reset_servo(&mut self) {
         self.servo_db = self.info.digital_gain_db(self.gain_index, self.iq_stage);
-        self.peak_fraction = None;
+        self.peak = None;
         self.quiet_since = None;
     }
 
@@ -953,6 +969,12 @@ fn move_fft_window(client: &mut Client) -> Result<()> {
 /// only after the peak has sat below target for [`GAIN_QUIET_BEFORE_RAISE`],
 /// and by no more than [`GAIN_STEP_UP_DB`], so a pause in the traffic is not
 /// mistaken for room and the next syllable does not land on a rail.
+///
+/// Every step is measured from the gain the samples' *own header* states, so
+/// what the loop does is independent of how long a setting takes to reach the
+/// stream. A rail that was sent under a figure already superseded resolves to
+/// that same figure and moves nothing, and the loop simply waits for samples
+/// the last change actually reached.
 fn maintain_digital_gain(client: &mut Client) -> Result<()> {
     if !client.loop_runs() {
         return Ok(());
@@ -966,14 +988,14 @@ fn maintain_digital_gain(client: &mut Client) -> Result<()> {
     }
     // Nothing arrived is not an argument for anything. A stream of mid-scale
     // is: that is `Some(0.0)`, and the strongest case there is for more gain.
-    let Some(peak) = client.peak_fraction.take() else {
+    let Some(peak) = client.peak.take() else {
         return Ok(());
     };
 
     // The move that would put this peak on target. Positive is room to spare;
     // infinite when nothing in the stream cleared mid-scale, which the step
     // limit below makes finite.
-    let want = 20.0 * f64::from(GAIN_TARGET_PEAK / peak).log10();
+    let want = 20.0 * f64::from(GAIN_TARGET_PEAK / peak.fraction).log10();
     if want > 0.0 {
         // Room to spare. Wait for it to be a settled fact rather than a gap in
         // the traffic, and then take it a step at a time.
@@ -986,20 +1008,32 @@ fn maintain_digital_gain(client: &mut Client) -> Result<()> {
         // so this still cancels a pending raise even though the loop now only
         // looks at the end of one.
         client.quiet_since = None;
-        if peak < GAIN_CLIP_PEAK && -want < GAIN_DEADBAND_DB {
+        if peak.fraction < GAIN_CLIP_PEAK && -want < GAIN_DEADBAND_DB {
             return Ok(());
         }
     }
     let step = want.min(GAIN_STEP_UP_DB);
-    let next = (client.servo_db + step).round().clamp(0.0, GAIN_MAX_DB);
-    if next == client.servo_db.round() {
-        // Already against a stop. Saying so again costs a setting.
+    // Measured from the figure the samples were *sent* under, not from the one
+    // most recently asked for. On a link with a message or two in flight the
+    // two differ for as long as the flight takes, and stepping from the latter
+    // takes the same correction twice — down towards a floor the band never
+    // needed, on exactly the slow links an 8-bit stream is chosen for.
+    let held = client.servo_db.round();
+    let ideal = (peak.gain_db + step).round().clamp(0.0, GAIN_MAX_DB);
+    // A peak may never move the gain the way it did not argue for. A rail sent
+    // under a figure already left behind resolves to that figure, which is an
+    // argument for waiting rather than for climbing back onto the rail.
+    let next = if want > 0.0 { ideal.max(held) } else { ideal.min(held) };
+    if next == held {
+        // Against a stop, or already acted on. Saying so again costs a setting.
         return Ok(());
     }
     tracing::debug!(
-        "SpyServer {}: 8-bit peak at {:.0} % of full scale, digital gain {:.0} -> {:.0} dB",
+        "SpyServer {}: 8-bit peak at {:.0} % of full scale under {:.0} dB, \
+         digital gain {:.0} -> {:.0} dB",
         client.endpoint,
-        peak * 100.0,
+        peak.fraction * 100.0,
+        peak.gain_db,
         client.servo_db,
         next,
     );
@@ -1032,10 +1066,17 @@ fn on_message(
                     // the gain back gives the raw fraction, in any format.
                     // The *header's* gain — what the server did — so a message
                     // from before the last change still reports where its own
-                    // bytes sat.
-                    let peak = iq_scratch.iter().fold(0f32, |m, v| m.max(v.abs()));
-                    let peak = peak * h.digital_gain();
-                    client.peak_fraction = Some(client.peak_fraction.map_or(peak, |p| p.max(peak)));
+                    // bytes sat, and carries the figure that put them there.
+                    let fraction = iq_scratch.iter().fold(0f32, |m, v| m.max(v.abs()));
+                    let seen =
+                        Peak { fraction: fraction * h.digital_gain(), gain_db: f64::from(h.flags) };
+                    // The loudest one wins, and brings its own gain with it:
+                    // pairing a peak with a figure some other message was sent
+                    // under is the whole mistake being avoided here.
+                    client.peak = Some(match client.peak {
+                        Some(p) if p.fraction >= seen.fraction => p,
+                        _ => seen,
+                    });
                 }
                 client.note_sequence(h.sequence, stats);
                 stats.on_iq(pairs);
