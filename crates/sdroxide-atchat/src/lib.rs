@@ -10,9 +10,14 @@
 //! frame types and the line-JSON wire used by the virtual channel (which is
 //! `channel_server.py`-compatible).
 //!
-//! `engine` (the `DigiEngine` seam) lands in a later commit.
+//! The thin `DigiEngine` controller that wraps [`session::AtChatSession`] lives
+//! in `sdroxide-digi` (it needs the DSP resamplers); this crate has no
+//! dependency on the rest of the workspace.
 
 pub mod channel;
 pub mod modem;
 pub mod netproto;
 pub mod protocol;
+pub mod session;
+
+pub use session::{AtChatSession, AtChatSnapshot, ChatLine, RecvFile, TransferLine};

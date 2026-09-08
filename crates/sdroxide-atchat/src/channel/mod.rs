@@ -11,6 +11,7 @@
 pub mod config;
 pub mod core;
 pub mod link;
+pub mod radio;
 pub mod tcp_server;
 
 pub use config::{ChannelConfig, apply_channel};
@@ -19,3 +20,4 @@ pub use link::{
     Connector, InProcConnector, InProcRx, InProcTx, LinkRx, LinkTx, TcpConnector, TcpRx, TcpTx,
     b64_to_samples, samples_to_b64,
 };
+pub use radio::{RadioBridge, RadioConnector};
