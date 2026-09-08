@@ -10,9 +10,9 @@
 //! frame types and the line-JSON wire used by the virtual channel (which is
 //! `channel_server.py`-compatible).
 //!
-//! `protocol` (the `Station` state machine), `channel` (the virtual TCP
-//! channel + link abstraction) and `engine` (the `DigiEngine` seam) land in
-//! later commits.
+//! `engine` (the `DigiEngine` seam) lands in a later commit.
 
+pub mod channel;
 pub mod modem;
 pub mod netproto;
+pub mod protocol;
