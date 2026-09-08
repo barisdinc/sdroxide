@@ -1,0 +1,26 @@
+[package]
+name = "sdroxide-atchat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AtCHAT NET: an OFDM multi-station chat/file mode — DigiEngine, a virtual TCP channel for radio-less development, and the standalone test tools"
+
+# The modem, the NET protocol (master election, roster, ARQ file transfer) and
+# the virtual channel are a straight port of barisdinc/AtChat (originally MIT);
+# folded in here under the workspace licence.
+
+[dependencies]
+num-complex.workspace = true
+rustfft.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde_json = "1"
+crc32fast = "1"
+base64 = "0.22"
+rand = "0.8"
+rand_distr = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "fs"] }
+
+[dev-dependencies]
+hound = "3"
