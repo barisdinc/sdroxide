@@ -1,4 +1,4 @@
-//! `AtChatSession` — the sync façade the DigiEngine controller wraps.
+//! `AtChatSession` — the sync facade the DigiEngine controller wraps.
 //!
 //! The [`Station`](crate::protocol::Station) is tokio-async and the DigiEngine
 //! hooks are sync (audio thread), so the session runs a one-thread tokio
