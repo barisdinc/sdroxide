@@ -2946,11 +2946,8 @@ impl SdroxideApp {
             if iq {
                 let mb = self.state.iq_recording_mb;
                 let rate = self.state.sample_rate.max(1.0);
-                let secs = f64::from(mb) * f64::from(1u32 << 20) / (rate * 8.0);
                 ui.label(
-                    RichText::new(format!("{mb} MB · {:.0}:{:02}", secs / 60.0, secs as u64 % 60))
-                        .size(9.5)
-                        .color(crate::theme::ALERT()),
+                    RichText::new(iq_recording_caption(mb, rate)).size(9.5).color(crate::theme::ALERT()),
                 );
             } else if have_iq {
                 // The bill, before it is run up rather than after: at 2.4 Msps
@@ -5060,6 +5057,23 @@ fn cessb_value_text(db: f32) -> String {
     if db < 0.05 { "off".into() } else { format!("{db:.0} dB") }
 }
 
+/// The running I/Q capture's caption: size so far, and elapsed time derived
+/// from it (there is no separate clock — `mb` is all this has to go on).
+///
+/// The minutes and seconds *must* come from the same truncated whole-second
+/// count. An earlier version computed them independently — `secs / 60.0`
+/// formatted with `{:.0}`, which *rounds* to the nearest minute, alongside
+/// `secs as u64 % 60`, which truncates — so the minute digit jumped up a
+/// full minute early, at :30 into the true minute, then the seconds went on
+/// counting from a number that no longer matched it (e.g. true 2:56 shown as
+/// 3:56, the exact glitch reported live: "the minute notification changes at
+/// :30, not at the top of the minute"). Both fields below come from one
+/// `total` now, so they can't disagree.
+fn iq_recording_caption(mb: u32, rate_hz: f64) -> String {
+    let total = (f64::from(mb) * f64::from(1u32 << 20) / (rate_hz.max(1.0) * 8.0)) as u64;
+    format!("{mb} MB · {}:{:02}", total / 60, total % 60)
+}
+
 fn tx_rows_w_for(ui: &egui::Ui, keyer: bool, side_col_w: f32) -> f32 {
     let (row1, row2) = tx_rows_fixed_w(ui, keyer);
     row1.max(row2)
@@ -5765,6 +5779,32 @@ fn readout_digit_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real-world bug this exists to catch: minutes and seconds computed
+    /// from two different roundings of the same elapsed time disagreed —
+    /// live, that showed as the minute digit jumping a full minute early, at
+    /// :30 into the true minute (`round(secs/60.0)` ticks over there),
+    /// rather than at its top, while the independently-truncated seconds
+    /// field went on counting from underneath it (true 2:56 shown as 3:56).
+    ///
+    /// `rate_hz = 131_072.0` makes `mb` land on whole seconds exactly
+    /// (`mb * 2^20 bytes / (131_072 Hz * 8 bytes/frame) == mb` seconds), so
+    /// each case below can just say what second it means directly.
+    #[test]
+    fn recording_caption_minutes_and_seconds_agree() {
+        const RATE: f64 = 131_072.0;
+        assert_eq!(iq_recording_caption(0, RATE), "0 MB · 0:00");
+        // The exact glitch reported live: 176 true seconds must read 2:56,
+        // never 3:56 (the old `{:.0}` rounding of 176.0/60.0 = 2.93 up to 3).
+        assert_eq!(iq_recording_caption(176, RATE), "176 MB · 2:56");
+        // Just short of and at the real :30-early rollover point (90s takes
+        // secs/60.0 to exactly 1.5, which `{:.0}` rounds up to "2").
+        assert_eq!(iq_recording_caption(89, RATE), "89 MB · 1:29");
+        assert_eq!(iq_recording_caption(90, RATE), "90 MB · 1:30");
+        // The minute must only roll at the top of the minute, not before.
+        assert_eq!(iq_recording_caption(119, RATE), "119 MB · 1:59");
+        assert_eq!(iq_recording_caption(120, RATE), "120 MB · 2:00");
+    }
 
     /// Walk a chip through a sequence of pointer edges, collecting the PTT
     /// commands it asks for. `(down, touch, click)` per edge, as
