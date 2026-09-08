@@ -15908,6 +15908,7 @@ fn rig_mode_class(m: Mode) -> u8 {
         | Mode::RfPaint
         | Mode::Rade
         | Mode::PacketHf
+        | Mode::AtChat
         | Mode::Spec => 1,
         // DRM sits on the dial in a channel about as wide as AM's, and a
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
