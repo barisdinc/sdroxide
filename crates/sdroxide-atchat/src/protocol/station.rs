@@ -15,8 +15,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use rand::Rng;
@@ -69,6 +69,15 @@ pub struct StationShared<C: Connector> {
     /// `receive_loop` takes its next `rx` from here (drop/reconnect).
     rx_slot: tokio::sync::Mutex<Option<C::Rx>>,
     reconnect_notify: Notify,
+    /// Bumped at the start of every [`reconnect`](Self::reconnect). `receive_loop`
+    /// reads it when it picks up an `rx` and again if that `rx` closes: a close
+    /// with the count unchanged is a real drop and marks the link down; a close
+    /// after the count moved is just this reconnect swapping the channel, and
+    /// must not touch `connected` — the reconnect has already set it true.
+    reconnect_epoch: AtomicU64,
+    /// Held for the duration of a [`reconnect`](Self::reconnect) so a double
+    /// click on REJOIN cannot run two of them into each other.
+    reconnecting: AtomicBool,
 }
 
 impl<C: Connector> StationShared<C> {
@@ -162,7 +171,10 @@ impl<C: Connector> StationShared<C> {
     // Receive loop (the SINGLE reader)
     // ------------------------------------------------------------------ //
     async fn receive_loop(self: Arc<Self>) {
-        loop {
+        'outer: loop {
+            // The reconnect count as of the moment we pick up this rx — see the
+            // `None` arm below.
+            let epoch = self.reconnect_epoch.load(Relaxed);
             // IMPORTANT: do NOT hold the rx_slot lock across `.await` —
             // otherwise `reconnect` cannot put the new rx in and `notified()`
             // never completes (deadlock). The lock is held only for the
@@ -172,14 +184,22 @@ impl<C: Connector> StationShared<C> {
                 Some(rx) => rx,
                 None => {
                     self.reconnect_notify.notified().await;
-                    continue;
+                    continue 'outer;
                 }
             };
             loop {
                 match rx.recv().await {
                     None => {
-                        self.connected.store(false, Relaxed);
-                        break;
+                        // A close with the reconnect count unchanged is a real
+                        // drop and marks the link down. A close after a
+                        // reconnect bumped the count is just that reconnect
+                        // swapping the channel under us — `connected` has
+                        // already been set true and must be left alone, or the
+                        // rejoined station's first JOIN sees a dead link.
+                        if self.reconnect_epoch.load(Relaxed) == epoch {
+                            self.connected.store(false, Relaxed);
+                        }
+                        continue 'outer;
                     }
                     Some(msg) => match msg {
                         ServerMsg::TxGranted { .. } | ServerMsg::ChannelBusy { .. } => {
@@ -857,11 +877,18 @@ impl<C: Connector> StationShared<C> {
             self.log("already connected");
             return;
         }
+        if self.reconnecting.swap(true, Relaxed) {
+            self.log("reconnect already in progress — ignoring the repeat");
+            return;
+        }
+        // Every early return from here on must clear `reconnecting`.
+        self.reconnect_epoch.fetch_add(1, Relaxed);
         self.log("reconnecting — dialing the channel");
         let (tx, rx) = match self.connector.connect().await {
             Ok(p) => p,
             Err(e) => {
                 self.log(format!("!! could not reconnect: {e}"));
+                self.reconnecting.store(false, Relaxed);
                 return;
             }
         };
@@ -874,6 +901,7 @@ impl<C: Connector> StationShared<C> {
             st.last_beacon_time = Instant::now();
         }
         self.reconnect_notify.notify_one();
+        self.reconnecting.store(false, Relaxed);
         self.log("reconnected to the channel");
         let _ = self.events.send(StationEvent::RoleChanged(Role::Listener));
 
@@ -1010,6 +1038,8 @@ impl<C: Connector> Station<C> {
             events,
             rx_slot: tokio::sync::Mutex::new(Some(rx)),
             reconnect_notify: Notify::new(),
+            reconnect_epoch: AtomicU64::new(0),
+            reconnecting: AtomicBool::new(false),
         });
         let _ = std::fs::create_dir_all(&shared.cfg.received_dir);
 

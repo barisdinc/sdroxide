@@ -614,4 +614,39 @@ mod tests {
         });
         assert!(got, "send_chat should produce a modulated burst that demodulates back");
     }
+
+    #[test]
+    fn rf_session_stays_connected_across_a_rejoin() {
+        let s = AtChatSession::new("TA1ABC", None);
+        assert!(wait(&s, 5, |sn| sn.connected), "station comes up connected");
+
+        s.drop_link();
+        assert!(wait(&s, 3, |sn| !sn.connected), "drop takes it off the net");
+
+        s.reconnect();
+        assert!(wait(&s, 3, |sn| sn.connected), "rejoin brings it back");
+
+        // The bug: the old carrier segmenter's teardown closed the receive
+        // channel, and receive_loop read that as a drop and cleared `connected`
+        // a beat after reconnect set it — so a rejoined station went silent.
+        // It must now hold.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(
+            s.snapshot().connected,
+            "connected must not flip back after the rejoin settles"
+        );
+
+        // And a transmit after the rejoin must actually reach the tx ring.
+        let mut junk = Vec::new();
+        s.drain_tx_pcm(&mut junk, 480_000);
+        s.send_chat("ALL", "after rejoin");
+        assert!(
+            wait(&s, 6, |_| {
+                let mut buf = Vec::new();
+                s.drain_tx_pcm(&mut buf, 8_000);
+                !buf.is_empty()
+            }),
+            "a rejoined station must be able to transmit"
+        );
+    }
 }
