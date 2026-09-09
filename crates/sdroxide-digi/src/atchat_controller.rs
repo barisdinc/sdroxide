@@ -53,6 +53,9 @@ pub struct AtChatController {
     tx_done: bool,
     /// 8 kHz transmit samples pulled from the session and not yet handed out.
     tx_fifo: Vec<f32>,
+    /// Samples handed to the radio for the burst currently on the air — for the
+    /// diagnostic note when the burst ends.
+    tx_burst_samples: usize,
 
     last_status: DigiStatus,
     status_dirty: bool,
@@ -72,6 +75,7 @@ impl AtChatController {
             keyed: false,
             tx_done: false,
             tx_fifo: Vec::new(),
+            tx_burst_samples: 0,
             last_status,
             status_dirty: true,
         }
@@ -203,7 +207,9 @@ impl DigiEngine for AtChatController {
             self.keyed = true;
             self.tx_done = false;
             self.tx_fifo.clear();
+            self.tx_burst_samples = 0;
             self.status_dirty = true;
+            self.session.note("controller: modem burst ready — keying the transmitter");
             actions.push(DigiAction::KeyTx);
         }
 
@@ -246,6 +252,7 @@ impl DigiEngine for AtChatController {
         out[..take].copy_from_slice(&self.tx_fifo[..take]);
         out[take..].fill(0.0);
         self.tx_fifo.drain(..take);
+        self.tx_burst_samples += take;
 
         // The over ends once the session has nothing more queued and the FIFO
         // has played out. Returning true early would clip the tail of a frame,
@@ -257,9 +264,14 @@ impl DigiEngine for AtChatController {
     }
 
     fn on_burst_done(&mut self) {
+        self.session.note(format!(
+            "controller: burst finished — {} samples sent to the radio",
+            self.tx_burst_samples
+        ));
         self.keyed = false;
         self.tx_done = false;
         self.tx_fifo.clear();
+        self.tx_burst_samples = 0;
         self.status_dirty = true;
     }
 
@@ -268,9 +280,17 @@ impl DigiEngine for AtChatController {
     }
 
     fn abort_tx(&mut self) {
+        if self.keyed {
+            self.session.note(format!(
+                "controller: transmit aborted after {} samples — the TX rails refused or the \
+                 over was interrupted",
+                self.tx_burst_samples
+            ));
+        }
         self.keyed = false;
         self.tx_done = true;
         self.tx_fifo.clear();
+        self.tx_burst_samples = 0;
         self.status_dirty = true;
     }
 

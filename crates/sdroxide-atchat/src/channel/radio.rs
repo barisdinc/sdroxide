@@ -51,6 +51,9 @@ fn jitter() -> f64 {
     rand::thread_rng().gen_range(0.05f64..0.35)
 }
 
+/// How many diagnostic lines the bridge keeps before dropping the oldest.
+const DIAG_CAP: usize = 300;
+
 /// The audio-thread-facing handle. Cheap to clone; all state is shared.
 #[derive(Clone)]
 pub struct RadioBridge {
@@ -58,6 +61,10 @@ pub struct RadioBridge {
     tx_pcm: Arc<Mutex<VecDeque<i16>>>,
     carrier: Arc<AtomicBool>,
     seg: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Lines the RF channel wants shown in the station log — the segmenter and
+    /// the transmit-grant path have no `Station` handle, so they leave notes
+    /// here and `session_main` drains them into the snapshot each tick.
+    diag: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for RadioBridge {
@@ -73,7 +80,23 @@ impl RadioBridge {
             tx_pcm: Arc::new(Mutex::new(VecDeque::new())),
             carrier: Arc::new(AtomicBool::new(false)),
             seg: Arc::new(Mutex::new(None)),
+            diag: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Leave a diagnostic line for the station log.
+    pub fn push_diag(&self, msg: impl Into<String>) {
+        let mut d = self.diag.lock().unwrap();
+        d.push(msg.into());
+        let over = d.len().saturating_sub(DIAG_CAP);
+        if over > 0 {
+            d.drain(..over);
+        }
+    }
+
+    /// Take everything logged since the last drain.
+    pub fn drain_diag(&self) -> Vec<String> {
+        std::mem::take(&mut *self.diag.lock().unwrap())
     }
 
     /// Feed demodulated receive audio (8 kHz mono i16).
@@ -135,8 +158,10 @@ impl Connector for RadioConnector {
                 Arc::clone(&self.bridge.rx_pcm),
                 Arc::clone(&self.bridge.carrier),
                 tx.clone(),
+                self.bridge.clone(),
             ));
             *self.bridge.seg.lock().unwrap() = Some(handle);
+            self.bridge.push_diag("RF: link connected, carrier segmenter (re)started");
             Ok((RadioTx { bridge: self.bridge.clone(), reply: tx }, RadioRx { rx }))
         }
     }
@@ -156,17 +181,26 @@ impl LinkTx for RadioTx {
             let samples = b64_to_samples(&audio_b64)?;
             if self.bridge.carrier_sense() {
                 let retry_after = 0.4 + jitter();
+                self.bridge.push_diag(format!(
+                    "RF: transmit held — carrier heard; retry in {retry_after:.2}s"
+                ));
                 let _ = self.reply.send(ServerMsg::ChannelBusy { retry_after }).await;
             } else {
-                let duration = samples.len() as f64 / SAMPLE_RATE as f64;
-                {
+                let n = samples.len();
+                let duration = n as f64 / SAMPLE_RATE as f64;
+                let ring = {
                     let mut t = self.bridge.tx_pcm.lock().unwrap();
                     t.extend(samples);
                     let over = t.len().saturating_sub(TX_RING_CAP);
                     for _ in 0..over {
                         t.pop_front();
                     }
-                }
+                    t.len()
+                };
+                self.bridge.push_diag(format!(
+                    "RF: transmit granted — {n} samples ({:.0} ms) queued, tx ring {ring}",
+                    duration * 1000.0
+                ));
                 let _ = self.reply.send(ServerMsg::TxGranted { duration }).await;
             }
             Ok(())
@@ -193,6 +227,7 @@ async fn segmenter(
     rx_pcm: Arc<Mutex<VecDeque<i16>>>,
     carrier: Arc<AtomicBool>,
     out: mpsc::Sender<ServerMsg>,
+    bridge: RadioBridge,
 ) {
     let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(15));
     let mut burst: Vec<i16> = Vec::new();
@@ -203,6 +238,11 @@ async fn segmenter(
     // but real receiver audio sits well above any fixed threshold after the
     // rig's AGC — so the station would read a permanent carrier and never key.
     let mut noise_floor = FLOOR_INIT;
+    // Diagnostics: report a carrier edge as it happens, plus a level line every
+    // ~4 s so the log shows the floor settling even on a quiet channel.
+    let mut carrier_prev = false;
+    let mut hops_since_report = 0u32;
+    let mut fed_any = false;
 
     loop {
         tick.tick().await;
@@ -214,6 +254,10 @@ async fn segmenter(
                 }
                 r.drain(..HOP).collect()
             };
+            if !fed_any {
+                fed_any = true;
+                bridge.push_diag("RF: first receive audio reached the segmenter");
+            }
             let peak = hop.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0);
             let threshold = (noise_floor * CARRIER_OVER_FLOOR).max(GATE as f64);
             let loud = f64::from(peak) > threshold;
@@ -223,7 +267,24 @@ async fn segmenter(
             if !loud && !in_burst {
                 noise_floor += FLOOR_ALPHA * (f64::from(peak) - noise_floor);
             }
-            carrier.store(loud || (in_burst && quiet_hops < SILENCE_HANG_HOPS), Ordering::Relaxed);
+            let carrier_now = loud || (in_burst && quiet_hops < SILENCE_HANG_HOPS);
+            carrier.store(carrier_now, Ordering::Relaxed);
+
+            hops_since_report += 1;
+            if carrier_now != carrier_prev {
+                bridge.push_diag(format!(
+                    "RF: carrier {} (peak {peak}, threshold {threshold:.0}, floor {noise_floor:.0})",
+                    if carrier_now { "detected" } else { "cleared" }
+                ));
+                carrier_prev = carrier_now;
+                hops_since_report = 0;
+            } else if hops_since_report >= 200 {
+                bridge.push_diag(format!(
+                    "RF: channel {} — peak {peak}, threshold {threshold:.0}, floor {noise_floor:.0}",
+                    if carrier_now { "busy" } else { "clear" }
+                ));
+                hops_since_report = 0;
+            }
 
             if loud {
                 if !in_burst {
@@ -238,6 +299,10 @@ async fn segmenter(
                 if quiet_hops >= SILENCE_HANG_HOPS {
                     in_burst = false;
                     if burst.len() >= MIN_BURST {
+                        bridge.push_diag(format!(
+                            "RF: captured a {}-sample burst, handing it to the demod",
+                            burst.len()
+                        ));
                         let b64 = samples_to_b64(&burst);
                         let _ = out.send(ServerMsg::RxAudio { audio_b64: b64 }).await;
                     }

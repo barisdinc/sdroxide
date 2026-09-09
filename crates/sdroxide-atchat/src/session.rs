@@ -100,6 +100,10 @@ enum Cmd {
     SetCallsign(String),
     SetVirtual(Option<String>),
     ClearChat,
+    /// A line from the engine-side controller (transmit keying, burst end) for
+    /// the station log — the controller runs on the audio thread and has no
+    /// other way into the snapshot.
+    Note(String),
 }
 
 pub struct AtChatSession {
@@ -179,6 +183,10 @@ impl AtChatSession {
     }
     pub fn clear_chat(&self) {
         let _ = self.cmd_tx.send(Cmd::ClearChat);
+    }
+    /// Put a diagnostic line into the station log from the engine side.
+    pub fn note(&self, msg: impl Into<String>) {
+        let _ = self.cmd_tx.send(Cmd::Note(msg.into()));
     }
 }
 
@@ -362,8 +370,18 @@ async fn session_main(
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                     c = cmd_rx.recv() => match c {
                         None => return,
-                        Some(Cmd::SetCallsign(x)) => call = x,
-                        Some(Cmd::SetVirtual(a)) => virtual_addr = a,
+                        Some(Cmd::SetCallsign(x)) => {
+                            push_log(&snap, format!("callsign -> {x}; rebuilding"));
+                            call = x;
+                        }
+                        Some(Cmd::SetVirtual(a)) => {
+                            push_log(&snap, match &a {
+                                Some(addr) => format!("switching to virtual channel {addr}"),
+                                None => "switching to the radio (RF)".into(),
+                            });
+                            virtual_addr = a;
+                        }
+                        Some(Cmd::Note(s)) => push_log(&snap, s),
                         Some(_) => {}
                     },
                 }
@@ -379,8 +397,8 @@ async fn session_main(
         push_log(
             &snap,
             match &virtual_addr {
-                Some(a) => format!("{call} — virtual channel {a}"),
-                None => format!("{call} — radio (RF)"),
+                Some(a) => format!("{call} — station up on virtual channel {a}"),
+                None => format!("{call} — station up on the radio (RF)"),
             },
         );
 
@@ -390,7 +408,13 @@ async fn session_main(
 
         while !rebuild {
             tokio::select! {
-                _ = tick.tick() => station.write_snapshot(&snap, &bridge),
+                _ = tick.tick() => {
+                    station.write_snapshot(&snap, &bridge);
+                    // Surface anything the RF channel logged since the last tick.
+                    for line in bridge.drain_diag() {
+                        push_log(&snap, line);
+                    }
+                }
 
                 r = ev.recv() => match r {
                     Ok(StationEvent::Log(s)) => push_log(&snap, s),
@@ -415,7 +439,10 @@ async fn session_main(
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(_) => { rebuild = true; }
+                    Err(_) => {
+                        push_log(&snap, "event stream closed — rebuilding the station".into());
+                        rebuild = true;
+                    }
                 },
 
                 c = cmd_rx.recv() => match c {
@@ -448,17 +475,33 @@ async fn session_main(
                             }
                         station.send_file(path, &dst);
                     }
-                    Some(Cmd::Drop) => station.drop_bg(),
+                    Some(Cmd::Drop) => {
+                        push_log(&snap, "leave requested — dropping the link".into());
+                        station.drop_bg();
+                    }
                     Some(Cmd::Reconnect) => {
                         if station.is_connected() {
-                            // no-op
+                            push_log(&snap, "rejoin requested, but the link is already up".into());
                         } else {
+                            push_log(&snap, "rejoin requested — reconnecting".into());
                             station.reconnect_bg();
                         }
                     }
                     Some(Cmd::ClearChat) => { snap.lock().unwrap().chat.clear(); }
-                    Some(Cmd::SetCallsign(c)) => { call = c; rebuild = true; }
-                    Some(Cmd::SetVirtual(a)) => { virtual_addr = a; rebuild = true; }
+                    Some(Cmd::Note(s)) => push_log(&snap, s),
+                    Some(Cmd::SetCallsign(c)) => {
+                        push_log(&snap, format!("callsign -> {c}; rebuilding"));
+                        call = c;
+                        rebuild = true;
+                    }
+                    Some(Cmd::SetVirtual(a)) => {
+                        push_log(&snap, match &a {
+                            Some(addr) => format!("switching to virtual channel {addr}"),
+                            None => "switching to the radio (RF)".into(),
+                        });
+                        virtual_addr = a;
+                        rebuild = true;
+                    }
                 },
             }
         }

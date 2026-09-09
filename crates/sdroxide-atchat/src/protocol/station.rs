@@ -86,21 +86,30 @@ impl<C: Connector> StationShared<C> {
     // Low-level send (LBT + backoff)
     // ------------------------------------------------------------------ //
     async fn send_frame(&self, frame: Frame, mode: Mode) -> bool {
+        let kind = frame.kind();
         if !self.connected.load(Relaxed) {
+            self.log(format!(">> {kind}: not sent — link is down"));
             return false;
         }
         let payload = frame.to_json_bytes();
         let samples = self.modem.modulate(&payload, mode);
         let audio_b64 = crate::channel::samples_to_b64(&samples);
+        self.log(format!(
+            ">> {kind}: {} payload bytes, {} modem samples ({mode:?}) — asking to transmit",
+            payload.len(),
+            samples.len()
+        ));
 
         let mut backoff = 0.2_f64;
-        for _ in 0..40 {
+        for attempt in 0..40 {
             if !self.connected.load(Relaxed) {
+                self.log(format!(">> {kind}: giving up — link went down mid-send"));
                 return false;
             }
             let reply = {
                 let mut tx_guard = self.tx.lock().await;
                 let Some(tx) = tx_guard.as_mut() else {
+                    self.log(format!(">> {kind}: no transmit link — not sent"));
                     return false;
                 };
                 let (rtx, rrx) = oneshot::channel();
@@ -108,14 +117,16 @@ impl<C: Connector> StationShared<C> {
                 if tx.send(ClientMsg::TransmitAudio { audio_b64: audio_b64.clone() }).await.is_err()
                 {
                     self.connected.store(false, Relaxed);
-                    self.log("!! send failed, the link is treated as down");
+                    self.log(format!("!! {kind}: send failed, the link is treated as down"));
                     return false;
                 }
                 match tokio::time::timeout(Duration::from_secs(8), rrx).await {
                     Ok(Ok(m)) => m,
                     _ => {
                         self.connected.store(false, Relaxed);
-                        self.log("!! send failed, the link is treated as down (timeout)");
+                        self.log(format!(
+                            "!! {kind}: no transmit-grant reply in 8 s, the link is treated as down"
+                        ));
                         return false;
                     }
                 }
@@ -123,10 +134,19 @@ impl<C: Connector> StationShared<C> {
 
             match reply {
                 ServerMsg::TxGranted { duration } => {
+                    self.log(format!(
+                        ">> {kind}: on the air ({:.0} ms), attempt {}",
+                        duration * 1000.0,
+                        attempt + 1
+                    ));
                     tokio::time::sleep(Duration::from_secs_f64(duration)).await;
                     return true;
                 }
                 ServerMsg::ChannelBusy { retry_after } => {
+                    self.log(format!(
+                        ">> {kind}: channel busy (attempt {}/40), waiting {retry_after:.2}s",
+                        attempt + 1
+                    ));
                     tokio::time::sleep(Duration::from_secs_f64(retry_after + jitter())).await;
                     backoff = (backoff * 1.7).min(3.0);
                     let _ = backoff;
@@ -134,7 +154,7 @@ impl<C: Connector> StationShared<C> {
                 ServerMsg::RxAudio { .. } => {}
             }
         }
-        self.log("!! the channel stayed busy, the send was given up");
+        self.log(format!("!! {kind}: channel stayed busy for 40 tries — the send was given up"));
         false
     }
 
@@ -190,6 +210,15 @@ impl<C: Connector> StationShared<C> {
         let dst = frame.dst().to_string();
         let is_self = src.as_deref() == Some(self.callsign.as_str());
         let for_me = dst == "ALL" || dst == self.callsign;
+
+        if !matches!(frame, Frame::BulkBlock { .. }) {
+            self.log(format!(
+                "<< {} from {} -> {dst}{}",
+                frame.kind(),
+                src.as_deref().unwrap_or("?"),
+                if is_self { " (our own transmit, heard back)" } else { "" }
+            ));
+        }
 
         if !is_self && let Some(s) = &src {
             self.touch_roster(s);
@@ -828,6 +857,7 @@ impl<C: Connector> StationShared<C> {
             self.log("already connected");
             return;
         }
+        self.log("reconnecting — dialing the channel");
         let (tx, rx) = match self.connector.connect().await {
             Ok(p) => p,
             Err(e) => {
@@ -983,6 +1013,11 @@ impl<C: Connector> Station<C> {
         });
         let _ = std::fs::create_dir_all(&shared.cfg.received_dir);
 
+        shared.log(format!(
+            "station started as {} ({:?}); receive/watchdog/beacon tasks up",
+            shared.callsign, shared.default_mode
+        ));
+
         let tasks = vec![
             tokio::spawn(StationShared::receive_loop(Arc::clone(&shared))),
             tokio::spawn(StationShared::master_watchdog(Arc::clone(&shared))),
@@ -994,6 +1029,7 @@ impl<C: Connector> Station<C> {
         let s = Arc::clone(&shared);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
+            s.log("joining the net — sending the first JOIN_REQUEST");
             s.send_frame(
                 Frame::JoinRequest { src: s.callsign.clone(), dst: "ALL".into() },
                 s.default_mode,

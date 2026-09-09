@@ -201,6 +201,20 @@ impl Frame {
         }
     }
 
+    /// A short wire-name tag, for logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Frame::JoinRequest { .. } => "JOIN_REQUEST",
+            Frame::Beacon { .. } => "BEACON",
+            Frame::Chat { .. } => "CHAT",
+            Frame::BulkMeta { .. } => "BULK_META",
+            Frame::BulkBlock { .. } => "BULK_BLOCK",
+            Frame::BulkEnd { .. } => "BULK_END",
+            Frame::BulkStatus { .. } => "BULK_STATUS",
+            Frame::Unknown => "UNKNOWN",
+        }
+    }
+
     pub fn to_json_bytes(&self) -> Vec<u8> {
         // The equivalent of `json.dumps(frame, ensure_ascii=False)`.
         serde_json::to_vec(self).expect("frame serialize")
