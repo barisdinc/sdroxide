@@ -331,16 +331,46 @@ async fn session_main(
     mut call: String,
     mut virtual_addr: Option<String>,
 ) {
+    let mut last_err: Option<String> = None;
     loop {
         // (Re)build the station for the current callsign + backend.
         let station = match build_station(&call, &virtual_addr, &bridge).await {
             Ok(s) => s,
             Err(e) => {
-                push_log(&snap, format!("could not start: {e}"));
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // The station is down. Say so in the snapshot, or a JOIN badge
+                // left green by an earlier good station keeps claiming we are on
+                // the net while nothing runs and nothing keys the radio. Log the
+                // reason once until it changes, not every two seconds.
+                {
+                    let mut o = snap.lock().unwrap();
+                    o.connected = false;
+                    o.role = None;
+                    o.master = None;
+                    o.roster.clear();
+                    o.virtual_addr = virtual_addr.clone();
+                    o.my_call = call.clone();
+                }
+                let msg = format!("could not start: {e}");
+                if last_err.as_deref() != Some(msg.as_str()) {
+                    push_log(&snap, msg.clone());
+                    last_err = Some(msg);
+                }
+                // Stay responsive to a backend switch during the backoff — an
+                // operator turning the virtual channel off to fall back to the
+                // radio must not have to wait for a connect that cannot succeed.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    c = cmd_rx.recv() => match c {
+                        None => return,
+                        Some(Cmd::SetCallsign(x)) => call = x,
+                        Some(Cmd::SetVirtual(a)) => virtual_addr = a,
+                        Some(_) => {}
+                    },
+                }
                 continue;
             }
         };
+        last_err = None;
         {
             let mut o = snap.lock().unwrap();
             o.virtual_addr = virtual_addr.clone();
