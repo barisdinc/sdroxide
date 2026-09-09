@@ -2521,7 +2521,10 @@ may run:
 - **I/Q WAV** — the raw spectrum the receiver is delivering, described under
   [Recording the spectrum](#recording-the-spectrum) below.
 
-The button lights while either is running and hovering it names the files. It has
+The button lights while either is running and hovering it names the files. On a
+narrow window the whole receiver box folds into the **RX** menu chip, and there
+the same two rows are at the bottom of that menu, under **Record audio** and
+**Record spectrum**, rather than behind a button of their own. It has
 no keyboard shortcut by default, but
 **Record on/off** is in the bindable action list, so it can be put on a key, a
 mouse button or a MIDI pad ([6.4](#64-controls-keyboard-mouse-and-midi)).

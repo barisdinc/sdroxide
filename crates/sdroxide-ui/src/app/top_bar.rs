@@ -2668,10 +2668,11 @@ impl SdroxideApp {
             }
         });
         if narrow {
-            // The filter rows and the engine picker the chips above cannot open
-            // from inside a menu.
+            // The filter rows, the engine picker and the recording rows the
+            // chips above cannot open from inside a menu.
             self.filter_controls(ui, cmds);
             self.nr_controls(ui, cmds);
+            self.rec_controls(ui, cmds);
         }
     }
 
@@ -2680,16 +2681,13 @@ impl SdroxideApp {
     /// the NR chip stands in for a picker that cannot be opened from inside a
     /// menu.
     fn rx_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, chip: RxChip, narrow: bool) {
+        // A chip that would open a popup is not drawn in a menu column at all;
+        // its rows are inlined below instead. See [`RxChip::inlined_in_a_menu`].
+        if narrow && chip.inlined_in_a_menu() {
+            return;
+        }
         match chip {
-            RxChip::Bw => {
-                // In a menu column the filter rows are inlined at the bottom of
-                // [`Self::rx_controls`] instead: a popup opened from inside a
-                // popup counts as a click outside the first and closes it, the
-                // same reason the NR picker is inlined there.
-                if !narrow {
-                    self.bw_button(ui, cmds);
-                }
-            }
+            RxChip::Bw => self.bw_button(ui, cmds),
             RxChip::Nb => {
                 let nb = self.state.noise_blanker;
                 if crate::chrome::chip(ui, nb, "NB")
@@ -3107,7 +3105,7 @@ impl SdroxideApp {
         let audio = self.state.recording;
         let iq = self.state.iq_recording;
 
-        crate::chrome::menu_caption(ui, "Audio");
+        crate::chrome::menu_caption(ui, "Record audio");
         ui.horizontal_wrapped(|ui| {
             if crate::chrome::chip_accent(
                 ui,
@@ -3143,7 +3141,7 @@ impl SdroxideApp {
             ui.label(RichText::new(f).size(9.5).color(crate::theme::CYAN_DIM()));
         }
 
-        crate::chrome::menu_caption(ui, "Spectrum");
+        crate::chrome::menu_caption(ui, "Record spectrum");
         // A demod-audio radio hands over audio and no I/Q, so there is nothing
         // for this to write. Said on the chip rather than hidden: an operator
         // looking for the feature has to find out that this radio has not got
@@ -5424,6 +5422,21 @@ enum RxChip {
 }
 
 impl RxChip {
+    /// Whether this chip's rows are inlined at the bottom of the menu column
+    /// instead of being drawn as a chip there ([`SdroxideApp::rx_controls`]).
+    ///
+    /// True for every chip whose click opens a *second* popup. egui counts a
+    /// click on one of those as a click outside the menu the chip was drawn
+    /// in, so the menu closes, the chip goes with it, and the popup it was
+    /// opening never appears — the control is simply dead on any layout narrow
+    /// enough to fold the receiver box into a menu. That is what happened to
+    /// the filter picker, then to the NR engine picker, and then to REC
+    /// (issue #388), so the answer lives here where the invariant can be
+    /// tested rather than in three `if narrow` branches.
+    fn inlined_in_a_menu(self) -> bool {
+        matches!(self, Self::Bw | Self::Rec)
+    }
+
     /// The widest label the chip ever wears, which is what the box reserves
     /// for it: a chip whose label follows what it is reading — the tone chip —
     /// must not change the width of the box around it as signals come and go.
