@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use sdroxide_types::{
     Action, ActionInput, ActionKind, BindingTuning, ButtonMode, Command, InputSettings, KeyChord,
-    MAX_MANUAL_GAIN_DB, MouseButton, RadioState, RxId, SQUELCH_OPEN_DB, Vfo,
+    MAX_MANUAL_GAIN_DB, MouseButton, RadioState, RxId, SQUELCH_CLOSED_DB, SQUELCH_OPEN_DB, Vfo,
 };
 
 use crate::view::ViewState;
@@ -112,7 +112,7 @@ fn absolute_range(act: Action, state: &RadioState, rig_squelch: bool) -> Option<
         // dBFS for the engine's own gate, and the rig's own `0..1` where the
         // radio is the one squelching.
         Squelch if rig_squelch => (0.0, 1.0),
-        Squelch => (SQUELCH_OPEN_DB, 0.0),
+        Squelch => (SQUELCH_OPEN_DB, SQUELCH_CLOSED_DB),
         AgcMaxGain => (0.0, 120.0),
         ManualGain => (0.0, MAX_MANUAL_GAIN_DB),
         RitOffset | XitOffset => (-MAX_OFFSET_HZ, MAX_OFFSET_HZ),
@@ -222,7 +222,7 @@ pub(crate) fn apply_action(
             }
             Squelch => {
                 let cur = state.rx[0].squelch_db;
-                let db = target.unwrap_or(cur + delta).clamp(SQUELCH_OPEN_DB, 0.0);
+                let db = target.unwrap_or(cur + delta).clamp(SQUELCH_OPEN_DB, SQUELCH_CLOSED_DB);
                 state.rx[0].squelch_db = db;
                 cmds.push(Command::SetSquelch { rx, db });
             }

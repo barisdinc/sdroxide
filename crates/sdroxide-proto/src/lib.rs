@@ -1283,7 +1283,15 @@ use sdroxide_types::{
 /// tail, and `Js8Msg` rides inside `Js8Status` and so inside `DigiStatus`,
 /// which crosses the link whole — so a v141 peer handed one reads the tail of
 /// every status update out of step rather than merely missing a field.
-pub const PROTO_VERSION: u16 = 142;
+///
+/// v143: [`sdroxide_types::Meters`] gains `passband_dbfs`, the level the
+/// software squelch actually compares its threshold against — which is not
+/// `s_dbm` beside it, and on a rig reporting its own meter is not the same
+/// measurement at all, so there was nothing on screen to set the SQL rail
+/// against (issue #394). It sits at that struct's tail and `Meters` rides
+/// `ServerMsg::Meters` whole, so a v142 peer handed one reads the end of it out
+/// of step.
+pub const PROTO_VERSION: u16 = 143;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

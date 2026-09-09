@@ -491,6 +491,17 @@ mode. What is in the box never changes; only where the two rows are cut does.
   squelch action follows the same rail. Every other front end — anything
   sending sdroxide I/Q — keeps the dBFS threshold, which is the honest one
   there: the whole passband arrives and sdroxide does the gating.
+
+  The dBFS rail runs from fully open up to **full scale**, and hovering it says
+  what the passband is reading *now* so you can put the threshold between the
+  noise and the signal instead of hunting for it. That number is not the
+  S‑meter's: the meter has the front end's gain taken out and your calibration
+  offset put in, and on a rig that reports its own meter it is the rig's
+  reading rather than a measurement made here. It matters most on a stream that
+  arrives with the **radio's AGC already in it** — an Icom's 12 kHz IF over the
+  network is a levelled IF, so its noise sits far higher on this scale than an
+  SDR's raw baseband, above where the rail used to stop, and the gate would not
+  close at any setting you could ask for (issue #394).
 - **NB** — impulse noise blanker on the raw signal (keyboard shortcut **N**).
 - **ANC** — automatic notch: an adaptive filter that cancels **constant tone
   elements** — heterodynes, carriers, and tuner-uppers — while leaving voice and

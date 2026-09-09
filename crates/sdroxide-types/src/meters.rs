@@ -118,6 +118,26 @@ pub struct Meters {
     /// the sub-audible readout; always `None` outside NFM, and `None` in NFM
     /// until a tone has been present long enough to be sure of.
     pub tone: Option<crate::SubTone>,
+    /// The level in the receive passband in **dBFS**, uncalibrated and
+    /// ungained — exactly the figure the software squelch compares its
+    /// threshold against.
+    ///
+    /// Not the same number as `s_dbm` beside it, and that is the point.
+    /// `s_dbm` is what the *operator* is shown: the front end's own gain
+    /// subtracted, `cal_offset_db` added, and on a rig that reports its own
+    /// meter it is the rig's reading rather than a measurement made here at
+    /// all. None of that scale reaches the squelch, so on such a radio there
+    /// was nothing on screen to set the threshold against and the rail had to
+    /// be hunted across blind (issue #394).
+    ///
+    /// `f32::NEG_INFINITY` where there is no chain to measure — a demod-audio
+    /// front end, which has no software squelch either.
+    #[serde(default = "minus_infinity")]
+    pub passband_dbfs: f32,
+}
+
+fn minus_infinity() -> f32 {
+    f32::NEG_INFINITY
 }
 
 impl Meters {

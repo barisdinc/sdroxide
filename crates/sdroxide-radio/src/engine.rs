@@ -4596,6 +4596,9 @@ fn engine_thread(
                     tx: Some(TxMeters { fwd_w: tele.fwd_w, swr: tele.swr, alc, po: tele.po }),
                     stereo: false,
                     tone: None,
+                    // Transmitting: the receiver is stood down and whatever the
+                    // chain last measured belongs to a moment that has passed.
+                    passband_dbfs: f32::NEG_INFINITY,
                 })
             } else {
                 // Not transmitting: both SWR counters belong to an over, so they
@@ -4613,6 +4616,10 @@ fn engine_thread(
                 // a reading is published — otherwise a front end with no signal
                 // report would accumulate one reading over the whole session.
                 let (adc_peak_dbfs, adc_clip) = engine.adc.read();
+                // The squelch's own scale, alongside the operator's. See
+                // `Meters::passband_dbfs` for why they are two numbers.
+                let passband_dbfs =
+                    engine.main.as_ref().and_then(|c| c.power_dbfs()).unwrap_or(f32::NEG_INFINITY);
                 engine.rx_signal_dbm().map(|s_dbm| Meters {
                     s_dbm,
                     pa_temp_c,
@@ -4622,6 +4629,7 @@ fn engine_thread(
                     tx: None,
                     stereo,
                     tone,
+                    passband_dbfs,
                 })
             };
             if let Some(m) = meters {

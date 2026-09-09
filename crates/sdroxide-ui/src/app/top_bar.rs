@@ -2645,18 +2645,39 @@ impl SdroxideApp {
                 }
             } else {
                 let mut sql = self.state.rx[0].squelch_db;
+                // What the threshold is actually compared against, so the rail
+                // can be set against a number instead of hunted across. It is
+                // not the S-meter's scale: that has the front end's gain taken
+                // out and the calibration offset put in, and on a rig that
+                // reports its own meter it is not measured here at all
+                // (issue #394).
+                let now = self.meters.as_ref().map(|m| m.passband_dbfs);
+                let level = match now {
+                    Some(p) if p.is_finite() => format!("\n\nThe passband is at {p:.0} dBFS now."),
+                    _ => String::new(),
+                };
                 if crate::chrome::slider(
                     ui,
-                    Slider::new(&mut sql, sdroxide_types::SQUELCH_OPEN_DB..=-30.0)
-                        .show_value(true)
-                        .custom_formatter(|v, _| {
-                            if v <= (sdroxide_types::SQUELCH_OPEN_DB + 1.0) as f64 {
-                                "off".into()
-                            } else {
-                                format!("{v:.0}")
-                            }
-                        }),
+                    Slider::new(
+                        &mut sql,
+                        sdroxide_types::SQUELCH_OPEN_DB..=sdroxide_types::SQUELCH_CLOSED_DB,
+                    )
+                    .show_value(true)
+                    .custom_formatter(|v, _| {
+                        if v <= (sdroxide_types::SQUELCH_OPEN_DB + 1.0) as f64 {
+                            "off".into()
+                        } else {
+                            format!("{v:.0}")
+                        }
+                    }),
                 )
+                .on_hover_text(format!(
+                    "Gate the audio below this power in the receive passband, in dBFS. \
+                     Left is open.{level} Set it above the noise and below the signal.\n\n\
+                     A stream that arrives with the radio's own AGC already in it — an \
+                     Icom's 12 kHz IF, for one — sits far higher on this scale than an \
+                     SDR's raw baseband does, which is why the rail reaches full scale."
+                ))
                 .changed()
                 {
                     self.state.rx[0].squelch_db = sql; // optimistic echo
@@ -7793,7 +7814,8 @@ mod tests {
                                         ui,
                                         Slider::new(
                                             &mut sql,
-                                            sdroxide_types::SQUELCH_OPEN_DB..=-30.0,
+                                            sdroxide_types::SQUELCH_OPEN_DB
+                                                ..=sdroxide_types::SQUELCH_CLOSED_DB,
                                         )
                                         .show_value(true)
                                         .custom_formatter(|v, _| format!("{v:.0}")),

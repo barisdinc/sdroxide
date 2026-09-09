@@ -52,6 +52,24 @@ impl OffsetState {
 /// Squelch fully open (slider minimum).
 pub const SQUELCH_OPEN_DB: f32 = -150.0;
 
+/// Squelch fully closed (slider maximum): the top of the scale the threshold is
+/// measured on, which is full scale.
+///
+/// [`RxState::squelch_db`] is compared against the *post-filter passband power
+/// in dBFS*, and that runs all the way to 0 for a signal filling the converter.
+/// The rail used to stop at −30, which is more travel than an ordinary SDR
+/// needs — its noise floor is far below that — but not a threshold an ordinary
+/// SDR is the only kind of front end there is.
+///
+/// A stream that carries the *radio's* AGC sits an order of magnitude higher:
+/// an Icom's 12 kHz IF over the LAN is a levelled IF, so on a quiet band its
+/// noise arrives near the top of the scale, above anything the old rail could
+/// reach, and the gate never closed at any setting the operator could ask for
+/// (issue #394). The extra 30 dB costs the rail a quarter of its resolution
+/// and is the difference between a control that works there and one that does
+/// not.
+pub const SQUELCH_CLOSED_DB: f32 = 0.0;
+
 /// Ceiling for [`RxState::manual_gain_db`], matching the AGC's own maximum.
 pub const MAX_MANUAL_GAIN_DB: f32 = 120.0;
 

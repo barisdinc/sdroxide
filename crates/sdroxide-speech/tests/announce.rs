@@ -47,6 +47,7 @@ fn meters(swr: Option<f32>, fwd: Option<f32>, keyed: bool) -> Meters {
         tx: keyed.then_some(TxMeters { fwd_w: fwd, swr, alc: 0.0, po: None }),
         stereo: false,
         tone: None,
+        passband_dbfs: f32::NEG_INFINITY,
     }
 }
 
