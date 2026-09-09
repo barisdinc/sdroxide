@@ -9340,6 +9340,18 @@ to watch.
 - Transmit belongs entirely to the transceiver, including the transmit range,
   the SWR and power meters and CW keying. The receiver's own gains, antenna and
   sample rate are still its own, and are set on its page.
+- **In CW the transceiver's own VFO sits a sidetone pitch above the dial**, and
+  is put there for you. sdroxide's CW dial is a zero-beat — the note you copy is
+  a pitch above it, which is where the passband is centred and what the QRG
+  readout shows ([2.14](#214-cw-decoding-and-keyboard-sending)) — but a
+  transceiver put in CW makes its own carrier on its own VFO, whether the key is
+  a paddle in its socket or text handed to its keyer. Left on our dial it would
+  call a whole sidetone below the station being answered, which is what was
+  reported with a QMX keying and an Airspy HF+ listening (issue #364). So the
+  rig goes where the contact is and the receiver stays on the dial; nothing on
+  screen moves, and turning the rig's own knob still reads back as the dial.
+  MCW is the exception — there the rig is deliberately held on a sideband and
+  the keyed tone already lands a pitch above its VFO.
 - Closing the receiver from the roster leaves the transceiver on the air: the
   pairing is dropped, with a line in the log saying so.
 

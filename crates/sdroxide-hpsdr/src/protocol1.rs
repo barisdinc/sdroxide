@@ -730,9 +730,7 @@ pub(crate) fn run(ctx: ThreadCtx) {
                     // above, so a caller polling on the meter tick reads
                     // whatever the last frame said rather than having to catch
                     // one (issue #333).
-                    if hermes_lite
-                        && let Some(c) = info.ain5.and_then(hl2_temperature_c)
-                    {
+                    if hermes_lite && let Some(c) = info.ain5.and_then(hl2_temperature_c) {
                         temp_centi_c.store((c * 100.0) as i32, Ordering::Relaxed);
                     }
                     // An overloaded ADC is the classic "the signal looks weird"
@@ -901,8 +899,14 @@ mod tests {
 
     #[test]
     fn ep6_status_bits() {
-        let mut info =
-            Ep6Info { seq: 0, ptt: false, adc_overload: false, ack: None, versions: None, ain5: None };
+        let mut info = Ep6Info {
+            seq: 0,
+            ptt: false,
+            adc_overload: false,
+            ack: None,
+            versions: None,
+            ain5: None,
+        };
         // Status set 0, PTT closed, ADC overloaded, versions in C2..C4.
         decode_ep6_status(&[0x01, 0x01, 0x11, 0x22, 0x33], &mut info);
         assert!(info.ptt);
@@ -911,8 +915,14 @@ mod tests {
 
         // A different status set carries power/voltage, not versions: the
         // overload flag and version bytes must not be read out of it.
-        let mut other =
-            Ep6Info { seq: 0, ptt: false, adc_overload: false, ack: None, versions: None, ain5: None };
+        let mut other = Ep6Info {
+            seq: 0,
+            ptt: false,
+            adc_overload: false,
+            ack: None,
+            versions: None,
+            ain5: None,
+        };
         // Set 2 (power/voltage): not versions, and not the temperature either.
         decode_ep6_status(&[0x10, 0xFF, 0xFF, 0xFF, 0xFF], &mut other);
         assert!(!other.adc_overload);
@@ -926,8 +936,14 @@ mod tests {
     fn a_hermes_lite_reports_its_temperature_on_status_set_one() {
         // C0: set 1 in bits 7..3, ACK clear, PTT clear.
         let cc = [1u8 << 3, 0x07, 0x8B, 0x00, 0x00];
-        let mut info =
-            Ep6Info { seq: 0, ptt: false, adc_overload: false, ack: None, versions: None, ain5: None };
+        let mut info = Ep6Info {
+            seq: 0,
+            ptt: false,
+            adc_overload: false,
+            ack: None,
+            versions: None,
+            ain5: None,
+        };
         decode_ep6_status(&cc, &mut info);
         assert_eq!(info.ain5, Some(0x078B));
         // 3.26 × 1931 / 4096 = 1.537 V; less the sensor's 500 mV offset, over
@@ -945,8 +961,14 @@ mod tests {
         assert_eq!(hl2_temperature_c(0), None);
 
         // And set 0 still means what it meant: versions, not a temperature.
-        let mut info =
-            Ep6Info { seq: 0, ptt: false, adc_overload: false, ack: None, versions: None, ain5: None };
+        let mut info = Ep6Info {
+            seq: 0,
+            ptt: false,
+            adc_overload: false,
+            ack: None,
+            versions: None,
+            ain5: None,
+        };
         decode_ep6_status(&[0x00, 0x01, 0x02, 0x03, 0x04], &mut info);
         assert!(info.ain5.is_none());
         assert_eq!(info.versions, Some((0x01, 0x02, 0x03, 0x04)));

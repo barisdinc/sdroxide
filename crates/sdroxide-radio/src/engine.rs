@@ -6391,6 +6391,9 @@ impl Engine {
         self.digi_tx_band = None;
         if mode == Mode::Cw {
             self.source.set_cw_wpm(self.digi_config.cw_wpm);
+            // And where the rig makes its own carrier, the pitch is also how
+            // far above our dial its VFO belongs — see `sync_cw_filter`.
+            self.source.set_cw_pitch_hz(self.cw_pitch_hz());
         }
     }
 
@@ -6406,6 +6409,13 @@ impl Engine {
             return;
         }
         let pitch = self.cw_pitch_hz();
+        // The pitch is also where the *contact* is, so a front end that keys a
+        // transceiver of its own has to hear about it: a pairing moves the
+        // rig's VFO by it, which is arithmetic only that source can do
+        // ([`IqSource::set_cw_pitch_hz`], issue #364). Pushed here rather than
+        // only on a mode change because the operator moves the pitch by
+        // clicking, and the station moves with it.
+        self.source.set_cw_pitch_hz(pitch);
         let r = &mut self.state.rx[0];
         let w = (r.filter_hi - r.filter_lo).abs().clamp(50.0, 3000.0);
         let (lo, hi) = (pitch - w / 2.0, pitch + w / 2.0);

@@ -75,8 +75,7 @@ fn keyed_slots(scene: &Scene) -> Vec<i64> {
     // those are the slots whose decode the sequencer has to have acted on
     // before REPLY is pressed, and waiting on the others costs a full decode
     // of a quiet slot for nothing.
-    let dx_in =
-        |i: i64| (i % 2 == 0) == scene.dx_even && i - first < scene.dx_overs * 2;
+    let dx_in = |i: i64| (i % 2 == 0) == scene.dx_even && i - first < scene.dx_overs * 2;
 
     let mut t = start;
     let end = start + scene.slots as f64 * slot_s;

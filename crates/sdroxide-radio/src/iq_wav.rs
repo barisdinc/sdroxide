@@ -198,10 +198,7 @@ fn header_bytes(rate_hz: u32, center_hz: f64) -> Header {
 /// propagating an error nobody at a `finish()`/header-build call site could
 /// usefully act on.
 fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// The `auxi` chunk SDR#/HDSDR write: two `SYSTEMTIME`s, nine `u32` tuning

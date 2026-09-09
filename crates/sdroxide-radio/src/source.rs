@@ -788,6 +788,19 @@ pub trait IqSource: Send {
     /// Tell the radio's keyer what speed to send at. It keys at its own speed,
     /// so until this arrives the panel's WPM is not what goes on the air.
     fn set_cw_wpm(&mut self, _wpm: f32) {}
+    /// Tell the front end the sidetone pitch the operator is copying CW at.
+    ///
+    /// sdroxide's CW dial is a zero-beat and the note sits a pitch above it, so
+    /// on any arrangement where a *transceiver* makes its own CW carrier the
+    /// rig's VFO belongs a pitch above our dial rather than on it. Where the
+    /// rig is also the front end the engine does that arithmetic itself
+    /// (`Engine::rig_cw_offset_hz`); where the rig and the receiver are two
+    /// different radios only the source can tell them apart, which is what this
+    /// is for (issue #364).
+    ///
+    /// Default: ignored — an SDR keys the sidetone through its own transmit
+    /// chain and the dial is already the zero-beat.
+    fn set_cw_pitch_hz(&mut self, _hz: f32) {}
 
     /// Block until queued TX audio has been played out, so PTT can be released
     /// without cutting off the tail of a burst. Default: nothing is buffered.
@@ -1570,6 +1583,9 @@ impl IqSource for ConvertedSource {
     }
     fn set_cw_wpm(&mut self, wpm: f32) {
         self.inner.set_cw_wpm(wpm);
+    }
+    fn set_cw_pitch_hz(&mut self, hz: f32) {
+        self.inner.set_cw_pitch_hz(hz);
     }
 
     fn tx_drain(&mut self) {

@@ -117,8 +117,7 @@ pub use digi::{
     QsoStep, QueuedCall, RTTY_CENTER_HZ, RadeStatus, TX_AUDIO_LEVEL_MIN, TX_AUDIO_LEVEL_MIN_DB,
     ThorMode, TranscriptLine, adif_band, adif_records, adif_to_qso_log, clock_health, cq_is_for_us,
     eu_vhf_rs, fmt_report, next_contest_serial, qso_log_to_adif, qso_log_to_text,
-    qso_to_adif_record, tx_level_db,
-    tx_level_from_db, utc_ymd_hms, worked_before, ymd_hms_to_unix,
+    qso_to_adif_record, tx_level_db, tx_level_from_db, utc_ymd_hms, worked_before, ymd_hms_to_unix,
 };
 pub use drm::{
     DrmChannel, DrmCodec, DrmConstellation, DrmRobustness, DrmService, DrmStatus, DrmSync, DrmTime,

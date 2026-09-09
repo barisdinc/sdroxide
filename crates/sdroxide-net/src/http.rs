@@ -52,11 +52,7 @@ pub fn post_form_status(url: &str, fields: &[(&str, &str)]) -> Result<(u16, Stri
 /// "that contact is already logged" have to be told apart and reported
 /// differently. See [`post_form_status`], which is this for the form-encoded
 /// services.
-pub fn post_json_status(
-    url: &str,
-    bearer: &str,
-    json: &str,
-) -> Result<(u16, String), String> {
+pub fn post_json_status(url: &str, bearer: &str, json: &str) -> Result<(u16, String), String> {
     let mut resp = agent()
         .post(url)
         .header("Authorization", &format!("Bearer {bearer}"))

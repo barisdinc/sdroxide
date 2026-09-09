@@ -105,11 +105,10 @@ pub fn contactinfo(q: &QsoRecord, station: &str) -> String {
     // "N1MM", not "sdroxide": the readers of this packet dispatch on it, the
     // same reason `WsjtxConfig::id` defaults to "WSJT-X".
     out.push_str(&el("app", "N1MM"));
-    out.push_str(&el("contestname", if q.contest_id.trim().is_empty() {
-        "DX"
-    } else {
-        q.contest_id.trim()
-    }));
+    out.push_str(&el(
+        "contestname",
+        if q.contest_id.trim().is_empty() { "DX" } else { q.contest_id.trim() },
+    ));
     out.push_str(&el("contestnr", "1"));
     out.push_str(&el("timestamp", &stamp));
     out.push_str(&el("mycall", q.my_call.trim()));
@@ -310,11 +309,7 @@ mod tests {
     /// One `&` in an operator's note must not cost the whole datagram.
     #[test]
     fn text_that_would_break_the_document_is_escaped() {
-        let q = QsoRecord {
-            name: "Bob & Sue".into(),
-            comment: "<not a tag>".into(),
-            ..qso()
-        };
+        let q = QsoRecord { name: "Bob & Sue".into(), comment: "<not a tag>".into(), ..qso() };
         let x = contactinfo(&q, "SHACK");
         assert!(x.contains("<name>Bob &amp; Sue</name>"), "{x}");
         assert!(x.contains("<comment>&lt;not a tag&gt;</comment>"), "{x}");

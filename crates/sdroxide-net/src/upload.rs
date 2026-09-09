@@ -640,8 +640,8 @@ fn test_wrl(cfg: &NetworkConfig) -> Result<String, String> {
     }
     // `defaultLogbook` is an object when there is one; the API's own note is
     // that a null here means a contact sent without a logbook is refused.
-    let has_default = json_field(&body, "defaultLogbook").is_some()
-        || body.contains("\"defaultLogbook\":{");
+    let has_default =
+        json_field(&body, "defaultLogbook").is_some() || body.contains("\"defaultLogbook\":{");
     let call = json_field(&body, "callsign").unwrap_or_default();
     let who = if call.is_empty() { String::new() } else { format!(" as {call}") };
     if has_default {
