@@ -7702,6 +7702,37 @@ mod tests {
         assert!(!off.invert_spectrum);
     }
 
+    /// A `radio.json` written before the overload loop existed loads with it off
+    /// and the whole gain range available to it, which is exactly how the
+    /// station behaved before (issue #362).
+    #[test]
+    fn an_older_config_gets_the_overload_loop_switched_off() {
+        let cfg: HpsdrConfig = serde_json::from_str(r#"{}"#).expect("parses");
+        assert!(!cfg.auto_gain);
+        assert_eq!(cfg.auto_gain_step_db, 1.0);
+        assert_eq!(cfg.auto_gain_attack_ms, 100);
+        assert_eq!(cfg.auto_gain_decay_ms, 10_000);
+        assert_eq!(
+            cfg.auto_gain_bounds(),
+            (HpsdrConfig::LNA_GAIN_MIN_DB, HpsdrConfig::LNA_GAIN_MAX_DB)
+        );
+        // Bounds typed the wrong way round are still bounds, and neither escapes
+        // the board's own range.
+        let wide: HpsdrConfig =
+            serde_json::from_str(r#"{"auto_gain_min_db": 40.0, "auto_gain_max_db": -900.0}"#)
+                .expect("parses");
+        assert_eq!(wide.auto_gain_bounds(), (HpsdrConfig::LNA_GAIN_MIN_DB, 40.0));
+    }
+
+    /// The FlexRadio I/Q swap likewise: a config that predates it loads off,
+    /// which is how every FLEX this backend has met has been read.
+    #[test]
+    fn an_older_flex_config_does_not_suddenly_mirror_its_spectrum() {
+        let cfg: SmartSdrConfig = serde_json::from_str(r#"{}"#).expect("parses");
+        assert!(!cfg.swap_iq);
+        assert!(!SmartSdrConfig::default().swap_iq);
+    }
+
     /// The sound-card rig's copy of the same setting goes the other way: every
     /// CAT rig already working is on the convention this end assumes, so the
     /// only safe value for a config that predates the checkbox is off.
