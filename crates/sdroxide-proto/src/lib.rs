@@ -1275,7 +1275,15 @@ use sdroxide_types::{
 /// fields rather than at the tail, so a v140 peer reads every field after it
 /// out of step; `DigiConfig` rides inside `Command::SetDigiConfig` and
 /// `DigiStatus`, both of which cross the link whole.
-pub const PROTO_VERSION: u16 = 141;
+///
+/// v142: [`sdroxide_types::Js8Msg`] gains `speed`, the submode a decoded
+/// message actually arrived on. With multi-speed decoding on, four waveforms
+/// share the sub-band and the conversation list was the one place that did not
+/// say which of them carried a message (issue #389). It sits at that struct's
+/// tail, and `Js8Msg` rides inside `Js8Status` and so inside `DigiStatus`,
+/// which crosses the link whole — so a v141 peer handed one reads the tail of
+/// every status update out of step rather than merely missing a field.
+pub const PROTO_VERSION: u16 = 142;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

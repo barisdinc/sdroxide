@@ -177,18 +177,39 @@ impl SdroxideApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("JS8").size(11.0).strong().color(crate::theme::CYAN()));
             let multi = self.digi_cfg_edit.js8_multi_decode;
-            for speed in Js8Speed::ALL {
-                // Lit as the transmit speed; with MULTI on, every one of them
-                // is also being listened for, which the chip's tooltip says
-                // rather than the highlight — the highlight is what goes out.
-                if crate::chrome::chip(ui, js8.speed == speed, speed.label())
-                    .on_hover_text(if multi {
-                        format!("Transmit at {} — every speed is being decoded", speed.label())
+            // Slowest first: these are one dial from 30-second slots 25 Hz wide
+            // to 6-second slots 160 Hz wide, and the declaration order runs
+            // NORMAL FAST TURBO SLOW, which is the order JS8Call happened to
+            // ship the submodes in and a scale of nothing (issue #389).
+            for speed in Js8Speed::UI_ORDER {
+                // A lit chip is a speed being *decoded*, which with MULTI on is
+                // all four of them — the row is the honest answer to "what am I
+                // hearing", and a single lit chip while four waveforms were
+                // being read said otherwise. Which one goes out is then the
+                // marked one: it is still one speed, and the mark has to
+                // survive the whole row being lit.
+                let tx = js8.speed == speed;
+                let face = if multi && tx {
+                    format!("▸{}", speed.label())
+                } else {
+                    speed.label().to_string()
+                };
+                if crate::chrome::chip(ui, multi || tx, face)
+                    .on_hover_text(if multi && tx {
+                        format!(
+                            "Every speed is being decoded; ▸ marks {}, the one you transmit at",
+                            speed.label()
+                        )
+                    } else if multi {
+                        format!(
+                            "Every speed is being decoded. Click to transmit at {} instead",
+                            speed.label()
+                        )
                     } else {
                         format!("Transmit and decode at {}", speed.label())
                     })
                     .clicked()
-                    && js8.speed != speed
+                    && !tx
                 {
                     self.digi_cfg_edit.js8_speed = speed;
                     cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
@@ -197,7 +218,10 @@ impl SdroxideApp {
             // Decoding all four rather than the one being worked (issue #358).
             // Beside the speed chips because that is the setting it qualifies:
             // without it a station on another speed is simply not there, and
-            // nothing on this screen would say so.
+            // nothing on this screen would say so — but set apart from them,
+            // because it is not a fifth speed and a row of five identical chips
+            // reads as one (issue #389).
+            ui.add_space(10.0);
             if crate::chrome::chip(ui, multi, "MULTI")
                 .on_hover_text(
                     "Decode every JS8 speed, not only the one you transmit at. The four \
@@ -210,6 +234,7 @@ impl SdroxideApp {
                 self.digi_cfg_edit.js8_multi_decode = !multi;
                 cmds.push(Command::SetDigiConfig(self.digi_cfg_edit.clone()));
             }
+            ui.add_space(6.0);
             ui.label(RichText::new(format!("{audio_hz:.0} Hz")).monospace());
             if crate::chrome::chip(ui, false, "−").clicked() {
                 cmds.push(Command::SetDigiAudioFreq((audio_hz - 10.0).clamp(200.0, 3500.0)));
@@ -822,6 +847,7 @@ impl SdroxideApp {
     /// turns into the reply it expects.
     fn js8_conversation(&mut self, ui: &mut egui::Ui, js8: &sdroxide_types::Js8Status) {
         let me = self.js8_me(js8);
+        let multi = self.digi_cfg_edit.js8_multi_decode;
         let mut pick: Option<(String, Option<String>)> = None;
         egui::ScrollArea::vertical()
             .id_salt("js8-convo")
@@ -847,6 +873,23 @@ impl SdroxideApp {
                                 ui.label(
                                     RichText::new(format!("{h:02}:{mi:02}")).monospace().weak(),
                                 );
+                                // Which of the four waveforms carried this.
+                                // Only where it is a question: with one speed
+                                // running every row is that speed and a column
+                                // saying so is noise, but with MULTI on the
+                                // list was the one place that did not say
+                                // (issue #389). A row decoded before the
+                                // setting was turned off keeps its tag, so
+                                // nothing already on screen quietly loses the
+                                // answer it was showing.
+                                if multi || m.speed != js8.speed {
+                                    ui.label(
+                                        RichText::new(m.speed.tag())
+                                            .monospace()
+                                            .color(crate::theme::PINK()),
+                                    )
+                                    .on_hover_text(format!("Decoded at {}", m.speed.label()));
+                                }
                                 if to_me {
                                     ui.label(RichText::new("★").color(crate::theme::YELLOW()));
                                 }
@@ -1148,6 +1191,7 @@ mod js8_panel_tests {
             frames: 1,
             complete: true,
             to_me: true,
+            speed: sdroxide_types::Js8Speed::Normal,
         }
     }
 

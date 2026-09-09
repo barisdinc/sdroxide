@@ -610,6 +610,7 @@ fn a_js8_message_is_spoken_only_when_complete() {
         frames,
         complete,
         to_me: true,
+        speed: sdroxide_types::Js8Speed::Normal,
     };
 
     let mut st = digi_with_call("OE3ABC");

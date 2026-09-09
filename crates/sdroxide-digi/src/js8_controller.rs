@@ -1534,6 +1534,7 @@ mod tests {
                 frames: 1,
                 complete: true,
                 to_me: true,
+                speed: Js8Speed::Normal,
             };
             let reply = auto_reply(&msg, &c.station(), ReplyPolicy::default())
                 .unwrap_or_else(|| panic!("{cmd} went unanswered"));
@@ -1594,6 +1595,7 @@ mod tests {
             frames: 12,
             complete: true,
             to_me: false,
+            speed: Js8Speed::Normal,
         };
         let Some(DigiAction::Heard { call, grid, audio_hz, snr_db, slot_utc }) =
             heard_report(&msg, grid_of(&msg).as_deref())
@@ -1634,6 +1636,7 @@ mod tests {
             frames: 1,
             complete: true,
             to_me: true,
+            speed: Js8Speed::Normal,
         };
         assert_eq!(grid_of(&hb("EM73", "HB")).as_deref(), Some("EM73"));
         assert_eq!(grid_of(&hb("QF22", "CQ")).as_deref(), Some("QF22"));
@@ -1661,6 +1664,7 @@ mod tests {
             frames: 1,
             complete: true,
             to_me: true,
+            speed: Js8Speed::Normal,
         }
     }
 

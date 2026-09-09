@@ -4072,21 +4072,27 @@ band's JS8 frequency — 14.078 on 20 m, and the traffic in the 3 kHz above it
 
 | Speed | Slot | Width | Use |
 |---|---|---|---|
+| SLOW | 30 s | 25 Hz | The weak-signal end |
 | NORMAL | 15 s | 50 Hz | The band convention; nearly all traffic |
 | FAST | 10 s | 80 Hz | Good conditions, shorter waits |
 | TURBO | 6 s | 160 Hz | Local and VHF work |
-| SLOW | 30 s | 25 Hz | The weak-signal end |
+
+They are drawn in that order — slowest and narrowest first, fastest and widest
+last — because that is what they are: one dial, not four unrelated choices.
 
 Both stations must be on the same speed to work each other — they are different
 waveforms on different slot clocks, not different settings of one receiver, so a
 station transmitting NORMAL is not something a TURBO receiver can hear. Normal
 is what you want unless you have agreed otherwise.
 
-**MULTI**, the chip beside the four speeds, decodes *all* of them at once
-(issue #358). The speed buttons then say only what you transmit at; everything
-on the band is decoded whatever speed it is on, so a station calling you from
-another one appears in the heard list instead of not existing, and you can drop
-onto its speed to answer. Without it there is nothing on screen to tell a quiet
+**MULTI**, the chip set apart to the right of the four speeds, decodes *all* of
+them at once (issue #358). All four speed buttons then light, because all four
+are being listened to, and a small ▸ marks the one you transmit at — click
+another to move it. Everything on the band is decoded whatever speed it is on,
+so a station calling you from another one appears in the heard list instead of
+not existing, and you can drop onto its speed to answer. In the conversation
+list each message then carries a one-letter tag after its time — **S**, **N**,
+**F** or **T** — saying which of the four it came in on; hover it for the name. Without it there is nothing on screen to tell a quiet
 band from three quarters of a busy one. It costs about four times the receive
 CPU — four separate decodes on four separate slot clocks — which is why it is
 off by default; a slot that arrives while the decoder is still behind is dropped
