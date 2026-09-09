@@ -392,10 +392,25 @@ pub enum CatFamily {
     ///
     /// Appended after [`CatFamily::Flrig`] for the reason given there.
     QrpLabs,
+    /// HobbyPCB's RS-HFIQ, a 5 W HF transceiver whose whole control interface
+    /// is a frequency command and a transmit command (issue #383).
+    ///
+    /// Not a dialect of anything: `*F` sets the oscillator, `*X` keys, every
+    /// command opens with `*` and closes with a carriage return, and there is
+    /// no mode, power, filter or meter command because the radio has none of
+    /// those. What comes off its sound card is complex baseband — a quadrature
+    /// detector and a quadrature modulator either side of an Si5351 running at
+    /// four times the dial — so the mode, the filter and the modulation are all
+    /// sdroxide's, and the serial port carries the two things that are the
+    /// radio's.
+    ///
+    /// Appended after [`CatFamily::QrpLabs`] for the reason [`CatFamily::Flrig`]
+    /// gives.
+    RsHfiq,
 }
 
 impl CatFamily {
-    pub const ALL: [CatFamily; 9] = [
+    pub const ALL: [CatFamily; 10] = [
         CatFamily::Xiegu,
         CatFamily::Icom,
         CatFamily::Yaesu,
@@ -403,6 +418,7 @@ impl CatFamily {
         CatFamily::Elecraft,
         CatFamily::Elad,
         CatFamily::QrpLabs,
+        CatFamily::RsHfiq,
         CatFamily::Rigctld,
         CatFamily::Flrig,
     ];
@@ -421,6 +437,7 @@ impl CatFamily {
             CatFamily::Elecraft => "Elecraft",
             CatFamily::Elad => "ELAD",
             CatFamily::QrpLabs => "QRP Labs",
+            CatFamily::RsHfiq => "RS-HFIQ",
             CatFamily::Rigctld => "Hamlib rigctld (network)",
             CatFamily::Flrig => "flrig (network)",
         }
@@ -1114,6 +1131,15 @@ pub const QMX_IQ_OFFSET_HZ: f64 = -12_000.0;
 /// rate to ask for, so the panadapter is 48 kHz wide and that is the whole of
 /// the band this radio can show at once.
 pub const QMX_IQ_RATE_HZ: u32 = 48_000;
+
+/// The one baud rate an RS-HFIQ's control port has: "The serial port is running
+/// at 57600 Baud, N, 8, 1."
+///
+/// A constant rather than a default, because there is no menu in the firmware
+/// to change it. Any other rate is not a slower link, it is a silent one — so
+/// selecting the family fills this in and `sdroxide_cat::spawn` pins it
+/// (issue #383).
+pub const RS_HFIQ_CAT_BAUD: u32 = 57_600;
 
 /// Whether a rig's I/Q is corrected unless the operator says otherwise. On:
 /// see [`CatConfig::iq_correction`].
@@ -7446,12 +7472,16 @@ mod tests {
     /// disappears from the dialog instead of failing to build.
     #[test]
     fn every_cat_family_is_offered_and_labelled() {
-        assert_eq!(CatFamily::ALL.len(), 9);
+        assert_eq!(CatFamily::ALL.len(), 10);
         for f in CatFamily::ALL {
             assert!(!f.label().is_empty(), "{f:?}");
         }
         assert!(CatFamily::ALL.contains(&CatFamily::Elad));
         assert!(CatFamily::ALL.contains(&CatFamily::QrpLabs));
+        assert!(CatFamily::ALL.contains(&CatFamily::RsHfiq));
+        // An RS-HFIQ's control link is a serial port on the board itself
+        // (issue #383).
+        assert!(!CatFamily::RsHfiq.is_network());
         // ELAD is a serial family: the FDM-DUO's CAT port is an FTDI bridge,
         // not a socket.
         assert!(!CatFamily::Elad.is_network());

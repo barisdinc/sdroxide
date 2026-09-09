@@ -17,6 +17,7 @@ mod flrig;
 mod kenwood;
 mod qrplabs;
 mod rigctld;
+mod rshfiq;
 mod yaesu;
 
 use std::time::{Duration, Instant};
@@ -1135,6 +1136,10 @@ fn make_protocol(cfg: &CatConfig) -> Box<dyn Protocol> {
         // USB codec carries either demodulated audio or raw I/Q, and which one
         // it must carry is asserted at the radio when the port opens.
         CatFamily::QrpLabs => Box::new(qrplabs::QrpLabs::new(cfg.format == SoundFormat::Iq)),
+        // The one family that commands nothing but the oscillator and the
+        // transmit relay: everything else about an RS-HFIQ is I/Q, and so
+        // sdroxide's.
+        CatFamily::RsHfiq => Box::new(rshfiq::RsHfiq::new()),
         CatFamily::Rigctld => Box::new(rigctld::Rigctld::new()),
         CatFamily::Flrig => Box::new(flrig::Flrig::new(cfg.flrig_addr.trim().to_string())),
     }
@@ -1457,6 +1462,24 @@ pub fn query_once(cfg: &CatConfig) -> Option<(Option<f64>, Option<Mode>)> {
 /// [`SerialConfig`]: sdroxide_types::SerialConfig
 /// [issue #146]: https://github.com/dividebysandwich/sdroxide/issues/146
 fn with_family_serial_limits(mut cfg: CatConfig) -> CatConfig {
+    // An RS-HFIQ's port is 57600 8N1 in the firmware, with no menu to change
+    // it, so there is no operator setting to respect here — only a rate that
+    // works and a set that do not (issue #383).
+    if cfg.family == CatFamily::RsHfiq {
+        const RS_HFIQ_BAUD: u32 = 57_600;
+        if cfg.serial.baud != RS_HFIQ_BAUD {
+            warn!(
+                asked = cfg.serial.baud,
+                using = RS_HFIQ_BAUD,
+                "an RS-HFIQ's serial port runs at one rate and has no setting for it;                  opening at that rate instead"
+            );
+        }
+        cfg.serial.baud = RS_HFIQ_BAUD;
+        cfg.serial.data_bits = 8;
+        cfg.serial.parity = Parity::None;
+        cfg.serial.stop_bits = StopBits::One;
+        return cfg;
+    }
     if cfg.family != CatFamily::Elad {
         return cfg;
     }
@@ -3699,15 +3722,24 @@ mod tests {
     }
 
     /// The dial has to keep up with a hand on the VFO knob; the mode is a
-    /// setting somebody changes a few times an evening. Every family splits the
-    /// two, and the dial half is the frequency read on its own.
+    /// setting somebody changes a few times an evening. Every family that has a
+    /// mode to read splits the two, and the dial half is the frequency read on
+    /// its own.
     #[test]
     fn the_mode_does_not_ride_along_with_every_dial_poll() {
         for f in CatFamily::ALL {
             let p = make_protocol(&CatConfig { family: f, ..CatConfig::default() });
             let (full, dial) = (p.poll_requests(), p.dial_requests());
-            // The dial poll is strictly smaller, and it is the front of the
-            // full one — the frequency read, with the mode left off the back.
+            // A family whose whole poll is the dial has nothing to split off:
+            // an RS-HFIQ has no mode command at all, because it has no modes —
+            // what comes off it is I/Q and the mode is sdroxide's (issue #383).
+            if full.len() == 1 {
+                assert_eq!(dial, full, "{f:?}");
+                continue;
+            }
+            // Otherwise the dial poll is strictly smaller, and it is the front
+            // of the full one — the frequency read, with the mode left off the
+            // back.
             assert!(dial.len() < full.len(), "{f:?}");
             assert_eq!(dial, full[..dial.len()], "{f:?}");
         }
@@ -3907,6 +3939,35 @@ mod tests {
         assert_eq!(fixed.stop_bits, StopBits::One);
     }
 
+    /// Issue #383: an RS-HFIQ's port is 57600 8N1 in the firmware and there is
+    /// no menu to change it, so unlike an ELAD's four rates there is not even
+    /// one alternative to respect — every frame is pinned, whatever was carried
+    /// over from the last radio.
+    #[test]
+    fn an_rs_hfiq_takes_the_one_port_setting_it_has() {
+        for serial in [
+            sdroxide_types::SerialConfig::default(),
+            sdroxide_types::SerialConfig {
+                baud: 115_200,
+                data_bits: 7,
+                parity: Parity::Even,
+                stop_bits: StopBits::Two,
+                ..Default::default()
+            },
+        ] {
+            let fixed = with_family_serial_limits(CatConfig {
+                family: CatFamily::RsHfiq,
+                serial,
+                ..CatConfig::default()
+            })
+            .serial;
+            assert_eq!(fixed.baud, sdroxide_types::RS_HFIQ_CAT_BAUD);
+            assert_eq!(fixed.data_bits, 8);
+            assert_eq!(fixed.parity, Parity::None);
+            assert_eq!(fixed.stop_bits, StopBits::One);
+        }
+    }
+
     /// And nobody else is touched: every other family takes whatever the
     /// operator has set at the radio, including the frames an ELAD cannot use.
     #[test]
@@ -3919,7 +3980,7 @@ mod tests {
             ..Default::default()
         };
         for f in CatFamily::ALL {
-            if f == CatFamily::Elad {
+            if matches!(f, CatFamily::Elad | CatFamily::RsHfiq) {
                 continue;
             }
             let cfg = with_family_serial_limits(CatConfig {

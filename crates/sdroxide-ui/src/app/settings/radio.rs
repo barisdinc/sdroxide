@@ -176,8 +176,8 @@ pub(in crate::app) fn settings_cat_tab(
     use sdroxide_types::{
         CAT_SCOPE_MIN_BAUD, CatFamily, CwKeying, DigiMode, Direction, ELAD_CAT_BAUDS,
         ELAD_DEFAULT_CAT_BAUD, EladAntenna, EladTxInput, IcomModel, IcomScopeSpan, KenwoodSend,
-        LineState, ModeControl, Parity, PttMethod, QMX_IQ_OFFSET_HZ, QMX_IQ_RATE_HZ, SoundFormat,
-        StopBits,
+        LineState, ModeControl, Parity, PttMethod, QMX_IQ_OFFSET_HZ, QMX_IQ_RATE_HZ,
+        RS_HFIQ_CAT_BAUD, SoundFormat, StopBits,
     };
     let Some(cfg) = radio_edit.as_mut() else {
         ui.label("Waiting for the configuration of the machine the radio is attached to.");
@@ -340,6 +340,21 @@ pub(in crate::app) fn settings_cat_tab(
         if arrived_at_qmx_iq {
             cfg.cat.iq_offset_hz = QMX_IQ_OFFSET_HZ;
             cfg.cat.iq_rate_hz = QMX_IQ_RATE_HZ;
+        }
+
+        // An RS-HFIQ, for the same reason and more of it. Its sound card is
+        // complex baseband and nothing else, its serial port is 57600 8N1 in
+        // the firmware with no menu to change it, and its only transmit switch
+        // is the `*X` command — so all three are facts about the radio rather
+        // than preferences, and every one of them left at a default would be a
+        // link that does not work or an audio path that is noise (issue #383).
+        // The oscillator is on the dial, so the I/Q offset goes to zero:
+        // whatever the previous radio needed is not what this one does.
+        if cfg.cat.family == CatFamily::RsHfiq && cfg.cat.family != family_before {
+            cfg.cat.format = SoundFormat::Iq;
+            cfg.cat.serial.baud = RS_HFIQ_CAT_BAUD;
+            cfg.cat.ptt = PttMethod::Cat;
+            cfg.cat.iq_offset_hz = 0.0;
         }
 
         // A network family reaches the radio over a socket, so every serial
@@ -738,6 +753,51 @@ pub(in crate::app) fn settings_cat_tab(
                     );
                 ui.end_row();
             }
+        }
+
+        if cfg.cat.family == CatFamily::RsHfiq {
+            ui.label("Radio");
+            ui.label(RichText::new("RS-HFIQ (5 W HF transceiver)").weak()).on_hover_text(
+                "HobbyPCB's RS-HFIQ. There is nothing to pick here: the profile \
+                 is the whole of the radio's command set, and the firmware \
+                 version is logged when the port opens.\n\n\
+                 The control link carries two things and no more — where to put \
+                 the oscillator, and whether to transmit. There is no mode, \
+                 power, filter, squelch or meter command, because the radio has \
+                 none of them. Everything else is sdroxide's: what comes off \
+                 the sound card is complex baseband centred on the dial, so the \
+                 mode, the filter and the modulation all happen on this side.\n\n\
+                 The frequency command covers 3–30 MHz. Ask for anything \
+                 outside that and the radio refuses it and stays where it is; \
+                 the log says so.\n\n\
+                 CW is keyed as audio through the transmit chain — this radio \
+                 has no keyer that takes text. (It has an internal CW \
+                 generator; sdroxide never uses it, on the firmware's own \
+                 advice.)",
+            );
+            ui.end_row();
+
+            ui.label("");
+            ui.label(
+                RichText::new("Sound format, baud and PTT are the radio's, not settings").weak(),
+            )
+            .on_hover_text(
+                "All three have been filled in and none of them is a \
+                 preference:\n\n\
+                 • Sound format is I/Q (stereo) — the card carries complex \
+                 baseband and nothing else.\n\
+                 • 57600 baud, 8N1 — the firmware's one rate, with no menu to \
+                 change it. Any other is a silent link, so it is pinned when \
+                 the port opens.\n\
+                 • PTT over CAT — the *X command is the only transmit switch \
+                 the interface has.\n\n\
+                 The centre offset has been set to zero: the synthesiser runs \
+                 at four times the dial into a quadrature detector, so the \
+                 middle of the span is the dial. Set the sample rate above to \
+                 whatever your sound card is actually running at; that is what \
+                 makes the panadapter as wide as it is.",
+            );
+            ui.end_row();
         }
 
         if cfg.cat.family == CatFamily::Icom {

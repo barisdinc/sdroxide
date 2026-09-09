@@ -4,7 +4,8 @@ SDRoxide is a PowerSDR/Thetis-style software-defined-radio transceiver. It gives
 you a panadapter and waterfall, dual VFOs, a full set of receive and transmit
 controls, FT8/FT4/FT2 digital modes with an integrated logbook, a wideband CW
 skimmer, and the ability to drive either a SoapySDR device or a CAT-controlled
-radio (such as a Xiegu, Icom, Yaesu, Kenwood, Elecraft, ELAD, or a QRP Labs QMX)
+radio (such as a Xiegu, Icom, Yaesu, Kenwood, Elecraft, ELAD, an RS-HFIQ, or a
+QRP Labs QMX)
 with audio over a USB sound card. The
 same interface runs as a native desktop application, streams to a web browser,
 or connects to a remote sdroxide server.
@@ -6809,10 +6810,10 @@ only.
 - **Serial port** — the radio's CAT serial port. On Linux, USB-style ports
   (`/dev/ttyACM*`, `/dev/ttyUSB*`) are listed first.
 - **CAT family** — `Xiegu`, `Icom`, `Yaesu`, `Kenwood`, `Elecraft`, `ELAD`,
-  `QRP Labs`, `Hamlib rigctld (network)`, or `flrig (network)`. The seven native
-  profiles drive one manufacturer's rigs each; the last two talk to an
-  already-running daemon — Hamlib's `rigctld`, or flrig — and cover everything
-  else (see **rigctld address** and **flrig address** below).
+  `QRP Labs`, `RS-HFIQ`, `Hamlib rigctld (network)`, or `flrig (network)`. The
+  eight native profiles drive one manufacturer's rigs each; the last two talk to
+  an already-running daemon — Hamlib's `rigctld`, or flrig — and cover
+  everything else (see **rigctld address** and **flrig address** below).
 
   Five of the native ones speak ASCII commands ending in `;` and look
   interchangeable, but they are not. A Kenwood driven as a Yaesu rejects every
@@ -6875,6 +6876,9 @@ only.
   **Baud** setting below is ignored (a QMX serves its own virtual COM ports over
   USB, so the rate means nothing at either end), and with **Sound format** on
   `IQ` a third says that I/Q mode is switched on at the radio for you.
+- **Radio** (RS-HFIQ only) — HobbyPCB's RS-HFIQ, the 5 W HF transceiver, and
+  the shortest profile here because it is the whole of the radio's command set
+  (issue #383). See the note below.
 - **Baud**, **Data bits**, **Parity**, **Stop bits** — the serial line settings
   (for example 19200 8N1 for a Xiegu X6100).
 - **Force RTS** / **Force DTR** — hold a control line high or low (some
@@ -7381,6 +7385,40 @@ what does the selecting.
 > change it with), and the RF and audio gains, which live in the radio's own
 > menus. Written from QRP Labs' published CAT and operating manuals; not yet
 > verified against a radio.
+
+> **Note (RS-HFIQ):** HobbyPCB's RS-HFIQ is an **I/Q transceiver**, and that is
+> what makes this the shortest profile here (issue #383). A quadrature detector
+> and a quadrature modulator sit either side of a synthesiser running at four
+> times the dial, so what the sound card carries is complex baseband centred on
+> the operating frequency, in both directions. Everything a CAT command does on
+> another radio — the mode, the filter, the modulation, the demodulation — is
+> sdroxide's here, and the serial link is left with the two things that really
+> are the radio's: where to put the oscillator, and whether to transmit.
+>
+> Selecting the family fills in three things that are facts rather than
+> preferences, so leave them: **Sound format** goes to `IQ (stereo)`, **PTT
+> method** to `CAT`, and the port to **57600 8N1** — the firmware's one rate,
+> with no menu to change it, so sdroxide pins it when the port opens. The
+> **centre offset** is set to zero, because the oscillator is on the dial. Set
+> **IQ rate** to whatever your sound card is actually running at; that is what
+> makes the panadapter as wide as it is.
+>
+> **The frequency command covers 3–30 MHz** and nothing outside it. Ask for
+> more and the radio answers `Frq out of range.` and stays where it is — the
+> dial springs back within a poll, and the log says why.
+>
+> **What there is nothing to reach.** No mode, power, filter, squelch, meter or
+> keyer command exists, because the radio has none of them: transmit power is
+> set at the radio, the S-meter is sdroxide's own measurement of the I/Q, and
+> CW goes out as a keyed tone through the transmit chain like any other audio.
+> (The firmware has an internal CW generator on `*X2`; its own documentation
+> says do not use it, and sdroxide never does.)
+>
+> Written from HobbyPCB's published *Interface Commands* page. **Not verified
+> against a radio**, and one thing in particular is a guess: the page says what
+> each query reports but not how the reply is framed, so sdroxide accepts a bare
+> number, one with the command echoed in front of it, and either line ending. If
+> the dial readout does not follow the radio, that is the thing to report.
 
 > **Note:** RIT, XIT and split are driven over the same serial link, by moving
 > the radio's dial — see [2.6](#26-rit-and-xit). Set them in sdroxide rather than
