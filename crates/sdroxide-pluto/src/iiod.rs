@@ -95,12 +95,12 @@ const IO_DEADLINE: Duration = Duration::from_secs(8);
 ///
 /// A starting point rather than a fixed rule: a link carrying nearly as many
 /// bytes per second as it can hold stalls for longer than this and still
-/// recovers, so [`Connection::widen_payload_deadline`] lets the receive thread
+/// recovers, so [`Connection::set_payload_deadline`] lets the receive thread
 /// raise it when the evidence says the stalls are the transport rather than a
 /// wedge. See [`MAX_PAYLOAD_DEADLINE`].
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(2);
 
-/// The most [`Connection::widen_payload_deadline`] may stretch a payload read
+/// The most [`Connection::set_payload_deadline`] may stretch a payload read
 /// to.
 ///
 /// Stops just short of [`IO_DEADLINE`]: past that a stalled payload would

@@ -515,11 +515,27 @@ pub(crate) fn rx_thread(mut conn: Connection, shared: Arc<Shared>, mut ring: Pro
                 // would have finished, so the replacement gets longer before
                 // the same call is made about it.
                 if e.is_payload_stall() && stats.total_samples > 0 {
-                    payload_deadline *= 2;
-                    tracing::info!(
-                        "PlutoSDR: the receive link stalls under load — allowing a payload                          {:.1}s to arrive before the socket is replaced",
-                        payload_deadline.as_secs_f64()
-                    );
+                    // Announced *after* the clamp, not before it: the ceiling
+                    // is real, and a log that keeps promising a longer wait it
+                    // is never going to take sends an operator looking for a
+                    // fault in the wrong place (issue #377).
+                    conn.set_payload_deadline(payload_deadline * 2);
+                    let effective = conn.payload_deadline();
+                    if effective > payload_deadline {
+                        tracing::info!(
+                            "PlutoSDR: the receive link stalls under load — allowing a payload \
+                             {:.1}s to arrive before the socket is replaced",
+                            effective.as_secs_f64()
+                        );
+                    } else {
+                        tracing::info!(
+                            "PlutoSDR: the receive link is still stalling at the longest payload \
+                             wait this connection will take ({:.1}s) — the link, not the radio: \
+                             lower the sample rate, or put the board on its own network segment",
+                            effective.as_secs_f64()
+                        );
+                    }
+                    payload_deadline = effective;
                 }
                 let Some(mut fresh) = redial_rx(&shared, &e) else { break };
                 fresh.set_payload_deadline(payload_deadline);
