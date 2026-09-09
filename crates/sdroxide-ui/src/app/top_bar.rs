@@ -687,6 +687,7 @@ impl SdroxideApp {
                 self.smeter_box(ui, SMETER_W, crate::chrome::MODULE_TALL_H, false);
                 self.menu_bar(ui, cmds, tier, band_mode_shown, None);
             }
+            self.tune_step_row(ui, cmds);
         });
     }
 
@@ -1104,6 +1105,78 @@ impl SdroxideApp {
                 self.menu_chip_row(ui, cmds, tier, &chips, fit);
             },
         );
+    }
+
+    /// A row of finger-sized tuning buttons across the bottom of a touched
+    /// strip: step down, the step itself, step up.
+    ///
+    /// A touched client has none of the three ways a desktop tunes. There is no
+    /// wheel, so the readout's per-digit scroll is unreachable; the panadapter
+    /// is tuned by tapping it, and landing on a station 3 kHz from the one on
+    /// screen is a gesture nobody makes twice; and typing the whole frequency
+    /// in to move one channel is not tuning, it is data entry. So a phone had no
+    /// way to move a known step at all, which is what an operator working down a
+    /// band actually does (issue #380).
+    ///
+    /// Whole steps from where the dial *is*, not rounded to a multiple of the
+    /// step: an operator on 7.183 stepping by 1 kHz means 7.184, and a control
+    /// that silently moved them to 7.184 from 7.183.5 would be a second,
+    /// invisible edit. The band edges are the engine's business, as they are
+    /// for every other route to the dial.
+    fn tune_step_row(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        if !self.ui_settings.tune_step_buttons {
+            return;
+        }
+        let step = self.ui_settings.tune_step_hz;
+        let label = self.ui_settings.tune_step_label();
+        let h = crate::chrome::chip_height(ui, None);
+        let gap = ui.spacing().item_spacing.x;
+        // The row, divided in three. The *container's* width rather than what
+        // is left of the current one: allocating more than the row has left is
+        // what makes the wrapping layout break a fresh line for it instead of
+        // squeezing it in beside the menu chips.
+        let w = ui.max_rect().width().max(120.0);
+        let cell = ((w - 2.0 * gap) / 3.0).max(36.0);
+        let mut moved = 0.0f64;
+        let mut cycle = false;
+        ui.allocate_ui_with_layout(
+            egui::vec2(w, h),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                let size = egui::vec2(cell, h);
+                if crate::chrome::chip_sized(ui, false, RichText::new("−").strong(), size)
+                    .on_hover_text(format!("Down {label}"))
+                    .clicked()
+                {
+                    moved = -step;
+                }
+                if crate::chrome::chip_sized(ui, false, RichText::new(&label).strong(), size)
+                    .on_hover_text(
+                        "How far one press moves the dial. Tap to take the next step: 10 Hz, \
+                         100 Hz, 500 Hz, 1, 2.5, 5, 9, 10 and 25 kHz. Turn the row off in \
+                         Settings › UI.",
+                    )
+                    .clicked()
+                {
+                    cycle = true;
+                }
+                if crate::chrome::chip_sized(ui, false, RichText::new("+").strong(), size)
+                    .on_hover_text(format!("Up {label}"))
+                    .clicked()
+                {
+                    moved = step;
+                }
+            },
+        );
+        if cycle {
+            self.ui_settings.tune_step_hz = self.ui_settings.next_tune_step();
+            crate::app::persist::persist_ui_settings(&self.ui_settings);
+        }
+        if moved != 0.0 {
+            let vfo = self.state.active_vfo;
+            let hz = (self.state.active_freq_hz() + moved).max(0.0);
+            cmds.push(Command::SetVfo { vfo, hz });
+        }
     }
 
     /// Draw the menu chips, each dressed with the menu it opens. `fit` decides

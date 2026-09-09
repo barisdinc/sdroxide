@@ -10430,6 +10430,9 @@ spoken announcements below them under `[speech]`:
   [§2.8](#28-the-display-and-fft-controls).
 - **Waterfall palette** — the waterfall colour scheme (see
   [2.8](#28-the-display-and-fft-controls) and the [appendix](#waterfall-colour-schemes)).
+- **Tuning buttons** — the **−** / step / **+** row under the control strip on a
+  phone or tablet ([9.5](#95-phones-and-tablets)), with the step it is currently
+  set to shown beside the box. Never drawn on a desktop.
 - **Waterfall smoothing** — on by default. Every screen pixel is blended with
   the bins and rows around it, which is what makes a signal look continuous
   where the display is wider than the transform. Untick **Interpolate** for a
@@ -12614,6 +12617,22 @@ row of menu buttons:
 A menu stays open until you tap outside it or tap its button again — the top-bar
 popups do not fade away on a touch screen the way they do under a mouse, because
 there is no hovering pointer to hold them open.
+
+**Tuning buttons.** Under the menu row is a full-width row of three:
+**−**, the step, and **+**. Each press moves the dial by the step shown, and
+tapping the step itself takes the next one — 10 Hz, 100 Hz, 500 Hz, 1, 2.5, 5,
+9, 10 and 25 kHz, then round again. It is remembered between sessions.
+
+This is the one thing a touched screen had no way to do (issue #380). A desktop
+tunes three ways and a phone has none of them: there is no wheel, so scrolling a
+digit on the readout is unreachable; tapping the panadapter lands where you
+tapped, which is a gesture nobody makes twice when the next station is 3 kHz
+away; and typing the whole frequency in to move one channel is data entry rather
+than tuning. Stepping in round amounts is what working down a band actually is.
+
+The row costs one button's height of waterfall, so it can be switched off:
+**Settings → UI → Tuning buttons**. It is never drawn on a desktop, which has
+the wheel and the readout's own per-digit scrolling.
 
 **On a phone** the readout shrinks too, and the A/B selector and the other VFO's
 frequency move into the **VFO** menu; a small `A` or `B` before the digits says
