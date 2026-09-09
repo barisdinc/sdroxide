@@ -5850,10 +5850,13 @@ impl Engine {
         if freq <= 0.0 {
             return;
         }
+        // Not `as u32`: that saturates, and a QO-100 station heard on
+        // 10489.540 MHz would be reported as 4.295 GHz — a frequency on no
+        // band, which is why those reports never reached the map (issue #378).
         self.spots.psk_report(sdroxide_net::PskReport {
             call: call.to_string(),
             grid: grid.to_string(),
-            freq_hz: freq as u32,
+            freq_hz: (freq as u64).min(sdroxide_net::MAX_PSK_REPORT_HZ),
             snr_db: snr_db.clamp(-128, 127) as i8,
             mode: self.digi.as_ref().map(|d| d.mode().label().to_string()).unwrap_or_default(),
             when_utc: slot_utc.max(0) as u32,
