@@ -156,13 +156,25 @@ fn a_dial_already_on_one_of_the_modes_frequencies_is_left_alone() {
 
 #[test]
 fn a_band_with_no_convention_keeps_its_dial() {
-    // 11 m is not an amateur band and nothing in the table is anywhere near
-    // it; 15 MHz is WWV, in no band at all. Both are frequencies the operator
-    // chose, and neither is a reason to throw them into the nearest ham band.
-    assert_dial(27_185_000.0, Mode::Ft8, 27_185_000.0, "the CB channels");
+    // 15 MHz is WWV, in no band at all: a frequency the operator chose, and no
+    // reason to throw them into the nearest ham band.
     assert_dial(15_000_000.0, Mode::Ft8, 15_000_000.0, "WWV");
+    // 26.5 MHz is inside no band either — 11 m starts at 26.965 (issue #396).
+    assert_dial(26_500_000.0, Mode::Ft8, 26_500_000.0, "below the citizens' band");
     // 60 m has no FT8 convention in this table even though it is a band.
     assert_dial(5_357_000.0, Mode::Ft8, 5_357_000.0, "60 m");
+}
+
+/// Issue #396: 11 m is not an amateur band, but it *does* have digimode
+/// channels its operators agreed on, and selecting a mode there lands on the
+/// mode's channel exactly as it does on 20 m. Channel 19 is where a CB radio
+/// idles; channel 26 is where the FT8 is.
+#[test]
+fn the_citizens_band_has_conventions_of_its_own() {
+    assert_dial(27_185_000.0, Mode::Ft8, 27_265_000.0, "11 m FT8 (ch 26)");
+    assert_dial(27_185_000.0, Mode::Js8, 27_245_000.0, "11 m JS8 (ch 25)");
+    // ...and a mode with no 11 m channel is left where the operator put it.
+    assert_dial(27_185_000.0, Mode::Ft4, 27_185_000.0, "11 m has no FT4 channel");
 }
 
 #[test]
