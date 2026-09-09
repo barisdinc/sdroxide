@@ -1181,10 +1181,22 @@ service — and there the second is what makes the device reachable:
 ```sh
 sudo groupadd -f plugdev
 sudo usermod -aG plugdev $USER
+sudo udevadm control --reload
 ```
 
 then log out and back in. This applies to every radio below, not just the
 RTL-SDR.
+
+The `udevadm control --reload` is not redundant even if you already ran it when
+installing the rules: udev resolves `GROUP=` when it *parses* a rule, not when
+a device appears, so a `plugdev` created afterwards is invisible to rules
+already loaded. Creating the group first and reloading second works too — the
+order that does not work is creating it and never reloading.
+
+If the group does not exist you lose nothing but that fallback; the `uaccess`
+ACL is on a separate line in every packaged rule precisely so that an unknown
+group cannot take it down with it. `plugdev` ships on Debian and Ubuntu but not
+on Arch or Fedora, where the ACL alone is normally all you need.
 
 **Windows.** The dongle must be bound to **WinUSB**, which you do once with
 [Zadig](https://zadig.akeo.ie/). This is the same step SDR#, gqrx and every
