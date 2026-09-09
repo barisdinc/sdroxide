@@ -33,7 +33,11 @@ impl SdroxideApp {
             ui.label(RichText::new("starting the AtCHAT NET station…").weak());
             return;
         };
-        let tx_ok = self.tx_capable();
+        // On the virtual TCP channel nothing keys a transmitter, so sending a
+        // line or a file needs no TX-capable radio — only the on-air path does.
+        // Gate SEND on that, not on [`tx_capable`] alone, or a radio-less dev
+        // station can join the net but never speak on it.
+        let can_send = self.tx_capable() || st.virtual_addr.is_some();
 
         self.atchat_header(ui, cmds, &st);
         ui.add_space(6.0);
@@ -45,7 +49,7 @@ impl SdroxideApp {
                     if pane.is_none() {
                         ui.set_width(ui.available_width() * 0.56);
                     }
-                    self.atchat_chat_pane(ui, cmds, &st, panel_h, tx_ok);
+                    self.atchat_chat_pane(ui, cmds, &st, panel_h, can_send);
                 });
             }
             if pane.is_none() {
@@ -53,7 +57,7 @@ impl SdroxideApp {
             }
             if pane.is_none_or(|p| p == 1) {
                 ui.vertical(|ui| {
-                    self.atchat_files_pane(ui, cmds, &st, panel_h, tx_ok);
+                    self.atchat_files_pane(ui, cmds, &st, panel_h, can_send);
                 });
             }
         });
@@ -176,7 +180,7 @@ impl SdroxideApp {
         cmds: &mut Vec<Command>,
         st: &AtChatStatus,
         panel_h: f32,
-        tx_ok: bool,
+        can_send: bool,
     ) {
         // Open a DM tab for any incoming private line newer than the newest we
         // have already turned into a tab for that peer. Closing a tab does not
@@ -225,49 +229,74 @@ impl SdroxideApp {
                         self.atchat_dm_tabs.push(r.call.clone());
                     }
                     self.atchat_chat_tab = Some(r.call.clone());
+                    self.atchat_show_log = false;
                 }
             }
         });
         ui.add_space(4.0);
 
-        // Tab row: CHAT (common) + one closable tab per DM correspondent.
+        // Tab row: CHAT (common), one closable tab per DM correspondent, and a
+        // permanent LOG tab last. A framed strip sets the tabs apart from the
+        // roster above and the transcript below.
         let mut to_close: Option<String> = None;
-        ui.horizontal_wrapped(|ui| {
-            if crate::chrome::chip(
-                ui,
-                self.atchat_chat_tab.is_none(),
-                RichText::new(" CHAT ").size(10.5),
-            )
-            .on_hover_text("The common channel — lines here go to everyone (ALL)")
-            .clicked()
-            {
-                self.atchat_chat_tab = None;
-            }
-            for peer in self.atchat_dm_tabs.clone() {
-                let active = self.atchat_chat_tab.as_deref() == Some(peer.as_str());
-                // Unread when the newest incoming line from this peer is newer
-                // than the last one seen while its tab was open.
-                let newest_in = st
-                    .chat
-                    .iter()
-                    .filter(|c| c.private && !c.own && c.from == peer)
-                    .map(|c| c.when)
-                    .max()
-                    .unwrap_or(0);
-                let unread = !active && newest_in > self.atchat_dm_read.get(&peer).copied().unwrap_or(0);
-                let face = if unread { format!("● {peer} ") } else { format!(" {peer} ") };
-                if crate::chrome::chip(ui, active, RichText::new(face).size(10.5)).clicked() {
-                    self.atchat_chat_tab = Some(peer.clone());
-                }
-                if ui
-                    .add(egui::Label::new(RichText::new("✕").size(9.5).color(theme::gray(130))).sense(egui::Sense::click()))
-                    .on_hover_text(format!("close the {peer} tab"))
-                    .clicked()
-                {
-                    to_close = Some(peer.clone());
-                }
-            }
-        });
+        // A `Frame` auto-sizes by measuring its content with unbounded width, so
+        // the wrapped row inside would never wrap. Pin it to the width there is.
+        let strip_w = (ui.available_width() - 12.0).max(80.0);
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, theme::CYAN_DIM()))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.set_min_width(strip_w);
+                ui.set_max_width(strip_w);
+                ui.horizontal_wrapped(|ui| {
+                    let chat_active = !self.atchat_show_log && self.atchat_chat_tab.is_none();
+                    if crate::chrome::chip(ui, chat_active, RichText::new(" CHAT ").size(10.5))
+                        .on_hover_text("The common channel — lines here go to everyone (ALL)")
+                        .clicked()
+                    {
+                        self.atchat_chat_tab = None;
+                        self.atchat_show_log = false;
+                    }
+                    for peer in self.atchat_dm_tabs.clone() {
+                        let active = !self.atchat_show_log
+                            && self.atchat_chat_tab.as_deref() == Some(peer.as_str());
+                        // Unread when the newest incoming line from this peer is
+                        // newer than the last one seen while its tab was open.
+                        let newest_in = st
+                            .chat
+                            .iter()
+                            .filter(|c| c.private && !c.own && c.from == peer)
+                            .map(|c| c.when)
+                            .max()
+                            .unwrap_or(0);
+                        let unread = !active
+                            && newest_in > self.atchat_dm_read.get(&peer).copied().unwrap_or(0);
+                        let face = if unread { format!("● {peer} ") } else { format!(" {peer} ") };
+                        if crate::chrome::chip(ui, active, RichText::new(face).size(10.5)).clicked() {
+                            self.atchat_chat_tab = Some(peer.clone());
+                            self.atchat_show_log = false;
+                        }
+                        if ui
+                            .add(egui::Label::new(RichText::new("✕").size(9.5).color(theme::gray(130))).sense(egui::Sense::click()))
+                            .on_hover_text(format!("close the {peer} tab"))
+                            .clicked()
+                        {
+                            to_close = Some(peer.clone());
+                        }
+                    }
+                    ui.separator();
+                    if crate::chrome::chip(ui, self.atchat_show_log, RichText::new(" LOG ").size(10.5))
+                        .on_hover_text(
+                            "The station's own on-air activity — master election, \
+                             roster ageing, ARQ retries",
+                        )
+                        .clicked()
+                    {
+                        self.atchat_show_log = true;
+                    }
+                });
+            });
         if let Some(peer) = to_close {
             self.atchat_dm_tabs.retain(|p| p != &peer);
             if self.atchat_chat_tab.as_deref() == Some(peer.as_str()) {
@@ -276,16 +305,33 @@ impl SdroxideApp {
         }
         ui.add_space(4.0);
 
-        // Transcript for the active tab.
+        // Transcript for the active tab — or the on-air activity log when the
+        // LOG tab is up.
+        let show_log = self.atchat_show_log;
         let active = self.atchat_chat_tab.clone();
-        let salt = active.clone().unwrap_or_else(|| "__common__".into());
-        let input_h = 30.0;
+        let salt = if show_log {
+            "__log__".to_string()
+        } else {
+            active.clone().unwrap_or_else(|| "__common__".into())
+        };
+        let input_h = if show_log { 0.0 } else { 30.0 };
         egui::ScrollArea::vertical()
             .id_salt(("atchat-chat", salt))
             .max_height((panel_h - 128.0 - input_h).max(60.0))
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if show_log {
+                    if st.log.is_empty() {
+                        ui.label(RichText::new("No activity logged yet.").weak());
+                    }
+                    for line in &st.log {
+                        ui.label(
+                            RichText::new(line).monospace().size(10.0).color(theme::gray(150)),
+                        );
+                    }
+                    return;
+                }
                 let mut shown = 0usize;
                 for c in &st.chat {
                     let in_tab = match &active {
@@ -314,6 +360,11 @@ impl SdroxideApp {
                 }
             });
 
+        // Nothing to type on while the LOG tab is up — it is read-only.
+        if show_log {
+            return;
+        }
+
         // Viewing a DM tab marks it read up to its newest incoming line.
         if let Some(peer) = &active {
             let newest_in = st
@@ -340,7 +391,7 @@ impl SdroxideApp {
                     .hint_text(hint),
             );
             send |= resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if tx_gated(ui, tx_ok, |ui| {
+            if tx_gated(ui, can_send, |ui| {
                 crate::chrome::chip_accent(
                     ui,
                     false,
@@ -355,7 +406,7 @@ impl SdroxideApp {
             }
         });
 
-        if send && tx_ok && !self.atchat_draft.trim().is_empty() {
+        if send && can_send && !self.atchat_draft.trim().is_empty() {
             cmds.push(Command::AtChatSendChat {
                 to: self.atchat_target(),
                 text: self.atchat_draft.trim().to_string(),
@@ -371,7 +422,7 @@ impl SdroxideApp {
         cmds: &mut Vec<Command>,
         st: &AtChatStatus,
         panel_h: f32,
-        tx_ok: bool,
+        can_send: bool,
     ) {
         let target = self.atchat_target();
         ui.horizontal_wrapped(|ui| {
@@ -387,7 +438,7 @@ impl SdroxideApp {
             )
             .on_hover_text("A sent file follows the active chat tab");
             crate::chrome::row_tail(ui, |ui| {
-                if tx_gated(ui, tx_ok, |ui| {
+                if tx_gated(ui, can_send, |ui| {
                     crate::chrome::chip(ui, false, RichText::new(" SEND FILE ").size(10.0))
                 })
                 .on_hover_text("Send a file or image over the air, block-CRC-ARQ")

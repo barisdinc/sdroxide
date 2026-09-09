@@ -552,6 +552,11 @@ pub struct SdroxideApp {
     /// AtCHAT: the selected chat tab. `None` is the common "CHAT" tab (lines go
     /// to ALL); `Some(call)` is that station's direct-message tab.
     atchat_chat_tab: Option<String>,
+    /// AtCHAT: the permanent LOG tab is up — the transcript area shows the
+    /// station's on-air activity log instead of a conversation. Takes
+    /// precedence over [`Self::atchat_chat_tab`] while set; any other tab
+    /// click clears it.
+    atchat_show_log: bool,
     /// AtCHAT: newest incoming direct-message timestamp already turned into a
     /// tab, per peer — so closing a tab does not make an old message reopen it.
     atchat_dm_seen: std::collections::HashMap<String, u64>,
@@ -1349,6 +1354,7 @@ impl SdroxideApp {
             atchat_draft: String::new(),
             atchat_dm_tabs: Vec::new(),
             atchat_chat_tab: None,
+            atchat_show_log: false,
             atchat_dm_seen: std::collections::HashMap::new(),
             atchat_dm_read: std::collections::HashMap::new(),
             atchat_img_at: 0,
