@@ -81,10 +81,14 @@ impl Tracker {
     /// Fold one decoded message into the table.
     pub fn absorb(&mut self, d: &Decoded, now: i64) {
         let m = &d.message;
-        // MMSI 0 is what a transmitter sends before it has been programmed, and
-        // it is not a station: several of them would share one row and drag it
-        // across the sea.
-        if m.mmsi == 0 {
+        // An MMSI that is not one of ITU-R M.585's formats was not sent by a
+        // station. MMSI 0 — what a transmitter sends before it has been
+        // programmed — is the obvious case, and several of them would share one
+        // row and drag it across the sea; the rest are frames a slot collision
+        // manufactured and a sixteen-bit check sequence failed to catch. See
+        // [`sdroxide_types::mmsi_is_identity`] for why sixteen bits is not
+        // enough and why the identity is what gives those away.
+        if !sdroxide_types::mmsi_is_identity(m.mmsi) {
             return;
         }
         // A message of a type this crate does not interpret carries an MMSI and,
@@ -437,6 +441,32 @@ mod tests {
         assert_eq!(t.len(), 1, "MMSI zero was given a row");
     }
 
+    /// Issue #400: two "base stations" steaming about the Pacific at anchor,
+    /// reported for twenty minutes from a receiver on Lake Erie. Both had a
+    /// five-digit MMSI, which no station has — the frames came out of a slot
+    /// collision and got past a sixteen-bit check sequence, and because the
+    /// collision repeated so did they.
+    ///
+    /// The identity is what refuses them: `000049613` has `004` where a
+    /// `00MIDXXXX` coast station carries its country, and ITU has never
+    /// allocated `004` to anybody.
+    #[test]
+    fn a_number_that_is_not_an_identity_is_not_a_station() {
+        let mut t = Tracker::new(AisSettings::default());
+        for ghost in [49_613u32, 65_216] {
+            feed(&mut t, position(ghost, 6.3992, 156.38967), 1_000);
+        }
+        assert!(t.is_empty(), "a collision was drawn as {} station(s)", t.len());
+        assert_eq!(AisKind::from_mmsi(49_613), None, "and it is not labelled a base station");
+
+        // The real shore stations of the same lake are not touched: 00 316 xxxx
+        // is a Canadian coast station and 316 xxx xxx a Canadian ship.
+        feed(&mut t, position(3_160_021, 42.9, -79.6), 1_000);
+        feed(&mut t, position(316_001_234, 42.5, -79.9), 1_000);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.snapshot()[0].kind, AisKind::BaseStation);
+    }
+
     /// A message that says nothing about a field must not erase what an earlier
     /// one said. A Class B unit reports its position without a name every
     /// thirty seconds and its name every six minutes.
@@ -460,12 +490,12 @@ mod tests {
         let cfg = AisSettings { max_vessels: 10, ..AisSettings::default() }.sane();
         let mut t = Tracker::new(cfg);
         for k in 0..20u32 {
-            feed(&mut t, position(200_000_000 + k, 52.0, 4.0), 1_000 + i64::from(k));
+            feed(&mut t, position(201_000_000 + k, 52.0, 4.0), 1_000 + i64::from(k));
         }
         t.expire(1_020);
         assert_eq!(t.len(), 10);
         let mmsis: Vec<u32> = t.snapshot().iter().map(|v| v.mmsi).collect();
-        assert!(mmsis.contains(&200_000_019));
-        assert!(!mmsis.contains(&200_000_000));
+        assert!(mmsis.contains(&201_000_019));
+        assert!(!mmsis.contains(&201_000_000));
     }
 }

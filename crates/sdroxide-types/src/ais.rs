@@ -147,13 +147,90 @@ pub enum AisKind {
     Craft,
 }
 
+/// The lowest and highest Maritime Identification Digits ITU has ever
+/// allocated — the country code buried in almost every MMSI format.
+///
+/// 2xx Europe, 3xx North America, Central America and the Caribbean, 4xx Asia,
+/// 5xx Oceania, 6xx Africa, 7xx South America. Nothing below 201 or above 775
+/// has been assigned to anybody, and the numbers in between that are still
+/// spare are a moving target not worth tabulating: what matters here is that
+/// the field is a country and not three digits of noise.
+///
+/// Source: ITU-R M.585-9 Annex 1, and the ITU's MID list.
+pub const MMSI_MID_MIN: u32 = 201;
+/// See [`MMSI_MID_MIN`].
+pub const MMSI_MID_MAX: u32 = 775;
+
+/// True if `mid` is in the range ITU allocates country codes from.
+fn is_mid(mid: u32) -> bool {
+    (MMSI_MID_MIN..=MMSI_MID_MAX).contains(&mid)
+}
+
+/// True if `mmsi` is an identity ITU-R M.585 defines *and* one a station can
+/// transmit from.
+///
+/// # Why a decoder needs this at all
+///
+/// The only thing standing between a burst of interference and a target on the
+/// chart is a sixteen-bit frame check sequence, and sixteen bits is not very
+/// many. AIS is self-organising TDMA with no collision detection, so two
+/// stations out of range of each other reuse the same slot and go on doing so
+/// for as long as they are both there — the hidden-node case the standard
+/// accepts by design. A receiver in the middle hears the pair welded together
+/// every time round, and once in about sixty-five thousand of those the wreck
+/// checks out. Because the collision *repeats*, so does the frame: one lucky
+/// check sequence becomes a station that reports for hours, drifting about the
+/// map as the noise on it changes. That is what issue #400 saw — two of them,
+/// steaming about in the Pacific at anchor.
+///
+/// What gives them away is the identity. An MMSI is nine digits with a
+/// structure, and a number pulled out of a collision has no reason to have one:
+/// both of the ones reported were five digits long. So a message from a number
+/// that is not an identity is not a message — no station could have sent it,
+/// whatever its check sequence came out as.
+///
+/// Source: ITU-R M.585-9 (assignment and use of maritime identities).
+#[must_use]
+pub fn mmsi_is_identity(mmsi: u32) -> bool {
+    match mmsi {
+        // 111MIDXXX — SAR aircraft.
+        111_000_000..=111_999_999 => is_mid(mmsi / 1_000 % 1_000),
+        // MIDXXXXXX — a ship station, the ordinary case.
+        200_000_000..=799_999_999 => is_mid(mmsi / 1_000_000),
+        // 8MIDXXXXX — a handheld VHF set with DSC and a GNSS receiver.
+        800_000_000..=899_999_999 => is_mid(mmsi / 100_000 % 1_000),
+        // 970yyxxxx / 972yyxxxx / 974yyxxxx — AIS-SART, man-overboard beacon
+        // and EPIRB-AIS. These carry a manufacturer number where everything
+        // else carries a country, so there is no MID in them to check; the
+        // three-digit prefix is the whole of their format.
+        970_000_000..=970_999_999 | 972_000_000..=972_999_999 | 974_000_000..=974_999_999 => true,
+        // 98MIDXXXX — a craft associated with a parent ship. 99MIDXXXX — an
+        // aid to navigation.
+        980_000_000..=999_999_999 => is_mid(mmsi / 10_000 % 1_000),
+        // 00MIDXXXX — a coast or base station.
+        0..=9_999_999 => is_mid(mmsi / 10_000),
+        // 0MIDXXXXX is a group of ships: an address to call, not a station,
+        // and nothing transmits from one. Everything else — 1xx that is not
+        // 111, 9xx that is not 97/98/99 — is unallocated.
+        _ => false,
+    }
+}
+
 impl AisKind {
     /// What the MMSI's own format says, where it says anything.
     ///
     /// ITU-R M.585 reserves whole prefixes, and those are worth more than the
     /// message a station happened to send: a base station that has only ever
     /// been heard sending a position report is still a base station.
+    ///
+    /// A prefix only counts where the country code inside it counts too —
+    /// `000049613` matches `00MIDXXXX` on its first two digits and has `004`
+    /// where the MID belongs, so calling it a base station labels a decoding
+    /// accident as the shore. See [`mmsi_is_identity`].
     pub fn from_mmsi(mmsi: u32) -> Option<AisKind> {
+        if !mmsi_is_identity(mmsi) {
+            return None;
+        }
         match mmsi {
             // 970xxxxxx / 972xxxxxx / 974xxxxxx — SART, MOB, EPIRB-AIS.
             970_000_000..=970_999_999 | 972_000_000..=972_999_999 | 974_000_000..=974_999_999 => {
@@ -752,6 +829,37 @@ mod tests {
         // An ordinary ship's MMSI says nothing beyond the flag, so the message
         // it sent is what decides Class A from Class B.
         assert_eq!(AisKind::from_mmsi(244_660_000), None);
+    }
+
+    /// Issue #400: a number with no country in it is not an identity, and a
+    /// prefix alone is not enough to make one. `000049613` matches `00MIDXXXX`
+    /// on its two leading zeros and carries `004` where the MID belongs.
+    #[test]
+    fn a_number_with_no_country_in_it_is_not_an_identity() {
+        for real in [
+            244_660_000, // a Dutch ship
+            316_001_234, // a Canadian ship
+            3_160_021,   // a Canadian coast station
+            992_111_840, // a German aid to navigation
+            111_232_500, // a British SAR aircraft
+            982_345_678, // a British ship's tender
+            824_712_345, // an Italian handheld
+            970_123_456, // an AIS-SART, which has a maker's number, not a MID
+        ] {
+            assert!(mmsi_is_identity(real), "{real} is a station");
+        }
+        for wrong in [
+            0,           // never programmed
+            49_613,      // the first of issue #400's ghosts: 00 004 9613
+            65_216,      // and the second
+            100_000_000, // 1xx that is not 111MID
+            920_000_000, // 92x is not allocated
+            20_100_000,  // 0 201 00000 — a group of ships, which never sends
+            800_000_000, // 8 000 00000 — no country
+            200_000_000, // 200 is one below the first MID ITU ever handed out
+        ] {
+            assert!(!mmsi_is_identity(wrong), "{wrong} is not a station");
+        }
     }
 
     /// The map's clock and the list's clock are not the same clock, and a
