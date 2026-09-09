@@ -109,13 +109,63 @@ impl Band {
     ];
 
     /// This band's place in [`Band::ALL`] — the order the bands are shown in,
-    /// and a stable index for a table with one entry per band.
+    /// and an index for a table with one entry per band that is built and used
+    /// within one run.
     ///
     /// Not the declaration order, which is the postcard wire order and has 70
     /// cm, 4 m and 1.25 m appended out of place; [`Band::ALL`] is the order an
     /// operator reads.
+    ///
+    /// ⚠️ Stable within a build and **not** across them: a band added between
+    /// two others moves every band after it. Anything *stored* has to use
+    /// [`Band::wire_index`] instead.
     pub fn index(self) -> usize {
         Band::ALL.iter().position(|b| *b == self).unwrap_or(Band::ALL.len() - 1)
+    }
+
+    /// Every band in *declaration* order — which is the order postcard numbers
+    /// the variants in, and the order [`Band::wire_index`] counts.
+    ///
+    /// Append-only, forever. A new band goes on the end here and wherever it
+    /// belongs in [`Band::ALL`]; the two lists are deliberately different.
+    const DECLARED: [Band; 23] = [
+        Band::M160,
+        Band::M80,
+        Band::M60,
+        Band::M40,
+        Band::M30,
+        Band::M20,
+        Band::M17,
+        Band::M15,
+        Band::M12,
+        Band::M10,
+        Band::M6,
+        Band::M2,
+        Band::Gen,
+        Band::M70,
+        Band::M4,
+        Band::M125,
+        Band::Cm33,
+        Band::Cm23,
+        Band::Cm13,
+        Band::Cm9,
+        Band::Cm6,
+        Band::Cm3,
+        Band::M11,
+    ];
+
+    /// This band's position in the *declaration* order, which is append-only
+    /// and therefore means the same thing in every release.
+    ///
+    /// The index anything **saved** has to be keyed on. [`Band::index`] is the
+    /// order the band bar is read in, and a band added in the middle of it —
+    /// 11 m, between 12 m and 10 m — moves every band above it by one. That is
+    /// free for a table built at startup and wrong for a bitmask in a file: the
+    /// WSPR hop set is one, and keyed on the bar's order it would come back
+    /// after an upgrade selecting a different set of bands than the operator
+    /// chose (issue #396).
+    pub fn wire_index(self) -> usize {
+        Band::DECLARED.iter().position(|b| *b == self).unwrap_or(0)
     }
 
     /// The band's name, as the station's configured region writes it.
@@ -455,6 +505,45 @@ mod tests {
         assert!(Band::M11.index() < Band::M10.index());
         // Channel 25, the digital calling channel, and inside the band.
         assert_eq!(Band::M11.default_entry(), (27_245_000.0, crate::Mode::Usb));
+    }
+
+    /// The stored index is the declaration order, which is append-only: the
+    /// nine bands a WSPR hop mask can name have to keep the bit positions they
+    /// have had since the setting existed, or an upgrade silently rearranges
+    /// somebody's hop cycle (issue #396).
+    #[test]
+    fn the_wire_index_is_the_declaration_order_and_never_moves() {
+        // A bijection onto 0..N, so no two bands share a bit and none is
+        // unreachable.
+        let mut seen = vec![false; Band::ALL.len()];
+        for b in Band::ALL {
+            let i = b.wire_index();
+            assert!(!seen[i], "{b:?} shares index {i}");
+            seen[i] = true;
+        }
+        assert!(seen.iter().all(|s| *s));
+        // And the positions that are actually in a saved file are the ones the
+        // first release had, in that order.
+        for (i, b) in [
+            Band::M160,
+            Band::M80,
+            Band::M60,
+            Band::M40,
+            Band::M30,
+            Band::M20,
+            Band::M17,
+            Band::M15,
+            Band::M12,
+            Band::M10,
+            Band::M6,
+            Band::M2,
+            Band::Gen,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(b.wire_index(), i, "{b:?} moved");
+        }
     }
 
     /// Region 1 is the default, and it must still be exactly the band table

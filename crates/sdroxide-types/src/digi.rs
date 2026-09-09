@@ -1877,11 +1877,15 @@ fn wspr_default_hop_bands() -> u16 {
     // 80/40/30/20/17/15/12/10 — the bands with a WSPR dial and enough traffic
     // to be worth a slot. 160 m is left out of the default cycle because it is
     // dead by day, and adding it costs a whole slot every time round.
+    //
+    // Bit positions are `Band::wire_index`, the declaration order, because this
+    // is a *saved* mask: the band bar's order moves when a band is added in the
+    // middle of it, and a stored mask read back against the new order would
+    // select bands the operator never chose (issue #396).
     use crate::Band;
     [Band::M80, Band::M40, Band::M30, Band::M20, Band::M17, Band::M15, Band::M12, Band::M10]
         .iter()
-        .filter_map(|b| Band::ALL.iter().position(|x| x == b))
-        .fold(0u16, |m, i| m | (1 << i))
+        .fold(0u16, |m, b| m | (1 << b.wire_index()))
 }
 
 /// Default for [`DigiConfig::sstv_banner_left`] — the operator's own callsign,

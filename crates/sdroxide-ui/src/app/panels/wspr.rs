@@ -532,11 +532,12 @@ impl SdroxideApp {
                 let mut mask = self.digi_cfg_edit.wspr_hop_bands;
                 let mut hit = false;
                 // Only bands with a WSPR dial: the rest have nothing to hop to.
-                for (i, b) in Band::ALL.iter().enumerate() {
+                for b in Band::ALL.iter() {
                     if !sdroxide_types::WSPR_DIALS.iter().any(|&hz| Band::containing(hz) == *b) {
                         continue;
                     }
-                    let bit = 1u16 << i;
+                    // The saved order, not the bar's — see `Band::wire_index`.
+                    let bit = 1u16 << b.wire_index();
                     if crate::chrome::chip(ui, mask & bit != 0, RichText::new(b.label()).size(9.5))
                         .clicked()
                     {
