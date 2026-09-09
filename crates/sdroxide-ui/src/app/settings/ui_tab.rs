@@ -92,6 +92,17 @@ pub(in crate::app) fn settings_ui_tab(
             });
         ui.end_row();
 
+        ui.label("Waterfall smoothing");
+        crate::chrome::checkbox(ui, &mut cfg.waterfall_smooth, "Interpolate").on_hover_text(
+            "Blend each screen pixel with the bins and rows around it, so a signal looks \
+                 continuous where the display is wider than the transform. Turn it off for a \
+                 rectangular waterfall — one block per bin, one per row — which is what \
+                 reading a signal's shape off the picture needs: an interpolated signal cannot \
+                 be told apart from a genuinely wider one. A bigger FFT (the FFT chip) is the \
+                 other half of that.",
+        );
+        ui.end_row();
+
         ui.label("Spectrum background");
         ui.horizontal(|ui| {
             crate::chrome::checkbox(ui, &mut cfg.spectrum_gradient, "Gradient");

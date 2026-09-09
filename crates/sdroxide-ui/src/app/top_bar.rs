@@ -4835,20 +4835,34 @@ impl SdroxideApp {
     /// [`Self::skimmer_controls`] for why a menu cannot use the popup.
     fn spectrum_controls(&mut self, ui: &mut egui::Ui) {
         crate::chrome::menu_caption(ui, "Spectrum");
+        // Rails, not spinners. These are the two controls an operator moving
+        // between band segments touches constantly, and a number box has to be
+        // dragged by the digit or typed into — so the picture arrived at the
+        // level it was left at and had to be re-fitted by hand every time
+        // (issue #375). A slider is one grab from either stop, and the FIT chip
+        // above sets both at once from what is on screen.
         ui.horizontal(|ui| {
             ui.label("floor");
-            ui.add(
-                DragValue::new(&mut self.view.db_floor)
-                    .speed(1.0)
-                    .range(-160.0..=-40.0)
-                    .suffix(" dB"),
+            crate::chrome::slider(
+                ui,
+                Slider::new(&mut self.view.db_floor, -160.0..=-40.0)
+                    .show_value(true)
+                    .custom_formatter(|v, _| format!("{v:.0} dB")),
+            )
+            .on_hover_text(
+                "The level drawn at the bottom of the spectrum and as the darkest waterfall                  colour. Bring it up until the noise floor just darkens.",
             );
-            ui.label("ceil");
-            ui.add(
-                DragValue::new(&mut self.view.db_ceil)
-                    .speed(1.0)
-                    .range(-100.0..=20.0)
-                    .suffix(" dB"),
+        });
+        ui.horizontal(|ui| {
+            ui.label("ceil ");
+            crate::chrome::slider(
+                ui,
+                Slider::new(&mut self.view.db_ceil, -100.0..=20.0)
+                    .show_value(true)
+                    .custom_formatter(|v, _| format!("{v:.0} dB")),
+            )
+            .on_hover_text(
+                "The level drawn at the top. Bring it down until the strongest signal you                  care about reaches full colour.",
             );
         });
         // Chips rather than a ComboBox: the combo opens a second popup

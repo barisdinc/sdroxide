@@ -457,6 +457,16 @@ pub struct UiSettings {
     pub spectrum_3d_speed: Speed,
     /// Waterfall colour palette, as an index into the client's palette list.
     pub waterfall_palette: usize,
+    /// Whether the waterfall's history is drawn through a smoothing filter.
+    ///
+    /// On — the default, and what it has always done — each screen pixel is
+    /// interpolated between the bins and rows around it, which is what makes a
+    /// signal look continuous when the display is wider than the transform. Off
+    /// draws every bin and every row as the block it is, which is what a
+    /// listener reading a signal's *signature* off the waterfall wants: an
+    /// interpolated picture cannot be told apart from a genuinely wider signal
+    /// (issue #375).
+    pub waterfall_smooth: bool,
     /// How many columns the panadapter and its waterfall are drawn with.
     ///
     /// This screen's preference, like the frame rate above it and for the same
@@ -640,6 +650,7 @@ impl Default for UiSettings {
             spectrum_speed: Speed::Medium,
             spectrum_3d_speed: Speed::Medium,
             waterfall_palette: 0,
+            waterfall_smooth: true,
             spectrum_detail: SpectrumDetail::Auto,
             spectrum_gradient: true,
             gradient_top: [64, 0, 0],   // dark red

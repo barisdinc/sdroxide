@@ -914,7 +914,11 @@ reaching for the other aerial do not mean opening a dialog.
 
 **FFT module:**
 
-- **floor** / **ceil** — the waterfall's dB range.
+- **floor** / **ceil** — the waterfall's dB range, one slider each. Bring the
+  floor up until the noise just darkens and the ceiling down until the strongest
+  signal you care about reaches full colour; **FIT** above does both at once
+  from what is on screen, which is the quicker answer when a band change has
+  moved the whole picture.
 - **FFT** size — `2048`, `4096`, `8192`, `16384`, `32768`, `65536` or `131072`.
   This is the FFT over the *whole* of what the radio streams, and the panadapter
   grows it with the zoom until it runs out.
@@ -10397,6 +10401,15 @@ spoken announcements below them under `[speech]`:
   [§2.8](#28-the-display-and-fft-controls).
 - **Waterfall palette** — the waterfall colour scheme (see
   [2.8](#28-the-display-and-fft-controls) and the [appendix](#waterfall-colour-schemes)).
+- **Waterfall smoothing** — on by default. Every screen pixel is blended with
+  the bins and rows around it, which is what makes a signal look continuous
+  where the display is wider than the transform. Untick **Interpolate** for a
+  rectangular waterfall — one block per bin, one per row — which is what reading
+  a signal's *signature* off the picture needs: an interpolated signal cannot be
+  told apart from a genuinely wider one, and the smoothing is why a waterfall
+  can look lower-resolution than the transform behind it really is. A bigger FFT
+  (the **FFT** chip, [2.8](#28-the-display-and-fft-controls)) is the other half
+  of that, and the two are worth setting together.
 - **Spectrum background** — a vertical gradient behind the spectrum line, filled
   from the **top** colour down to the **bottom** colour (default dark red →
   black). Untick **Gradient** for a plain background.
@@ -14726,5 +14739,9 @@ have are not offered.
 `Classic` (PowerSDR-style), `Viridis`, `Gray`, `Icom` (Icom-style palette,
 peaking at red with no white blow-out), `Neon`, `Synthwave`, `Matrix`, `Tron`,
 `Amber` (one warm phosphor family, to wear with the **Amber Phosphor** UI
-theme) and `Rainbow` (the full spectrum in order, to wear with the **Rainbow**
-UI theme). Chosen on the **UI** tab of the Settings window ([6.3](#63-ui-display-preferences-and-voice-announcements)).
+theme), `Rainbow` (the full spectrum in order, to wear with the **Rainbow**
+UI theme) and `Blue` — the traditional blue waterfall SDR# has used since the
+beginning and SDR++ inherited: a navy floor rather than a black one, so the
+noise keeps its texture, and a top half that runs white, yellow, orange and two
+shades of red where the other ramps have already saturated. Chosen on the **UI**
+tab of the Settings window ([6.3](#63-ui-display-preferences-and-voice-announcements)).

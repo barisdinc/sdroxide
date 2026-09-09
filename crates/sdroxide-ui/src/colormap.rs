@@ -1,6 +1,6 @@
 //! Waterfall colormap LUTs: 256×1 RGBA8.
 
-pub const NAMES: [&str; 10] = [
+pub const NAMES: [&str; 11] = [
     "Classic",
     "Viridis",
     "Gray",
@@ -11,6 +11,7 @@ pub const NAMES: [&str; 10] = [
     "Tron",
     "Amber",
     "Rainbow",
+    "Blue",
 ];
 
 /// Piecewise-linear gradient through (position, RGB) anchor points.
@@ -136,6 +137,25 @@ pub fn lut(index: usize) -> [u8; 256 * 4] {
             (0.80, [255, 180, 0]),
             (0.90, [255, 70, 30]),
             (1.00, [255, 255, 255]),
+        ]),
+        // Blue — the palette SDR# has used since the beginning and SDR++
+        // inherited, and what most operators mean by "the traditional blue
+        // waterfall" (issue #375). Two things set it apart from Classic above:
+        // the floor is a navy rather than black, so the noise still has visible
+        // texture in it instead of going flat, and the top half runs white →
+        // yellow → orange → red → dark red, which puts *two* readable steps
+        // above the point where every other ramp here has already saturated.
+        10 => gradient(&[
+            (0.00, [0, 0, 32]),
+            (0.15, [0, 0, 80]),
+            (0.28, [0, 0, 145]),
+            (0.38, [30, 144, 255]),
+            (0.46, [255, 255, 255]),
+            (0.54, [255, 255, 0]),
+            (0.66, [254, 109, 22]),
+            (0.78, [255, 0, 0]),
+            (0.89, [198, 0, 0]),
+            (1.00, [117, 0, 0]),
         ]),
         // Gray (index 2) and any out-of-range fallback.
         _ => gradient(&[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])]),

@@ -375,6 +375,9 @@ pub struct WfTuning {
     pub spectrum_alpha: f32,
     /// Waterfall colour-palette index (from `UiSettings`).
     pub palette: usize,
+    /// Whether the waterfall is interpolated between bins and rows — see
+    /// [`sdroxide_types::UiSettings::waterfall_smooth`].
+    pub smooth: bool,
     /// Rows a second the 3D spectrum flows away from the viewer, from the SPEC
     /// popup's **flow** row. Zero while the stream is stalled, which is what
     /// holds the surface still — the same rule that stops the waterfall
@@ -2187,6 +2190,7 @@ pub fn show_ext(
             lut: wf.palette,
             rows_to_write: wf.rows_to_write,
             flip: view.waterfall_flip,
+            smooth: wf.smooth,
             wf_id: wf.wf_id,
             tex_w: wf.tex_w,
         },

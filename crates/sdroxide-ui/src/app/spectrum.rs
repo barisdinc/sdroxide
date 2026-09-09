@@ -524,6 +524,7 @@ impl SdroxideApp {
             now_unix: self.wf_now_pin,
             spectrum_alpha,
             palette: s.waterfall_palette,
+            smooth: s.waterfall_smooth,
             gradient,
             wf_id: u64::from(self.radio_id),
         }
