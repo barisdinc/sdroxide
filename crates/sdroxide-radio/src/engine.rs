@@ -8514,6 +8514,11 @@ impl Engine {
                     d.set_sstv_mode(mode);
                 }
             }
+            SstvRestartRx => {
+                if let Some(d) = self.digi.as_mut() {
+                    d.sstv_restart_rx();
+                }
+            }
             WefaxStart => {
                 if let Some(d) = self.digi.as_mut() {
                     d.wefax_start();

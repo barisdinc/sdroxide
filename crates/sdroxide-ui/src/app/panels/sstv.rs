@@ -756,6 +756,34 @@ impl SdroxideApp {
                                     ui.label(RichText::new("listening…").size(10.0).weak());
                                 }
 
+                                // Issue #397. A receiver that has locked on is
+                                // committed for the whole length of the mode it
+                                // locked on to, and Scottie DX is four and a
+                                // half minutes — so a VIS misread as a slow
+                                // mode costs every picture sent while it runs
+                                // out. On QO-100, where one station follows
+                                // another over the same transponder, that is
+                                // the next few overs.
+                                //
+                                // Offered whether or not a picture is under
+                                // way: re-arming an idle hunt costs nothing,
+                                // and a chip that appears only once the mistake
+                                // has been made is one the operator has to find
+                                // in a hurry. The half-picture goes with it,
+                                // here as well as in the decoder — leaving the
+                                // abandoned frame on screen would say the
+                                // button had not worked.
+                                if crate::chrome::chip(ui, false, "Restart RX")
+                                    .on_hover_text(
+                                        "Abandon the picture being received and listen for the                                          next header. For a transmission that started decoding                                          in the wrong mode — the receiver is otherwise committed                                          until that mode runs out.",
+                                    )
+                                    .clicked()
+                                {
+                                    cmds.push(Command::SstvRestartRx);
+                                    self.sstv.rx_color = None;
+                                    self.sstv.rx_tex = None;
+                                }
+
                                 // Who sent it. The FSK ID arrives in tones a
                                 // fraction of a second after the picture, which
                                 // is exactly when the operator is looking at the

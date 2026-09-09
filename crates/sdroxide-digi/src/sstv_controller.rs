@@ -307,6 +307,28 @@ impl DigiEngine for SstvController {
         self.status_dirty = true;
     }
 
+    /// Abandon the picture being received and listen for the next header.
+    ///
+    /// The partial image is dropped rather than emitted: half a picture in the
+    /// wrong mode is not a picture, and filing one would put it in the gallery
+    /// beside the real ones. `image_id` still moves on, so a scanline of the
+    /// abandoned frame that is already in flight to a remote client lands on a
+    /// canvas nothing else is using instead of on the next station's picture.
+    ///
+    /// The operator's mode selection is left alone — this is not a way to get
+    /// back to Auto — and so is the callsign heard from the last FSK ID, which
+    /// belongs to a station rather than to a frame.
+    fn sstv_restart_rx(&mut self) {
+        self.rx.restart();
+        self.image_id = self.image_id.wrapping_add(1);
+        self.rx_image = Vec::new();
+        self.rx_w = 0;
+        self.rx_h = 0;
+        self.rx_active = false;
+        self.detected = None;
+        self.status_dirty = true;
+    }
+
     fn set_sstv_image(&mut self, mode: SstvMode, rgb: Vec<u8>, w: u16, h: u16) {
         self.tx_mode = mode;
         let tx = SstvTx::new(mode, &rgb, w, h, OUT_RATE, self.cfg.sstv_tx_ppm);
@@ -388,5 +410,41 @@ mod tests {
         c.set_sstv_image(SstvMode::Martin1, rgb, w, h);
         c.abort_tx();
         assert_eq!(c.tx_lead, 0);
+    }
+
+    /// Issue #397: restarting the receiver drops the picture in progress and
+    /// says so, and starts a fresh canvas so a scanline of the abandoned frame
+    /// still in flight cannot land on the next station's picture.
+    #[test]
+    fn restarting_the_receiver_drops_the_picture_in_progress() {
+        let rate = 48_000.0;
+        let mut c = SstvController::new(Mode::Sstv, DigiConfig::default(), rate);
+        let (w, h) = SstvMode::ScottieDx.dimensions();
+        let rgb = vec![96u8; w as usize * h as usize * 3];
+        let mut tx = sdroxide_dsp::SstvTx::new(SstvMode::ScottieDx, &rgb, w, h, rate, 0.0);
+        let mut block = vec![0.0f32; 4096];
+        while !c.rx_active {
+            let n = tx.next_block(&mut block);
+            assert!(n > 0, "the transmission ran out before the picture started");
+            c.on_rx_audio(&block[..n]);
+        }
+        assert_eq!(c.detected, Some(SstvMode::ScottieDx));
+        let was = c.image_id;
+
+        c.sstv_restart_rx();
+        assert!(!c.rx_active, "it is still receiving");
+        assert_eq!(c.detected, None, "the panel would still say a mode was locked");
+        assert!(c.rx_image.is_empty(), "the half-picture was kept");
+        assert_ne!(c.image_id, was, "the next picture would be painted onto this one");
+        let st = c.sstv_status();
+        assert!(!st.rx_active);
+        assert_eq!(st.progress, 0.0);
+
+        // Transmit is untouched: this is the receiver's button, and an operator
+        // who presses it mid-over must not lose the picture going out.
+        let (rgb, w, h) = image();
+        c.set_sstv_image(SstvMode::Martin1, rgb, w, h);
+        c.sstv_restart_rx();
+        assert!(c.tx.is_some(), "the transmission was aborted by a receive control");
     }
 }

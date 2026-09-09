@@ -3794,6 +3794,15 @@ one of the two.
 - In **Auto**, the mode is identified from the VIS header (or the sync cadence if
   you tuned in mid-picture) and pre-selected for your next transmission — no need
   to pick it.
+- **Restart RX** abandons the picture being received and starts listening for the
+  next header. Once the decoder has locked on it is committed for the whole
+  length of that mode, and the slow ones are long — Scottie DX runs four and a
+  half minutes — so a header misread as a slow mode takes the receiver off the
+  air until it runs out. On QO-100, where one station follows another over the
+  same transponder, that is the next few pictures gone. Press this and the
+  half-picture is dropped and the receiver is hunting again. It is a receive
+  control only: it does not touch a transmission in progress (that is **ABORT
+  TX**) and it does not put the mode selection back to **Auto**.
 - Received images are saved as PNG under `~/.config/sdroxide/sstv_rx/` and reload
   into the gallery next time.
 - **Deleting.** Most of what a night on 20 m leaves behind is noise. **Right-click**

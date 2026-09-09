@@ -1008,4 +1008,19 @@ pub enum Command {
     ///
     /// Appended for the usual reason — postcard numbers variants by position.
     LogQso(Box<crate::QsoRecord>),
+
+    /// SSTV: abandon the picture being received and listen for the next header.
+    ///
+    /// A receiver that has locked on is committed for the whole length of the
+    /// mode it locked on to, and Scottie DX is four and a half minutes. A VIS
+    /// misread as a slow mode therefore takes the receiver off the air until it
+    /// runs out, and on QO-100 — where one station follows another over the
+    /// same transponder — that is the next few pictures gone (issue #397).
+    ///
+    /// Receive only. It does not touch a transmission in progress, which is
+    /// what [`Command::DigiAbortTx`] is for, and it does not put the mode
+    /// selection back to Auto.
+    ///
+    /// Appended for the usual reason — postcard numbers variants by position.
+    SstvRestartRx,
 }

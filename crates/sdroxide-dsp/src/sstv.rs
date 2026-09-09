@@ -624,6 +624,37 @@ impl SstvRx {
         self.expected = mode;
     }
 
+    /// Abandon whatever is being decoded and go back to hunting for a header.
+    ///
+    /// An SSTV receiver that has locked on is committed for the length of the
+    /// mode it locked on to, and the slow modes are long: Scottie DX is four
+    /// and a half minutes, PD290 nearly five. A false VIS — or a real one for a
+    /// mode the transmitting station did not actually send — therefore takes
+    /// the receiver off the air for as long as it takes to run out, and on a
+    /// transponder where pictures follow one another that is several missed.
+    /// This is the way back (issue #397).
+    ///
+    /// The history goes with it, deliberately. It holds the last 1.2 s of the
+    /// picture being abandoned, sync pulses and all, and the free-run hunt
+    /// reads exactly that — left in place it would re-lock on the cadence of
+    /// the transmission the operator has just asked to be rid of. The
+    /// front-end filter, the level meter and the operator's mode selection are
+    /// *not* touched: none of them is about this picture.
+    pub fn restart(&mut self) {
+        self.phase = RxPhase::Hunt;
+        self.vis_state = VisState::reset();
+        self.fsk_state = FskIdState::reset();
+        self.line = 0;
+        self.line_start = 0;
+        self.line_samples = 0;
+        self.last_cr.clear();
+        self.last_cb.clear();
+        self.sync_run = 0;
+        self.sync_hist.clear();
+        self.hist.clear();
+        self.hist_base = self.sample_idx;
+    }
+
     /// The mode currently being decoded (or last detected).
     pub fn mode(&self) -> SstvMode {
         self.mode
@@ -1205,6 +1236,67 @@ mod tests {
         let added = (with - plain) as f64 / rate;
         let want = FSKID_LEADER_S + FSKID_SYNC_S + FSKID_BIT_S * (1.0 + 6.0 * 9.0);
         assert!((added - want).abs() < 0.01, "the ID added {added:.3} s, expected {want:.3} s");
+    }
+
+    /// Issue #397: a receiver committed to a four-minute mode has to be able
+    /// to let go of it.
+    ///
+    /// Locked on to Scottie DX and then restarted, it must be hunting again —
+    /// and it must *stay* hunting on the audio that is still arriving from the
+    /// transmission it abandoned, because the free-run detector reads the
+    /// history buffer and the history buffer was full of that picture's sync
+    /// pulses. Then a new header on the same receiver has to start a picture,
+    /// which is the half that says the restart re-armed rather than merely
+    /// stopped.
+    #[test]
+    fn a_restart_lets_go_of_the_picture_and_hunts_again() {
+        let rate = 48_000.0;
+        let (w, h) = SstvMode::ScottieDx.dimensions();
+        let rgb = vec![96u8; w as usize * h as usize * 3];
+        let mut tx = SstvTx::new(SstvMode::ScottieDx, &rgb, w, h, rate, 0.0);
+        let mut rx = SstvRx::new(rate);
+        let mut events = Vec::new();
+        let mut block = vec![0.0f32; 4096];
+
+        // Far enough in to be decoding lines, not merely to have seen the VIS.
+        while !rx.receiving() || rx.progress() < 0.02 {
+            let n = tx.next_block(&mut block);
+            assert!(n > 0, "the transmission ran out before the picture started");
+            rx.process(&block[..n], &mut events);
+            events.clear();
+        }
+        assert_eq!(rx.mode(), SstvMode::ScottieDx);
+
+        rx.restart();
+        assert!(!rx.receiving(), "the picture was not let go of");
+        assert_eq!(rx.progress(), 0.0);
+
+        // Another second of the abandoned transmission: a receiver that kept
+        // its history would lock straight back on to the cadence it is hearing.
+        for _ in 0..12 {
+            let n = tx.next_block(&mut block);
+            rx.process(&block[..n], &mut events);
+            events.clear();
+        }
+        assert!(!rx.receiving(), "it re-locked on the transmission it was told to abandon");
+
+        // ...and the next station's header still starts a picture.
+        let (w2, h2) = SstvMode::Robot36.dimensions();
+        let rgb2 = vec![32u8; w2 as usize * h2 as usize * 3];
+        let mut next = SstvTx::new(SstvMode::Robot36, &rgb2, w2, h2, rate, 0.0);
+        let mut detected = None;
+        let mut guard = 0;
+        while detected.is_none() && !next.done() && guard < 2_000 {
+            let n = next.next_block(&mut block);
+            rx.process(&block[..n], &mut events);
+            for e in events.drain(..) {
+                if let SstvEvent::ModeDetected(m) = e {
+                    detected = Some(m);
+                }
+            }
+            guard += 1;
+        }
+        assert_eq!(detected, Some(SstvMode::Robot36), "the restarted receiver heard nothing");
     }
 
     /// End-to-end: encode a small gradient, decode it back, and check the VIS

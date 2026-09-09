@@ -186,6 +186,8 @@ pub trait DigiEngine: Send {
     fn set_sstv_mode(&mut self, _mode: Option<SstvMode>) {}
     /// SSTV: queue a composed image (interleaved RGB) and start transmitting.
     fn set_sstv_image(&mut self, _mode: SstvMode, _rgb: Vec<u8>, _w: u16, _h: u16) {}
+    /// SSTV: throw away the picture being received and hunt for a header again.
+    fn sstv_restart_rx(&mut self) {}
 
     /// Weather fax: begin a picture now rather than waiting for a start tone.
     /// The usual way to catch a chart already under way, which on a

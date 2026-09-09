@@ -1305,7 +1305,13 @@ use sdroxide_types::{
 /// discriminant moved, but `CatFamily` rides inside `RadioConfig` and so inside
 /// `ServerMsg::RadioConfig` and `Command::SetRadioConfig`: a v144 peer handed
 /// one fails to decode the message carrying it.
-pub const PROTO_VERSION: u16 = 145;
+///
+/// v146: `Command::SstvRestartRx` — abandon the SSTV picture being received and
+/// hunt for the next header, so a VIS misread as a four-minute mode no longer
+/// costs every picture sent while it runs out (issue #397). Appended, so no
+/// surviving discriminant moved, but a v145 station has no name for it and
+/// fails to decode the message carrying it.
+pub const PROTO_VERSION: u16 = 146;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]
