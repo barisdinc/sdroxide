@@ -109,8 +109,8 @@ pub use command::Command;
 pub use contacts::FsqContact;
 pub use controller::{AudioDevices, PeerRadio, RadioController, RadioEvent};
 pub use digi::{
-    CONTEST_SERIAL_MAX, ClockHealth, ContestMode, CwStatus, Decode, DecodeSort, DigiConfig,
-    DigiStatus, DxpedMode, FOX_MAX_SLOTS, FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg,
+    CONTEST_SERIAL_MAX, ClockHealth, ContestMode, CwMacro, CwStatus, Decode, DecodeSort,
+    DigiConfig, DigiStatus, DxpedMode, FOX_MAX_SLOTS, FOX_ZONE_MAX_HZ, FoxCaller, FsqHeard, FsqMsg,
     HOUND_ZONE_MAX_HZ, HellVariant, NAVTEX_MESSAGE_MAX, NAVTEX_TONE_HZ, NavtexMessage,
     NavtexStatus, PACKET_HEARD_MAX, PACKET_TERM_LINE_MAX, PACKET_TERM_MAX, PacketBaud, PacketHeard,
     PacketLink, PacketLinkOwner, PacketStatus, PacketTermKind, PacketTermLine, QsoLive, QsoRecord,

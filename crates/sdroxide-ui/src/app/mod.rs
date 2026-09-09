@@ -482,6 +482,10 @@ pub struct SdroxideApp {
     /// by the round-tripped status echo. Seeded once from the first status.
     digi_cfg_edit: sdroxide_types::DigiConfig,
     digi_cfg_seeded: bool,
+    /// Whether the CW panel's message-button editor is open (issue #374).
+    /// Screen state, not the operator's: the buttons themselves live in
+    /// `DigiConfig`.
+    cw_macro_edit: bool,
     /// The FT8/FT4 transmit-offset box, as typed. Kept as text rather than a
     /// number so a half-finished figure survives between frames: parsing every
     /// keystroke would rewrite "8" to 200 before the 2 was pressed.
@@ -1325,6 +1329,7 @@ impl SdroxideApp {
             aprs_lat_buf: String::new(),
             aprs_lon_buf: String::new(),
             digi_cfg_seeded: false,
+            cw_macro_edit: false,
             digi_tx_hz_edit: String::new(),
             digi_preview: None,
             map_view: Default::default(),

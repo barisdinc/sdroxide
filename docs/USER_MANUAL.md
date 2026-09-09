@@ -1777,6 +1777,35 @@ typed characters, and there are none to bridge when the line was composed before
 it was sent. The setting is shared with the keyboard modes
 ([3.3](#33-psk31-and-rtty)).
 
+**Message buttons — your own text, one press.** Under the sending controls is a
+row of buttons you write yourself: a contest exchange, a reply with your name
+and QTH, `TNX 73 GL`, the standard calls — whatever the session needs. Press
+**MSG** to open the editor window and fill in as many as ten rows; each has a short
+**button** label (what the chip says) and the **sends** text (what goes on the
+air). Leave the label empty and the chip names itself from the first few
+characters of the text.
+
+- One press sends the whole message in one piece, exactly as **SEND ON RETURN**
+  does for a typed line — which is the point of them on a transceiver that keys
+  itself from text: one hand-off to the rig's keyer instead of one per word.
+- **F1–F9** press the first nine, so long as nothing on screen has the keyboard
+  — no caret in the transmit box, no field being typed into anywhere else. That
+  exclusion is deliberate: an operator part-way through a callsign has a key down
+  in a text field, and a function key firing a message from under them would put
+  the wrong thing on the air. Click somewhere outside the box first, or use the
+  buttons.
+- `{MYCALL}` and `{MYGRID}` are filled in as the message goes out — the same
+  placeholders the FT8 message templates take — so one row keeps working when
+  the callsign in use changes. `{DX}` is not among them: CW here is a free-text
+  keyboard mode with no sequencer holding the other station's callsign, so there
+  would be nothing true to put in its place.
+- The panel's **WPM** and Farnsworth settings apply to what a button sends,
+  because it goes out through the same keyer as everything else.
+- The buttons belong to the station rather than to the screen: they are saved
+  with the rest of the digital-mode configuration, so they survive a restart,
+  they reach a remote client with everything else, and Settings → General
+  **EXPORT** carries them to another machine.
+
 It is off by default, because sending as you type is how a CW operator sends:
 the first letter of a callsign is on the air while the rest is still being
 typed. Turn it on if you are keying a **transceiver's own keyer** — the usual

@@ -1258,7 +1258,15 @@ use sdroxide_types::{
 /// out of step. [`sdroxide_types::HpsdrConfig`] gains the loop that acts on it
 /// — `auto_gain` and its five settings — appended to a struct that rides inside
 /// `RadioConfig`, with the same consequence.
-pub const PROTO_VERSION: u16 = 139;
+///
+/// v140: the operator's own CW message buttons —
+/// [`sdroxide_types::DigiConfig`] gains `cw_macros`, a list of the new
+/// [`sdroxide_types::CwMacro`], each a label and the text that button sends
+/// (issue #374). It sits with the other `cw_*` fields rather than at the tail,
+/// so a v139 peer reads every field after it out of step; `DigiConfig` rides
+/// inside `Command::SetDigiConfig` and `DigiStatus`, both of which cross the
+/// link whole.
+pub const PROTO_VERSION: u16 = 140;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

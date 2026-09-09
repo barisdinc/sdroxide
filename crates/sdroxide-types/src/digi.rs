@@ -1160,6 +1160,51 @@ impl HellVariant {
     }
 }
 
+/// One of the operator's CW message buttons — what the chip says, and what it
+/// sends (issue #374).
+///
+/// The label is kept apart from the text because a chip has to be readable at a
+/// glance and the text it sends is a sentence: a button showing
+/// `TNX FER CALL OM UR RST 599 599 HR` would be a row two panels wide. An empty
+/// label falls back to the first few characters of the text, so a row typed in
+/// a hurry still draws something.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CwMacro {
+    pub label: String,
+    pub text: String,
+}
+
+impl CwMacro {
+    /// The most buttons the panel will draw. Ten is what a rig's memory bank
+    /// and every contest logger offer, and it is as many chips as the row can
+    /// hold without wrapping into the text box.
+    pub const MAX: usize = 10;
+
+    /// What the chip says: the operator's label, or the head of the text where
+    /// they gave none.
+    pub fn chip_label(&self) -> String {
+        let label = self.label.trim();
+        if !label.is_empty() {
+            return label.to_string();
+        }
+        let text = self.text.trim();
+        if text.chars().count() <= 10 {
+            return text.to_string();
+        }
+        format!("{}…", text.chars().take(9).collect::<String>())
+    }
+
+    /// The text to send, with the station's own details filled in.
+    ///
+    /// The same placeholders the FT8 templates above take, so an operator who
+    /// has written one already knows this. `{DX}` is deliberately not among
+    /// them: CW here is a free-text keyboard mode with no sequencer holding the
+    /// other station's callsign, so there is nothing true to substitute.
+    pub fn expand(&self, my_call: &str, my_grid: &str) -> String {
+        self.text.replace("{MYCALL}", my_call).replace("{MYGRID}", my_grid)
+    }
+}
+
 /// echoed to clients in [`DigiStatus`]. `#[serde(default)]` so an older
 /// `digi.json` without the newer fields still loads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1519,6 +1564,19 @@ pub struct DigiConfig {
     /// 0, or anything at or above `cw_wpm`, means ordinary timing.
     #[serde(default)]
     pub cw_farnsworth_wpm: f32,
+    /// CW: the operator's own message buttons, in the order they are drawn.
+    ///
+    /// A rig's CW memories, in software: the exchanges an operator sends over
+    /// and over — a contest report, a name-and-QTH reply, `TNX 73 GL` — typed
+    /// once instead of every contact (issue #374). Empty by default; a station
+    /// that has never opened the editor carries no rows.
+    ///
+    /// Here rather than in the client's own settings because this is the
+    /// operator's, not the screen's: it belongs with the callsign and the FT8
+    /// message templates above, it reaches a remote client with the rest of the
+    /// configuration, and it is in the directory Settings → General exports.
+    #[serde(default)]
+    pub cw_macros: Vec<CwMacro>,
     /// CW: pin the decoder's speed search to `cw_wpm` instead of reading the
     /// speed off the signal. Worth having for a signal too weak for the search
     /// to settle when you already know how fast the other station sends.
@@ -1876,6 +1934,7 @@ impl Default for DigiConfig {
             cw_pitch_hz: cw_default_pitch(),
             cw_wpm: cw_default_wpm(),
             cw_farnsworth_wpm: 0.0,
+            cw_macros: Vec::new(),
             cw_speed_lock: false,
             send_on_enter: false,
             tx_watchdog_min: 6,
@@ -3072,4 +3131,38 @@ fn default_aprs_path() -> String {
 }
 fn default_aprs_ttl() -> u32 {
     60
+}
+
+#[cfg(test)]
+mod cw_macro_tests {
+    use super::CwMacro;
+
+    /// A row typed in a hurry — text but no label — still draws a chip, and a
+    /// long one is cut rather than allowed to stretch the row (issue #374).
+    #[test]
+    fn a_button_with_no_label_names_itself_from_its_text() {
+        let m = CwMacro { label: String::new(), text: "5NN 5NN".into() };
+        assert_eq!(m.chip_label(), "5NN 5NN");
+
+        let long =
+            CwMacro { label: String::new(), text: "TNX FER CALL OM UR RST 599 599 HR".into() };
+        assert_eq!(long.chip_label(), "TNX FER C…");
+
+        // A label the operator did give always wins, trimmed.
+        let named = CwMacro { label: "  RPT ".into(), text: "5NN 5NN".into() };
+        assert_eq!(named.chip_label(), "RPT");
+    }
+
+    /// The station's own details are filled in as the message goes out, so one
+    /// row serves a callsign that changes with the licence being used.
+    #[test]
+    fn the_station_fills_in_its_own_details() {
+        let m = CwMacro { label: "CQ".into(), text: "CQ CQ DE {MYCALL} {MYCALL} K".into() };
+        assert_eq!(m.expand("OE1XYZ", "JN88"), "CQ CQ DE OE1XYZ OE1XYZ K");
+
+        // Text with no placeholder in it is sent exactly as typed — no
+        // trimming, no case folding, nothing.
+        let plain = CwMacro { label: String::new(), text: "  TNX 73 GL  ".into() };
+        assert_eq!(plain.expand("OE1XYZ", "JN88"), "  TNX 73 GL  ");
+    }
 }
