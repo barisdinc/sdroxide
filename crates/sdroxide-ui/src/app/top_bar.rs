@@ -5958,6 +5958,35 @@ fn disabled_band_reason(band: Band, caps: Option<&DeviceCaps>, stated: bool) -> 
     )
 }
 
+/// Where a band chip tunes to when it is pressed, or `None` when pressing it is
+/// an ordinary band change through the band stack.
+///
+/// In a digital mode a band button keeps the mode and jumps to where that mode
+/// is worked in the band — its standard dial where the band has one, and the
+/// band's default frequency where it has not, because a mode like RF Paint has
+/// no conventions anywhere and any band should still be pickable in it. Outside
+/// the digital modes a click is a normal band change.
+///
+/// APRS is the exception, and it is what issue #260 was. APRS is not worked
+/// across a band, it is one channel per region — 144.800, 144.390, 145.175, and
+/// the two on 70 cm — so there is no APRS on 20 m to jump to. Keeping the mode
+/// and landing on the band's default frequency put the operator into FM packet
+/// in the middle of an SSB band, hearing nothing, with the band button looking
+/// broken next to a mode where it worked. A band APRS has no channel in is
+/// therefore an ordinary band change, and the band stack brings back the mode
+/// that band was last worked in — which is what leaving APRS ought to look
+/// like. Selecting APRS again goes back to the channel, from the other
+/// direction, in the engine.
+fn band_chip_dial(mode: Mode, band: Band, std_hz: Option<f64>) -> Option<f64> {
+    match std_hz {
+        Some(hz) => Some(hz),
+        // The bands APRS does have a channel in are covered by the arm above.
+        None if mode.is_aprs() => None,
+        None if mode.is_digital() => Some(band.default_entry().0),
+        None => None,
+    }
+}
+
 /// The band + mode + digital chip rows: the body of the band/mode popup.
 ///
 /// A free function taking the state it draws from, rather than a method, so a
@@ -5993,20 +6022,8 @@ fn band_mode_menu(
             if b != Band::Gen && b.edges().is_none() {
                 continue;
             }
-            // In a digital mode, a band button tunes to the band's standard
-            // dial frequency where the mode has one (SetVfo keeps the mode),
-            // and the chip carries a cyan underline saying so. A band without
-            // one — every band, in RF Paint's case — jumps to the band's
-            // default frequency instead, still keeping the mode: any band can
-            // be picked in any mode, standard frequency or not. Outside the
-            // digital modes a click is a normal band change through the band
-            // stack.
             let std_hz = if digital { digi_freq_for_band(mode, b) } else { None };
-            let digi_hz = match std_hz {
-                Some(hz) => Some(hz),
-                None if digital => Some(b.default_entry().0),
-                None => None,
-            };
+            let digi_hz = band_chip_dial(mode, b, std_hz);
             // A radio that publishes no tuning range keeps every band button:
             // `may_rx_span` reads an empty range list as "the driver didn't
             // say", and greying out the whole bar would be a worse guess than
@@ -7667,6 +7684,54 @@ mod tests {
         })
         .drop_without_applying_deltas();
         ctx.memory(|m| m.area_rect(id)).expect("the menu was shown")
+    }
+
+    /// Issue #260: in APRS the band buttons stopped being band buttons.
+    ///
+    /// APRS is one channel per region, so every band but 2 m and 70 cm had no
+    /// APRS dial to offer — and the digital-mode rule filled that in with the
+    /// band's default frequency and *kept the mode*, which put an IC-7610 into
+    /// FM-D1 in the middle of 20 m. The mode chip stays enabled everywhere;
+    /// what changes is that a band APRS is not worked in is an ordinary band
+    /// change, so the band stack decides the mode.
+    #[test]
+    fn a_band_aprs_has_no_channel_in_is_an_ordinary_band_change() {
+        for b in [Band::M160, Band::M40, Band::M20, Band::M10, Band::M6] {
+            let std_hz = digi_freq_for_band(Mode::Aprs, b);
+            assert_eq!(std_hz, None, "{} was given an APRS channel", b.label());
+            assert_eq!(
+                band_chip_dial(Mode::Aprs, b, std_hz),
+                None,
+                "{} kept APRS instead of changing band",
+                b.label()
+            );
+        }
+
+        // The bands it *is* worked in still tune to the channel and keep the
+        // mode — that is the whole point of the digital-mode rule.
+        for b in [Band::M2, Band::M70] {
+            let std_hz = digi_freq_for_band(Mode::Aprs, b);
+            assert!(std_hz.is_some(), "{} has an APRS channel", b.label());
+            assert_eq!(band_chip_dial(Mode::Aprs, b, std_hz), std_hz);
+        }
+
+        // Nothing else moved. A digital mode with no convention in a band —
+        // RF Paint has none anywhere — still jumps to the band and keeps the
+        // mode, because it is worked across the band rather than on a channel
+        // of it; and one that does have a convention still lands on it.
+        let b = Band::M20;
+        assert_eq!(
+            band_chip_dial(Mode::RfPaint, b, digi_freq_for_band(Mode::RfPaint, b)),
+            Some(b.default_entry().0),
+            "RF Paint lost its band button"
+        );
+        assert_eq!(
+            band_chip_dial(Mode::Olivia, b, digi_freq_for_band(Mode::Olivia, b)),
+            Some(14_076_000.0),
+            "Olivia lost its own 20 m dial"
+        );
+        // ...and outside the digital modes a click is a band change as before.
+        assert_eq!(band_chip_dial(Mode::Lsb, Band::M20, None), None);
     }
 
     /// The longest menu in the program, on the smallest screens it opens on.

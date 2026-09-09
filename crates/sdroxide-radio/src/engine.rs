@@ -11987,9 +11987,16 @@ impl Engine {
         // not already on one of the channels — so a traveller who has tuned
         // Japan's 144.640 by hand keeps it, and so does anyone who moves off
         // frequency and back within the mode.
+        //
+        // ...and only on a radio that reaches the channel, which is the guard
+        // the ADS-B block below spells out: dragging an HF transceiver's state
+        // to 144.800 takes away the band the operator was on and gives nothing
+        // back, and leaves the state and the radio disagreeing about where the
+        // dial is. The APRS panel says there is no traffic instead (issue #260).
         if rx == RxId::Main
             && mode.is_aprs()
             && !self.state.rx[0].mode.is_aprs()
+            && self.caps.may_rx_hz(sdroxide_types::aprs_dial())
             && !sdroxide_types::is_aprs_channel(self.state.active_freq_hz())
         {
             let hz = sdroxide_types::aprs_dial();

@@ -441,6 +441,21 @@ fn digi_dial_freqs(mode: Mode) -> &'static [(&'static str, f64)] {
         ],
         // RF Paint has no defined calling frequency — offer no band presets.
         Mode::RfPaint => &[],
+        // The AX.25 modes, which have no business anywhere in the list below.
+        //
+        // APRS is one channel per region and `APRS_DIALS` names every one of
+        // them, so the shared table has already answered for the two bands it
+        // is worked in; there is no APRS anywhere else. Packet is the same
+        // waveform without even that much of a convention — a node, a BBS or a
+        // Winlink gateway is on whatever channel its keeper picked.
+        //
+        // Falling through to the default below gave all three FT8's dials,
+        // which is issue #260: pressing 20 m in APRS tuned to 14.074 and left
+        // the mode alone, so an IC-7610 went to FM-D1 on the FT8 watering hole
+        // and the band button looked broken. Landing an FM packet transmitter
+        // on top of the busiest frequency in the band is the part of that
+        // worth being sure about.
+        Mode::Aprs | Mode::Packet | Mode::PacketHf => &[],
         // RIFP assigns no frequency at all: 433.92 MHz is the deployment
         // example the draft names, and the others are the middle of the
         // segments where a 25 kHz channel is a realistic thing to ask for
