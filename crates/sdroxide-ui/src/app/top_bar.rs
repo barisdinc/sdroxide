@@ -3825,16 +3825,57 @@ impl SdroxideApp {
         }
     }
 
+    /// What Drive is worth on the band that is about to be transmitted on,
+    /// including the per-band calibration standing between the slider and the
+    /// transmitter.
+    ///
+    /// The calibration had nowhere to show itself: it is set in a settings
+    /// table, applied inside the engine, and reported only to the log — so an
+    /// operator who set a row and saw no difference had no way to tell a trim
+    /// that was not reaching the radio from one that was reaching it and doing
+    /// what it was told (issue #376). Stated in decibels and not converted into
+    /// a percentage of the slider, because what a decibel of *output power* is
+    /// worth in slider units depends on the radio underneath — see
+    /// [`sdroxide_types::BandDriveTrim::factor_for`].
+    fn drive_hover(&self) -> String {
+        let hz = self.state.tx_freq_hz();
+        let band = sdroxide_types::Band::containing(hz);
+        let name = if band == sdroxide_types::Band::Gen {
+            "This frequency, which is on no amateur band,".to_string()
+        } else {
+            format!("{} is", band.label())
+        };
+        let db = self.radio_cfg.as_ref().map_or(0.0, |c| c.drive_trim_db(hz));
+        let trim = if db == 0.0 {
+            format!("{name} not calibrated, so the setting reaches the transmitter whole.")
+        } else {
+            format!(
+                "{name} calibrated {db:+.1} dB, so the same setting puts {:.1} dB {} on the \
+                 air here than on an uncalibrated band.",
+                db.abs(),
+                if db < 0.0 { "less" } else { "more" },
+            )
+        };
+        format!(
+            "How hard the transmitter is driven. On a radio sdroxide modulates itself it \
+             scales the modulated samples; on a rig with its own power control it is the \
+             fraction of rated power the rig is asked for.\n\n{trim}\n\nSettings → Radio → \
+             Transmit drive by band."
+        )
+    }
+
     /// The Drive label + rail + readout.
     fn tx_drive(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         let mut drive = self.state.tx.drive;
-        ui.label("Drive");
+        let hover = self.drive_hover();
+        ui.label("Drive").on_hover_text(&hover);
         if crate::chrome::slider(
             ui,
             Slider::new(&mut drive, 0.0..=1.0)
                 .show_value(true)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
         )
+        .on_hover_text(&hover)
         .changed()
         {
             cmds.push(Command::SetTxDrive(drive));

@@ -158,3 +158,112 @@ fn the_drive_that_reaches_the_rig_follows_the_bands_calibration() {
         let _ = t.join();
     }
 }
+
+/// A radio where drive scales the modulated I/Q instead of commanding a rig's
+/// power — a LimeSDR, a HackRF, a Pluto, an HPSDR board. Records the peak
+/// magnitude of everything written to the transmit path.
+struct MockIqTx {
+    center: f64,
+    peak: Arc<Mutex<f32>>,
+}
+
+impl IqSource for MockIqTx {
+    fn sample_rate(&self) -> f64 {
+        RATE
+    }
+    fn center_hz(&self) -> f64 {
+        self.center
+    }
+    fn set_center_hz(&mut self, hz: f64) -> Result<()> {
+        self.center = hz;
+        Ok(())
+    }
+    fn read(&mut self, buf: &mut [Complex32]) -> Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = buf.len().min(2048);
+        buf[..n].fill(Complex32::new(0.0, 0.0));
+        Ok(n)
+    }
+    fn describe(&self) -> String {
+        "mock IQ transmitter".into()
+    }
+    fn tx_begin(&mut self, _center_hz: f64, rate: f64) -> Result<f64> {
+        Ok(rate)
+    }
+    fn tx_write(&mut self, samples: &[Complex32]) -> Result<()> {
+        let mut p = self.peak.lock().unwrap();
+        for z in samples {
+            *p = p.max(z.norm());
+        }
+        Ok(())
+    }
+    fn tx_end(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The same calibration on the radios that have no power control of their own,
+/// where it lands on the samples rather than on a commanded fraction — which is
+/// every direct-sampling and zero-IF transmitter sdroxide modulates itself, and
+/// the half a LimeSDR operator reported as doing nothing (issue #376).
+///
+/// Measured as a *ratio* between two bands rather than against an absolute
+/// figure: the upconverter's own passband gain is not the subject, the trim is.
+#[test]
+fn the_samples_a_lime_transmits_follow_the_bands_calibration() {
+    isolate_config();
+    let peak = Arc::new(Mutex::new(0.0f32));
+    let caps = DeviceCaps {
+        freq_ranges_rx: vec![(1_000_000.0, 3_800_000_000.0)],
+        freq_ranges_tx: vec![(1_000_000.0, 3_800_000_000.0)],
+        ..caps()
+    };
+    let mut h = start_engine(
+        Box::new(MockIqTx { center: 145_500_000.0, peak: Arc::clone(&peak) }),
+        caps,
+        EngineConfig { tx_ham_only: false, ..EngineConfig::default() },
+    );
+    let thread = h.thread.take();
+    std::thread::sleep(Duration::from_millis(200));
+
+    // 2 m comes out 20 dB hot on this station's amplifier; 23 cm is where it
+    // was calibrated.
+    let cfg = RadioConfig {
+        tx_drive_trim: vec![BandDriveTrim { band: Band::M2, db: -20.0 }],
+        ..RadioConfig::default()
+    };
+    h.cmd_tx.send(Command::SetRadioConfig { cfg: Box::new(cfg), reopen: false }).unwrap();
+    h.cmd_tx.send(Command::SetTuneDrive(1.0)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    // A held carrier is the cleanest thing to measure: no microphone, no
+    // modulation, one amplitude.
+    let tune_peak = |hz: f64| -> f32 {
+        h.cmd_tx.send(Command::SetVfo { vfo: Vfo::A, hz }).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        *peak.lock().unwrap() = 0.0;
+        h.cmd_tx.send(Command::SetTune(true)).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        h.cmd_tx.send(Command::SetTune(false)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        *peak.lock().unwrap()
+    };
+
+    let on_23cm = tune_peak(1_296_100_000.0);
+    let on_2m = tune_peak(145_500_000.0);
+    assert!(on_23cm > 0.01, "the uncalibrated band should have transmitted, got {on_23cm}");
+    assert!(on_2m > 0.0, "2 m should have transmitted at all, got {on_2m}");
+
+    // 20 dB of output power is a tenth of the amplitude.
+    let ratio = on_2m / on_23cm;
+    assert!(
+        (ratio - 0.1).abs() < 0.02,
+        "2 m is trimmed 20 dB down, so it should transmit at a tenth of the amplitude \
+         23 cm does: got {on_2m} against {on_23cm} (ratio {ratio})"
+    );
+
+    drop(h.cmd_tx);
+    if let Some(t) = thread {
+        let _ = t.join();
+    }
+}

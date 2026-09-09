@@ -14272,7 +14272,12 @@ impl Engine {
         if db == self.drive_trim_db {
             return;
         }
-        debug!("TX drive calibration: {db:+.1} dB on {} ({tx_dial_hz:.0} Hz)", band.label());
+        // At info, not debug: this fires only when the calibration actually
+        // changes — a band change, or the operator editing the table — and it
+        // is the one line that says the trim took effect, which is what an
+        // operator reporting "it does nothing" needs to be able to see
+        // (issue #376).
+        info!("TX drive calibration: {db:+.1} dB on {} ({tx_dial_hz:.0} Hz)", band.label());
         self.drive_trim_db = db;
         // A rig that holds its own power setting has already been told the old
         // one; it is not keyed (this only runs when the transmit frequency
