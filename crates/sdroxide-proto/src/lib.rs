@@ -1266,7 +1266,16 @@ use sdroxide_types::{
 /// so a v139 peer reads every field after it out of step; `DigiConfig` rides
 /// inside `Command::SetDigiConfig` and `DigiStatus`, both of which cross the
 /// link whole.
-pub const PROTO_VERSION: u16 = 140;
+///
+/// v141: the CW panel picks its decoder —
+/// [`sdroxide_types::DigiConfig`] gains `cw_engine`, the existing
+/// [`sdroxide_types::CwEngine`] the skimmer already chose between, because
+/// DeepCW's output layer has no class for an accented letter and only the
+/// timing decoder can copy one (issue #382). It sits with the other `cw_*`
+/// fields rather than at the tail, so a v140 peer reads every field after it
+/// out of step; `DigiConfig` rides inside `Command::SetDigiConfig` and
+/// `DigiStatus`, both of which cross the link whole.
+pub const PROTO_VERSION: u16 = 141;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

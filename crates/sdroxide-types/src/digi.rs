@@ -1582,6 +1582,18 @@ pub struct DigiConfig {
     /// to settle when you already know how fast the other station sends.
     #[serde(default)]
     pub cw_speed_lock: bool,
+    /// CW: which of the two decoders copies the panel's receive window.
+    ///
+    /// The neural one is better at the job it was trained for and is the
+    /// default. What it cannot do is produce a character its output layer has
+    /// no class for, and its 41 classes are the plain alphabet, the digits and
+    /// four marks — so `Ä`, `Ö`, `Å` and the rest of ITU-R M.1677-1's accented
+    /// letters come out as nothing at all, however cleanly they were sent. The
+    /// timing decoder reads the element string and looks it up, so it copies
+    /// them; an operator working a band where they turn up can say so here
+    /// (issue #382). See [`crate::CwEngine`].
+    #[serde(default)]
+    pub cw_engine: crate::CwEngine,
     /// Keyboard modes and CW: hold what is typed until Return, then send the
     /// line in one piece, instead of putting each character on the air as it is
     /// typed.
@@ -1936,6 +1948,7 @@ impl Default for DigiConfig {
             cw_farnsworth_wpm: 0.0,
             cw_macros: Vec::new(),
             cw_speed_lock: false,
+            cw_engine: crate::CwEngine::default(),
             send_on_enter: false,
             tx_watchdog_min: 6,
             max_tx_repeats: 10,

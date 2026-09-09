@@ -2110,7 +2110,7 @@ mod tests {
         assert_eq!(cfg.squelch_db, default.squelch_db);
         // A `skimmer.json` from before the CW decoder was the operator's choice
         // still opens, on the decoder it used to have.
-        assert_eq!(cfg.cw_decoder, sdroxide_types::CwSkimmerDecoder::Neural);
+        assert_eq!(cfg.cw_decoder, sdroxide_types::CwEngine::Neural);
         assert_eq!(cfg.cw_slots, default.cw_slots);
     }
 

@@ -23,7 +23,7 @@
 
 use eframe::egui::{self, Color32, ComboBox, DragValue, RichText, Slider};
 use sdroxide_types::{
-    AgcMode, BURST_MS_RANGE, Band, Command, CwSkimmerDecoder, DCS_CODES, DIV_FREEZE_ELEMENT,
+    AgcMode, BURST_MS_RANGE, Band, Command, CwEngine, DCS_CODES, DIV_FREEZE_ELEMENT,
     DIV_MODE_ELEMENT, DIV_RATE_ELEMENT, DIV_RESET_ELEMENT, DeviceCaps, Direction, DiversityMode,
     GainElement, GainUnit, MAX_OFFSET_HZ, Mode, NrEngine, NrLevel, NrStrength, RadioState, RxId,
     Shift, SkimmerKind, SpectrumDetail, Speed, SubTone, ToneMode, Vfo,
@@ -4413,7 +4413,7 @@ impl SdroxideApp {
                     ui.add_space(2.0);
                     crate::chrome::menu_caption(ui, "CW decoder");
                     ui.horizontal_wrapped(|ui| {
-                        for d in CwSkimmerDecoder::ALL {
+                        for d in CwEngine::ALL {
                             if crate::chrome::chip(ui, cfg.cw_decoder == d, d.label())
                                 .on_hover_text(d.hint())
                                 .clicked()
@@ -4422,7 +4422,7 @@ impl SdroxideApp {
                             }
                         }
                     });
-                    if cfg.cw_decoder == CwSkimmerDecoder::Neural {
+                    if cfg.cw_decoder == CwEngine::Neural {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("stations")

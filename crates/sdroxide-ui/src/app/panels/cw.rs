@@ -13,7 +13,7 @@
 //! nothing to keep in step.
 
 use eframe::egui::{self, Color32, RichText};
-use sdroxide_types::Command;
+use sdroxide_types::{Command, CwEngine};
 
 use crate::app::{SdroxideApp, tx_gated};
 use crate::theme::ThemedScroll;
@@ -609,6 +609,35 @@ impl SdroxideApp {
             .clicked()
         {
             cfg.cw_speed_lock = !locked;
+            changed = true;
+        }
+
+        // Which decoder copies the receive window. Two values, so a chip that
+        // cycles rather than a picker — and the label says which one is
+        // running, not which one it would switch to.
+        let engine = cfg.cw_engine;
+        if crate::chrome::chip(
+            ui,
+            engine == CwEngine::Timing,
+            RichText::new(engine.label()).size(10.5),
+        )
+        .on_hover_text(format!(
+            "{}\n\nClick for the {} decoder. The neural one copies further down and \
+                 reads hand-sent CW a timing fit will not accept; the timing one is the \
+                 only one that copies the accented letters — Ä, Ö, Å, Ü, É — because the \
+                 model has no output class for them.",
+            engine.hint(),
+            match engine {
+                CwEngine::Neural => "timing",
+                CwEngine::Timing => "neural",
+            }
+        ))
+        .clicked()
+        {
+            cfg.cw_engine = match engine {
+                CwEngine::Neural => CwEngine::Timing,
+                CwEngine::Timing => CwEngine::Neural,
+            };
             changed = true;
         }
 

@@ -1824,6 +1824,15 @@ characters as well, or it will drop out between them however the text arrives.
 - **LOCK** — decode at your own speed instead of reading the speed off the
   signal. Worth turning on for a signal too weak for the speed search to settle
   when you already know how fast the other station sends.
+- **NEURAL / TIMING** — which decoder copies the receive window. **NEURAL** is
+  DeepCW, the default: it reads several dB further down and copes with hand
+  sending that a timing fit will not accept. **TIMING** reads the keying
+  envelope and looks the elements up in the Morse table, which costs almost
+  nothing — and is the only one that copies the **accented letters** ITU‑R
+  M.1677‑1 lists (Ä, Å, Ç, È, É, Ñ, Ö, Ü). The neural model has no output class
+  for them, so on **NEURAL** they simply do not appear. Sending them works
+  either way: type `ä`, `ö`, `å` (or `æ`, `ø`, `à`, and the Polish and
+  Esperanto letters that share their codes) and the keyer sends the code.
 
 > **Transmitting** on an IQ radio (SoapySDR, HPSDR, TCI, SmartSDR) is the
 > keyer building its own sideband signal. On a CAT radio the keyer transmits by

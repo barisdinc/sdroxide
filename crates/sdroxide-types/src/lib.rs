@@ -223,7 +223,7 @@ pub use satlock::{
 };
 pub use scanner::{SCAN_STEPS_HZ, ScanKind, ScanResume, ScanState, ScannerConfig};
 pub use skimmer::{
-    CW_SLOT_CHOICES, CW_SLOTS_DEFAULT, CwSkimmerDecoder, SkimmerKind, SkimmerSettings, SkimmerSpot,
+    CW_SLOT_CHOICES, CW_SLOTS_DEFAULT, CwEngine, SkimmerKind, SkimmerSettings, SkimmerSpot,
 };
 pub use spectrum::{
     DEFAULT_DISPLAY_BINS, DEFAULT_ROWS_PER_SEC, MAX_DISPLAY_BINS, MAX_ROWS_PER_SEC, SpectrumConfig,
