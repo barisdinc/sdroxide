@@ -8543,6 +8543,14 @@ what puts it into dual-tuner mode:
    (the same serial), the **other** tuner, and the same two settings.
    **Apply**.
 
+It does not matter whether the two radios name the board the same way — one
+picked from the list by serial and the other left on *first found* are the same
+receiver, and sdroxide resolves them to it before looking for a session to join
+(issue #392). A second radio that reports *no SDRplay RSP found* while the first
+one is happily receiving is the older behaviour, from before that; if you still
+see it, the message now says instead that the board is already open here and
+what to set.
+
 Either order works, and either radio may be started first; the second one to
 open finds the board already running and takes the tuner that is free. Closing
 one leaves the other streaming, and the board is only handed back to the

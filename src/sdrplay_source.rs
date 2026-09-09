@@ -77,8 +77,18 @@ pub struct SdrPlaySource {
 
 impl SdrPlaySource {
     pub fn open(cfg: &SdrPlayConfig, center_hz: f64) -> anyhow::Result<Self> {
+        // The *receiver's* serial, not the string this radio's configuration
+        // happens to hold. Two radios sharing an RSPduo have to find one
+        // another in the registry, and they will not if one of them names the
+        // board and the other is still on "the first one found": the second
+        // then opens its own session on a device this process is already
+        // holding, which the service reports as no such device (issue #392).
+        // A board that resolves to nothing keys on what was configured and
+        // lets the open below report why.
+        let key = sdroxide_sdrplay::resolve_serial(&cfg.serial)
+            .unwrap_or_else(|| cfg.serial.trim().to_string());
         let dev = registry()
-            .get_or_open(DeviceKey::SdrPlay(cfg.serial.trim().to_string()), || {
+            .get_or_open(DeviceKey::SdrPlay(key), || {
                 sdroxide_sdrplay::open(cfg, center_hz).map_err(|e| e.to_string())
             })
             .map_err(anyhow::Error::msg)?;

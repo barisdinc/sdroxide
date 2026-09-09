@@ -33,7 +33,7 @@ mod linux;
 mod pair;
 mod stream;
 
-pub use api::{list, try_list};
+pub use api::{list, resolve_serial, try_list};
 pub use error::{Error, Result};
 pub use handle::{DuoMode, SdrPlayDevice, SdrPlayHandle};
 pub use stream::{open, spawn};
