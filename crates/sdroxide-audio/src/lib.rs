@@ -160,11 +160,27 @@ const GLITCH_REPORT_EVERY: Duration = Duration::from_secs(60);
 struct Glitches {
     n: Arc<AtomicU64>,
     said: Mutex<(u64, Instant)>,
+    /// Whether a lost sample on this stream costs anything downstream.
+    ///
+    /// True for a receive stream — a hole in a receiver's audio or I/Q is a
+    /// decode that does not happen, and that is what the warning is for. False
+    /// for the microphone, whose samples reach nothing at all except a
+    /// transmitter that is not keyed: while receiving, the ring is drained and
+    /// discarded on every tick, so a microphone that loses a millisecond has
+    /// lost a millisecond of nothing.
+    ///
+    /// The distinction exists because the warning without it is actively
+    /// misleading. Both streams glitch together on a machine that is briefly
+    /// busy, and the operator in issue #367 quite reasonably read two identical
+    /// warnings as two identical faults and went looking for what a USB
+    /// microphone had to do with FT8 not decoding. It had nothing to do with
+    /// it.
+    costs_a_decode: bool,
 }
 
 impl Glitches {
-    fn new(n: Arc<AtomicU64>) -> Glitches {
-        Glitches { n, said: Mutex::new((0, Instant::now())) }
+    fn new(n: Arc<AtomicU64>, costs_a_decode: bool) -> Glitches {
+        Glitches { n, said: Mutex::new((0, Instant::now())), costs_a_decode }
     }
 
     /// Record one and log it, at most once per [`GLITCH_REPORT_EVERY`] after
@@ -177,6 +193,20 @@ impl Glitches {
             return;
         }
         *said = (total, Instant::now());
+        if !self.costs_a_decode {
+            // Recorded and reported, but not as a fault: nothing is listening
+            // to this stream unless the transmitter is keyed by voice, and then
+            // the hole is a millisecond of speech rather than a lost period.
+            info!(
+                "{what}: the audio stream from \"{device}\" glitched ({total} so far) — the \
+                 host lost samples between two callbacks. On the microphone this only matters \
+                 during a voice over, where it is a millisecond of speech; while receiving, \
+                 nothing reads this stream at all and it costs nothing. It is not why a \
+                 digital mode is failing to decode — look at the receiver's own audio stream \
+                 for that."
+            );
+            return;
+        }
         if total == 1 {
             warn!(
                 "{what}: the audio stream from \"{device}\" glitched — the host says samples \
@@ -214,9 +244,12 @@ fn spawn_input(
     glitches: Arc<AtomicU64>,
     what: &'static str,
     label: String,
+    // Whether a hole in this stream costs a decode — see
+    // `Glitches::costs_a_decode`.
+    costs_a_decode: bool,
 ) -> Result<cpal::Stream, AudioError> {
     let channels = config.channels as usize;
-    let log = Glitches::new(glitches);
+    let log = Glitches::new(glitches, costs_a_decode);
     macro_rules! build {
         ($t:ty) => {
             device.build_input_stream(
@@ -291,7 +324,7 @@ fn spawn_output(
     // virtual cable on the playback end glitches just as freely as one on the
     // capture end. Its count is not published — `underruns` above is the
     // figure that matters for playback, and it is ours rather than the host's.
-    let log = Glitches::new(Arc::new(AtomicU64::new(0)));
+    let log = Glitches::new(Arc::new(AtomicU64::new(0)), true);
     macro_rules! build {
         ($t:ty) => {
             device.build_output_stream(
@@ -773,7 +806,9 @@ pub fn start_input(
     device_name: Option<&str>,
     preferred_rate: u32,
 ) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
-    start_input_mono(device_name, preferred_rate, false, "mic input")
+    // A hole in the microphone is only heard during a voice over, and never
+    // costs a decode: see [`Glitches::costs_a_decode`] and issue #367.
+    start_input_mono(device_name, preferred_rate, false, "mic input", false)
 }
 
 /// [`start_input`] with the same generous, rate-independent capture period as
@@ -793,7 +828,7 @@ pub fn start_input_buffered(
     device_name: Option<&str>,
     preferred_rate: u32,
 ) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
-    start_input_mono(device_name, preferred_rate, true, "radio audio input")
+    start_input_mono(device_name, preferred_rate, true, "radio audio input", true)
 }
 
 /// The body both mono capture openers share. `buffered` asks for the
@@ -805,6 +840,7 @@ fn start_input_mono(
     preferred_rate: u32,
     buffered: bool,
     what: &'static str,
+    costs_a_decode: bool,
 ) -> Result<(AudioInput, rtrb::Consumer<f32>), AudioError> {
     let host = cpal::default_host();
     let (device, label) = pick_device(&host, device_name, false)?;
@@ -840,6 +876,7 @@ fn start_input_mono(
             glitches.clone(),
             what,
             label.clone(),
+            costs_a_decode,
         ) {
             Ok(stream) => {
                 info!(rate, buffer = ?config.buffer_size, format = ?fmt, device = %label, "{what} running");
@@ -983,6 +1020,7 @@ pub fn start_input_stereo(
             glitches.clone(),
             "radio IQ input",
             label.clone(),
+            true,
         ) {
             Ok(stream) => {
                 info!(rate, buffer = ?config.buffer_size, stream_channels = config.channels, hw_channels = channels, format = ?fmt, device = %label, "radio IQ input running");

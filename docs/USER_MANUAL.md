@@ -13382,9 +13382,19 @@ The radio's capture device could not be opened. Common causes:
 The audio device is losing samples. The line in the diagnostics reads
 
 ```
-WARN sdroxide_audio: mic input: the audio stream from "…" glitched — the host
-says samples were lost between two callbacks …
+WARN sdroxide_audio: radio audio input: the audio stream from "…" glitched — the
+host says samples were lost between two callbacks …
 ```
+
+**Read the stream's name first.** Only two of them can cost a decode:
+`radio audio input` (a transceiver's demodulated audio) and `radio IQ input`
+(an SDR's I/Q on a sound card). The **`mic input`** stream is the microphone,
+and nothing reads it at all unless you are transmitting by voice — while
+receiving, its samples are drained and thrown away on every tick. Both streams
+glitch together on a machine that is momentarily busy, which is why the
+microphone's line is `INFO` and says so in as many words: it is not why a
+digital mode is failing to decode, and it sent one reporter looking for what a
+USB microphone had to do with FT8 (issue #367).
 
 and after the first one they are counted and summarised rather than repeated,
 so a stream that does this every few seconds no longer buries the rest of the
@@ -13400,6 +13410,12 @@ perfectly healthy. When that happens the FT8 panel says so directly:
 WARN sdroxide_digi: FT8: the last receive period arrived 0.4 s short of the
 15.0 s it should be — the audio device is losing samples …
 ```
+
+The period you *selected the mode in* is exempt, however short it is: a mode
+chosen four seconds before the next boundary has legitimately only heard four
+seconds, and reporting that as a fault at every start had two people looking for
+a broken sound card that was never broken (issues #363, #367). Counting starts
+with the first period sdroxide has heard all of.
 
 A **virtual audio cable** — VB-Audio, VAC, Flex DAX — is the usual source, and
 it is not a fault in the cable so much as a consequence of what one is: there is

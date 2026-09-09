@@ -161,6 +161,16 @@ pub struct DigiController {
     slot_buf: Vec<i16>,
     tap_scratch: Vec<f32>,
     last_slot_idx: i64,
+    /// The first slot this controller was alive for the whole of.
+    ///
+    /// A mode is selected at some arbitrary moment inside a period, so the
+    /// period that was already running when the controller was built holds only
+    /// the tail of itself — a second and a half of a fifteen-second slot, if the
+    /// operator happened to press the button then. That is not a fault and must
+    /// not be reported as one: it was doing exactly what it should
+    /// (issues #363, #367). `i64::MAX` until the first boundary says which slot
+    /// that is.
+    first_whole_slot: i64,
     /// Receive periods that arrived short of a full slot — see
     /// [`DigiController::check_slot_arrived_whole`].
     short_slots: u64,
@@ -298,6 +308,7 @@ impl DigiController {
             dial_hz: 0.0,
             audio_hz: 1500.0,
             tx_even,
+            first_whole_slot: i64::MAX,
             tx_fired_slot: i64::MIN,
             last_heard: std::collections::HashMap::new(),
             recent_activity: Vec::new(),
@@ -560,6 +571,11 @@ impl DigiController {
         if self.last_slot_idx == self.tx_fired_slot {
             return;
         }
+        // The period the mode was selected in holds only the tail of itself,
+        // however healthy the audio device is — see [`Self::first_whole_slot`].
+        if self.last_slot_idx < self.first_whole_slot {
+            return;
+        }
         let want = (self.params.slot_s * DECODE_RATE) as usize;
         let got = self.slot_buf.len();
         if want == 0 || got >= (want as f64 * SLOT_COMPLETE_FRAC) as usize {
@@ -771,6 +787,14 @@ impl DigiController {
                     }
                 }
             }
+            if self.last_slot_idx == i64::MIN {
+                // Not a boundary at all: the first poll, landing wherever
+                // inside period `idx` the operator happened to select the mode.
+                // What this controller ends up holding for `idx` is whatever
+                // was left of it — so the first period it hears all of is the
+                // next one.
+                self.first_whole_slot = idx.saturating_add(1);
+            }
             self.slot_buf.clear();
             self.last_slot_idx = idx;
         }
@@ -923,6 +947,36 @@ mod tests {
             tx_even: true,
             ..Default::default()
         }
+    }
+
+    /// A mode selected part way through a period must not report that period
+    /// as a fault.
+    ///
+    /// It is short because it started late, not because anything lost samples,
+    /// and saying "the audio device is losing samples … nothing will decode
+    /// while this lasts" at every start sent two reporters looking for a fault
+    /// in their sound card that was never there (issues #363, #367).
+    #[test]
+    fn the_period_a_mode_was_selected_inside_is_not_a_short_period() {
+        // 1_609_459_200 is a 15 s boundary; start 1.6 s into the slot after it,
+        // which is where issue #367's log has the engine coming up.
+        let t = |secs: f64| UNIX_EPOCH + Duration::from_secs_f64(1_609_459_200.0 + secs);
+        let mut c = DigiController::new(Mode::Ft8, cfg(), 12_000.0);
+        c.poll(t(1.6), 14_074_000.0);
+        // Whatever was left of that period, and then the boundary that ends it.
+        c.on_rx_audio(&vec![0.0f32; (13.4 * 12_000.0) as usize]);
+        c.poll(t(15.1), 14_074_000.0);
+        assert_eq!(c.short_slots, 0, "the period we joined late is not a fault");
+
+        // The next one is this controller's own, and a hole in it is real.
+        c.on_rx_audio(&vec![0.0f32; (2.0 * 12_000.0) as usize]);
+        c.poll(t(30.1), 14_074_000.0);
+        assert_eq!(c.short_slots, 1, "a period that lost thirteen seconds is");
+
+        // ...and a whole one is not.
+        c.on_rx_audio(&vec![0.0f32; (15.0 * 12_000.0) as usize]);
+        c.poll(t(45.1), 14_074_000.0);
+        assert_eq!(c.short_slots, 1);
     }
 
     #[test]
