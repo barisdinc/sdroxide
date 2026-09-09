@@ -7302,7 +7302,23 @@ involved:
 - **Devices / Discover** — scan the local network for HPSDR devices and pick one
   from the list. Both protocols are driven: Protocol 1 (the Metis framing used
   by the Hermes Lite 2 and the older Metis/Hermes boards) and Protocol 2. Which
-  one a board speaks is detected when the connection opens.
+  one a board speaks is detected when the connection opens. A board is listed
+  by the gateware's own name with the commercial one beside it — `Angelia
+  (ANAN-100D)`, `Orion (ANAN-200D)`, `Saturn (ANAN-G2)` — because those are the
+  same radio under two names and only one of them is on the front panel.
+
+  A board found here that then **never starts** — the connection opens, the
+  waterfall stays empty, the link is dropped after five seconds and the whole
+  thing repeats — is almost always a board that is still streaming to somebody
+  else: another program on the network, or a session of this one that ended
+  without being able to stop it. The gateware sends to whichever host started
+  it and ignores a start command from anywhere else while it is running, and it
+  reports itself as **in use** in the discovery listing and the log while that
+  lasts. sdroxide sends a stop before every start for exactly this reason, and
+  repeats the start command each second while nothing arrives, so a board in
+  that state is normally reclaimed within a second or two (issue #365). If it
+  is not, close whatever else is holding it — and check that UDP port 1024 is
+  not blocked by a firewall.
 - **Manual IP** — connect directly to a known address (for example
   `192.168.1.50`), skipping discovery. A manual IP overrides whatever discovery
   found.

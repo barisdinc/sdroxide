@@ -554,6 +554,36 @@ pub(crate) fn run(ctx: ThreadCtx) {
         }
     );
 
+    let mut buf = [0u8; 2048];
+
+    // Stop before starting. A board left streaming — a session that crashed, a
+    // program killed, a reconnect whose predecessor could not send the stop
+    // because it had been superseded — goes on sending EP6 to that dead
+    // endpoint, and several gateware versions ignore a run command from
+    // anywhere else while they are already running. The radio is then
+    // discovered, accepts everything, and streams to nobody: the endless
+    // "connect, wait for the waterfall, lose it, connect again" of issue #365.
+    // Every reference implementation opens this way (piHPSDR's
+    // `metis_restart`), and on a board that was already idle it costs one
+    // datagram.
+    let _ = socket.send_to(&start_command(false), dest);
+    std::thread::sleep(Duration::from_millis(100));
+    // Whatever was still in flight belongs to the previous session. Dropped
+    // rather than decoded: its sequence numbers are the old stream's, and the
+    // first real datagram would otherwise be counted as a few hundred lost.
+    let mut stale = 0u32;
+    while socket.recv_from(&mut buf).is_ok() {
+        stale += 1;
+        if stale > 1000 {
+            break;
+        }
+    }
+    if stale > 0 {
+        tracing::info!(
+            "HPSDR P1: the radio was already streaming — {stale} datagram(s) from the previous              session dropped before starting"
+        );
+    }
+
     // Prime the registers — two full rotations so every slot lands, including
     // the front-end gain — then start the EP6 I/Q stream. That order is the one
     // rustyHPSDR uses, so the radio begins with its rate, NCO and gain loaded.
@@ -565,7 +595,6 @@ pub(crate) fn run(ctx: ThreadCtx) {
     let _ = socket.send_to(&start_command(true), dest);
     tracing::debug!("HPSDR P1: sent priming EP2 datagrams + run command; awaiting EP6 stream");
 
-    let mut buf = [0u8; 2048];
     let mut rx_scratch: Vec<f32> = Vec::with_capacity(FLOATS_PER_DATAGRAM);
     let mut tx_scratch: Vec<f32> = Vec::with_capacity(FLOATS_PER_DATAGRAM);
     let mut next_ep2 = Instant::now();
@@ -574,6 +603,9 @@ pub(crate) fn run(ctx: ThreadCtx) {
     let mut logged_first_rx = false;
     let mut logged_versions = false;
     let mut warned_no_rx = false;
+    // When the run command was last sent, so it can be repeated while the
+    // board has yet to answer with any I/Q — see the retry below.
+    let mut last_run_cmd = Instant::now();
     let mut radio_ptt = false;
     // See the `push_iq` call: the RX ring is still full for the moment
     // between unkey and the engine draining it.
@@ -791,14 +823,26 @@ pub(crate) fn run(ctx: ThreadCtx) {
             }
         }
 
+        // A run command the board never acted on is worth repeating before the
+        // whole connection is torn down and rebuilt around it: the register
+        // priming above is already in the gateware, so a second ask is one
+        // datagram against a five-second reconnect. Some boards drop the first
+        // one when it lands too soon after the priming frames (issue #365).
+        if !logged_first_rx && last_run_cmd.elapsed() >= Duration::from_secs(1) {
+            last_run_cmd = Instant::now();
+            let _ = socket.send_to(&start_command(true), dest);
+            tracing::debug!("HPSDR P1: still no EP6 — run command sent again");
+        }
+
         // Flag a radio that accepted the run command but never streams I/Q — the
         // usual symptom of a wrong sample-rate/endpoint offset or a firewall.
         if !logged_first_rx && !warned_no_rx && started.elapsed() >= Duration::from_secs(3) {
             warned_no_rx = true;
             tracing::warn!(
-                "HPSDR P1: no EP6 I/Q datagrams after 3 s. Check that UDP port {PORT} is not \
-                 blocked, that the radio is idle (not held by another program), and that the \
-                 board actually speaks Protocol 1."
+                "HPSDR P1: no EP6 I/Q datagrams after 3 s, and the run command has been sent \
+                 again since. Check that UDP port {PORT} is not blocked, that the radio is idle \
+                 (not held by another program — it reports that as \"in use\" at discovery), and \
+                 that the board actually speaks Protocol 1."
             );
         }
         stats.tick();

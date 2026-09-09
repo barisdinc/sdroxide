@@ -226,7 +226,7 @@ fn two_ddcs_share_one_connection_and_detach_independently() {
     )
     .expect("open");
     assert_eq!(board.protocol(), 2);
-    assert_eq!(board.board(), "Saturn");
+    assert_eq!(board.board(), "Saturn (ANAN-G2)");
     assert_eq!(board.ddc_count(), 8);
 
     // A DDC beyond the framing is refused with the count.

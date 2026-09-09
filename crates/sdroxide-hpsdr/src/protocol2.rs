@@ -525,6 +525,13 @@ impl P2Thread {
             port::HIGH_PRIORITY,
             port::GENERAL,
         );
+        // Stop before starting, for the reason `protocol1::run` gives at
+        // length: a board left streaming to a host that has gone answers
+        // discovery as "in use" and ignores a fresh start, which is the
+        // endless connect-and-lose-it of issue #365. One packet on a board
+        // that was already idle.
+        self.send_high_priority_run(false);
+        std::thread::sleep(Duration::from_millis(100));
         // The order and the pauses are the protocol's, not a style: the
         // General packet carries the port table and the board switches and has
         // to land before anything is configured against them, and each step
@@ -552,6 +559,9 @@ impl P2Thread {
         let mut logged_first_tx = false;
         let mut warned_no_rx = false;
         let started = Instant::now();
+        // When the run bit was last asserted, so it can be repeated while the
+        // board has yet to answer with any I/Q — see the retry below.
+        let mut last_run_cmd = Instant::now();
 
         loop {
             let mut freq_changed = false;
@@ -720,6 +730,20 @@ impl P2Thread {
                 }
             }
 
+            // A run bit the board never acted on is worth asserting again
+            // before the whole connection is torn down and rebuilt around it:
+            // the DDC and DUC configuration is already in the gateware, so a
+            // second ask is one packet against a five-second reconnect
+            // (issue #365).
+            if !logged_first_rx
+                && !self.slots.is_empty()
+                && last_run_cmd.elapsed() >= Duration::from_secs(1)
+            {
+                last_run_cmd = Instant::now();
+                self.send_high_priority();
+                tracing::debug!("HPSDR P2: still no DDC I/Q — run command sent again");
+            }
+
             // Flag a radio that accepted the run command but never streams I/Q.
             if !logged_first_rx
                 && !warned_no_rx
@@ -728,9 +752,11 @@ impl P2Thread {
             {
                 warned_no_rx = true;
                 tracing::warn!(
-                    "HPSDR P2: no DDC I/Q datagrams after 3 s. Expected them on source port \
-                     {}..{}. Check that these UDP ports are not blocked by a firewall, that the \
-                     radio is idle, and that the DDC-command offsets match this board.",
+                    "HPSDR P2: no DDC I/Q datagrams after 3 s, and the run command has been sent \
+                     again since. Expected them on source port {}..{}. Check that these UDP \
+                     ports are not blocked by a firewall, that the radio is idle (another \
+                     program holding it shows as \"in use\" at discovery), and that the \
+                     DDC-command offsets match this board.",
                     port::DDC_IQ_BASE,
                     port::DDC_IQ_BASE + 7
                 );
