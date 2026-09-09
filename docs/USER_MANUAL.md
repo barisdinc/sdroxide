@@ -8027,6 +8027,66 @@ tezuka board has been on this bench — so treat the 47.5 MHz figure as the
 firmware's claim, and press **Test connection** to see what your own board
 actually answers.
 
+**The Fishball/PlutoSky build carries a DATV stack you are probably not using.**
+That variant of tezuka ships, on top of the bare IIOD/AD9361 essentials, a whole
+amateur-television transmit stack: an MQTT broker (`mosquitto`) and several
+subscribers, a web server (`maia-httpd`), an NFS server, `gpsd`, and a handful of
+shell watchers that re-run themselves (`api_controller.sh`, `bitrate_strategy.sh`,
+`mqtt_obs_ctrl.sh`, `watchconsoletx.sh`, `watchdatveasy.sh`, `watchconsolefreq.sh`,
+`pluto_mqtt_ctrl`, `pluto_stream`). On the Zynq 7020's two Cortex-A9 cores and
+743 MB of RAM that costs real capacity even when no DATV transmission is running,
+and one station using the board purely as a wideband receiver for sdroxide
+reported it climbing to a load average above 12, a kernel RCU stall, and then an
+IIOD link that collapsed into a tight `os error 11` / `os error 32` loop until
+the board was unreachable. After shutting the stack down, the same board held
+about 607 MB free and a load of 1.1–1.3 through more than two hours of continuous
+streaming.
+
+**Its root filesystem lives in RAM, so editing `/etc/init.d` achieves nothing.**
+This is the part that wastes people's evenings: `/` on this firmware is a rootfs
+regenerated from the firmware image at every boot. Scripts you edit there —
+`S95bgcript`, `S96plutostream` — are correct when you check them and back to
+their original contents after a reboot. Only `/mnt/jffs2` is real flash, and the
+stock `S98autostart` runs `/mnt/jffs2/autorun.sh` if it exists. That file is the
+one place a change survives:
+
+```sh
+cat > /mnt/jffs2/autorun.sh << 'EOF'
+#!/bin/sh
+sleep 5
+# The DATV stack — nothing to do with receiving.
+pkill -f watchconsoletx.sh
+pkill -f watchdatveasy.sh
+pkill -f watchconsolefreq.sh
+pkill -f api_controller.sh
+pkill -f mqtt_obs_ctrl.sh
+pkill -f bitrate_strategy.sh
+pkill -f pluto_mqtt_ctrl
+pkill -f pluto_stream
+pkill -f "inotifywait.*ensm_mode"
+pkill -f "inotifywait.*RX_LO_frequency"
+# MQTT, web, GPS and NFS — likewise.
+pkill -f mosquitto_sub
+pkill mosquitto
+pkill -f maia-httpd
+pkill gpsd
+rpc.nfsd 0 2>/dev/null
+pkill rpc.mountd
+pkill rpc.statd
+EOF
+chmod +x /mnt/jffs2/autorun.sh
+reboot
+```
+
+It leaves everything the board needs to stay reachable and to stream: `iiod`,
+`dropbear` for SSH, `chronyd`, `avahi-daemon`, the loggers, the watchdog, the
+network daemons and `update.sh` for firmware updates over USB. Do this only if
+you are certain you will not want the DATV side — the `inotifywait` watchers it
+kills are also what some tezuka builds use to follow the tuned frequency — and
+remember that it is your board. None of this has been run here: it is the
+recommendation of the operator who reported it (issue #379), on a Fishball
+board running `tezuka-v0.3.21`.
+
 **Full duplex** — the checkbox above the port boxes, off by default. With it
 off, receive stops for the length of an over and the whole link goes to
 transmit, exactly as the HPSDR backend does. The reason is the link, not the
