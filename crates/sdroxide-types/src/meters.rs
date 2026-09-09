@@ -93,6 +93,22 @@ pub struct Meters {
     /// constant-envelope signal passes √2 of full scale. Together they say both
     /// *whether* and roughly *how far*.
     pub adc_clip: f32,
+    /// The *radio's own* converter-overflow flag, where it reports one.
+    ///
+    /// A different claim from `adc_clip` beside it, and neither replaces the
+    /// other. `adc_clip` is measured here, from the samples that arrived; this
+    /// is the front end reporting on the converter those samples came out of.
+    /// On a direct-sampling radio the two can disagree completely and the
+    /// radio's is the one that is right: a Hermes-Lite 2 puts the whole of
+    /// 0–38 MHz onto one 12-bit ADC and then hands over 48 kHz of it, so a
+    /// broadcaster three bands away can drive the converter into its rails
+    /// while every sample that reaches us sits at a tenth of full scale
+    /// (issue #362).
+    ///
+    /// `None` on the great majority of radios, which have no such flag —
+    /// see `IqSource::adc_overload`.
+    #[serde(default)]
+    pub adc_overload: Option<bool>,
     /// Present while transmitting.
     pub tx: Option<TxMeters>,
     /// A WFM stereo pilot is locked on the main receiver. Drives the `ST`
@@ -108,7 +124,9 @@ impl Meters {
     /// The front end is running into its rails, so nothing downstream — this
     /// struct's own `s_dbm` included — is reading an undistorted signal.
     pub fn adc_overloaded(&self) -> bool {
-        self.adc_clip > OVERLOAD_FRACTION
+        // The radio's own flag wins where there is one: it is watching the
+        // converter, and this side is only watching what came out of it.
+        self.adc_overload.unwrap_or(false) || self.adc_clip > OVERLOAD_FRACTION
     }
 
     /// S-units for display: S9 = -73 dBm, 6 dB per unit below, dB-over-9 above.

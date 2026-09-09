@@ -964,6 +964,91 @@ pub(in crate::app) fn settings_hpsdr_tab(
         }
         ui.end_row();
 
+        ui.label("Overload protection").on_hover_text(
+            "Back the LNA gain off by itself while the board reports its ADC overflowing, and \
+             let it back up once it stops.\n\n\
+             A Hermes-Lite 2 samples the whole of 0-38 MHz onto one 12-bit converter with no \
+             mixer and no preselector in front of it, so a broadcast station a band away can \
+             drive it into overflow while the band you are looking at shows nothing wrong at \
+             all — the noise floor climbs, everything intermodulates and the decoders stop. \
+             The board knows, and this is what acts on it.\n\n\
+             Off by default: it moves a control you set. Nothing happens while transmitting.",
+        );
+        crate::chrome::checkbox(
+            ui,
+            &mut cfg.hpsdr.auto_gain,
+            "Wind the gain back when the ADC overflows",
+        )
+        .on_hover_text(
+            "Applies on Apply / reconnect. The gain rail above follows the loop while it \
+             runs, so you can watch what it does.",
+        );
+        ui.end_row();
+
+        if cfg.hpsdr.auto_gain {
+            ui.label("  Step").on_hover_text(
+                "How far the gain moves each time, in dB. One is the step the board's own \
+                 gain register has.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut cfg.hpsdr.auto_gain_step_db)
+                    .range(0.5..=12.0)
+                    .speed(0.5)
+                    .suffix(" dB"),
+            );
+            ui.end_row();
+
+            ui.label("  Attack / decay").on_hover_text(
+                "How often the gain may come down while the converter is overflowing, and how \
+                 often it may go back up once it has stopped.\n\n\
+                 The two are deliberately a hundred times apart. Retreat immediately: every \
+                 millisecond of overflow is a receiver full of intermodulation. Return slowly: \
+                 whatever caused it — a neighbour keying, a broadcaster coming up at dusk — has \
+                 usually not gone away, and a loop that recovered as fast as it retreated would \
+                 spend the evening oscillating across the threshold. 100 ms and 10 s per \
+                 decibel is what PowerSDR's Auto S-Att and N1GP's HermesIntf have both used.",
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut cfg.hpsdr.auto_gain_attack_ms)
+                        .range(20..=5_000)
+                        .speed(10)
+                        .suffix(" ms"),
+                );
+                ui.label("/");
+                ui.add(
+                    egui::DragValue::new(&mut cfg.hpsdr.auto_gain_decay_ms)
+                        .range(100..=120_000)
+                        .speed(100)
+                        .suffix(" ms"),
+                );
+            });
+            ui.end_row();
+
+            ui.label("  Range").on_hover_text(
+                "The lowest and highest gain the loop may use, in dB. The ceiling is what stops \
+                 it deciding how sensitive your receiver should be; the floor is where you say \
+                 that below some point the overload is somebody else's problem and the answer \
+                 is a filter, not another twenty decibels.",
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut cfg.hpsdr.auto_gain_min_db)
+                        .range(HpsdrConfig::LNA_GAIN_MIN_DB..=HpsdrConfig::LNA_GAIN_MAX_DB)
+                        .speed(1.0)
+                        .suffix(" dB"),
+                );
+                ui.label("…");
+                ui.add(
+                    egui::DragValue::new(&mut cfg.hpsdr.auto_gain_max_db)
+                        .range(HpsdrConfig::LNA_GAIN_MIN_DB..=HpsdrConfig::LNA_GAIN_MAX_DB)
+                        .speed(1.0)
+                        .suffix(" dB"),
+                );
+            });
+            ui.end_row();
+        }
+
         ui.label("Filter board").on_hover_text(
             "Accessory board on the Hermes-Lite 2's J16 header (or the open-collector \
              outputs of any other openHPSDR board — Protocol 2 included). \"N2ADR\" picks \

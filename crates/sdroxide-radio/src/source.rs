@@ -432,6 +432,22 @@ pub trait IqSource: Send {
     fn pa_temp_c(&mut self) -> Option<f32> {
         None
     }
+    /// The front end's own converter-overflow flag, where the radio reports one.
+    ///
+    /// Not the same claim as `Meters::adc_clip`, which is measured on this side
+    /// from the samples that arrive. A direct-sampling radio converts a whole
+    /// band at once and then hands over a narrow DDC out of it, so the stream
+    /// can be perfectly clean while the converter behind it is being driven
+    /// into its rails by a broadcaster three bands away — everything
+    /// intermodulates, the noise floor climbs, and nothing in the samples says
+    /// why. Only the board knows, and a Hermes-Lite 2 says so in the status
+    /// bytes it sends with every frame (issue #362).
+    ///
+    /// `None` on the great majority of radios, which have no such flag.
+    /// Default: none.
+    fn adc_overload(&mut self) -> Option<bool> {
+        None
+    }
     /// The rig's own S-meter in dBm, polled by the engine while receiving.
     ///
     /// For a source that hands us already-demodulated audio (a CAT rig on a
@@ -1482,6 +1498,9 @@ impl IqSource for ConvertedSource {
 
     fn pa_temp_c(&mut self) -> Option<f32> {
         self.inner.pa_temp_c()
+    }
+    fn adc_overload(&mut self) -> Option<bool> {
+        self.inner.adc_overload()
     }
 
     fn rx_signal_dbm(&mut self) -> Option<f32> {

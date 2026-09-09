@@ -223,6 +223,9 @@ fn two_ddcs_share_one_connection_and_detach_independently() {
         false,
         true,
         sdroxide_types::HpsdrIoRxInput::Radio,
+        // Automatic overload protection off: these tests drive the wire, not
+        // the loop that rides on it.
+        sdroxide_hpsdr::AutoGain::new(false, 1.0, 100, 10_000, -12.0, 48.0),
     )
     .expect("open");
     assert_eq!(board.protocol(), 2);

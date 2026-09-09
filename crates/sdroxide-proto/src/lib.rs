@@ -1249,7 +1249,16 @@ use sdroxide_types::{
 /// * [`sdroxide_types::Command`] gains `LogQso`, which carries a hand-entered
 ///   contact to the WSJT-X UDP listeners the way the sequencer's own contacts
 ///   already went (issue #341). Appended, so no surviving discriminant moved.
-pub const PROTO_VERSION: u16 = 138;
+/// v139: [`sdroxide_types::Meters`] gains `adc_overload`, the front end's own
+/// converter-overflow flag where the radio reports one — a Hermes-Lite 2 does,
+/// and on a direct-sampling board it is the only thing that can say the
+/// converter is being driven into its rails by something outside the window
+/// (issue #362). It sits among that struct's fields and `Meters` rides
+/// `ServerMsg::Meters` whole, so a v138 peer handed one reads the tail of it
+/// out of step. [`sdroxide_types::HpsdrConfig`] gains the loop that acts on it
+/// — `auto_gain` and its five settings — appended to a struct that rides inside
+/// `RadioConfig`, with the same consequence.
+pub const PROTO_VERSION: u16 = 139;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

@@ -106,6 +106,17 @@ impl HpsdrSource {
                     cfg.invert_spectrum,
                     cfg.pa_enable,
                     cfg.io_rx_input,
+                    {
+                        let (lo, hi) = cfg.auto_gain_bounds();
+                        sdroxide_hpsdr::AutoGain::new(
+                            cfg.auto_gain,
+                            cfg.auto_gain_step_db,
+                            cfg.auto_gain_attack_ms,
+                            cfg.auto_gain_decay_ms,
+                            lo,
+                            hi,
+                        )
+                    },
                 )
                 .map(std::sync::Arc::new)
                 .map_err(|e| e.to_string())
@@ -360,6 +371,14 @@ impl IqSource for HpsdrSource {
     /// answers `None` and the meter says nothing.
     fn pa_temp_c(&mut self) -> Option<f32> {
         self.rx.as_ref()?.pa_temp_c()
+    }
+
+    /// The board's own ADC-overflow flag — see [`IqSource::adc_overload`]. It
+    /// is the one thing that can tell an operator a direct-sampling front end
+    /// is in trouble, because a narrow DDC out of a converter being hammered by
+    /// something outside it looks perfectly clean.
+    fn adc_overload(&mut self) -> Option<bool> {
+        self.rx.as_ref()?.adc_overload()
     }
 
     /// The board's front-end LNA gain. On a Hermes-Lite 2 this is the only

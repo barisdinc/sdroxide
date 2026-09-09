@@ -164,6 +164,9 @@ fn p1_loopback_rx() {
         false,
         true,
         sdroxide_types::HpsdrIoRxInput::Radio,
+        // Automatic overload protection off: these tests drive the wire, not
+        // the loop that rides on it.
+        sdroxide_hpsdr::AutoGain::new(false, 1.0, 100, 10_000, -12.0, 48.0),
     )
     .expect("open loopback connection");
     assert_eq!(board.protocol(), 1, "detected as Protocol 1");

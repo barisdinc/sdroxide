@@ -1595,6 +1595,56 @@ pub struct HpsdrConfig {
     /// an operator who has a correction they are happy with.
     #[serde(default)]
     pub ps_frozen: bool,
+    // ── Automatic overload protection ──────────────────────────────────────
+    /// Back the front-end gain off by itself while the board reports its ADC
+    /// overloading, and let it back up again when it stops (issue #362).
+    ///
+    /// A Hermes-Lite 2's front end is a 12-bit direct-sampling converter with
+    /// no mixer in front of it: the whole 0–38 MHz arrives at once, so a
+    /// broadcast station a band away can drive it into overflow while the
+    /// panadapter shows nothing unusual at all — everything simply
+    /// intermodulates and the noise floor climbs. The board reports the
+    /// overflow itself, in the status bytes it sends with every frame, and this
+    /// is what acts on it.
+    ///
+    /// Off by default. It moves a control the operator set, so it is theirs to
+    /// ask for; and on a station whose gain is already right it never has
+    /// anything to do.
+    #[serde(default)]
+    pub auto_gain: bool,
+    /// How much the gain moves per step, in dB. One decibel is the step the
+    /// Hermes-Lite's own gain register has and what the reference
+    /// implementations use.
+    #[serde(default = "HpsdrConfig::default_auto_gain_step_db")]
+    pub auto_gain_step_db: f64,
+    /// How often the gain may come *down* while the converter is overloading,
+    /// in ms. Fast, because every millisecond of overflow is a receiver full of
+    /// intermodulation.
+    #[serde(default = "HpsdrConfig::default_auto_gain_attack_ms")]
+    pub auto_gain_attack_ms: u32,
+    /// How often the gain may go back *up* once the overflow has cleared, in
+    /// ms. Slow, because the thing that caused it — a neighbour's transmission,
+    /// a broadcast station coming up at dusk — has not necessarily gone away,
+    /// and a loop that recovered as fast as it retreated would spend the
+    /// evening oscillating across the overflow threshold.
+    ///
+    /// The asymmetry is the whole design: fast attack, slow decay, which is
+    /// what N1GP's HermesIntf has used since 2013 and what PowerSDR's
+    /// "Auto S-Att" does.
+    #[serde(default = "HpsdrConfig::default_auto_gain_decay_ms")]
+    pub auto_gain_decay_ms: u32,
+    /// The lowest gain the loop may wind down to, in dB. Its own floor rather
+    /// than the board's, so an operator can say "never make this receiver
+    /// deafer than this" — below some point the overflow is somebody else's
+    /// problem and the answer is a filter, not another 20 dB.
+    #[serde(default = "HpsdrConfig::default_auto_gain_min_db")]
+    pub auto_gain_min_db: f64,
+    /// The highest gain the loop may return to, in dB. The gain the operator
+    /// set is the ceiling by default — the loop's job is to protect the
+    /// converter, not to decide how sensitive the receiver should be — and this
+    /// is how that ceiling is stated in its own right.
+    #[serde(default = "HpsdrConfig::default_auto_gain_max_db")]
+    pub auto_gain_max_db: f64,
     /// The operator's own open-collector words, one row per band, used when
     /// [`Self::filter_board`] is [`HpsdrFilterBoard::Custom`] — see
     /// [`HpsdrOcRow`] (issue #296).
@@ -1624,6 +1674,12 @@ impl Default for HpsdrConfig {
             ps_bins: Self::default_ps_bins(),
             ps_rate: Self::default_ps_rate(),
             ps_frozen: false,
+            auto_gain: false,
+            auto_gain_step_db: Self::default_auto_gain_step_db(),
+            auto_gain_attack_ms: Self::default_auto_gain_attack_ms(),
+            auto_gain_decay_ms: Self::default_auto_gain_decay_ms(),
+            auto_gain_min_db: Self::default_auto_gain_min_db(),
+            auto_gain_max_db: Self::default_auto_gain_max_db(),
             oc_table: Vec::new(),
         }
     }
@@ -1682,6 +1738,42 @@ impl HpsdrConfig {
     /// See [`HpsdrConfig::pa_enable`].
     pub fn default_pa_enable() -> bool {
         true
+    }
+
+    /// See [`Self::auto_gain_step_db`].
+    pub fn default_auto_gain_step_db() -> f64 {
+        1.0
+    }
+
+    /// See [`Self::auto_gain_attack_ms`] — 100 ms per decibel, the figure
+    /// N1GP's HermesIntf has used since 2013.
+    pub fn default_auto_gain_attack_ms() -> u32 {
+        100
+    }
+
+    /// See [`Self::auto_gain_decay_ms`] — ten seconds per decibel, a hundred
+    /// times slower than the attack.
+    pub fn default_auto_gain_decay_ms() -> u32 {
+        10_000
+    }
+
+    /// See [`Self::auto_gain_min_db`]. The board's own floor: the loop is free
+    /// to use the whole range unless the operator narrows it.
+    pub fn default_auto_gain_min_db() -> f64 {
+        Self::LNA_GAIN_MIN_DB
+    }
+
+    /// See [`Self::auto_gain_max_db`]. The board's own ceiling.
+    pub fn default_auto_gain_max_db() -> f64 {
+        Self::LNA_GAIN_MAX_DB
+    }
+
+    /// The loop's bounds, in the order the gain register takes them and with
+    /// the operator's two figures the right way round however they were typed.
+    pub fn auto_gain_bounds(&self) -> (f64, f64) {
+        let lo = self.auto_gain_min_db.clamp(Self::LNA_GAIN_MIN_DB, Self::LNA_GAIN_MAX_DB);
+        let hi = self.auto_gain_max_db.clamp(Self::LNA_GAIN_MIN_DB, Self::LNA_GAIN_MAX_DB);
+        (lo.min(hi), lo.max(hi))
     }
 
     /// Matches the cushion every other backend gets: enough to absorb ordinary

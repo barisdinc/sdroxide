@@ -504,6 +504,9 @@ pub(crate) fn run(ctx: ThreadCtx) {
         invert_spectrum,
         pa_enable,
         io_rx_input,
+        auto_gain: mut agc,
+        lna_gain_centi_db,
+        adc_overload: overload_line,
         radio_ptt: ptt_line,
         temp_centi_c,
         mut tx,
@@ -768,16 +771,31 @@ pub(crate) fn run(ctx: ThreadCtx) {
                     // An overloaded ADC is the classic "the signal looks weird"
                     // fault: everything intermodulates and the noise floor
                     // jumps. Rate-limit the warning, it can fire every datagram.
-                    if info.adc_overload {
+                    //
+                    // Transmit is excluded from the count as well as from the
+                    // loop: a board's own transmitter leaks into its receiver,
+                    // and the operator has no more use for "your transmitter
+                    // overloaded your receiver" once per over than the loop
+                    // does.
+                    agc.observe(info.adc_overload, regs.ptt, Instant::now());
+                    if info.adc_overload && !regs.ptt {
                         overloads += 1;
                         if last_overload_warn.is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
                         {
                             last_overload_warn = Some(Instant::now());
+                            let advice = if agc.enabled {
+                                "automatic overload protection is on and is winding the gain back"
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "lower the {} gain in Settings → Device, or switch on \
+                                     automatic overload protection on the HPSDR page",
+                                    crate::net::LNA_GAIN_ELEMENT
+                                )
+                            };
                             tracing::warn!(
                                 "HPSDR P1: ADC OVERLOAD reported by the radio ({overloads} so \
-                                 far). The front end is clipping — lower the {} gain in \
-                                 Settings → Device (currently {:+.0} dB).",
-                                crate::net::LNA_GAIN_ELEMENT,
+                                 far). The front end is clipping at {:+.0} dB — {advice}.",
                                 regs.lna_gain.unwrap_or(0.0),
                             );
                         }
@@ -820,6 +838,30 @@ pub(crate) fn run(ctx: ThreadCtx) {
                 ptt_line.store(false, Ordering::Relaxed);
                 stop_stream(&socket, dest, radio, conn_id, &format!("recv error: {e}"));
                 return;
+            }
+        }
+
+        // The overload light and the loop that acts on it. Outside the receive
+        // arm because both have to keep working through a gap in the stream:
+        // an indicator that stayed lit because no frame arrived to clear it
+        // would be reporting the network rather than the front end.
+        let now = Instant::now();
+        overload_line.store(agc.overloading(now), Ordering::Relaxed);
+        if let Some(g) = regs.lna_gain {
+            if let crate::net::AutoGainStep::Set(want) = agc.step(g, regs.ptt, now) {
+                regs.lna_gain = Some(want);
+                lna_gain_centi_db.store((want * 100.0) as i32, Ordering::Relaxed);
+                // Ahead of the round robin: the point of a hundred-millisecond
+                // attack is that it reaches the board inside a hundred
+                // milliseconds.
+                rot.urge(Slot::LnaGain);
+                tracing::info!(
+                    "HPSDR P1: automatic overload protection moved the {} gain {:+.0} → \
+                     {want:+.0} dB ({} overflow report(s) so far)",
+                    crate::net::LNA_GAIN_ELEMENT,
+                    g,
+                    agc.events,
+                );
             }
         }
 

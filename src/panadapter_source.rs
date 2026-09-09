@@ -617,6 +617,13 @@ impl IqSource for PanadapterSource {
         self.ctrl.rx_signal_dbm()
     }
 
+    /// The *receiver's*, not the transceiver's: what overflows is the converter
+    /// the spectrum is coming out of, and the transceiver in this arrangement
+    /// is not in that path at all.
+    fn adc_overload(&mut self) -> Option<bool> {
+        self.rx.adc_overload()
+    }
+
     // ── Transmit: the transceiver ───────────────────────────────────────────
 
     /// `center_hz` arrives on the dial's scale; the transmitter goes where the

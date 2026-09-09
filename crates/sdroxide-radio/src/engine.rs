@@ -4463,6 +4463,11 @@ fn engine_thread(
             // for both branches: it is a property of the radio, not of the
             // direction it happens to be pointing (issue #333).
             let pa_temp_c = engine.source.pa_temp_c();
+            // The board's own converter-overflow flag, likewise read once for
+            // both branches. Not what `engine.adc` measures — that is this
+            // side's view of the samples that arrived, and on a direct-sampling
+            // radio the two answer different questions (issue #362).
+            let adc_overload = engine.source.adc_overload();
             let meters = if engine.tx_active || engine.rig_tx {
                 // CAT/TCI rigs report real forward power / SWR; HackRF and other
                 // IQ sources have no such sensor and leave both `None` (the meter
@@ -4587,6 +4592,7 @@ fn engine_thread(
                     pa_temp_c,
                     adc_peak_dbfs,
                     adc_clip,
+                    adc_overload,
                     tx: Some(TxMeters { fwd_w: tele.fwd_w, swr: tele.swr, alc, po: tele.po }),
                     stereo: false,
                     tone: None,
@@ -4612,6 +4618,7 @@ fn engine_thread(
                     pa_temp_c,
                     adc_peak_dbfs,
                     adc_clip,
+                    adc_overload,
                     tx: None,
                     stereo,
                     tone,

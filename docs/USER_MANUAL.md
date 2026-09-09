@@ -1120,6 +1120,17 @@ riding above it has already gone. See the RDS diagnostics tab
 ([2.7](#27-receiver-controls)) for the same warning where its effects show
 first.
 
+`OVL` answers to two different measurements, and either one lights it. The
+first is what sdroxide measures here, from the samples the radio sends: how many
+of them sat at full scale over the last meter window. The second is the **radio's
+own overflow flag**, on the few front ends that report one — a Hermes Lite 2
+does. That second one matters on a direct-sampling radio, where the converter
+takes a whole band at once and then hands over a narrow slice of it: a
+broadcaster three bands away can be driving the ADC into its rails while every
+sample that reaches sdroxide sits at a tenth of full scale, so only the board
+can tell you. A Hermes Lite 2 can also be left to fix it by itself — see
+**Overload protection** in [6.2.3](#623-hpsdr-network-radios).
+
 **Board temperature.** A radio with a temperature sensor of its own has the
 reading in the meter's bottom-left corner, in degrees Celsius — a Hermes-Lite 2
 is the one this driver meets that reports one, on every face and in receive as
@@ -7356,6 +7367,50 @@ involved:
   convincing-looking traces while SSB comes out on the wrong sideband and FT8
   returns no decodes at all (or a handful of CQs from callsigns that don't match
   their grid).
+- **Overload protection** — wind the LNA gain back by itself while the board
+  reports its ADC overflowing, and let it back up once it stops. **Off by
+  default**, because it moves a control you set.
+
+  A Hermes Lite 2 samples the whole of 0–38 MHz onto one 12-bit converter with
+  no mixer and no preselector in front of it. A broadcast station a band away
+  can therefore drive it into overflow while the band you are looking at shows
+  nothing wrong at all: the noise floor climbs, everything intermodulates, the
+  decoders stop, and none of it is visible as a signal that is obviously too
+  big. The board knows — the overflow flag is in the status bytes it sends with
+  every frame — and this is what acts on it. The **OVL** light on the S-meter
+  ([2.9](#29-the-s-meter)) follows that same flag whether or not the loop is
+  switched on, so you can run manual gain and still see it happening.
+
+  Switching it on opens three settings:
+
+  - **Step** — how far the gain moves each time, 0.5 to 12 dB. One decibel is
+    the step the board's own gain register has.
+  - **Attack / decay** — how often the gain may come *down* while the converter
+    is overflowing, and how often it may go back *up* once it has stopped. The
+    two are deliberately a hundred times apart, and that asymmetry is the whole
+    design rather than a tuning choice. Retreat immediately: every millisecond
+    of overflow is a receiver full of intermodulation. Return slowly: whatever
+    caused it — a neighbour keying, a broadcaster coming up at dusk — has
+    usually not gone away, and a loop that recovered as fast as it retreated
+    would spend the evening oscillating across the threshold. 100 ms and 10 s
+    per decibel are the defaults, which is what PowerSDR's *Auto S-Att* and
+    N1GP's HermesIntf have both used.
+  - **Range** — the lowest and highest gain the loop may use. The ceiling is
+    what stops it deciding how sensitive your receiver should be; the floor is
+    where you say that below some point the overload is somebody else's problem
+    and the answer is a filter, not another twenty decibels.
+
+  **Nothing happens while you are transmitting.** A board's own transmitter
+  leaks into its own receiver, and reading that as a receive overload would wind
+  the gain down through every over and hand you a deaf receiver on unkey. The
+  LNA gain rail above follows the loop while it runs, so you can watch what it
+  does, and every move it makes is logged with the running count of overflow
+  reports — which is worth having on its own when you are trying to work out
+  whether a preamplifier or an antenna is marginal (issue #362).
+
+  Only a Hermes Lite 2 has a front-end gain sdroxide can command, so this is a
+  Hermes Lite feature today; the loop itself knows nothing about the board and
+  will follow any front end that grows one.
 - **Filter board** — how the board's seven open-collector outputs are driven.
   On a Hermes Lite 2 these are the J16 header; every other openHPSDR board has
   them too, **Protocol 2 boards included** (Odyssey 2, ANAN-G2, Saturn — before
