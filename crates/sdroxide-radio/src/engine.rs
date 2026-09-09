@@ -14490,11 +14490,25 @@ impl Engine {
                     txf / 1e6
                 ));
             }
-            if self.tx_ham_only && Band::containing(txf) == Band::Gen {
-                return self.deny_tx(
+            // `is_amateur`, not `!= Gen`: the band bar carries one band that is
+            // not an amateur allocation — 11 m, the citizens' band — precisely
+            // so it can be listened to, and a band being nameable must not be
+            // the same thing as a licence to key up on it (issue #396).
+            let band = Band::containing(txf);
+            if self.tx_ham_only && !band.is_amateur() {
+                return self.deny_tx(&if band == Band::Gen {
                     "outside amateur bands (set tx_ham_only = false in config.toml, or pass \
-                     --oob-tx, if you are licensed to transmit here)",
-                );
+                     --oob-tx, if you are licensed to transmit here)"
+                        .to_string()
+                } else {
+                    format!(
+                        "{} is not an amateur band — it is a separate radio service with its \
+                         own rules and its own type-approved equipment (set tx_ham_only = \
+                         false in config.toml, or pass --oob-tx, if you are licensed to \
+                         transmit here)",
+                        band.label()
+                    )
+                });
             }
             // The dial is not what goes out. A digital mode transmits at the
             // dial PLUS its audio offset, so every check above — this radio's

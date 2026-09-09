@@ -1291,7 +1291,14 @@ use sdroxide_types::{
 /// against (issue #394). It sits at that struct's tail and `Meters` rides
 /// `ServerMsg::Meters` whole, so a v142 peer handed one reads the end of it out
 /// of step.
-pub const PROTO_VERSION: u16 = 143;
+///
+/// v144: [`sdroxide_types::Band`] gains `M11`, the 11 m citizens' band — on the
+/// bar so it can be tuned and listened to, and flagged as not an amateur
+/// allocation so the transmit lockout still holds there (issue #396). A band
+/// rides inside `RadioState`, the band stack, every memory and
+/// `DigiConfig::tx_audio_hz`, and a discriminant a v143 peer has no name for
+/// stops it decoding any of them.
+pub const PROTO_VERSION: u16 = 144;
 const VERSION_BYTE: u8 = 0x12;
 
 #[derive(Debug, thiserror::Error)]

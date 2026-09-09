@@ -19,6 +19,12 @@
 //! frequency list for the whole world. Only where a mode really does operate in
 //! two places, like PSK31 and RTTY on 40 m, is a dial tagged with the regions
 //! it belongs to.
+//!
+//! 11 m has dial entries ([`CB11_DIALS`]) and deliberately no segments. It is
+//! not an amateur band and there is no band plan to transcribe: forty numbered
+//! channels, and a sub-band split invented here would be putting words in an
+//! administration's mouth. The waterfall strip already draws the allocation as
+//! CB (`widgets::bandplan`), which is what it is.
 
 use serde::{Deserialize, Serialize};
 
@@ -778,6 +784,40 @@ fn wideband_by_design(mode: crate::Mode) -> bool {
     )
 }
 
+/// The 11 m (citizens' band) digital channels, by the mode each carries.
+///
+/// Not a band plan any administration publishes — CB has forty numbered
+/// channels and no modes attached to them. This is what the operators there
+/// agreed among themselves, and it is a real agreement: a JS8 station calls on
+/// channel 25 and an FT8 station on channel 26 the way a 20 m station calls on
+/// 14.078 and 14.074, and one tuned anywhere else is talking to nobody
+/// (issue #396). The channel number is carried as the note, because that is
+/// what a CB operator is actually reading off their radio.
+///
+/// **Only the channels inside the 40-channel allocation.** The lists that
+/// circulate also name 27.500 (CW/PSK31/RTTY), 27.585 (FAX), 27.635 and
+/// 27.700–27.710 (SSTV), and every one of those is above 27.405 — the
+/// "freeband", which no administration grants. sdroxide is not going to point
+/// a transmitter at them by name. They tune by hand like anything else, and a
+/// licence that does cover them (the UK's second block starts at 27.60125) is
+/// what a hand-edited `bandplan.json` and the operator's own presets are for.
+///
+/// WSPR is absent for a different reason: 27.255 is quoted for it, and
+/// nobody appears to use it.
+///
+/// Tagged as every region's. The channel grid is the same 40 channels under
+/// CEPT, the FCC and the ACMA, and the mode agreement travels with the
+/// channel numbers — but it is a European band above all, and the note says
+/// which channel rather than claiming a worldwide convention.
+const CB11_DIALS: &[(crate::Mode, f64, &str)] = &[
+    (crate::Mode::Packet, 27_235_000.0, "ch 24, FM 1200 baud"),
+    (crate::Mode::Js8, 27_245_000.0, "ch 25, calling"),
+    (crate::Mode::Sstv, 27_255_000.0, "ch 23"),
+    (crate::Mode::Ft8, 27_265_000.0, "ch 26"),
+    (crate::Mode::Packet, 27_365_000.0, "ch 36, 1200 baud"),
+    (crate::Mode::Sstv, 27_375_000.0, "ch 37"),
+];
+
 /// The conventional dial frequencies for `mode` in the station's configured
 /// region, ascending.
 pub fn digi_channels(mode: crate::Mode) -> Vec<DigiChannel> {
@@ -862,6 +902,18 @@ pub fn digi_channels_for(mode: crate::Mode, region: Region) -> Vec<DigiChannel> 
             .collect()
     };
 
+    // The 11 m channels, appended to whatever the mode's own table holds.
+    // Here rather than inside each table because they are one agreement about
+    // one band, and splitting them across six tables would lose that.
+    let cb11 = |v: &mut Vec<DigiChannel>| {
+        v.extend(
+            CB11_DIALS
+                .iter()
+                .filter(|&&(m, _, _)| m == mode)
+                .map(|&(_, dial_hz, note)| DigiChannel { dial_hz, note, mine: false }),
+        );
+    };
+
     let mut v = match mode {
         Mode::Js8 => plain(JS8_DIALS),
         Mode::Wspr => plain(WSPR_DIALS),
@@ -884,8 +936,11 @@ pub fn digi_channels_for(mode: crate::Mode, region: Region) -> Vec<DigiChannel> 
         Mode::SstvFm => tagged(SSTV_FM_DIALS),
         Mode::Rifp => plain(RIFP_CALLING),
         Mode::Aprs => tagged(APRS_DIALS),
+        // Packet has no HF/VHF table of its own — its VHF channel is the APRS
+        // one and its HF use is not channelised — but 11 m does give it two.
         _ => Vec::new(),
     };
+    cb11(&mut v);
     // The operator's own, in every region: these are their frequencies, not a
     // continent's convention, and a station that travels takes them along.
     // A preset on a frequency the tables already carry is dropped rather than
@@ -1441,8 +1496,26 @@ mod js8_tests {
     #[test]
     fn js8_has_conventional_channels() {
         let ch = digi_channels_for(crate::Mode::Js8, Region::R1);
-        assert_eq!(ch.len(), JS8_DIALS.len());
+        let cb = CB11_DIALS.iter().filter(|(m, _, _)| *m == crate::Mode::Js8).count();
+        assert_eq!(ch.len(), JS8_DIALS.len() + cb);
         assert!(ch.iter().any(|c| c.dial_hz == 14_078_000.0), "20 m JS8 missing");
+    }
+
+    /// Issue #396: the 11 m channels are the ones inside the 40-channel
+    /// allocation and nowhere else. The lists that circulate also name
+    /// frequencies above 27.405 — the freeband, which nobody is licensed for —
+    /// and sdroxide does not point a transmitter at those by name.
+    #[test]
+    fn the_eleven_metre_channels_are_inside_the_allocation() {
+        let (lo, hi) =
+            crate::Band::M11.iaru_default_edges_in(Region::R1).expect("11 m is in every region");
+        for &(mode, dial, note) in CB11_DIALS {
+            assert!((lo..=hi).contains(&dial), "{note} ({dial} Hz) is outside {lo}..{hi}");
+            // And each one is offered for the mode it belongs to, in the band
+            // it belongs to.
+            let ch = digi_channels_in_region(mode, crate::Band::M11, Region::R1);
+            assert!(ch.iter().any(|c| c.dial_hz == dial), "{note} is not offered for {mode:?}");
+        }
     }
 
     #[test]

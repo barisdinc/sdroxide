@@ -57,6 +57,11 @@ fn ham_label(band: Band, region: Region) -> &'static str {
         Band::M17 => "17m HAM",
         Band::M15 => "15m HAM",
         Band::M12 => "12m HAM",
+        // Never actually drawn: `coarse` and `fine` skip the bands that are
+        // not amateur allocations, because `non_ham` already carries this one
+        // as CB and drawing it twice — once in the ham colour — would claim it
+        // was ours (issue #396). Named honestly all the same.
+        Band::M11 => "11m CB",
         Band::M10 => "10m HAM",
         Band::M6 => "6m HAM",
         Band::M4 => "4m HAM",
@@ -134,6 +139,11 @@ fn non_ham(region: Region) -> Vec<Seg> {
 fn coarse(region: Region) -> Vec<Seg> {
     let mut v = non_ham(region);
     for band in Band::ALL {
+        // `non_ham` above already carries every allocation that is not ours —
+        // CB included — with its own colour and label.
+        if !band.is_amateur() {
+            continue;
+        }
         let Some((lo, hi)) = band.edges_in(region) else { continue };
         v.push(s(lo, hi, ham_label(band, region), Kind::Ham));
     }
@@ -157,8 +167,12 @@ fn fine(region: Region) -> Vec<Seg> {
         v.push(s(seg.lo, seg.hi, label, kind));
     }
     // The bands with no sub-segment table keep their whole-band block, so
-    // zooming into 2 m or 70 cm does not empty the strip.
+    // zooming into 2 m or 70 cm does not empty the strip. Non-amateur
+    // allocations are `non_ham`'s, as in `coarse`.
     for band in Band::ALL {
+        if !band.is_amateur() {
+            continue;
+        }
         let Some((lo, hi)) = band.edges_in(region) else { continue };
         if !segs.iter().any(|s| s.lo < hi && s.hi > lo) {
             v.push(s(lo, hi, ham_label(band, region), Kind::Ham));

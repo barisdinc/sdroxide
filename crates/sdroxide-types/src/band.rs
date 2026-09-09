@@ -57,10 +57,32 @@ pub enum Band {
     /// 10 GHz unit *inside* it, so its 3 cm is the radio's own band and not an
     /// entry in the transverter table (issue #326).
     Cm3,
+    /// 11 m — the citizens' band, 26.965–27.405, and **not an amateur
+    /// allocation** (issue #396).
+    ///
+    /// The one band here that is not ours. It is on the bar because it is a
+    /// band people work: a busy one in Europe, with its own digimode
+    /// conventions on the ordinary 40-channel grid — FT8 on channel 26, JS8 on
+    /// 25, SSTV on 23 and 37, packet on 24 and 36 — and a receiver that could
+    /// not be pointed at it by name was simply worse at its job.
+    ///
+    /// What does *not* follow is a transmit permission. Every other band in
+    /// this list is one an amateur licence grants; this one is a separate
+    /// service with its own rules and its own type-approved equipment, and a
+    /// transceiver keyed there under an amateur callsign is out of band in
+    /// every administration. So [`Band::is_amateur`] says no, and with the
+    /// station's `tx_ham_only` set — the default — the transmit lockout holds
+    /// here exactly as it does in general coverage. An operator entitled to
+    /// transmit here turns that off, as they would to work any other allocation
+    /// sdroxide cannot check their licence for.
+    ///
+    /// Appended for the reason [`Band::M70`] gives; [`Band::ALL`] puts it
+    /// between 12 m and 10 m, where the frequencies are.
+    M11,
 }
 
 impl Band {
-    pub const ALL: [Band; 22] = [
+    pub const ALL: [Band; 23] = [
         Band::M160,
         Band::M80,
         Band::M60,
@@ -70,6 +92,7 @@ impl Band {
         Band::M17,
         Band::M15,
         Band::M12,
+        Band::M11,
         Band::M10,
         Band::M6,
         Band::M4,
@@ -122,6 +145,7 @@ impl Band {
             Band::M17 => "17M",
             Band::M15 => "15M",
             Band::M12 => "12M",
+            Band::M11 => "11M",
             Band::M10 => "10M",
             Band::M6 => "6M",
             Band::M4 => "4M",
@@ -139,6 +163,18 @@ impl Band {
             Band::Cm3 => "3CM",
             Band::Gen => "GEN",
         }
+    }
+
+    /// Whether this band is an *amateur* allocation.
+    ///
+    /// True for every band on the bar but two: [`Band::Gen`], which is the
+    /// absence of a band, and [`Band::M11`], which is the citizens' band — a
+    /// separate radio service that an amateur licence does not grant. The
+    /// transmit lockout asks this rather than comparing against `Gen`, so
+    /// putting a band on the bar so it can be *listened* to does not quietly
+    /// hand out permission to key up on it (issue #396).
+    pub fn is_amateur(self) -> bool {
+        !matches!(self, Band::Gen | Band::M11)
     }
 
     /// Band edges in Hz for the station's configured region (see
@@ -221,6 +257,17 @@ impl Band {
             Band::M17 => Some((18_068_000.0, 18_168_000.0)),
             Band::M15 => Some((21_000_000.0, 21_450_000.0)),
             Band::M12 => Some((24_890_000.0, 24_990_000.0)),
+            // 11 m: the 40-channel citizens' band, 26.965–27.405. Not an IARU
+            // allocation at all — see [`Band::M11`] — but the same 40 channels
+            // in all three regions, because CEPT, the FCC and the ACMA all
+            // grant that grid.
+            //
+            // The wider claims are deliberately absent. Above 27.405 is the
+            // "freeband", which no administration grants to anybody; the UK's
+            // second block at 27.60125–27.99125 is a national arrangement and
+            // belongs in that operator's own `bandplan.json`, which is what
+            // the file is for.
+            Band::M11 => Some((26_965_000.0, 27_405_000.0)),
             Band::M10 => Some((28_000_000.0, 29_700_000.0)),
             Band::M6 => by_region(
                 (50_000_000.0, 52_000_000.0),
@@ -313,6 +360,9 @@ impl Band {
             Band::M17 => (18_120_000.0, Mode::Usb),
             Band::M15 => (21_250_000.0, Mode::Usb),
             Band::M12 => (24_940_000.0, Mode::Usb),
+            // Channel 25, the agreed 11 m digital calling channel — and the
+            // one part of the band a program like this one is any use on.
+            Band::M11 => (27_245_000.0, Mode::Usb),
             Band::M10 => (28_400_000.0, Mode::Usb),
             Band::M6 => (50_150_000.0, Mode::Usb),
             // 70.200 is the 4 m SSB/CW calling frequency, in the narrow-band
@@ -374,6 +424,37 @@ mod tests {
         assert_eq!(Band::ALL.iter().filter(|b| **b == Band::Cm3).count(), 1);
         assert!(Band::Cm3.index() > Band::Cm6.index());
         assert!(Band::Cm3.index() < Band::Gen.index());
+    }
+
+    /// Issue #396: 11 m is on the bar so it can be tuned and listened to, and
+    /// it is not an amateur band — which is a different claim, and the one the
+    /// transmit lockout reads.
+    #[test]
+    fn eleven_metres_is_a_band_but_not_an_amateur_one() {
+        for r in Region::ALL {
+            assert_eq!(
+                Band::M11.edges_in(r),
+                Some((26_965_000.0, 27_405_000.0)),
+                "11 m in {r:?} is not the 40-channel allocation"
+            );
+            assert_eq!(Band::M11.label_in(r), "11M");
+        }
+        assert!(!Band::M11.is_amateur());
+        assert!(!Band::Gen.is_amateur());
+        // ...and it is the only band on the bar that is not, so nothing else
+        // has quietly lost its transmit permission.
+        for b in Band::ALL {
+            assert_eq!(
+                b.is_amateur(),
+                !matches!(b, Band::M11 | Band::Gen),
+                "{b:?} is on the wrong side of is_amateur"
+            );
+        }
+        // Between 12 m and 10 m on the bar, where its frequencies are.
+        assert!(Band::M11.index() > Band::M12.index());
+        assert!(Band::M11.index() < Band::M10.index());
+        // Channel 25, the digital calling channel, and inside the band.
+        assert_eq!(Band::M11.default_entry(), (27_245_000.0, crate::Mode::Usb));
     }
 
     /// Region 1 is the default, and it must still be exactly the band table

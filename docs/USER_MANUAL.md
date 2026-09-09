@@ -5907,6 +5907,27 @@ decides every band plan sdroxide draws and enforces:
   edges are what the band buttons jump to, what `Band` a frequency reports as,
   and — with `tx_ham_only` set, which is the default — where transmit is
   refused.
+- **11 m** (`M11`) is on the bar and is **not an amateur band.** 26.965–27.405
+  is the citizens' band — the same forty channels under CEPT, the FCC and the
+  ACMA — and it is here because it is a band people work, busy in Europe and
+  with its own digimode conventions on the ordinary channel grid: FT8 on
+  **27.265** (ch 26), JS8 on **27.245** (ch 25), SSTV on **27.255** and
+  **27.375** (ch 23 and 37), 1200-baud packet on **27.235** and **27.365**
+  (ch 24 and 36). Those appear in the ⇵ frequency picker like any other
+  convention, and pressing **11M** in a digital mode lands on the mode's
+  channel. What does not follow is permission to transmit: with `tx_ham_only`
+  set (the default) sdroxide refuses to key up there, because an amateur
+  licence does not grant the citizens' band and this end cannot check what
+  else you hold — the refusal names the band and says how to lift it. A
+  contact there logs with an **empty ADIF band**, because ADIF's enumeration
+  runs 12 m, 10 m, 8 m with nothing in between (issue #396).
+
+  The frequencies **above 27.405** that circulate on the same lists — 27.500,
+  27.585, 27.635, 27.700, 27.710 — are the freeband, which no administration
+  grants, and sdroxide does not offer them as channels. They tune by hand like
+  anything else, and a licence that does cover part of that range (the UK's
+  second CB block starts at 27.60125) goes in `bandplan.json` and in your own
+  saved frequencies.
 - **What a band is called** — the 5650 MHz band is **6 cm** to the IARU
   Region 1 VHF handbook, the RSGB, the WIA and the NRRL, and **5 cm** to plans
   across the other two regions, so the band button, the band-plan strip and the
@@ -5987,8 +6008,8 @@ limit when it hunts for a slot, so it stops choosing frequencies the lockout
 would then refuse.
 
 **A band sdroxide adds later** — 4 m (`M4`) was the first, and 1.25 m (`M125`),
-33 cm (`Cm33`), 23 cm (`Cm23`), 13 cm (`Cm13`), 9 cm (`Cm9`) and 6 cm (`Cm6`)
-the latest — is not in a file
+33 cm (`Cm33`), 23 cm (`Cm23`), 13 cm (`Cm13`), 9 cm (`Cm9`), 6 cm (`Cm6`),
+3 cm (`Cm3`) and 11 m (`M11`) since — is not in a file
 written before it existed, and a file that has never heard of a band is not
 saying you have not got it. So a band on that short list is filled in from the
 built-in tables when your file names it in **no** region at all, exactly as a

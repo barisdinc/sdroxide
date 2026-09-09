@@ -368,8 +368,17 @@ impl std::error::Error for BandPlanError {}
 ///
 /// New entries are appended as bands are added. Old ones stay: a file that
 /// predates 4 m predates everything after it too.
-const BANDS_ADDED_SINCE_THE_FILE: &[Band] =
-    &[Band::M4, Band::M125, Band::Cm33, Band::Cm23, Band::Cm13, Band::Cm9, Band::Cm6, Band::Cm3];
+const BANDS_ADDED_SINCE_THE_FILE: &[Band] = &[
+    Band::M4,
+    Band::M125,
+    Band::Cm33,
+    Band::Cm23,
+    Band::Cm13,
+    Band::Cm9,
+    Band::Cm6,
+    Band::Cm3,
+    Band::M11,
+];
 
 impl TryFrom<PlanFile> for BandPlan {
     type Error = BandPlanError;

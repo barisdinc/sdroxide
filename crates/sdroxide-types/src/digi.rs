@@ -2184,6 +2184,12 @@ pub fn adif_band(freq_hz: f64) -> &'static str {
         m if m < 18.2 => "17m",
         m if m < 21.5 => "15m",
         m if m < 25.0 => "12m",
+        // 11 m is the citizens' band and ADIF has no enumeration for it: the
+        // spec's list runs 12m, 10m, 8m with nothing between 24.99 and 28.0.
+        // An empty BAND is what a log for a contact there honestly holds —
+        // better than filing it under 10m, which is what the coarse `< 29.8`
+        // below used to do to every frequency in this gap (issue #396).
+        m if m < 27.5 => "",
         m if m < 29.8 => "10m",
         m if m < 54.1 => "6m",
         m if m < 70.6 => "4m",
@@ -2920,6 +2926,15 @@ mod tests {
                 let Some((lo, hi)) = b.edges_in(region) else { continue };
                 let (inside_lo, inside_hi) = (adif_band(lo + 1000.0), adif_band(hi - 1000.0));
                 assert_eq!(inside_lo, inside_hi, "{b:?} in {region:?} straddles two ADIF bands");
+                // Every *amateur* band has an ADIF name. 11 m has none and
+                // must not borrow one: ADIF's enumeration runs 12m, 10m, 8m
+                // with nothing in between, because the citizens' band is not
+                // an amateur allocation and no amateur log has a column for it
+                // (issue #396). An empty BAND is the honest record.
+                if !b.is_amateur() {
+                    assert!(inside_lo.is_empty(), "{b:?} in {region:?} borrowed an ADIF name");
+                    continue;
+                }
                 assert!(!inside_lo.is_empty(), "{b:?} in {region:?} has no ADIF name");
             }
         }
