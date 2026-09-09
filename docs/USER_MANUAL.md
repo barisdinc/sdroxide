@@ -4025,8 +4025,13 @@ whether you have worked them before. A row addressed to you is boxed in gold; a
 heartbeat or a CQ, which are invitations, get the red CQ background.
 
 The conversation is on the right, newest at the bottom, with anything addressed
-to you marked ★. A message still arriving is shown greyed with a frame count,
-because a half-received sentence should not read like a complete one.
+to you marked ★. Each line reads *sender · recipient · command · text* —
+`OH8STN` answering `KN4CRD` shows as `OH8STN: KN4CRD HEARTBEAT SNR -02` — because
+on a busy channel half a dozen stations answer the same beacon inside a minute
+and the report alone does not say which of them was being answered. The heard
+list summarises the same way. A message still arriving is shown greyed with a
+frame count, because a half-received sentence should not read like a complete
+one.
 **CLEAR RX**, beside the query buttons, empties the conversation. The heard list
 is left alone — it is a separate pane, and it is what `HEARING?` is answered
 from.

@@ -78,10 +78,23 @@ fn js8_station_decode(
     }
 }
 
-/// A heard station's last transmission on one line: the command, then the text.
+/// A heard station's last transmission on one line: who it was for, then the
+/// command, then the text.
+///
+/// The recipient comes first because without it a directed message is
+/// ambiguous — on a busy channel half a dozen stations answer the same
+/// heartbeat within a minute, and `HEARTBEAT SNR -02` alone says nothing about
+/// which of them was being answered. This is the order JS8Call prints too.
 fn js8_msg_summary(m: &sdroxide_types::Js8Msg) -> String {
     let mut s = String::new();
+    let to = m.to.trim();
+    if !to.is_empty() {
+        s.push_str(to);
+    }
     if let Some(c) = &m.cmd {
+        if !s.is_empty() {
+            s.push(' ');
+        }
         s.push_str(c);
     }
     let text = m.text.trim();
@@ -847,6 +860,22 @@ impl SdroxideApp {
                                         },
                                     ),
                                 );
+                                // Who it was addressed to. Without this a
+                                // directed message reads as if it were meant
+                                // for everyone: on a busy channel several
+                                // stations answer the same heartbeat inside a
+                                // minute and every one of them says
+                                // "HEARTBEAT SNR ..".
+                                let to = m.to.trim();
+                                if !to.is_empty() {
+                                    ui.label(
+                                        RichText::new(to).monospace().strong().color(if to_me {
+                                            crate::theme::YELLOW()
+                                        } else {
+                                            crate::theme::GREEN()
+                                        }),
+                                    );
+                                }
                                 if let Some(c) = &m.cmd {
                                     ui.label(
                                         RichText::new(c).monospace().color(crate::theme::PINK()),
@@ -1205,11 +1234,25 @@ mod js8_panel_tests {
     fn a_stations_last_word_reads_as_one_line() {
         let mut m = msg(Some("HB"), "@ALLCALL");
         m.text = "EM73".into();
-        assert_eq!(js8_msg_summary(&m), "HB EM73");
+        assert_eq!(js8_msg_summary(&m), "@ALLCALL HB EM73");
         m.cmd = None;
-        assert_eq!(js8_msg_summary(&m), "EM73");
+        assert_eq!(js8_msg_summary(&m), "@ALLCALL EM73");
         // Still arriving, and the row has to say so.
         m.complete = false;
-        assert_eq!(js8_msg_summary(&m), "EM73…");
+        assert_eq!(js8_msg_summary(&m), "@ALLCALL EM73…");
+    }
+
+    #[test]
+    fn a_reply_names_the_station_it_answers() {
+        // The point of issue #372: on a busy channel a dozen stations answer
+        // the same heartbeat, and "HEARTBEAT SNR -02" on its own does not say
+        // which of them was being answered.
+        let mut m = msg(Some("HEARTBEAT SNR"), "OH8STN");
+        m.text = "-02".into();
+        assert_eq!(js8_msg_summary(&m), "OH8STN HEARTBEAT SNR -02");
+        // An undirected transmission has no recipient to name.
+        let mut free = msg(None, "");
+        free.text = "GOOD MORNING FROM VIENNA".into();
+        assert_eq!(js8_msg_summary(&free), "GOOD MORNING FROM VIENNA");
     }
 }
