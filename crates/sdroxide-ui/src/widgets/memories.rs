@@ -188,7 +188,12 @@ pub fn draw(p: &Painter, boxes: &[MemBox], hovered: Option<usize>) {
             Color32::from_rgba_unmultiplied(6, 12, 20, 222)
         };
         p.rect_filled(b.rect, 2.0, fill);
-        p.rect_stroke(b.rect, 2.0, Stroke::new(if on { 1.4 } else { 1.0 }, edge), StrokeKind::Inside);
+        p.rect_stroke(
+            b.rect,
+            2.0,
+            Stroke::new(if on { 1.4 } else { 1.0 }, edge),
+            StrokeKind::Inside,
+        );
         let g = b.galley.clone();
         let y = b.rect.top() + (b.rect.height() - g.size().y) * 0.5;
         p.galley(pos2(b.rect.left() + PAD_X, y), g, ink);

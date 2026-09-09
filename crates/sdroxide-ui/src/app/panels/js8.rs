@@ -868,13 +868,13 @@ impl SdroxideApp {
                                 // "HEARTBEAT SNR ..".
                                 let to = m.to.trim();
                                 if !to.is_empty() {
-                                    ui.label(
-                                        RichText::new(to).monospace().strong().color(if to_me {
+                                    ui.label(RichText::new(to).monospace().strong().color(
+                                        if to_me {
                                             crate::theme::YELLOW()
                                         } else {
                                             crate::theme::GREEN()
-                                        }),
-                                    );
+                                        },
+                                    ));
                                 }
                                 if let Some(c) = &m.cmd {
                                     ui.label(

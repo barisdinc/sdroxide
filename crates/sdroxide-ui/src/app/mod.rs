@@ -430,6 +430,9 @@ pub struct SdroxideApp {
     navtex_open: Option<usize>,
     nr_popup_since: Option<f64>,
     rec_popup_since: Option<f64>,
+    /// Fade clock for the receive-filter popup behind the BW chip, like
+    /// `nr_popup_since`.
+    bw_popup_since: Option<f64>,
     /// Fade clocks for the repeater popups in the VFO box — the DUPLEX shift
     /// and the TONE encoder — like `tone_popup_since`.
     duplex_popup_since: Option<f64>,
@@ -1254,6 +1257,7 @@ impl SdroxideApp {
             navtex_open: None,
             nr_popup_since: None,
             rec_popup_since: None,
+            bw_popup_since: None,
             duplex_popup_since: None,
             rpt_tone_popup_since: None,
             // Corrected on the first frame, once the viewport size is known.

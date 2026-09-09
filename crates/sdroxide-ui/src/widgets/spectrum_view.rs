@@ -2196,11 +2196,7 @@ pub fn show_ext(
     // with the stored memories marked on the same edge, stacked inwards from
     // however deep the strip ended up.
     crate::widgets::bandplan::overlay(&painter, view, &wf_rect, panel_below);
-    crate::widgets::memories::draw(
-        &painter,
-        &mem_boxes,
-        hover_mem,
-    );
+    crate::widgets::memories::draw(&painter, &mem_boxes, hover_mem);
 
     // --- VFO markers + passband shading -----------------------------------
     let in_view = |hz: f64| (view.view_lo_hz..=view.view_hi_hz).contains(&hz);

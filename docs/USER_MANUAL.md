@@ -465,6 +465,13 @@ mode. What is in the box never changes; only where the two rows are cut does.
   the next block of samples, with no gap in the audio and no risk of a device
   refusing it. The sub receiver still has to live inside the span, so if it was
   parked outside the new one it is moved back in.
+- **BW** — the receive filter as a number. The chip reads the passband width
+  the receiver is running (`BW 2.7k`, `BW 500`), and clicking it opens the
+  width, the two edges and the mode's standard filters as fields you can type
+  into. The panadapter's grips are the quick way to place a passband by eye
+  against what is on the band; this is where an exact figure — 2200, 2700,
+  3000 — is entered, which a drag can only creep up on (issue #371). See
+  [2.7](#27-receiver-controls) for what the numbers mean in each mode.
 - **MUTE** — mute the receiver (keyboard shortcut **M**).
 - **REC** — record what you hear and what you send, or the raw spectrum
   to an MP3 file, and choose whether it is written in two channels or one. See
@@ -682,6 +689,18 @@ mode. What is in the box never changes; only where the two rows are cut does.
 panadapter: two vertical grip lines mark the filter's low and high edges (they
 brighten to orange when you can grab them). Drag an edge to widen or narrow the
 passband. The grips work on both the spectrum and the waterfall.
+
+For an exact figure, use the **BW** chip in the receive box instead — it reads
+the current width and opens three things: this mode's **presets** (`2.4k`,
+`2.7k`, `500`, …), a **width** field in hertz, and the two **edges**, each of
+them typeable. A drag can only creep up on 2700 Hz; the field is where it is
+said. Changing the width keeps the passband where it is rather than moving the
+signal inside it: a channel about the carrier grows either side of it, CW and
+RTTY grow about the tone they are centred on, and on a sideband the cut nearest
+the carrier stays put while the far edge moves — which is what a transceiver's
+own bandwidth control does. The presets are taken as written except in **CW**,
+where they are re-centred on your own sidetone pitch, so a 250 Hz filter is
+250 Hz about the note you copy at rather than about somebody else's 700.
 
 In **AM, SAM, DSB, ISB and the FM modes** the two edges move together: the passband
 is a channel carved out about the carrier, both halves carry the same signal,
@@ -12375,7 +12394,7 @@ row of menu buttons:
 | Button | What it holds |
 | --- | --- |
 | **PTT** | Keys the transmitter. Hold it down to talk, or click it with a mouse to latch it on. |
-| **RX** | Volume, front-end gain, AGC, squelch, NB, ANC, NR, BIN |
+| **RX** | Volume, front-end gain, AGC, squelch, the filter width and edges, NB, ANC, NR, BIN |
 | **VFO** | A↔B, A→B, SPLIT, SUB, and the RIT/XIT offsets |
 | **SUB** | The second receiver's frequency, mode, filter and level (only while it is running) |
 | **TX** | TUNE, the voice keyer, and the drive, tune and mic levels |

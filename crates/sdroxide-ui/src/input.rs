@@ -24,8 +24,9 @@ const ACCEL_IDLE_S: f64 = 0.2;
 /// Ceiling for RIT/XIT offsets, matching the rig-like range reported to
 /// external control clients.
 const MAX_OFFSET_HZ: f32 = 9999.0;
-/// Narrowest a filter may be squeezed by a knob.
-const MIN_FILTER_HZ: f32 = 50.0;
+/// Narrowest a filter may be squeezed — by a knob, by the panadapter's grips
+/// or by the numeric fields behind the BW chip.
+pub(crate) const MIN_FILTER_HZ: f32 = 50.0;
 
 /// Side effects an action can have that are purely local to this client and
 /// never become a [`Command`]. The app lends the flags it owns.

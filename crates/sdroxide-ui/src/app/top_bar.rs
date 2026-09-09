@@ -2590,7 +2590,9 @@ impl SdroxideApp {
             }
         });
         if narrow {
-            // The engine picker the chip above cannot open from inside a menu.
+            // The filter rows and the engine picker the chips above cannot open
+            // from inside a menu.
+            self.filter_controls(ui, cmds);
             self.nr_controls(ui, cmds);
         }
     }
@@ -2601,6 +2603,15 @@ impl SdroxideApp {
     /// menu.
     fn rx_chip(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>, chip: RxChip, narrow: bool) {
         match chip {
+            RxChip::Bw => {
+                // In a menu column the filter rows are inlined at the bottom of
+                // [`Self::rx_controls`] instead: a popup opened from inside a
+                // popup counts as a click outside the first and closes it, the
+                // same reason the NR picker is inlined there.
+                if !narrow {
+                    self.bw_button(ui, cmds);
+                }
+            }
             RxChip::Nb => {
                 let nb = self.state.noise_blanker;
                 if crate::chrome::chip(ui, nb, "NB")
@@ -2809,6 +2820,145 @@ impl SdroxideApp {
     /// grew to "NR DFNR High" and shrank to "NR" changed width — and so moved
     /// every chip beside it — each time the engine or the strength changed.
     /// Which of the two is running is one click away, in the picker itself.
+    /// The BW chip: the receive filter's width, and the popup that sets it.
+    fn bw_button(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let rx0 = self.state.rx[0];
+        let btn =
+            crate::chrome::chip(ui, false, bw_chip_label(rx0.mode, rx0.filter_lo, rx0.filter_hi))
+                .on_hover_text(bw_chip_hint(rx0.mode, rx0.filter_lo, rx0.filter_hi));
+
+        let popup_id = egui::Popup::default_response_id(&btn);
+        let now = ui.input(|i| i.time);
+        let alpha =
+            crate::chrome::popup_fade_alpha(ui.ctx(), popup_id, now, &mut self.bw_popup_since);
+        let resp = egui::Popup::from_toggle_button_response(&btn)
+            .frame(crate::chrome::window_frame_alpha(alpha))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_opacity(alpha);
+                crate::chrome::window_body_bg(ui);
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                ui.set_max_width(300.0);
+                self.filter_controls(ui, cmds);
+            });
+        if let Some(r) = &resp {
+            crate::chrome::paint_popup_cut_border(ui.ctx(), &r.response, alpha);
+            if r.response.contains_pointer() {
+                self.bw_popup_since = Some(now);
+            }
+        }
+    }
+
+    /// Send a passband to the main receiver, clamped to what the mode allows.
+    ///
+    /// One route for the presets, the width field and the two edge fields, so
+    /// none of them can reach a shape the others cannot — the same floor and
+    /// ceiling the panadapter's grips enforce.
+    fn set_rx_filter(&mut self, lo: f32, hi: f32, cmds: &mut Vec<Command>) {
+        let max = self.state.rx[0].mode.max_filter_hz();
+        let lo = lo.clamp(-max, max);
+        let hi = hi.clamp(-max, max);
+        // 50 Hz, the floor the waterfall grips hold to, so the passband cannot
+        // be typed shut from here either.
+        let (lo, hi) = if hi - lo < crate::input::MIN_FILTER_HZ {
+            (lo, lo + crate::input::MIN_FILTER_HZ)
+        } else {
+            (lo, hi)
+        };
+        (self.state.rx[0].filter_lo, self.state.rx[0].filter_hi) = (lo, hi); // optimistic echo
+        cmds.push(Command::SetFilter { rx: RxId::Main, lo, hi });
+    }
+
+    /// The receive filter in numbers: the mode's presets, a width, and the two
+    /// edges.
+    ///
+    /// The panadapter's grips are the quick way to set a passband and the only
+    /// way to place one by eye against what is actually on the band. They are
+    /// not a way to reach an exact figure — a drag lands on whatever pixel the
+    /// pointer was over, so 2700 Hz is a matter of overshooting and
+    /// undershooting until the readout agrees (issue #371). These fields are
+    /// the other half: type the number, or take the width the mode is
+    /// conventionally worked at.
+    fn filter_controls(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
+        let rx0 = self.state.rx[0];
+        let mode = rx0.mode;
+        let max = mode.max_filter_hz();
+        // ISB's two edges move together like AM's, but what they set is the
+        // width of *each* sideband: the two are separate transmissions and one
+        // goes to each ear, so "2.7 kHz" means 2.7 kHz in either ear and
+        // 5.4 kHz of spectrum.
+        let per_sideband = mode == Mode::Isb;
+
+        let presets = mode.filter_presets();
+        if !presets.is_empty() {
+            crate::chrome::menu_caption(ui, "Presets");
+            ui.horizontal_wrapped(|ui| {
+                for &(label, plo, phi) in presets {
+                    let (plo, phi) = preset_edges(mode, plo, phi, self.cw_pitch_hz());
+                    let on = (rx0.filter_lo - plo).abs() < 1.0 && (rx0.filter_hi - phi).abs() < 1.0;
+                    let hint = if per_sideband {
+                        format!("{label} in each ear — {plo:.0} … {phi:.0} Hz, both sidebands")
+                    } else {
+                        format!("{plo:.0} … {phi:.0} Hz")
+                    };
+                    if crate::chrome::chip(ui, on, label).on_hover_text(hint).clicked() {
+                        self.set_rx_filter(plo, phi, cmds);
+                    }
+                }
+            });
+        }
+
+        crate::chrome::menu_caption(ui, if per_sideband { "Width per sideband" } else { "Width" });
+        ui.horizontal(|ui| {
+            let mut w = filter_width_hz(mode, rx0.filter_lo, rx0.filter_hi);
+            let resp = ui
+                .add_sized(
+                    [90.0, 22.0],
+                    DragValue::new(&mut w)
+                        .speed(10)
+                        .range(crate::input::MIN_FILTER_HZ..=2.0 * max)
+                        .suffix(" Hz"),
+                )
+                .on_hover_text(
+                    "Passband width in hertz — type it, or drag. \
+                     Click into the field to enter an exact figure.",
+                );
+            if resp.changed() {
+                let (lo, hi) = width_to_edges(mode, rx0.filter_lo, rx0.filter_hi, w);
+                self.set_rx_filter(lo, hi, cmds);
+            }
+        });
+
+        crate::chrome::menu_caption(ui, "Edges");
+        ui.horizontal(|ui| {
+            let mut lo = rx0.filter_lo;
+            let mut hi = rx0.filter_hi;
+            let lo_changed = ui
+                .add_sized([70.0, 22.0], DragValue::new(&mut lo).speed(10).range(-max..=max))
+                .on_hover_text("Low edge, in Hz from the carrier")
+                .changed();
+            let hi_changed = ui
+                .add_sized([70.0, 22.0], DragValue::new(&mut hi).speed(10).range(-max..=max))
+                .on_hover_text("High edge, in Hz from the carrier")
+                .changed();
+            if lo_changed || hi_changed {
+                let (lo, hi) = if mode.filter_symmetric() {
+                    // A channel about the carrier: whichever edge was typed
+                    // sets the half width and the other follows (issue #256),
+                    // the same rule the panadapter grips follow.
+                    let half = if hi_changed { hi.abs() } else { lo.abs() }.clamp(25.0, max);
+                    (-half, half)
+                } else {
+                    (
+                        lo.min(hi - crate::input::MIN_FILTER_HZ),
+                        hi.max(lo + crate::input::MIN_FILTER_HZ),
+                    )
+                };
+                self.set_rx_filter(lo, hi, cmds);
+            }
+        });
+    }
+
     fn nr_button(&mut self, ui: &mut egui::Ui, cmds: &mut Vec<Command>) {
         let nr = self.state.rx[0].noise_reduction;
         let hover = match nr.engine() {
@@ -2947,7 +3097,9 @@ impl SdroxideApp {
                 let mb = self.state.iq_recording_mb;
                 let rate = self.state.sample_rate.max(1.0);
                 ui.label(
-                    RichText::new(iq_recording_caption(mb, rate)).size(9.5).color(crate::theme::ALERT()),
+                    RichText::new(iq_recording_caption(mb, rate))
+                        .size(9.5)
+                        .color(crate::theme::ALERT()),
                 );
             } else if have_iq {
                 // The bill, before it is run up rather than after: at 2.4 Msps
@@ -5119,6 +5271,8 @@ fn db_rail_w(ui: &egui::Ui) -> f32 {
 /// window (issue #152) — exactly what ANC and MONO had done before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RxChip {
+    /// The receive filter: width, edges and the mode's presets.
+    Bw,
     Nb,
     Anc,
     Nr,
@@ -5142,6 +5296,11 @@ impl RxChip {
     /// must not change the width of the box around it as signals come and go.
     fn width_label(self) -> &'static str {
         match self {
+            // A width, so the label follows what it is reading — and unlike
+            // the others it changes *shape* as well as digits, because the
+            // modes span six decades. `width` prices it against every form
+            // rather than against this one sample of them.
+            Self::Bw => "BW 888k",
             Self::Nb => "NB",
             Self::Anc => "ANC",
             Self::Nr => "NR",
@@ -5159,6 +5318,16 @@ impl RxChip {
     }
 
     fn width(self, ui: &egui::Ui) -> f32 {
+        if self == Self::Bw {
+            // Every scale `bw_chip_label` can reach, at the widest digits: a
+            // 250 Hz CW filter and the two megahertz an ADS-B receiver reads
+            // are both "the filter", and a chip reserved for one of them would
+            // move the whole box on the way to the other.
+            return ["BW 888", "BW 8.8k", "BW 888k", "BW 8.8M"]
+                .iter()
+                .map(|s| crate::chrome::chip_width(ui, s, None))
+                .fold(0.0, f32::max);
+        }
         crate::chrome::chip_width(ui, self.width_label(), None)
     }
 }
@@ -5185,6 +5354,88 @@ fn div_rows_w(ui: &egui::Ui) -> f32 {
     top.max(bottom) + 2.0 * crate::chrome::MODULE_MARGIN_X
 }
 
+/// The passband width the operator reads off the BW chip.
+///
+/// The span between the edges everywhere except ISB, where the two sidebands
+/// are separate transmissions carrying different audio into different ears:
+/// there the width that means anything is the width of *one* of them, which is
+/// also what the mode's presets are labelled with.
+fn filter_width_hz(mode: Mode, lo: f32, hi: f32) -> f32 {
+    if mode == Mode::Isb { hi.abs().max(lo.abs()) } else { (hi - lo).abs() }
+}
+
+/// Where a typed width puts the two edges.
+///
+/// Three rules, because a passband means three different things. A channel
+/// about the carrier grows either side of it. A mode whose signal sits on a
+/// tone of its own — CW at the sidetone pitch, RTTY on its mark/space pair —
+/// grows about that tone, so widening a CW filter does not walk the note
+/// towards one edge. Everything else is a sideband: the cut nearest the
+/// carrier is a property of the transmission and stays where it is, and the
+/// far edge is what moves — which is how a rig's own bandwidth control behaves.
+fn width_to_edges(mode: Mode, lo: f32, hi: f32, width: f32) -> (f32, f32) {
+    if mode == Mode::Isb {
+        return (-width, width);
+    }
+    if mode.filter_symmetric() {
+        return (-width / 2.0, width / 2.0);
+    }
+    if mode.keeps_own_tx_offset() {
+        let centre = (lo + hi) / 2.0;
+        return (centre - width / 2.0, centre + width / 2.0);
+    }
+    if lo.abs() <= hi.abs() { (lo, lo + width) } else { (hi - width, hi) }
+}
+
+/// A preset's edges, once the operator's own station is accounted for.
+///
+/// Taken as written everywhere but CW, where the table is drawn about the
+/// 700 Hz default sidetone. An operator copying at 500 wants that same width
+/// about *their* pitch; handing them the table verbatim would put the note
+/// they are listening for on the edge of the filter, or outside it.
+fn preset_edges(mode: Mode, lo: f32, hi: f32, cw_pitch_hz: f32) -> (f32, f32) {
+    if mode != Mode::Cw {
+        return (lo, hi);
+    }
+    let half = (hi - lo).abs() / 2.0;
+    (cw_pitch_hz - half, cw_pitch_hz + half)
+}
+
+/// The BW chip's label: `BW 2.7k`, `BW 500`, `BW 1.2M`.
+///
+/// Three scales because the modes span six decades — a 250 Hz CW filter and
+/// the 2 MHz an ADS-B receiver reads are both "the filter" — and a figure in
+/// bare hertz stops being readable somewhere above ten kilohertz.
+fn bw_chip_label(mode: Mode, lo: f32, hi: f32) -> String {
+    let w = filter_width_hz(mode, lo, hi);
+    if w >= 1_000_000.0 {
+        format!("BW {:.1}M", w / 1e6)
+    } else if w >= 10_000.0 {
+        format!("BW {:.0}k", w / 1e3)
+    } else if w >= 1_000.0 {
+        format!("BW {:.1}k", w / 1e3)
+    } else {
+        format!("BW {w:.0}")
+    }
+}
+
+fn bw_chip_hint(mode: Mode, lo: f32, hi: f32) -> String {
+    let edges = format!("{lo:.0} … {hi:.0} Hz from the carrier");
+    let what = if mode == Mode::Isb {
+        format!(
+            "Receive filter: {:.0} Hz in each ear ({edges}). ISB's two sidebands are separate \
+             transmissions, so the width is the width of one of them.",
+            filter_width_hz(mode, lo, hi)
+        )
+    } else {
+        format!("Receive filter: {:.0} Hz wide ({edges}).", filter_width_hz(mode, lo, hi))
+    };
+    format!(
+        "{what}\n\nClick for the width, the two edges and this mode's presets, as numbers — \
+         the panadapter's grips place a passband by eye, this is where an exact figure is typed."
+    )
+}
+
 /// The RX box's chip run in a mode: the six every mode carries, then whatever
 /// the mode itself brings — a subcarrier to read, a tone to gate on.
 fn rx_chips(mode: Mode) -> Vec<RxChip> {
@@ -5192,14 +5443,15 @@ fn rx_chips(mode: Mode) -> Vec<RxChip> {
     // now sits beside the recording controls it belongs to, inside the REC
     // popup (issue #217). That is also one chip fewer on a strip that has to
     // fit on a 1366-pixel screen (issue #211).
-    let mut chips = vec![RxChip::Nb, RxChip::Anc, RxChip::Nr, RxChip::Mute, RxChip::Rec];
+    let mut chips =
+        vec![RxChip::Bw, RxChip::Nb, RxChip::Anc, RxChip::Nr, RxChip::Mute, RxChip::Rec];
     // Binaural audio goes where it is worth a permanent button: CW, where the
     // signal is a tone and so placing it by pitch places the signal, and SSB,
     // where what it buys is the decorrelated noise around the voice
     // (Mode::binaural_audio). It rides ahead of MUTE rather than on the end,
     // beside the other things done to the audio on its way to the ear.
     if mode.binaural_audio() {
-        chips.insert(3, RxChip::Bin);
+        chips.insert(4, RxChip::Bin);
     }
     match mode {
         // Only WFM has a stereo pilot to lock or an RDS subcarrier to decode.
@@ -6890,6 +7142,76 @@ mod tests {
             StripBox { w: display, flex: 1.0, max_w: display * CHIP_STRETCH_FACTOR },
             StripBox { w: system, flex: 1.0, max_w: system * CHIP_STRETCH_FACTOR },
         ]
+    }
+
+    /// A typed width has to leave the signal where it was.
+    ///
+    /// Issue #371 asked for 2700 exactly; a field that reached it by walking
+    /// the passband off the station would be no better than the drag it
+    /// replaces.
+    #[test]
+    fn a_typed_width_grows_the_passband_the_way_the_mode_wants() {
+        // A sideband keeps its low cut — the one nearest the carrier — and
+        // moves the far edge, which is what a rig's own BW control does.
+        assert_eq!(width_to_edges(Mode::Usb, 150.0, 2850.0, 2200.0), (150.0, 2350.0));
+        // ... on whichever side of the carrier the mode lives.
+        assert_eq!(width_to_edges(Mode::Lsb, -2850.0, -150.0, 2200.0), (-2350.0, -150.0));
+        // CW is centred on the note being copied, so it grows both ways: a
+        // wider filter must not walk the tone towards an edge.
+        assert_eq!(width_to_edges(Mode::Cw, 450.0, 950.0, 1000.0), (200.0, 1200.0));
+        // A channel about the carrier is symmetric by construction.
+        assert_eq!(width_to_edges(Mode::Am, -5000.0, 5000.0, 6000.0), (-3000.0, 3000.0));
+        // ISB's number is the width of one sideband, because the two carry
+        // different audio into different ears.
+        assert_eq!(width_to_edges(Mode::Isb, -2850.0, 2850.0, 2000.0), (-2000.0, 2000.0));
+        assert_eq!(filter_width_hz(Mode::Isb, -2850.0, 2850.0), 2850.0);
+        assert_eq!(filter_width_hz(Mode::Usb, 150.0, 2850.0), 2700.0);
+    }
+
+    /// A CW preset is a width, not a place: the table is written about the
+    /// 700 Hz default sidetone, and an operator copying at 500 would otherwise
+    /// be handed a passband with their own note on the edge of it.
+    #[test]
+    fn cw_presets_follow_the_operators_own_pitch() {
+        assert_eq!(preset_edges(Mode::Cw, 575.0, 825.0, 500.0), (375.0, 625.0));
+        assert_eq!(preset_edges(Mode::Cw, 575.0, 825.0, 700.0), (575.0, 825.0));
+        // Every other mode's presets say where the passband goes as well as how
+        // wide it is, and are taken as written.
+        assert_eq!(preset_edges(Mode::Usb, 150.0, 2850.0, 500.0), (150.0, 2850.0));
+    }
+
+    /// The chip's label must never outgrow what [`RxChip::width_label`]
+    /// reserves for it, or the box breathes as the filter is dragged.
+    #[test]
+    fn the_bw_chip_never_outgrows_its_reservation() {
+        let (ctx, input) = desktop_ctx();
+        let mut over = Vec::new();
+        // Measuring this many distinct labels grows the font atlas, and a
+        // `FullOutput` dropped with an unapplied texture delta panics — so the
+        // run hands its verdict back rather than asserting inside it.
+        let mut out = ctx.run_ui(input, |ui| {
+            let reserved = RxChip::Bw.width(ui);
+            for mode in Mode::ALL {
+                let max = mode.max_filter_hz();
+                for (lo, hi) in [
+                    mode.default_filter(),
+                    (-max, max),
+                    (0.0, crate::input::MIN_FILTER_HZ),
+                    (150.0, 2850.0),
+                ] {
+                    let label = bw_chip_label(mode, lo, hi);
+                    let w = crate::chrome::chip_width(ui, &label, None);
+                    if w > reserved + 0.5 {
+                        over.push(format!(
+                            "{mode:?} {lo}..{hi} reads {label:?} at {w} pt, over the \
+                             {reserved} pt reserved"
+                        ));
+                    }
+                }
+            }
+        });
+        out.textures_delta.clear();
+        assert!(over.is_empty(), "{}", over.join("\n"));
     }
 
     /// The narrowest window the desktop tier takes still packs the whole strip
