@@ -272,11 +272,11 @@ async fn backup_master_takes_over_after_master_drop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "full size: ~75 s (grup_gorseli.bin, 55 blocks)"]
+#[ignore = "full size: ~75 s (group_image.bin, 55 blocks)"]
 async fn full_size_image_transfer_bit_exact() {
     let dir = tempfile::tempdir().unwrap();
-    let src = root_fixture("grup_gorseli.bin");
-    let original = std::fs::read(&src).expect("grup_gorseli.bin must be at the repo root");
+    let src = root_fixture("group_image.bin");
+    let original = std::fs::read(&src).expect("group_image.bin must be in tests/");
 
     let core = ChannelCore::spawn(ChannelConfig::default());
     let a =

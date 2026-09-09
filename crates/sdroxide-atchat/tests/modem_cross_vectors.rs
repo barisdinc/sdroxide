@@ -3,7 +3,7 @@
 //! 1. `tests/vectors/*.i16` — Python modulation outputs produced by
 //!    `rust/tools/dump_vectors.py`; the Rust demodulator must decode them
 //!    bit-for-bit.
-//! 2. `ornek_net_sesi.wav` at the repo root — real protocol frames modulated
+//! 2. `tests/sample_net_audio.wav` — real protocol frames modulated
 //!    back to back; energy-gated segmentation + demod must read the frame
 //!    types back.
 //!
@@ -78,11 +78,11 @@ fn segment_bursts(x: &[i16]) -> Vec<Vec<i16>> {
 
 #[test]
 fn sample_wav_frames_decode() {
-    let wav_path = manifest_dir().join("ornek_net_sesi.wav");
+    let wav_path = manifest_dir().join("tests/sample_net_audio.wav");
     let mut reader = match hound::WavReader::open(&wav_path) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("could not open ornek_net_sesi.wav ({e}) — skipping");
+            eprintln!("could not open sample_net_audio.wav ({e}) — skipping");
             return;
         }
     };
