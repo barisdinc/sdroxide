@@ -438,18 +438,22 @@ impl SdroxideApp {
             )
             .on_hover_text("A sent file follows the active chat tab");
             crate::chrome::row_tail(ui, |ui| {
-                if tx_gated(ui, can_send, |ui| {
+                let clicked = tx_gated(ui, can_send, |ui| {
                     crate::chrome::chip(ui, false, RichText::new(" SEND FILE ").size(10.0))
                 })
                 .on_hover_text("Send a file or image over the air, block-CRC-ARQ")
-                .clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_file()
-                {
+                .clicked();
+                // Native file picker only — the browser client has no
+                // filesystem dialog here, same as the log-import button.
+                #[cfg(not(target_arch = "wasm32"))]
+                if clicked && let Some(path) = rfd::FileDialog::new().pick_file() {
                     cmds.push(Command::AtChatSendFile {
                         to: target.clone(),
                         path: path.to_string_lossy().into_owned(),
                     });
                 }
+                #[cfg(target_arch = "wasm32")]
+                let _ = (clicked, &cmds, &target);
             });
         });
 
