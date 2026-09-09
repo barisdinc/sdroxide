@@ -2177,6 +2177,19 @@ pub struct SmartSdrConfig {
     /// fragmented VITA-49 packets are dropped and the spectrum simply never
     /// arrives.
     pub network_mtu: u32,
+    /// Conjugate the radio's DAX I/Q, mirroring the spectrum about the centre
+    /// of the panadapter.
+    ///
+    /// **Off by default**, which is how this backend has always read a FLEX and
+    /// what a FLEX-6600 was verified on. It is here because a mirrored stream
+    /// is the one fault that leaves the waterfall looking entirely convincing
+    /// while every sideband signal comes out inverted — which is unintelligible
+    /// speech on USB and on LSB alike, and no decodes at all, with nothing on
+    /// screen saying why (issue #368, reported on a FLEX-8400M). If that is
+    /// what a radio does, this is the one click that settles it; if it is not,
+    /// turning it on makes the fault obvious rather than subtle.
+    #[serde(default)]
+    pub swap_iq: bool,
 }
 
 impl Default for SmartSdrConfig {
@@ -2189,6 +2202,7 @@ impl Default for SmartSdrConfig {
             station: "sdroxide".into(),
             gui_client_id: String::new(),
             network_mtu: 1450,
+            swap_iq: false,
         }
     }
 }

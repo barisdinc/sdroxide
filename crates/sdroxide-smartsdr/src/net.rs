@@ -1857,6 +1857,10 @@ impl DataThread {
                         }
                         iq.clear();
                         p::decode_dax_iq(payload, &mut iq);
+                        // Counted for the trace's measured-rate line, which is
+                        // what tells a receive chain running at the wrong rate
+                        // apart from one that is merely being sent nonsense.
+                        self.trace.iq_pairs(h.stream_id, iq.len() / 2);
                         // Whole I/Q pairs or nothing. Stopping wherever the
                         // ring happens to fill would leave it an odd number of
                         // floats deep, and from then on every pair is one float

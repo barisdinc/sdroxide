@@ -7772,6 +7772,12 @@ radio modulates.
   Leave it empty and sdroxide derives one from the station name, which is stable
   across restarts but *not* unique: every sdroxide that kept the default station
   name derives the same one. See **Two clients, one identity** below.
+- **Invert spectrum (Swap I/Q)** — mirrors the radio's I/Q about the centre of
+  the panadapter. **Off by default**, which is how a FLEX-6600 was verified.
+  Try it if receive audio is unintelligible on USB *and* on LSB and nothing
+  decodes, while the waterfall looks entirely convincing: that is what a
+  mirrored stream looks like, and it is the one fault with no other symptom
+  (issue #368, reported on a FLEX-8400M). Applies on **Apply / reconnect**.
 - **Network MTU** — the largest datagram the radio may put on the wire, 1450 by
   default, which is what SmartSDR itself asks for. Lower it if the radio reaches
   you through a VPN or a tunnel with a smaller MTU: the spectrum rides UDP, and
@@ -7825,6 +7831,13 @@ empty while the frequency readout tracks the radio, suspect the UDP path. On a
 computer that has never run SmartSDR, **its own firewall is the usual answer**:
 SmartSDR's installer adds a rule for itself and sdroxide arrives without one. A
 VPN comes next, then an MTU smaller than the **Network MTU** setting.
+
+**Unintelligible audio.** Two faults sound the same and nothing on screen tells
+them apart: a receive chain running at the wrong sample rate, and a mirrored
+spectrum. The diagnostic report's `--- streams ---` section settles the first —
+each DAX I/Q stream carries a line stating the rate it is *measured* to be
+delivering against the rate its packets claim, and flags them when they
+disagree. If those two agree, try **Invert spectrum** above for the second.
 
 sdroxide says so on connect when nothing arrives, and the diagnostic report's
 `--- streams ---` section is where to confirm it. It opens with a count of the

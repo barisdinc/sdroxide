@@ -3430,6 +3430,18 @@ pub(in crate::app) fn settings_smartsdr_tab(
         );
         ui.end_row();
 
+        ui.label("Invert spectrum");
+        crate::chrome::checkbox(ui, &mut cfg.smartsdr.swap_iq, "Swap I/Q").on_hover_text(
+            "Mirror the radio's I/Q about the centre of the panadapter. Off by default, \
+             which is how a FLEX-6600 was verified.\n\n\
+             Try it if receive audio is unintelligible on USB *and* on LSB and nothing \
+             decodes, while the waterfall looks entirely convincing — that is what a \
+             mirrored stream looks like, and it is the one fault with no other symptom \
+             (issue #368). If it is not that, turning this on makes it obvious rather \
+             than subtle. Applies on Apply / reconnect.",
+        );
+        ui.end_row();
+
         ui.label("Network MTU").on_hover_text(
             "Largest datagram the radio may send. 1450 is what SmartSDR itself asks for. \
              Lower it on a path with a smaller MTU — a VPN or a tunnel — where the \
