@@ -241,6 +241,15 @@ impl Fake {
         )
     }
 
+    /// A board that pauses under its own load: longer than one payload
+    /// deadline, and with the transfer still on its way — see [`PAUSE`].
+    fn start_that_pauses_mid_buffer() -> Fake {
+        Fake::start_with(
+            DeviceState { stall_next_readbuf: Some(PAUSE), ..DeviceState::default() },
+            CONTEXT_XML.to_string(),
+        )
+    }
+
     /// A device whose first buffer produces nothing at all and whose second
     /// one — after a reopen — works.
     fn start_wedged_until_reopened() -> Fake {
@@ -660,6 +669,13 @@ fn attr_key(words: &[&str]) -> String {
 /// under test is patience rather than the reconnect below.
 const HICCUP: Duration = Duration::from_millis(1_200);
 
+/// A mid-buffer gap longer than one payload deadline, on a transfer that then
+/// finishes: the shape of issue #288, where a PlutoSDR whose own processor is
+/// busy goes quiet for a second or two on a link with no errors and nothing
+/// dropped. Long enough that the old client gave up and redialled; short enough
+/// that the bytes were always going to arrive.
+const PAUSE: Duration = Duration::from_millis(3_000);
+
 /// A mid-buffer gap long enough that the client should stop waiting and replace
 /// the receive socket.
 ///
@@ -879,6 +895,43 @@ fn a_gap_in_the_middle_of_a_buffer_does_not_end_the_stream() {
     );
     // The samples either side of the gap are still the ones the device sent,
     // in the right order — a retry that lost its place would interleave I and Q.
+    assert!((buf[0] - (SAMPLE_I as f32 / 2048.0)).abs() < 1e-6, "I was {}", buf[0]);
+    assert!((buf[1] - (SAMPLE_Q as f32 / 2048.0)).abs() < 1e-6, "Q was {}", buf[1]);
+    handle.release();
+}
+
+/// Issue #288: a pause longer than one payload deadline, on a transfer that is
+/// still arriving, costs neither the socket nor the buffer.
+///
+/// Both reports were of a Pluto whose own processor was busy enough to stop
+/// feeding the socket for a second or two — no errors on the link, nothing
+/// dropped, and the samples still on their way. Every one of those used to end
+/// the connection, because the read that hit the gap could not say how far into
+/// the payload it had got and the only safe answer was to redial and reopen the
+/// buffer. Counting the bytes is what makes the gap survivable, and the halves
+/// either side of it still have to splice back into the samples the device
+/// sent.
+#[test]
+fn a_pause_the_transfer_recovers_from_costs_no_socket() {
+    let fake = Fake::start_that_pauses_mid_buffer();
+    let mut handle =
+        PlutoHandle::open(&fake.address(), &config(), 435_000_000.0).expect("open the fake Pluto");
+
+    let mut buf = vec![0f32; 4096];
+    let mut got = 0;
+    wait_up_to(PAUSE + Duration::from_secs(5), "samples across the pause", || {
+        got = handle.rx_read(&mut buf);
+        got > 0
+    });
+    assert!(handle.is_alive(), "a pause must not take the connection down");
+    assert_eq!(
+        fake.connections.load(Ordering::Relaxed),
+        3,
+        "a pause the transfer recovered from must not have cost a socket"
+    );
+    assert_eq!(fake.state.lock().expect("lock").rx_buffer_opens, 1, "...nor a buffer reopen");
+    // And the two halves are still the samples the device sent, in order — a
+    // resumed read that lost its place would interleave I and Q.
     assert!((buf[0] - (SAMPLE_I as f32 / 2048.0)).abs() < 1e-6, "I was {}", buf[0]);
     assert!((buf[1] - (SAMPLE_Q as f32 / 2048.0)).abs() < 1e-6, "Q was {}", buf[1]);
     handle.release();
