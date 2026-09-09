@@ -980,8 +980,10 @@ pub(in crate::app) fn settings_hpsdr_tab(
             "Wind the gain back when the ADC overflows",
         )
         .on_hover_text(
-            "Applies on Apply / reconnect. The gain rail above follows the loop while it \
-             runs, so you can watch what it does.",
+            "Applies on Apply / reconnect. The main window's Gain rail reads the gain the \
+             board is actually running, so it follows the loop and you can watch what it \
+             does; the slider above is the level the radio starts at, and the loop does not \
+             rewrite it.",
         );
         ui.end_row();
 

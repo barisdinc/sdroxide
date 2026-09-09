@@ -7403,9 +7403,10 @@ involved:
   **Nothing happens while you are transmitting.** A board's own transmitter
   leaks into its own receiver, and reading that as a receive overload would wind
   the gain down through every over and hand you a deaf receiver on unkey. The
-  LNA gain rail above follows the loop while it runs, so you can watch what it
-  does, and every move it makes is logged with the running count of overflow
-  reports — which is worth having on its own when you are trying to work out
+  main window's **Gain** rail reads the gain the board is actually running, so it
+  follows the loop and you can watch what it does — the **LNA gain** slider on
+  this page is the level the radio *starts* at, and the loop does not rewrite it.
+  Every move it makes is logged with the running count of overflow reports — which is worth having on its own when you are trying to work out
   whether a preamplifier or an antenna is marginal (issue #362).
 
   Only a Hermes Lite 2 has a front-end gain sdroxide can command, so this is a
