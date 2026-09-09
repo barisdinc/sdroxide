@@ -990,8 +990,12 @@ impl SdroxideApp {
                         egui::vec2(ui.available_width(), meter_h),
                         egui::Layout::left_to_right(egui::Align::Min),
                         |ui| {
+                            let hover = format!(
+                                "{}\n\nClick to cycle meter face: bar / trace",
+                                smeter::hover_text(self.meters.as_ref())
+                            );
                             let resp = smeter::show(ui, self.meters.as_ref(), style.compact())
-                                .on_hover_text("Click to cycle meter face: bar / trace");
+                                .on_hover_text(hover);
                             if resp.clicked() {
                                 self.set_smeter_style(style.next_compact());
                             }
@@ -1749,11 +1753,12 @@ impl SdroxideApp {
         let shown = if compact { style.compact() } else { style };
         let mut picked = None;
         crate::chrome::module_bare_flush_h(ui, w, h, |ui| {
-            let resp = smeter::show(ui, self.meters.as_ref(), shown).on_hover_text(if compact {
-                "Click to cycle meter face: bar / trace"
-            } else {
-                "Click to cycle meter face: needle / bar / trace"
-            });
+            let hover = format!(
+                "{}\n\nClick to cycle meter face: {}",
+                smeter::hover_text(self.meters.as_ref()),
+                if compact { "bar / trace" } else { "needle / bar / trace" }
+            );
+            let resp = smeter::show(ui, self.meters.as_ref(), shown).on_hover_text(hover);
             if resp.clicked() {
                 picked = Some(if compact { style.next_compact() } else { style.next() });
             }

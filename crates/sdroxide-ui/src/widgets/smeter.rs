@@ -161,6 +161,87 @@ fn swr_frac(swr: f32) -> f32 {
 /// widget that draws it.
 pub use sdroxide_types::SmeterStyle;
 
+/// What the meter is showing right now, in words, for the hover.
+///
+/// The face is dense by design — a chip, a right-hand figure, one or two bars
+/// and a scale — and none of it says what it *is*. An operator seeing a needle
+/// at 50 during an over has no way to tell whether that is half the radio's
+/// power, half its modulation, or something else entirely, and an operator
+/// looking for SWR has no way to tell a radio that has no bridge from a reading
+/// that is missing (issue #373). So every line here names the quantity and its
+/// units, and the transmit case says outright when the radio measures nothing.
+pub fn hover_text(meters: Option<&Meters>) -> String {
+    let mut out = String::new();
+    if let Some(tx) = meters.and_then(|m| m.tx.as_ref()) {
+        out.push_str(
+            "ALC — how hard the transmitter is being driven, as a percentage of the most it \
+             can put out. 100 % is full scale, not full power in watts: what that is worth at \
+             the antenna depends on the radio and on Drive.",
+        );
+        match tx.fwd_w {
+            Some(w) => out.push_str(&format!(
+                "\n\nForward power — {w:.1} W, measured by the radio's own sensor.",
+            )),
+            None => out.push_str(
+                "\n\nThis radio reports no forward power, so the figure beside ALC is the \
+                 ALC reading again rather than watts.",
+            ),
+        }
+        if let Some(po) = tx.po {
+            out.push_str(&format!(
+                "\n\nPO — the radio's own power-output meter, at {:.0} % of its full scale. A \
+                 needle position as the radio reports it, not a calibrated wattage; what to \
+                 watch is whether it falls while Drive stays put.",
+                po.clamp(0.0, 1.0) * 100.0,
+            ));
+        }
+        match tx.swr {
+            Some(swr) => out.push_str(&format!(
+                "\n\nSWR — {swr:.1}:1, the match the antenna is presenting, as the radio \
+                 measures it. Under 2:1 is unremarkable; past 3:1 the scale turns red.",
+            )),
+            None => out.push_str(
+                "\n\nNo SWR: this radio has no bridge to measure it with, and sdroxide will \
+                 not invent one — it can only show what the radio itself reports. A rig with \
+                 an SWR meter (over CAT, TCI or a LAN link) and an HPSDR board both fill this \
+                 in; a plain SDR transmitter cannot.",
+            ),
+        }
+        return out;
+    }
+
+    let Some(m) = meters else {
+        return "No signal report yet — the receiver has not delivered a meter reading.".into();
+    };
+    let (s, over) = m.s_units();
+    if over > 0.0 {
+        out.push_str(&format!(
+            "Received signal strength: S9 + {over:.0} dB ({:.0} dBm in the passband).",
+            m.s_dbm,
+        ));
+    } else {
+        out.push_str(&format!(
+            "Received signal strength: S{s} ({:.0} dBm in the passband).",
+            m.s_dbm,
+        ));
+    }
+    out.push_str(
+        "\n\nS9 is −73 dBm and each S-unit below it is 6 dB. The dBm figure is only as \
+         honest as the front end's calibration — an uncalibrated receiver reports dBFS with a \
+         dBm label.",
+    );
+    if m.adc_overloaded() {
+        out.push_str(
+            "\n\nOVLD: the converter is into its rails, so the level shown understates the \
+             signal. Wind the front-end gain back.",
+        );
+    }
+    if let Some(t) = m.pa_temp_c {
+        out.push_str(&format!("\n\nThe radio reports {t:.0} °C."));
+    }
+    out
+}
+
 /// Draw the S-meter in the selected style, filling the box's full interior.
 /// Returns the (clickable) response so the caller can cycle the style.
 pub fn show(ui: &mut Ui, meters: Option<&Meters>, style: SmeterStyle) -> Response {

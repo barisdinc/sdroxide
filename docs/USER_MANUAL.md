@@ -1181,6 +1181,17 @@ and everything past 3:1 in red. Either way the SWR keeps its place as a number
 in the header button. Rigs with neither show the drive row alone, grown to fill
 the space.
 
+**Hover the meter and it says what it is showing.** The face is dense — a chip,
+a figure, one or two bars and a scale — and a needle sitting at 50 during an
+over does not say by itself whether that is half the power, half the modulation
+or something else. The tooltip names each quantity and its units, and on
+transmit it says outright when the radio measures nothing: an SDR that sdroxide
+modulates itself — a HackRF, a Pluto, a LimeSDR, an RTL-SDR-class transmitter —
+has **no SWR bridge and no power sensor at all**, so those rows are absent
+because there is nothing to put in them rather than because a reading has gone
+missing. SWR and forward power appear when the radio measures them: a rig over
+CAT, TCI or a LAN link, or an HPSDR board.
+
 Where the reading comes from depends on the interface. An SDR delivers IQ and
 the receiver measures the signal in its own passband, calibrated to dBm by
 `cal_offset_db` in `config.toml`.
