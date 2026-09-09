@@ -13586,8 +13586,25 @@ WARN sdroxide_digi: FT8: the last receive period arrived 0.4 s short of the
 The period you *selected the mode in* is exempt, however short it is: a mode
 chosen four seconds before the next boundary has legitimately only heard four
 seconds, and reporting that as a fault at every start had two people looking for
-a broken sound card that was never broken (issues #363, #367). Counting starts
-with the first period sdroxide has heard all of.
+a broken sound card that was never broken (issues #363, #367). So is the period
+the **audio itself started in**, which is not always the same one — the device
+may still be opening when the slot clock begins. Counting starts with the first
+period sdroxide has heard all of.
+
+A period that arrives **completely empty** is a different message, because it is
+a different fault — no audio is arriving at all, rather than audio arriving with
+a hole in it:
+
+```
+WARN sdroxide_digi: FT8: no receive audio is reaching the decoder — a whole
+15.0 s period arrived empty, so nothing can decode …
+```
+
+That is what a radio switched off, or an audio device that is not the one the
+radio is feeding, looks like from here. It is said **once** and not again until
+audio comes back, rather than every fifteen seconds for as long as it lasts —
+which is what filled one reporter's log with a thousand sample-loss warnings
+about a sound card that was never losing anything (issue #393).
 
 A **virtual audio cable** — VB-Audio, VAC, Flex DAX — is the usual source, and
 it is not a fault in the cable so much as a consequence of what one is: there is

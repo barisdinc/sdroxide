@@ -174,6 +174,22 @@ pub struct DigiController {
     /// Receive periods that arrived short of a full slot — see
     /// [`DigiController::check_slot_arrived_whole`].
     short_slots: u64,
+    /// Consecutive receive periods that carried no audio *at all*, and whether
+    /// the run has been reported yet.
+    ///
+    /// A different fault from a short period and it needs saying differently:
+    /// nothing is arriving, rather than something arriving with holes in it.
+    /// Counted separately so it is reported once per run instead of every
+    /// fifteen seconds for as long as the radio stays off (issue #393).
+    silent_slots: u64,
+    silent_reported: bool,
+    /// Whether any audio has reached this controller yet.
+    ///
+    /// The slot clock starts when the controller is built, but the audio tap
+    /// does not necessarily start with it — the device may still be opening, or
+    /// there may be no radio on the other end at all. Until something arrives
+    /// there is no "short period" to report, only an absent one.
+    heard_audio: bool,
     /// Slots handed to the decode worker and not yet answered for — see
     /// [`DigiController::decoding`].
     ///
@@ -304,6 +320,9 @@ impl DigiController {
             tap_scratch: Vec::new(),
             last_slot_idx: i64::MIN,
             short_slots: 0,
+            silent_slots: 0,
+            silent_reported: false,
+            heard_audio: false,
             decoding: 0,
             dial_hz: 0.0,
             audio_hz: 1500.0,
@@ -533,6 +552,24 @@ impl DigiController {
     /// Feed one block of demodulated audio (at `tap_rate`) into the current
     /// receive slot after resampling to 12 kHz.
     pub fn on_rx_audio(&mut self, tap: &[f32]) {
+        if !tap.is_empty() {
+            if !self.heard_audio {
+                self.heard_audio = true;
+                // The period audio *started* in holds only the tail of itself,
+                // exactly as the period the mode was selected in does — and it
+                // is not necessarily the same period. A tap that comes up two
+                // seconds late reported the first whole slot as thirteen
+                // seconds short of itself, every time the mode was selected
+                // (issue #393).
+                if self.last_slot_idx != i64::MIN {
+                    self.first_whole_slot =
+                        self.first_whole_slot.max(self.last_slot_idx.saturating_add(1));
+                }
+            }
+            // A run of silence has ended; the next one is worth reporting again.
+            self.silent_slots = 0;
+            self.silent_reported = false;
+        }
         self.tap_scratch.clear();
         match &mut self.resampler {
             Some(r) => r.push(tap, &mut self.tap_scratch),
@@ -572,13 +609,38 @@ impl DigiController {
             return;
         }
         // The period the mode was selected in holds only the tail of itself,
-        // however healthy the audio device is — see [`Self::first_whole_slot`].
+        // however healthy the audio device is — see [`Self::first_whole_slot`],
+        // which the first audio to arrive pushes forward if the tap started
+        // later than the clock did.
         if self.last_slot_idx < self.first_whole_slot {
             return;
         }
         let want = (self.params.slot_s * DECODE_RATE) as usize;
         let got = self.slot_buf.len();
-        if want == 0 || got >= (want as f64 * SLOT_COMPLETE_FRAC) as usize {
+        if want == 0 {
+            return;
+        }
+        // Nothing at all is a different fault from something with a hole in
+        // it, and the sample-loss message is simply untrue about it: there is
+        // no audio device losing samples, there is no audio. That is what a
+        // radio that is switched off looks like, or a tap that has not been
+        // connected — and reported as sample loss it produced one warning
+        // every fifteen seconds, for hours, in a mode the operator was not
+        // even in (issue #393). Said once per run instead, and re-armed by
+        // [`Self::on_rx_audio`] when audio comes back.
+        if got == 0 {
+            self.silent_slots = self.silent_slots.saturating_add(1);
+            if !self.silent_reported {
+                self.silent_reported = true;
+                tracing::warn!(
+                    "{}: no receive audio is reaching the decoder — a whole {:.1} s period                      arrived empty, so nothing can decode. Check that the radio is on and                      that the audio device sdroxide is listening to is the one it is feeding.                      Said once until audio returns.",
+                    self.params.mode.label(),
+                    self.params.slot_s,
+                );
+            }
+            return;
+        }
+        if got >= (want as f64 * SLOT_COMPLETE_FRAC) as usize {
             return;
         }
         self.short_slots = self.short_slots.saturating_add(1);
@@ -976,6 +1038,39 @@ mod tests {
         // ...and a whole one is not.
         c.on_rx_audio(&vec![0.0f32; (15.0 * 12_000.0) as usize]);
         c.poll(t(45.1), 14_074_000.0);
+        assert_eq!(c.short_slots, 1);
+    }
+
+    /// Issue #393: a controller with no audio reaching it at all reported one
+    /// "the audio device is losing samples" every fifteen seconds — a thousand
+    /// of them in one log, on a machine whose radio was not even switched on.
+    /// Nothing was losing samples; nothing was arriving.
+    #[test]
+    fn periods_with_no_audio_at_all_are_not_reported_as_lost_samples() {
+        let t = |secs: f64| UNIX_EPOCH + Duration::from_secs_f64(1_609_459_200.0 + secs);
+        let mut c = DigiController::new(Mode::Ft8, cfg(), 12_000.0);
+        c.poll(t(0.1), 14_074_000.0);
+        // Four empty periods running.
+        for i in 1..=4 {
+            c.poll(t(15.0 * f64::from(i) + 0.1), 14_074_000.0);
+        }
+        assert_eq!(c.short_slots, 0, "silence is not sample loss");
+        // Three, not four: the period the mode was selected inside is skipped
+        // whatever it holds, exactly as it is for a short period.
+        assert_eq!(c.silent_slots, 3, "but it is counted");
+        assert!(c.silent_reported, "and said once");
+
+        // Audio arrives part way through a period. That period is short
+        // because the tap started late, which is the same thing as joining a
+        // period late and equally not a fault.
+        c.on_rx_audio(&vec![0.0f32; (5.0 * 12_000.0) as usize]);
+        c.poll(t(90.1), 14_074_000.0);
+        assert_eq!(c.short_slots, 0, "the period the audio started in is not a fault");
+        assert!(!c.silent_reported, "and the silence report is re-armed");
+
+        // From the next one on, short means short.
+        c.on_rx_audio(&vec![0.0f32; (2.0 * 12_000.0) as usize]);
+        c.poll(t(105.1), 14_074_000.0);
         assert_eq!(c.short_slots, 1);
     }
 
