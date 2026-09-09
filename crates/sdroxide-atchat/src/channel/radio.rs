@@ -26,8 +26,22 @@ use crate::netproto::{ClientMsg, SAMPLE_RATE, ServerMsg};
 const HOP: usize = SAMPLE_RATE as usize / 50; // 20 ms
 /// Quiet run that ends a burst (~60 ms).
 const SILENCE_HANG_HOPS: usize = 3;
-/// Per-sample magnitude that counts as signal (i16 scale).
+/// Absolute noise floor (i16 peak) below which a hop is silence no matter what
+/// the adaptive floor has learned — keeps a genuinely dead input (a loopback,
+/// an unplugged rig) from ever reading as a carrier.
 const GATE: i32 = 250;
+/// A hop counts as a carrier when its peak is this many times the learned
+/// ambient floor. ~3× ≈ 9.5 dB over the noise.
+const CARRIER_OVER_FLOOR: f64 = 3.0;
+/// How fast the ambient-floor estimate tracks the input, per 20 ms hop. ~0.05
+/// settles in about half a second, so the first transmit after joining waits
+/// out a brief measure rather than being blocked forever by a floor that
+/// started at zero.
+const FLOOR_ALPHA: f64 = 0.05;
+/// Where the ambient-floor estimate starts, before any audio has been measured
+/// — permissive on purpose: a station that has just joined should be able to
+/// call rather than sit deaf behind an unlearned floor.
+const FLOOR_INIT: f64 = 4000.0;
 /// A burst shorter than this is noise, not a frame (~2 OFDM symbols).
 const MIN_BURST: usize = 640;
 const RX_RING_CAP: usize = SAMPLE_RATE as usize * 6;
@@ -184,6 +198,11 @@ async fn segmenter(
     let mut burst: Vec<i16> = Vec::new();
     let mut quiet_hops = 0usize;
     let mut in_burst = false;
+    // Ambient level the "is the channel busy?" test measures against. A fixed
+    // gate worked on the loopback, where the only thing in the ring is a frame,
+    // but real receiver audio sits well above any fixed threshold after the
+    // rig's AGC — so the station would read a permanent carrier and never key.
+    let mut noise_floor = FLOOR_INIT;
 
     loop {
         tick.tick().await;
@@ -196,7 +215,14 @@ async fn segmenter(
                 r.drain(..HOP).collect()
             };
             let peak = hop.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0);
-            let loud = peak > GATE;
+            let threshold = (noise_floor * CARRIER_OVER_FLOOR).max(GATE as f64);
+            let loud = f64::from(peak) > threshold;
+            // Learn the ambient level only from hops that are neither a carrier
+            // nor part of the burst being captured, so a long over does not pull
+            // the floor up to its own level.
+            if !loud && !in_burst {
+                noise_floor += FLOOR_ALPHA * (f64::from(peak) - noise_floor);
+            }
             carrier.store(loud || (in_burst && quiet_hops < SILENCE_HANG_HOPS), Ordering::Relaxed);
 
             if loud {
