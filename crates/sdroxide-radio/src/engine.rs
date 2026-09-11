@@ -17,10 +17,10 @@ use sdroxide_adsb::{AdsbAction, AdsbController};
 use sdroxide_ais::{AisAction, AisController};
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
-    AprsController, CwController, DigiAction, DigiController, DigiEngine, FsqController,
-    HellController, Js8Controller, NavtexController, PacketController, RadeController,
-    RfPaintController, RifpController, SstvController, TextModemController, WefaxController,
-    WsprController,
+    AprsController, AtChatController, CwController, DigiAction, DigiController, DigiEngine,
+    FsqController, HellController, Js8Controller, NavtexController, PacketController,
+    RadeController, RfPaintController, RifpController, SstvController, TextModemController,
+    WefaxController, WsprController,
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{
@@ -6318,6 +6318,12 @@ impl Engine {
             ))
         } else if mode.is_rade() {
             Box::new(RadeController::new(self.digi_config.clone(), tap_rate))
+        } else if mode.is_atchat() {
+            // Ahead of the fall-through, which is FT8's: AtCHAT is neither
+            // slotted nor a keyboard modem — it runs a whole NET protocol on
+            // its own thread — and nothing further down would notice it had
+            // been handed an FT8 decoder.
+            Box::new(AtChatController::new(self.digi_config.clone(), tap_rate))
         } else if mode.is_sstv() {
             // Both SSTV modes, one controller: HF and VHF differ in the radio
             // underneath, not in the picture — the same reason the two packet
@@ -8884,6 +8890,52 @@ impl Engine {
                     && self.state.rx[0].mode.is_packet()
                 {
                     d.packet_term_clear();
+                }
+                return;
+            }
+            // AtCHAT NET. No transmit gate of its own on any of these: the
+            // frames leave through the station's own listen-before-transmit and
+            // the engine's normal PTT path, exactly as a beacon does. A refusal
+            // is written into the station's own log, where the panel shows it —
+            // except "you are not in AtCHAT", which has no controller to log
+            // into and so is a Notice.
+            AtChatSendChat { to, text } => {
+                match self.digi.as_mut() {
+                    Some(d) if self.state.rx[0].mode.is_atchat() => d.atchat_send_chat(to, text),
+                    _ => {
+                        let _ = self.event_tx.send(RadioEvent::Notice(Some(
+                            "switch the radio to ATCHAT to send".into(),
+                        )));
+                    }
+                }
+                return;
+            }
+            AtChatSendFile { to, path } => {
+                match self.digi.as_mut() {
+                    Some(d) if self.state.rx[0].mode.is_atchat() => {
+                        d.atchat_send_file(to, std::path::PathBuf::from(path));
+                    }
+                    _ => {
+                        let _ = self.event_tx.send(RadioEvent::Notice(Some(
+                            "switch the radio to ATCHAT to send a file".into(),
+                        )));
+                    }
+                }
+                return;
+            }
+            AtChatDrop => {
+                if let Some(d) = self.digi.as_mut()
+                    && self.state.rx[0].mode.is_atchat()
+                {
+                    d.atchat_drop();
+                }
+                return;
+            }
+            AtChatReconnect => {
+                if let Some(d) = self.digi.as_mut()
+                    && self.state.rx[0].mode.is_atchat()
+                {
+                    d.atchat_reconnect();
                 }
                 return;
             }
@@ -15908,6 +15960,7 @@ fn rig_mode_class(m: Mode) -> u8 {
         | Mode::RfPaint
         | Mode::Rade
         | Mode::PacketHf
+        | Mode::AtChat
         | Mode::Spec => 1,
         // DRM sits on the dial in a channel about as wide as AM's, and a
         // rig has no DRM setting to report back — see `to_hamlib_mode`.
