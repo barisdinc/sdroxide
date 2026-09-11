@@ -31,6 +31,11 @@ clap = { version = "4", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
+# The protocol scenarios drive two stations at once under
+# `#[tokio::test(flavor = "multi_thread")]`; the library itself runs the session
+# on a current-thread runtime, so the multi-threaded scheduler is a test-only
+# need and stays out of the normal build.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 hound = "3"
 tempfile = "3"
 
