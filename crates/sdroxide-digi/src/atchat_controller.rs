@@ -243,7 +243,7 @@ impl DigiEngine for AtChatController {
         // Top the FIFO up from the session's 8 kHz transmit ring.
         if self.tx_fifo.len() < out.len() {
             let mut pcm: Vec<i16> = Vec::new();
-            let want = out.len().saturating_sub(self.tx_fifo.len()).max(out.len());
+            let want = out.len().saturating_sub(self.tx_fifo.len());
             self.session.drain_tx_pcm(&mut pcm, want);
             self.tx_fifo.extend(pcm.iter().map(|&s| s as f32 / 32768.0));
         }
