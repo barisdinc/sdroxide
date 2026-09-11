@@ -338,19 +338,31 @@ The **VFO** module has:
 - **SPLIT** — transmit on one VFO and receive on the other.
 - **SUB** — enable a second receiver, routed to the right ear.
 
-**Each VFO keeps its own mode**, and its own filter width with it. A VFO is a
-whole listening position rather than just a number — CW on A while B sits on an
-SSB net is what the pair is for — so switching between them puts the receiver
-into the mode that VFO was left in, exactly as the A/B button on a transceiver
-does. Swap and Copy A to B move the mode along with the frequency: after a swap
-each VFO holds what the other one had, and after a copy B is A in every respect.
+**Each VFO keeps its own mode**, its own filter width, and its own antenna. A
+VFO is a whole listening position rather than just a number — CW on A while B
+sits on an SSB net is what the pair is for — so switching between them puts the
+receiver into the mode that VFO was left in and back on the socket it was heard
+on, exactly as the A/B button on a transceiver does. Swap and Copy A to B move
+all of it along with the frequency: after a swap each VFO holds what the other
+one had, and after a copy B is A in every respect.
 
-Both VFOs, the mode each was left in, and which of the two was selected are
-remembered per radio in `session.json`, so a station left listening on B — or set
-up for split, with the other VFO on the DX's transmit frequency — comes back the
-same way at the next start rather than with B collapsed onto A. `--freq` and
-`--mode` still override the dial and the mode for a run, and they apply to
-whichever VFO was active.
+The antenna is remembered per band as well
+([6.2](#62-radio-choosing-and-configuring-the-rig)), and the two memories divide
+the work by what you have just done. **An A/B press that stays inside one band
+keeps each VFO's socket** — Antenna A on a broadcast station and Antenna B on
+the amateur allocation below it is one band and two sockets, which the band
+memory alone cannot express. **Crossing a band edge recalls the band's socket
+instead**, whether you got there by the dial or by pressing A/B onto a VFO
+parked on another band: which aerial hears 2 m is a fact about the station
+rather than about a VFO. Choosing a socket by hand is what writes the band's
+entry, so the band always holds your last explicit choice on it.
+
+Both VFOs, the mode and socket each was left in, and which of the two was
+selected are remembered per radio in `session.json`, so a station left listening
+on B — or set up for split, with the other VFO on the DX's transmit frequency —
+comes back the same way at the next start rather than with B collapsed onto A.
+`--freq` and `--mode` still override the dial and the mode for a run, and they
+apply to whichever VFO was active.
 
 The sub-receiver tunes **independently of A/B**: swapping VFOs or turning the
 dial leaves it where you parked it. Switching it on reveals a **SUB module** in
@@ -6610,7 +6622,10 @@ exposes, and nothing it does not:
 > channel is where you change your mind about which one that should be
 > ([2.12](#212-memory-channels)). A band you have never chosen a socket on is
 > left exactly where the radio already is, so nothing moves a relay for you
-> until you have said what belongs on that band.
+> until you have said what belongs on that band. **Each VFO remembers its socket
+> too**, which is what lets you keep A and B on different sockets at the same
+> end of one band; a change of band hands the choice back to the band
+> ([2.5](#25-vfos-split-and-the-sub-receiver)).
 - **Stream** — **Sample rate** and **Baseband filter**, listing the values this
   device says it accepts. Both default to leaving things as they were: the rate
   falls back to the app-wide `sample_rate`, and the filter to whatever the
