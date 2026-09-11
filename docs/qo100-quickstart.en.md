@@ -45,11 +45,7 @@ panadapter and waterfall below it.
 
 Press **SETTINGS** on the top control bar.
 
-```
-+-------------------------------------------------------------+
-|  BAND   MODE   FILTER   AGC   [ SETTINGS ]   SAT   SCAN      |   <- 2
-+-------------------------------------------------------------+
-```
+![The top control bar, with SETTINGS pressed](images/qo100-quickstart/01-top-bar.png)
 
 ### 3. Callsign and locator
 
@@ -57,14 +53,7 @@ On the **General** tab, enter your callsign in **Callsign** and your Maidenhead
 grid (e.g. `KN41GG`) in **Locator**. The satellite lock and the world map use
 this locator — **LOCK ON** will not work without it.
 
-```
-+- Settings ---------------------------------------------+
-|  [ General ]  Radio   Servers   TLE                    |
-|                                                       |
-|   Callsign   [ TA1XYZ            ]        <- 3         |
-|   Locator    [ KN41GG   ]                 <- 3         |
-+-------------------------------------------------------+
-```
+![Settings, General tab: Callsign and Locator fields](images/qo100-quickstart/02-settings-general.png)
 
 ### 4. Radio tab — device: PlutoSDR
 
@@ -72,20 +61,7 @@ Switch to the **Radio** tab and pick **PlutoSDR** in the interface selector. A
 Pluto is a network device even on a USB cable: plugging it in creates a network
 adapter, not a serial port. The next five fields are on this same tab:
 
-```
-+- Settings --------------------------------------------------------+
-|  General   [ Radio ]   Servers                                    |
-|                                                                  |
-|   Interface     [ PlutoSDR                        v ]     <- 4    |
-|   Converter     [ LNB, Ku low (-9750 MHz)         v ]     <- 5    |
-|   Offset        [ -9 750 000 000 Hz ]   (from preset, auto)       |
-|   Transmit      [ Its own offset v ]   [ 0 ] Hz           <- 6    |
-|   -------------------------------------------------------          |
-|   Address       [ 192.168.2.1 ]        [ Discover ]       <- 7    |
-|   Sample rate   [ 1 Msps v ]    [x] Full duplex           <- 8    |
-|                                              [ Apply ]    <- 9    |
-+------------------------------------------------------------------+
-```
+![Settings, Radio tab: Interface, Converter, Offset, Transmit, Address, Sample rate and Apply](images/qo100-quickstart/03-settings-radio.en.png)
 
 ### 5. Converter: LNB, Ku low (-9750 MHz)
 
@@ -140,31 +116,14 @@ Done each time you work the bird.
 Press **SAT** in the System box. The button glows green while a lock is running;
 the correction keeps being applied even with the window closed.
 
-```
-+ System +        +- SAT ---------------------------+
-| [ SAT ] |  -->  |  [ SATELLITES ]   [ QO-100 ]     |
-|  SCAN   |  10   |  SAT glows green while locked.   |
-|  MEM    |       +---------------------------------+
-+---------+
-```
+![Pressing SAT in the System box opens the SAT window](images/qo100-quickstart/04-sat-window-open.en.png)
 
 ### 11. Pick QO-100
 
 On the **SATELLITES** tab, type `QO-100` into the search box and pick it from the
 list. Its published links (narrowband transponder, beacon) appear below.
 
-```
-+- SAT - SATELLITES -------------------------------------+
-|  search: [ QO-100 ]                                    |
-|  +-------------------------------------------------+   |
-|  | > QO-100 (Es'hail-2)              geostationary  |  |  <- 11
-|  |   ISS (ZARYA)                                    |  |
-|  |   RS-44                                          |  |
-|  +-------------------------------------------------+   |
-|  NB transponder - beacon 10489.750 MHz                 |
-|                            [ TUNE ]   [ LOCK ON ]      |  <- 12
-+-------------------------------------------------------+
-```
+![The SATELLITES tab: search box, satellite list with QO-100 selected, TUNE and LOCK ON](images/qo100-quickstart/05-sat-satellites.en.png)
 
 ### 12. LOCK ON
 
@@ -190,24 +149,7 @@ It is the second tab of the SAT window.
 > offset has to be roughly right first (step 5), so the beacon lands somewhere
 > near 10489.750 MHz.
 
-```
-+- SAT - QO-100 -----------------------------------------------------+
-|  SATELLITES   [ QO-100 * ]                                         |
-|                                                                   |
-|  [ ON ]   [ TELEMETRY ]   [ AUTO ]        width [-] +/-25 kHz [+]  |
-|    ^17         ^18           ^17                        ^14        |
-|  +-----------------------------------------------------------+     |
-|  |  mini waterfall    ### = park lane                        |     |
-|  |  : = 10489.750 MHz target      || || = beacon, two lobes  |     |
-|  |  double-click the beacon's centre to mark it   <- 16      |     |
-|  +-----------------------------------------------------------+     |
-|  TRACKER            +1.2 kHz   (null 12 dB - snr 15 dB)            |
-|  CONVERTER OFFSET   -9 749 920 000 Hz                             |
-|  MEASURED           10489.751200 MHz     DRIFT +1.2 kHz            |
-|                                                                   |
-|                    [  APPLY CORRECTION  ]                 <- 16    |
-+------------------------------------------------------------------+
-```
+![The QO-100 tab: ON / TELEMETRY / AUTO, the mini waterfall with the beacon's two lobes, the TRACKER/CONVERTER OFFSET/MEASURED readouts, and APPLY CORRECTION](images/qo100-quickstart/06-sat-qo100-tracker.en.png)
 
 ### 14. See the beacon in the strip
 
@@ -255,15 +197,6 @@ When you are done, minimise this window and keep it in a corner of the screen
 (closing it is fine too). The LNB correction keeps going with the window closed;
 the **SAT** chip stays lit and the QO-100 tab keeps its dot.
 
-```
-+- sdroxide - main window ------------------------------+
-|  panadapter / waterfall           +- SAT - QO-100 * -+ |
-|                                   | [ AUTO ]  last    | |
-|                                   |  -80 Hz           | |
-|                                   +-------------------+ |
-|   keep the panel open in a corner - it keeps           |
-|   correcting with the window closed                    |
-+------------------------------------------------------+
-```
+![The QO-100 panel left floating in a corner of the main window while AUTO keeps correcting](images/qo100-quickstart/07-main-window-mini-panel.en.png)
 
 Good QSOs, and 73.

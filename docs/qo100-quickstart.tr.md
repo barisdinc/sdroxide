@@ -44,11 +44,7 @@ bulunur.
 
 Üst kontrol çubuğundaki **SETTINGS** düğmesine basın.
 
-```
-+-------------------------------------------------------------+
-|  BAND   MODE   FILTER   AGC   [ SETTINGS ]   SAT   SCAN      |   <- 2
-+-------------------------------------------------------------+
-```
+![Üst kontrol çubuğu, SETTINGS basılı](images/qo100-quickstart/01-top-bar.png)
 
 ### 3. Çağrı işareti ve locator
 
@@ -56,14 +52,7 @@ bulunur.
 Maidenhead karenizi (ör. `KN41GG`) girin. Uydu kilidi ve dünya haritası bu
 locator'ı kullanır — girilmezse **LOCK ON** çalışmaz.
 
-```
-+- Settings ---------------------------------------------+
-|  [ General ]  Radio   Servers   TLE                    |
-|                                                       |
-|   Callsign   [ TA1XYZ            ]        <- 3         |
-|   Locator    [ KN41GG   ]                 <- 3         |
-+-------------------------------------------------------+
-```
+![Settings, General sekmesi: Callsign ve Locator alanları](images/qo100-quickstart/02-settings-general.png)
 
 ### 4. Radio sekmesi — cihaz: PlutoSDR
 
@@ -71,20 +60,7 @@ locator'ı kullanır — girilmezse **LOCK ON** çalışmaz.
 USB kablosunda bile bir ağ cihazıdır: kabloyu takınca seri port değil, bir ağ
 adaptörü oluşur. Sonraki beş alan da bu sekmededir:
 
-```
-+- Settings --------------------------------------------------------+
-|  General   [ Radio ]   Servers                                    |
-|                                                                  |
-|   Interface     [ PlutoSDR                        v ]     <- 4    |
-|   Converter     [ LNB, Ku low (-9750 MHz)         v ]     <- 5    |
-|   Offset        [ -9 750 000 000 Hz ]   (ön ayardan otomatik)     |
-|   Transmit      [ Its own offset v ]   [ 0 ] Hz           <- 6    |
-|   -------------------------------------------------------          |
-|   Address       [ 192.168.2.1 ]        [ Discover ]       <- 7    |
-|   Sample rate   [ 1 Msps v ]    [x] Full duplex           <- 8    |
-|                                              [ Apply ]    <- 9    |
-+------------------------------------------------------------------+
-```
+![Settings, Radio sekmesi: Interface, Converter, Offset, Transmit, Address, Sample rate ve Apply](images/qo100-quickstart/03-settings-radio.tr.png)
 
 ### 5. Konverter: LNB, Ku low (-9750 MHz)
 
@@ -139,31 +115,14 @@ Uydu çalışacağınız her seferde yapılır.
 System box'taki **SAT** düğmesine basın. Kilit çalışırken düğme yeşil yanar;
 pencere kapalı olsa bile düzeltme uygulanmaya devam eder.
 
-```
-+ System +        +- SAT ---------------------------+
-| [ SAT ] |  -->  |  [ SATELLITES ]   [ QO-100 ]     |
-|  SCAN   |  10   |  Kilit varken SAT yeşil yanar.   |
-|  MEM    |       +---------------------------------+
-+---------+
-```
+![System box'taki SAT düğmesine basmak SAT penceresini açar](images/qo100-quickstart/04-sat-window-open.tr.png)
 
 ### 11. QO-100'ü seçin
 
 **SATELLITES** sekmesinde arama kutusuna `QO-100` yazıp listeden seçin. Uydunun
 yayınlanmış linkleri (dar bant transponder, beacon) altında belirir.
 
-```
-+- SAT - SATELLITES -------------------------------------+
-|  arama: [ QO-100 ]                                     |
-|  +-------------------------------------------------+   |
-|  | > QO-100 (Es'hail-2)              geostationary  |  |  <- 11
-|  |   ISS (ZARYA)                                    |  |
-|  |   RS-44                                          |  |
-|  +-------------------------------------------------+   |
-|  NB transponder - beacon 10489.750 MHz                 |
-|                            [ TUNE ]   [ LOCK ON ]      |  <- 12
-+-------------------------------------------------------+
-```
+![SATELLITES sekmesi: arama kutusu, QO-100 seçili uydu listesi, TUNE ve LOCK ON](images/qo100-quickstart/05-sat-satellites.tr.png)
 
 ### 12. LOCK ON
 
@@ -188,24 +147,7 @@ SAT penceresinin 2. sekmesidir.
 > sıfırdan tahmin yapmaz. `Settings > Radio` konverter offset'inin önce yaklaşık
 > doğru olması gerekir (adım 5), ki beacon 10489.750 MHz civarına düşsün.
 
-```
-+- SAT - QO-100 -----------------------------------------------------+
-|  SATELLITES   [ QO-100 * ]                                         |
-|                                                                   |
-|  [ ON ]   [ TELEMETRY ]   [ AUTO ]        width [-] +/-25 kHz [+]  |
-|    ^17         ^18           ^17                        ^14        |
-|  +-----------------------------------------------------------+     |
-|  |  mini şelale       ### = park lane                        |     |
-|  |  : = 10489.750 MHz hedef       || || = beacon, iki lob    |     |
-|  |  beacon'ın ortasına çift tıklayıp işaretleyin   <- 16     |     |
-|  +-----------------------------------------------------------+     |
-|  TRACKER            +1.2 kHz   (null 12 dB - snr 15 dB)            |
-|  CONVERTER OFFSET   -9 749 920 000 Hz                             |
-|  MEASURED           10489.751200 MHz     DRIFT +1.2 kHz            |
-|                                                                   |
-|                    [  APPLY CORRECTION  ]                 <- 16    |
-+------------------------------------------------------------------+
-```
+![QO-100 sekmesi: ON / TELEMETRY / AUTO, beacon'ın iki lobuyla mini şelale, TRACKER/CONVERTER OFFSET/MEASURED okumaları ve APPLY CORRECTION](images/qo100-quickstart/06-sat-qo100-tracker.tr.png)
 
 ### 14. Beacon'ı şeritte görün
 
@@ -253,15 +195,6 @@ değildir — bağımsız bir kontroldür.
 LNB düzeltmesi pencere kapalıyken de sürer; **SAT** çipi yanık kalır ve QO-100
 sekmesi kendi noktasını korur.
 
-```
-+- sdroxide - ana pencere ------------------------------+
-|  panadapter / şelale              +- SAT - QO-100 * -+ |
-|                                   | [ AUTO ]  son     | |
-|                                   |  -80 Hz           | |
-|                                   +-------------------+ |
-|   paneli bir köşede açık bırakın - pencere kapalıyken  |
-|   de düzeltmeyi sürdürür                               |
-+------------------------------------------------------+
-```
+![QO-100 paneli ana pencerenin bir köşesinde bırakılmış, AUTO düzeltmeyi sürdürüyor](images/qo100-quickstart/07-main-window-mini-panel.tr.png)
 
 İyi QSO'lar, 73.

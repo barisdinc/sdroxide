@@ -2673,6 +2673,11 @@ anywhere the beacon is still inside the captured span.
 > It needs a true IQ source and is unavailable when a CAT radio is feeding
 > demodulated audio.
 
+For a task-oriented walkthrough of getting a Pluto + LNB station onto QO-100
+from scratch, see the [QO-100 quick-start guide](qo100-quickstart.en.md)
+([Türkçe](qo100-quickstart.tr.md)); this section is the reference detail behind
+its beacon-sync step.
+
 #### How it works: ON and AUTO
 
 - **ON** starts the *spectral tracker*. Once a second it looks in the shaded
