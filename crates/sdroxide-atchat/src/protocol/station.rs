@@ -347,7 +347,10 @@ impl<C: Connector> StationShared<C> {
                 .collect()
         };
         for (tid, missing) in reqs {
-            self.log(format!("[{tid}] {src} came back, requesting {} missing blocks", missing.len()));
+            self.log(format!(
+                "[{tid}] {src} came back, requesting {} missing blocks",
+                missing.len()
+            ));
             let this = Arc::clone(self);
             let src = src.to_string();
             let mode = self.default_mode;
@@ -799,7 +802,10 @@ impl<C: Connector> StationShared<C> {
         if missing.is_empty() {
             self.save_transfer(&transfer_id);
         } else {
-            self.log(format!("[{transfer_id}] {}/{total} blocks missing, requesting them", missing.len()));
+            self.log(format!(
+                "[{transfer_id}] {}/{total} blocks missing, requesting them",
+                missing.len()
+            ));
         }
         // Send BULK_STATUS in EVERY case (SPAWN — CLAUDE.md #1).
         let this = Arc::clone(self);

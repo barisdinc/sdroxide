@@ -18,9 +18,9 @@ use sdroxide_ais::{AisAction, AisController};
 use sdroxide_config::BandStacks;
 use sdroxide_digi::{
     AprsController, AtChatController, CwController, DigiAction, DigiController, DigiEngine,
-    FsqController, HellController, Js8Controller, NavtexController, PacketController, RadeController,
-    RfPaintController, RifpController, SstvController, TextModemController, WefaxController,
-    WsprController,
+    FsqController, HellController, Js8Controller, NavtexController, PacketController,
+    RadeController, RfPaintController, RifpController, SstvController, TextModemController,
+    WefaxController, WsprController,
 };
 use sdroxide_drm::DrmDemod;
 use sdroxide_dsp::{

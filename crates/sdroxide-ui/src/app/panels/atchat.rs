@@ -126,9 +126,13 @@ impl SdroxideApp {
             }
 
             crate::chrome::row_tail(ui, |ui| {
-                if crate::chrome::chip(ui, self.show_digi_settings, RichText::new("⚙ SETUP").size(9.5))
-                    .on_hover_text("Station callsign and the virtual-channel address")
-                    .clicked()
+                if crate::chrome::chip(
+                    ui,
+                    self.show_digi_settings,
+                    RichText::new("⚙ SETUP").size(9.5),
+                )
+                .on_hover_text("Station callsign and the virtual-channel address")
+                .clicked()
                 {
                     self.show_digi_settings = !self.show_digi_settings;
                 }
@@ -272,13 +276,20 @@ impl SdroxideApp {
                             .unwrap_or(0);
                         let unread = !active
                             && newest_in > self.atchat_dm_read.get(&peer).copied().unwrap_or(0);
-                        let face = if unread { format!("● {peer} ") } else { format!(" {peer} ") };
-                        if crate::chrome::chip(ui, active, RichText::new(face).size(10.5)).clicked() {
+                        let face =
+                            if unread { format!("● {peer} ") } else { format!(" {peer} ") };
+                        if crate::chrome::chip(ui, active, RichText::new(face).size(10.5)).clicked()
+                        {
                             self.atchat_chat_tab = Some(peer.clone());
                             self.atchat_show_log = false;
                         }
                         if ui
-                            .add(egui::Label::new(RichText::new("✕").size(9.5).color(theme::gray(130))).sense(egui::Sense::click()))
+                            .add(
+                                egui::Label::new(
+                                    RichText::new("✕").size(9.5).color(theme::gray(130)),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
                             .on_hover_text(format!("close the {peer} tab"))
                             .clicked()
                         {
@@ -286,12 +297,16 @@ impl SdroxideApp {
                         }
                     }
                     ui.separator();
-                    if crate::chrome::chip(ui, self.atchat_show_log, RichText::new(" LOG ").size(10.5))
-                        .on_hover_text(
-                            "The station's own on-air activity — master election, \
+                    if crate::chrome::chip(
+                        ui,
+                        self.atchat_show_log,
+                        RichText::new(" LOG ").size(10.5),
+                    )
+                    .on_hover_text(
+                        "The station's own on-air activity — master election, \
                              roster ageing, ARQ retries",
-                        )
-                        .clicked()
+                    )
+                    .clicked()
                     {
                         self.atchat_show_log = true;
                     }
@@ -337,8 +352,7 @@ impl SdroxideApp {
                     let in_tab = match &active {
                         None => !c.private,
                         Some(peer) => {
-                            c.private
-                                && ((c.own && &c.dst == peer) || (!c.own && &c.from == peer))
+                            c.private && ((c.own && &c.dst == peer) || (!c.own && &c.from == peer))
                         }
                     };
                     if !in_tab {
@@ -467,11 +481,7 @@ impl SdroxideApp {
                 }
                 for t in &st.transfers {
                     let dir = if t.incoming { "◀" } else { "▶" };
-                    let frac = if t.total == 0 {
-                        0.0
-                    } else {
-                        t.have as f32 / t.total as f32
-                    };
+                    let frac = if t.total == 0 { 0.0 } else { t.have as f32 / t.total as f32 };
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{dir} {}", t.filename))

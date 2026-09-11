@@ -93,8 +93,14 @@ pub struct AtChatSnapshot {
 // ------------------------------------------------------------------ //
 
 enum Cmd {
-    Chat { dst: String, text: String },
-    SendFile { path: PathBuf, dst: String },
+    Chat {
+        dst: String,
+        text: String,
+    },
+    SendFile {
+        path: PathBuf,
+        dst: String,
+    },
     Drop,
     Reconnect,
     SetCallsign(String),
@@ -533,8 +539,7 @@ mod tests {
 
         // Synthesise a CHAT frame from TA2DEF and feed it as demodulated audio.
         let modem = Modem::new();
-        let frame =
-            br#"{"type":"CHAT","src":"TA2DEF","dst":"ALL","text":"hello over the radio"}"#;
+        let frame = br#"{"type":"CHAT","src":"TA2DEF","dst":"ALL","text":"hello over the radio"}"#;
         let wave = modem.modulate(frame, MMode::Qpsk);
         // Pre- and post-roll silence so the segmenter frames it as one burst.
         let sil = vec![0i16; 4000];
@@ -546,10 +551,7 @@ mod tests {
         }
 
         assert!(
-            wait(&s, 10, |sn| sn
-                .chat
-                .iter()
-                .any(|c| c.text == "hello over the radio" && !c.own)),
+            wait(&s, 10, |sn| sn.chat.iter().any(|c| c.text == "hello over the radio" && !c.own)),
             "the demodulated CHAT frame should land in the transcript"
         );
     }
@@ -631,10 +633,7 @@ mod tests {
         // a beat after reconnect set it — so a rejoined station went silent.
         // It must now hold.
         std::thread::sleep(Duration::from_millis(800));
-        assert!(
-            s.snapshot().connected,
-            "connected must not flip back after the rejoin settles"
-        );
+        assert!(s.snapshot().connected, "connected must not flip back after the rejoin settles");
 
         // And a transmit after the rejoin must actually reach the tx ring.
         let mut junk = Vec::new();

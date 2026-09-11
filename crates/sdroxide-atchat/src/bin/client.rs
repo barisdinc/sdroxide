@@ -40,7 +40,11 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let session = AtChatSession::new(&args.callsign, Some(args.connect.clone()));
-    println!("[{}] joining {} …  (type /quit to leave)", args.callsign.to_uppercase(), args.connect);
+    println!(
+        "[{}] joining {} …  (type /quit to leave)",
+        args.callsign.to_uppercase(),
+        args.connect
+    );
 
     let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
