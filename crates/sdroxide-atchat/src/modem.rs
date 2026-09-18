@@ -29,14 +29,14 @@ pub const SYMBOL_LEN: usize = N + CP_LEN; // 320
 
 const HEADER_BITS: usize = 17; // 16-bit length + 1-bit mode flag
 const HEADER_REPEAT: usize = 4;
-const SYNC_THRESHOLD: f64 = 0.25;
+pub(crate) const SYNC_THRESHOLD: f64 = 0.25;
 
 /// Carrier-offset search range, in subcarrier bins (~31.25 Hz each) — see
 /// [`carrier_diffs`]. Bounded by where the data carriers (bins 10..87) can
 /// slide before they fall on DC or spill past the header/data band's
 /// headroom toward Nyquist (bin 128).
-const MAX_SHIFT_UP: i32 = 40; // +1250 Hz: 86 + 40 = 126, still short of bin 128
-const MAX_SHIFT_DOWN: i32 = -9; // -281 Hz: 10 - 9 = 1, still short of DC
+pub(crate) const MAX_SHIFT_UP: i32 = 40; // +1250 Hz: 86 + 40 = 126, still short of bin 128
+pub(crate) const MAX_SHIFT_DOWN: i32 = -9; // -281 Hz: 10 - 9 = 1, still short of DC
 
 /// `list(range(10, 87))` — 77 data subcarriers.
 #[inline]
@@ -335,14 +335,25 @@ impl Modem {
     /// int16 audio samples -> payload bytes. `None` if it cannot be decoded
     /// (on a real radio this is treated as "heard nothing").
     pub fn demodulate(&self, samples: &[i16]) -> Option<Vec<u8>> {
+        self.demodulate_verbose(samples).payload
+    }
+
+    /// Same decode, with the intermediate results a "why didn't that decode?"
+    /// question needs: whether timing sync found anything and how strong,
+    /// which carrier-offset shift (if any) produced a plausible header, and
+    /// whether a shift got as far as a full data decode before failing CRC.
+    /// [`demodulate`](Self::demodulate) is this minus the bookkeeping.
+    pub fn demodulate_verbose(&self, samples: &[i16]) -> DemodAttempt {
+        let mut attempt = DemodAttempt { input_samples: samples.len(), ..Default::default() };
+
         let x: Vec<f64> = samples.iter().map(|&s| s as f64).collect();
         if x.len() < SYMBOL_LEN * 2 {
-            return None;
+            return attempt;
         }
         let half = N / 2; // 128
         let search_end = x.len().saturating_sub(SYMBOL_LEN * 2).min(400);
         if search_end == 0 {
-            return None;
+            return attempt;
         }
 
         let mut raw = vec![0.0_f64; search_end];
@@ -361,7 +372,7 @@ impl Modem {
             raw[ps] = dot.abs() / denom;
         }
         if raw.len() < CP_LEN {
-            return None;
+            return attempt;
         }
 
         // Because the CP is a copy of the periodic preamble, the raw score has
@@ -383,9 +394,11 @@ impl Modem {
                 best_idx = i;
             }
         }
+        attempt.sync_score = best_score;
         if best_score < SYNC_THRESHOLD {
-            return None;
+            return attempt;
         }
+        attempt.synced = true;
         let preamble_cp_start = best_idx; // best_ps - CP_LEN
 
         let symbol_at = |index: usize| -> Option<&[f64]> {
@@ -394,7 +407,7 @@ impl Modem {
             if end > x.len() { None } else { Some(&x[start..end]) }
         };
 
-        let header_sym = symbol_at(1)?;
+        let Some(header_sym) = symbol_at(1) else { return attempt };
 
         // Try the no-offset read first — the common case, and the only one
         // any existing (offset-free) test vector needs — then walk outward
@@ -418,6 +431,10 @@ impl Modem {
             };
             if !(4..=20000).contains(&payload_len) {
                 continue;
+            }
+            if attempt.header_shift.is_none() {
+                attempt.header_shift = Some(shift);
+                attempt.header_payload_len = Some(payload_len);
             }
 
             let bits_needed = payload_len * 8;
@@ -452,11 +469,34 @@ impl Modem {
                 full[payload_len - 1],
             ]);
             if crate::netproto::crc32(payload) == crc_recv {
-                return Some(payload.to_vec());
+                attempt.crc_shift = Some(shift);
+                attempt.payload = Some(payload.to_vec());
+                return attempt;
             }
         }
-        None
+        attempt
     }
+}
+
+/// The intermediate results behind one [`Modem::demodulate_verbose`] call —
+/// enough to tell a sync miss (bad SNR, wrong moment) from a sync hit that
+/// never found a valid carrier offset (CFO past the search range) from one
+/// that found a plausible header but failed data/CRC (residual sub-bin
+/// offset, real-channel distortion, or genuine noise).
+#[derive(Debug, Clone, Default)]
+pub struct DemodAttempt {
+    pub input_samples: usize,
+    /// The Schmidl-Cox timing-sync score; compare against `SYNC_THRESHOLD`
+    /// (0.25) to see how close a miss was, not just that it missed.
+    pub sync_score: f64,
+    pub synced: bool,
+    /// The first carrier-offset shift (bins, ~31.25 Hz each) whose header
+    /// decoded to a plausible length, if any.
+    pub header_shift: Option<i32>,
+    pub header_payload_len: Option<usize>,
+    /// The shift that produced a CRC-valid payload, if decode succeeded.
+    pub crc_shift: Option<i32>,
+    pub payload: Option<Vec<u8>>,
 }
 
 /// How many seconds a payload actually stays "on the air" (lead-in excluded).

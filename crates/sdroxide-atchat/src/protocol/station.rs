@@ -211,7 +211,28 @@ impl<C: Connector> StationShared<C> {
                             let Ok(samples) = crate::channel::b64_to_samples(&audio_b64) else {
                                 continue;
                             };
-                            let Some(payload) = self.modem.demodulate(&samples) else {
+                            let attempt = self.modem.demodulate_verbose(&samples);
+                            let Some(payload) = attempt.payload.clone() else {
+                                // Not a silent failure to the operator: say
+                                // exactly how far this burst got, so "nothing
+                                // decodes" and "almost decodes" are
+                                // distinguishable from the LOG tab alone.
+                                use crate::modem::{MAX_SHIFT_DOWN, MAX_SHIFT_UP, SYNC_THRESHOLD};
+                                self.log(match (attempt.synced, attempt.header_shift) {
+                                    (false, _) => format!(
+                                        "demod: no timing sync ({} samples, score {:.2} < {SYNC_THRESHOLD})",
+                                        attempt.input_samples, attempt.sync_score
+                                    ),
+                                    (true, None) => format!(
+                                        "demod: synced (score {:.2}) but no shift in {MAX_SHIFT_DOWN}..+{MAX_SHIFT_UP} bins found a plausible header",
+                                        attempt.sync_score
+                                    ),
+                                    (true, Some(shift)) => format!(
+                                        "demod: synced (score {:.2}), header at shift {shift:+} ({} bytes claimed) but no shift's data passed CRC",
+                                        attempt.sync_score,
+                                        attempt.header_payload_len.unwrap_or(0)
+                                    ),
+                                });
                                 continue; // could not decode -> treated as "not heard"
                             };
                             let Ok(frame) = serde_json::from_slice::<Frame>(&payload) else {
