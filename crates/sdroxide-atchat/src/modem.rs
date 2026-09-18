@@ -31,6 +31,13 @@ const HEADER_BITS: usize = 17; // 16-bit length + 1-bit mode flag
 const HEADER_REPEAT: usize = 4;
 const SYNC_THRESHOLD: f64 = 0.25;
 
+/// Carrier-offset search range, in subcarrier bins (~31.25 Hz each) — see
+/// [`carrier_diffs`]. Bounded by where the data carriers (bins 10..87) can
+/// slide before they fall on DC or spill past the header/data band's
+/// headroom toward Nyquist (bin 128).
+const MAX_SHIFT_UP: i32 = 40; // +1250 Hz: 86 + 40 = 126, still short of bin 128
+const MAX_SHIFT_DOWN: i32 = -9; // -281 Hz: 10 - 9 = 1, still short of DC
+
 /// `list(range(10, 87))` — 77 data subcarriers.
 #[inline]
 fn data_carriers() -> impl Iterator<Item = usize> {
@@ -161,8 +168,12 @@ fn make_header_symbol(inv_fft: &dyn Fft<f64>, payload_len: usize, mode: Mode) ->
     add_cp(&spectrum_to_time(inv_fft, &carrier_spectrum(&seq)))
 }
 
-fn decode_header_symbol(fwd_fft: &dyn Fft<f64>, symbol_no_cp: &[f64]) -> Option<(usize, Mode)> {
-    let diffs = carrier_diffs(fwd_fft, symbol_no_cp);
+fn decode_header_symbol(
+    fwd_fft: &dyn Fft<f64>,
+    symbol_no_cp: &[f64],
+    shift: i32,
+) -> Option<(usize, Mode)> {
+    let diffs = carrier_diffs(fwd_fft, symbol_no_cp, shift);
     let bits: Vec<u8> = diffs.iter().map(|d| (d.re < 0.0) as u8).collect(); // 76
 
     let reps = HEADER_REPEAT.min(N_INFO / HEADER_BITS); // 4
@@ -225,16 +236,32 @@ fn make_data_symbols(inv_fft: &dyn Fft<f64>, bits: &[u8], mode: Mode) -> Vec<Vec
     out
 }
 
-/// FFT -> `X[DATA_CARRIERS]` -> `diffs = vals[1:] * conj(vals[:-1])` (76 of them).
-fn carrier_diffs(fwd_fft: &dyn Fft<f64>, symbol_no_cp: &[f64]) -> Vec<Complex64> {
+/// FFT -> `X[DATA_CARRIERS + shift]` -> `diffs = vals[1:] * conj(vals[:-1])` (76
+/// of them).
+///
+/// `shift` reads every carrier `shift` bins away from where a zero-offset
+/// transmission would put it (~31.25 Hz/bin). Two stations' radios rarely
+/// share the same dial frequency down to the hertz — a plain LO/TCXO
+/// mismatch of a few hundred Hz between two independent SDRs is normal, and
+/// the mode has no tone offset to absorb it — so a fixed carrier error just
+/// slides every subcarrier sideways by the same number of bins. Because the
+/// coding is differential *within* a symbol (across adjacent carriers, not
+/// across time), reading the whole symbol `shift` bins over costs nothing
+/// once the right shift is found: see the search in [`Modem::demodulate`].
+fn carrier_diffs(fwd_fft: &dyn Fft<f64>, symbol_no_cp: &[f64], shift: i32) -> Vec<Complex64> {
     let mut buf: Vec<Complex64> = symbol_no_cp.iter().map(|&s| Complex64::new(s, 0.0)).collect();
     fwd_fft.process(&mut buf);
-    let vals: Vec<Complex64> = data_carriers().map(|k| buf[k]).collect();
+    let vals: Vec<Complex64> = data_carriers().map(|k| buf[(k as i32 + shift) as usize]).collect();
     vals.windows(2).map(|w| w[1] * w[0].conj()).collect()
 }
 
-fn decode_data_symbol(fwd_fft: &dyn Fft<f64>, symbol_no_cp: &[f64], mode: Mode) -> Vec<u8> {
-    let diffs = carrier_diffs(fwd_fft, symbol_no_cp);
+fn decode_data_symbol(
+    fwd_fft: &dyn Fft<f64>,
+    symbol_no_cp: &[f64],
+    mode: Mode,
+    shift: i32,
+) -> Vec<u8> {
+    let diffs = carrier_diffs(fwd_fft, symbol_no_cp, shift);
     let mut bits = Vec::new();
     for d in diffs {
         bits.push((d.re < 0.0) as u8);
@@ -368,38 +395,67 @@ impl Modem {
         };
 
         let header_sym = symbol_at(1)?;
-        let (payload_len, mode) = decode_header_symbol(&*self.fwd, header_sym)?;
-        if !(4..=20000).contains(&payload_len) {
-            return None;
+
+        // Try the no-offset read first — the common case, and the only one
+        // any existing (offset-free) test vector needs — then walk outward
+        // through plausible carrier offsets. Each candidate is cheap to rule
+        // out: the header's majority-voted length has to land in range
+        // before a shift is worth a full data decode.
+        let mut shifts = vec![0i32];
+        for s in 1..=MAX_SHIFT_UP.max(-MAX_SHIFT_DOWN) {
+            if s <= MAX_SHIFT_UP {
+                shifts.push(s);
+            }
+            if -s >= MAX_SHIFT_DOWN {
+                shifts.push(-s);
+            }
         }
 
-        let bits_needed = payload_len * 8;
-        let bits_per_carrier = if mode == Mode::Bpsk { 1 } else { 2 };
-        let bits_per_symbol = bits_per_carrier * N_INFO;
-        let n_data_symbols = bits_needed.div_ceil(bits_per_symbol);
+        for shift in shifts {
+            let Some((payload_len, mode)) = decode_header_symbol(&*self.fwd, header_sym, shift)
+            else {
+                continue;
+            };
+            if !(4..=20000).contains(&payload_len) {
+                continue;
+            }
 
-        let mut all_bits: Vec<u8> = Vec::with_capacity(n_data_symbols * bits_per_symbol);
-        for i in 0..n_data_symbols {
-            let sym = symbol_at(2 + i)?;
-            all_bits.extend(decode_data_symbol(&*self.fwd, sym, mode));
-        }
-        let take = bits_needed.min(all_bits.len());
-        let full = bytes_from_bits(&all_bits[..take]);
-        if full.len() < payload_len {
-            return None;
-        }
+            let bits_needed = payload_len * 8;
+            let bits_per_carrier = if mode == Mode::Bpsk { 1 } else { 2 };
+            let bits_per_symbol = bits_per_carrier * N_INFO;
+            let n_data_symbols = bits_needed.div_ceil(bits_per_symbol);
 
-        let payload = &full[..payload_len - 4];
-        let crc_recv = u32::from_be_bytes([
-            full[payload_len - 4],
-            full[payload_len - 3],
-            full[payload_len - 2],
-            full[payload_len - 1],
-        ]);
-        if crate::netproto::crc32(payload) != crc_recv {
-            return None;
+            let mut all_bits: Vec<u8> = Vec::with_capacity(n_data_symbols * bits_per_symbol);
+            let mut symbols_ok = true;
+            for i in 0..n_data_symbols {
+                let Some(sym) = symbol_at(2 + i) else {
+                    symbols_ok = false;
+                    break;
+                };
+                all_bits.extend(decode_data_symbol(&*self.fwd, sym, mode, shift));
+            }
+            if !symbols_ok {
+                continue;
+            }
+
+            let take = bits_needed.min(all_bits.len());
+            let full = bytes_from_bits(&all_bits[..take]);
+            if full.len() < payload_len {
+                continue;
+            }
+
+            let payload = &full[..payload_len - 4];
+            let crc_recv = u32::from_be_bytes([
+                full[payload_len - 4],
+                full[payload_len - 3],
+                full[payload_len - 2],
+                full[payload_len - 1],
+            ]);
+            if crate::netproto::crc32(payload) == crc_recv {
+                return Some(payload.to_vec());
+            }
         }
-        Some(payload.to_vec())
+        None
     }
 }
 
@@ -451,5 +507,84 @@ mod tests {
         // 250 B QPSK: full=254 -> bits=2032 -> bps=152 -> 14 sym -> +2 = 16
         // 16 * 320 / 8000 = 0.64 s
         assert!((airtime_seconds(250, Mode::Qpsk) - 0.64).abs() < 1e-9);
+    }
+
+    /// Frequency-shift a real signal by `hz`, the way two stations' radios
+    /// disagreeing on the dial actually would: build the analytic signal
+    /// (zero the negative-frequency half of its spectrum, double the
+    /// positive half), mix it up by `hz`, and keep the real part. Test-only —
+    /// this is what a receiver a few hundred Hz off the transmitter's LO
+    /// actually hands the modem, unlike a synthetic bin-index nudge.
+    fn shift_real_signal_hz(samples: &[f64], hz: f64, fs: f64) -> Vec<f64> {
+        let n = samples.len();
+        let mut planner = FftPlanner::<f64>::new();
+        let fwd = planner.plan_fft_forward(n);
+        let inv = planner.plan_fft_inverse(n);
+
+        let mut buf: Vec<Complex64> = samples.iter().map(|&s| Complex64::new(s, 0.0)).collect();
+        fwd.process(&mut buf);
+
+        let half = n / 2;
+        for c in buf.iter_mut().take(half).skip(1) {
+            *c *= 2.0;
+        }
+        for c in buf.iter_mut().take(n).skip(half + 1) {
+            *c = Complex64::new(0.0, 0.0);
+        }
+
+        inv.process(&mut buf);
+        let scale = 1.0 / n as f64;
+        let step = Complex64::from_polar(1.0, 2.0 * std::f64::consts::PI * hz / fs);
+        let mut rot = Complex64::new(1.0, 0.0);
+        buf.iter()
+            .map(|c| {
+                let re = (c * scale * rot).re;
+                rot *= step;
+                re
+            })
+            .collect()
+    }
+
+    /// A dial mismatch between two independent radios — a few hundred Hz is
+    /// ordinary for two different SDRs' LOs — must not stop a decode: the
+    /// carrier-offset search in `demodulate` exists exactly for this.
+    #[test]
+    fn demodulate_tolerates_a_realistic_dial_offset() {
+        let m = Modem::new();
+        let payload = b"CQ CQ DE TA1XYZ AtCHAT NET test".to_vec();
+        let wave_i16 = m.modulate_with_leadin(&payload, Mode::Qpsk, 137);
+        let wave_f64: Vec<f64> = wave_i16.iter().map(|&s| s as f64).collect();
+
+        // +500 Hz and -250 Hz: comfortably inside MAX_SHIFT_UP / MAX_SHIFT_DOWN
+        // (~1250 Hz / -281 Hz), and not multiples of the 31.25 Hz bin spacing,
+        // so this also exercises the residual sub-bin offset the search
+        // leaves behind.
+        for hz in [500.0_f64, -250.0] {
+            let shifted = shift_real_signal_hz(&wave_f64, hz, SAMPLE_RATE as f64);
+            let shifted_i16: Vec<i16> = shifted
+                .iter()
+                .map(|&v| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+                .collect();
+            let got =
+                m.demodulate(&shifted_i16).unwrap_or_else(|| panic!("demod failed at {hz} Hz"));
+            assert_eq!(got, payload, "offset={hz} Hz");
+        }
+    }
+
+    /// An offset past the search range is a station too far off to hear —
+    /// this must fail cleanly (`None`), not panic or return garbage.
+    #[test]
+    fn demodulate_past_the_search_range_is_none_not_garbage() {
+        let m = Modem::new();
+        let payload = b"out of range".to_vec();
+        let wave_i16 = m.modulate_with_leadin(&payload, Mode::Qpsk, 137);
+        let wave_f64: Vec<f64> = wave_i16.iter().map(|&s| s as f64).collect();
+
+        let shifted = shift_real_signal_hz(&wave_f64, 3000.0, SAMPLE_RATE as f64);
+        let shifted_i16: Vec<i16> = shifted
+            .iter()
+            .map(|&v| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+            .collect();
+        assert!(m.demodulate(&shifted_i16).is_none());
     }
 }
