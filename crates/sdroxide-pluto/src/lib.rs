@@ -57,7 +57,7 @@ pub use context::{Context, ScanFormat};
 pub use discovery::{discover, probe, test_connection};
 pub use error::{Error, Result};
 pub use iiod::DEFAULT_PORT;
-pub use net::{PlutoHandle, PlutoLimits, PlutoRig, PlutoRx};
+pub use net::{PlutoHandle, PlutoLimits, PlutoRig, PlutoRx, emergency_mute_all};
 pub use phy::{PHY, RX_BUFFER, TX_BUFFER};
 pub use sdroxide_types::PlutoDevice;
 pub use trace::{Trace, diagnostics};

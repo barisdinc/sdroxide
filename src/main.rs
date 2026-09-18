@@ -243,12 +243,51 @@ impl Cli {
     }
 }
 
+/// Catch `SIGTERM`/`SIGINT` and give any open Pluto a chance to park its
+/// transmitter before the process actually exits.
+///
+/// Without a handler at all, the OS's default action for both is to end the
+/// process immediately — no unwinding, no `Drop`, nothing any backend's own
+/// cleanup can do about it. That covers a plain `kill`/`pkill` (the default
+/// signal is `SIGTERM`), a `systemd stop`, and a Ctrl-C the terminal itself
+/// does not already intercept: exactly the ways a headless `--server`
+/// instance is normally stopped. `SIGKILL` still gets past this — nothing
+/// catches that — but it is not how any of the above ask a process to stop.
+///
+/// Unix only: signal-based termination and `SIGTERM` specifically are a Unix
+/// idea, and this only ever has a Pluto's registry to act on regardless.
+#[cfg(unix)]
+fn install_shutdown_signal_handler() {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = match Signals::new([SIGTERM, SIGINT]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("could not install a SIGTERM/SIGINT handler: {e}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            tracing::warn!(
+                "caught a termination signal — parking any open Pluto's transmitter before exit"
+            );
+            sdroxide_pluto::emergency_mute_all();
+            std::process::exit(0);
+        }
+    });
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    #[cfg(unix)]
+    install_shutdown_signal_handler();
 
     let mut cli = Cli::parse();
     let settings = Settings::load();

@@ -33,7 +33,7 @@
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -292,6 +292,46 @@ fn drop_socket(slot: &Mutex<Option<std::net::TcpStream>>) {
     }
 }
 
+/// Every `RigInner` currently open, so a caught termination signal can ask
+/// each one to park its transmitter before the process actually exits — see
+/// [`emergency_mute_all`]. `Weak` because this must never be the reason a rig
+/// outlives its last real owner.
+static OPEN_RIGS: OnceLock<Mutex<Vec<Weak<RigInner>>>> = OnceLock::new();
+
+fn open_rigs() -> &'static Mutex<Vec<Weak<RigInner>>> {
+    OPEN_RIGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Ask every currently open Pluto to release its connection — which is also
+/// what silences the transmit DDS and, on a TDD board, parks the state
+/// machine back on receive (see the end of [`control_thread`]) — and give
+/// each control thread a moment to actually get there before returning.
+///
+/// For a caught SIGTERM/SIGINT, once, right before the process exits: without
+/// it a killed process leaves whatever the transmitter was last doing running
+/// exactly as it was, potentially a full-power, un-modulated carrier (see
+/// [`Phy::silence_dds`](crate::phy::Phy::silence_dds)) — a raw `SIGKILL` still
+/// gets past this, nothing catches that, but a plain `kill`/`pkill`, a
+/// systemd stop, or an unhandled Ctrl-C all send `SIGTERM` or `SIGINT` first.
+pub fn emergency_mute_all() {
+    let rigs: Vec<Arc<RigInner>> = open_rigs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect();
+    if rigs.is_empty() {
+        return;
+    }
+    for rig in &rigs {
+        rig.release();
+    }
+    // release() only sends Ctrl::Shutdown; the control thread's own poll
+    // interval (200 ms) is what actually gets it there. This is the process's
+    // last moment to wait for that before it is gone.
+    std::thread::sleep(Duration::from_millis(400));
+}
+
 /// What every stream of one connection shares: the three threads, their
 /// sockets, and the endpoints a stream claims when it attaches. The teardown
 /// is [`RigInner::release`], run by the last handle out.
@@ -355,11 +395,23 @@ impl RigInner {
         }
         // After `alive` was cleared, so a thread racing to install a
         // replacement socket is refused rather than leaving one behind us.
+        //
+        // Not the control socket — unlike the receive and transmit threads,
+        // the control thread is never blocked in a long read; it polls its
+        // channel on a 200 ms timeout, so it does not need a socket shutdown
+        // to notice `Ctrl::Shutdown` promptly. It *does* need that socket
+        // left alone a little longer: on the way out it silences the
+        // transmit DDS and, on a TDD board, parks the state machine back on
+        // receive (see the end of `control_thread`) — both writes, both lost
+        // if this closes the socket out from under them before it gets
+        // there.
         self.shared.drop_rx_socket();
-        self.shared.drop_ctrl_socket();
         for j in self.joins.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
             let _ = j.join();
         }
+        // Now that the control thread has had its say and exited, there is
+        // nothing left to race — this is just returning the slot to empty.
+        self.shared.drop_ctrl_socket();
         tracing::debug!("PlutoSDR: released {}", self.addr);
     }
 }
@@ -693,7 +745,7 @@ impl PlutoRig {
             })?,
         ];
 
-        Ok(PlutoRig {
+        let rig = PlutoRig {
             inner: Arc::new(RigInner {
                 ctrl: ctrl_tx,
                 shared,
@@ -719,7 +771,13 @@ impl PlutoRig {
                 tx_port0: tx_port,
                 open_status: (!warnings.is_empty()).then(|| warnings.join("; ")),
             }),
-        })
+        };
+        {
+            let mut rigs = open_rigs().lock().unwrap_or_else(|e| e.into_inner());
+            rigs.retain(|w| w.strong_count() > 0);
+            rigs.push(Arc::downgrade(&rig.inner));
+        }
+        Ok(rig)
     }
 
     /// One line naming the radio, for logs and the UI.
@@ -1459,6 +1517,17 @@ fn control_thread(
         && let Err(e) = shared.phy.set_ensm_mode(&mut conn, ENSM_RX)
     {
         tracing::debug!("PlutoSDR: could not put the state machine back to receive: {e}");
+    }
+    // Every board, TDD or FDD: silence_dds is what key_up normally re-asserts
+    // before every over (see its doc comment) — skip it here and a process
+    // that ends mid-transmit, or that never gets the chance to open again and
+    // silence them itself, leaves the tone generators feeding the transmit
+    // path a full-power carrier pair with nothing downstream to turn it off.
+    // Unlike the ENSM write above this is not TDD-gated: an FDD board's
+    // transmit chain is live all the time, so its DDS is exactly as capable
+    // of putting out that carrier as a TDD board's is.
+    if let Err(e) = shared.phy.silence_dds(&mut conn) {
+        tracing::debug!("PlutoSDR: could not silence the transmit DDS on the way out: {e}");
     }
     conn.exit();
     tracing::debug!("PlutoSDR: control thread finished");
