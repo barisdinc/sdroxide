@@ -75,7 +75,7 @@ const MIN_LOUD_HOPS: usize = 4;
 /// tell that apart from a real transmission if it is loud enough for long
 /// enough — the level itself says nothing about where it came from, so this
 /// exists to not even look until it has had a chance to pass.
-const TX_RECOVERY_MUTE: Duration = Duration::from_millis(800);
+const TX_RECOVERY_MUTE: Duration = Duration::from_millis(1200);
 const RX_RING_CAP: usize = SAMPLE_RATE as usize * 6;
 const TX_RING_CAP: usize = SAMPLE_RATE as usize * 30;
 
