@@ -343,10 +343,47 @@ impl Modem {
     /// which carrier-offset shift (if any) produced a plausible header, and
     /// whether a shift got as far as a full data decode before failing CRC.
     /// [`demodulate`](Self::demodulate) is this minus the bookkeeping.
+    ///
+    /// Tries the burst as captured first, then a handful of small fractional
+    /// pre-shifts — see [`FRAC_SHIFTS_HZ`] and [`Self::attempt_at`], which
+    /// this only adds the outer search around. An integer number of bins off
+    /// (~31.25 Hz each) is what [`Self::attempt_at`]'s own shift search
+    /// covers; a *residual* offset sitting between two bins still smears
+    /// energy across neighbouring carriers (inter-carrier interference) at
+    /// even the best integer choice, and that is invisible to a search that
+    /// only ever reads whole bins.
     pub fn demodulate_verbose(&self, samples: &[i16]) -> DemodAttempt {
-        let mut attempt = DemodAttempt { input_samples: samples.len(), ..Default::default() };
-
         let x: Vec<f64> = samples.iter().map(|&s| s as f64).collect();
+
+        let mut best = self.attempt_at(&x);
+        best.input_samples = samples.len();
+        if best.payload.is_some() {
+            return best;
+        }
+        for hz in FRAC_SHIFTS_HZ {
+            let shifted = fractional_shift_hz(&x, hz, SAMPLE_RATE as f64);
+            let mut attempt = self.attempt_at(&shifted);
+            attempt.input_samples = samples.len();
+            attempt.frac_hz = hz;
+            if attempt.payload.is_some() {
+                return attempt;
+            }
+            // Keep whichever failure got furthest — synced beats not, a
+            // header found beats neither — so a LOG line has something more
+            // specific to say than "tried everything, nothing worked" when
+            // every candidate fails.
+            if progress(&attempt) > progress(&best) {
+                best = attempt;
+            }
+        }
+        best
+    }
+
+    /// One decode attempt against `x` exactly as given — no fractional
+    /// pre-shift of its own; see [`Self::demodulate_verbose`] for that.
+    fn attempt_at(&self, x: &[f64]) -> DemodAttempt {
+        let mut attempt = DemodAttempt::default();
+
         if x.len() < SYMBOL_LEN * 2 {
             return attempt;
         }
@@ -497,6 +534,65 @@ pub struct DemodAttempt {
     /// The shift that produced a CRC-valid payload, if decode succeeded.
     pub crc_shift: Option<i32>,
     pub payload: Option<Vec<u8>>,
+    /// The fractional pre-shift (Hz) this attempt was tried under, 0.0 for
+    /// the burst as captured. See [`Modem::demodulate_verbose`].
+    pub frac_hz: f64,
+}
+
+/// How far one [`DemodAttempt`] got, for picking which failure is most worth
+/// reporting when every fractional/integer combination fails: a header found
+/// beats a sync with none, a sync beats none at all.
+fn progress(a: &DemodAttempt) -> u8 {
+    if a.header_shift.is_some() {
+        2
+    } else if a.synced {
+        1
+    } else {
+        0
+    }
+}
+
+/// Sub-bin pre-shifts (Hz) [`Modem::demodulate_verbose`] tries the whole
+/// captured burst at when the unshifted attempt fails — roughly a quarter,
+/// half and three-quarters of the ~31.25 Hz subcarrier spacing, both
+/// directions. [`Modem::attempt_at`]'s own integer-bin search already covers
+/// whole-bin offsets; this only needs to bracket the gaps between them; a
+/// residual past three-quarters of a bin is closer to the *next* bin, which
+/// the integer search already tried directly.
+const FRAC_SHIFTS_HZ: [f64; 6] = [7.8, -7.8, 15.6, -15.6, 23.4, -23.4];
+
+/// Frequency-shift a real signal by `hz` the way two radios disagreeing on
+/// the dial actually would, not a synthetic bin-index nudge: build the
+/// analytic signal (zero the negative-frequency half of its spectrum, double
+/// the positive half), mix it up by `hz`, and keep the real part.
+fn fractional_shift_hz(samples: &[f64], hz: f64, fs: f64) -> Vec<f64> {
+    let n = samples.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(n);
+
+    let mut buf: Vec<Complex64> = samples.iter().map(|&s| Complex64::new(s, 0.0)).collect();
+    fwd.process(&mut buf);
+
+    let half = n / 2;
+    for c in buf.iter_mut().take(half).skip(1) {
+        *c *= 2.0;
+    }
+    for c in buf.iter_mut().take(n).skip(half + 1) {
+        *c = Complex64::new(0.0, 0.0);
+    }
+
+    inv.process(&mut buf);
+    let scale = 1.0 / n as f64;
+    let step = Complex64::from_polar(1.0, 2.0 * std::f64::consts::PI * hz / fs);
+    let mut rot = Complex64::new(1.0, 0.0);
+    buf.iter()
+        .map(|c| {
+            let re = (c * scale * rot).re;
+            rot *= step;
+            re
+        })
+        .collect()
 }
 
 /// How many seconds a payload actually stays "on the air" (lead-in excluded).
@@ -549,42 +645,6 @@ mod tests {
         assert!((airtime_seconds(250, Mode::Qpsk) - 0.64).abs() < 1e-9);
     }
 
-    /// Frequency-shift a real signal by `hz`, the way two stations' radios
-    /// disagreeing on the dial actually would: build the analytic signal
-    /// (zero the negative-frequency half of its spectrum, double the
-    /// positive half), mix it up by `hz`, and keep the real part. Test-only —
-    /// this is what a receiver a few hundred Hz off the transmitter's LO
-    /// actually hands the modem, unlike a synthetic bin-index nudge.
-    fn shift_real_signal_hz(samples: &[f64], hz: f64, fs: f64) -> Vec<f64> {
-        let n = samples.len();
-        let mut planner = FftPlanner::<f64>::new();
-        let fwd = planner.plan_fft_forward(n);
-        let inv = planner.plan_fft_inverse(n);
-
-        let mut buf: Vec<Complex64> = samples.iter().map(|&s| Complex64::new(s, 0.0)).collect();
-        fwd.process(&mut buf);
-
-        let half = n / 2;
-        for c in buf.iter_mut().take(half).skip(1) {
-            *c *= 2.0;
-        }
-        for c in buf.iter_mut().take(n).skip(half + 1) {
-            *c = Complex64::new(0.0, 0.0);
-        }
-
-        inv.process(&mut buf);
-        let scale = 1.0 / n as f64;
-        let step = Complex64::from_polar(1.0, 2.0 * std::f64::consts::PI * hz / fs);
-        let mut rot = Complex64::new(1.0, 0.0);
-        buf.iter()
-            .map(|c| {
-                let re = (c * scale * rot).re;
-                rot *= step;
-                re
-            })
-            .collect()
-    }
-
     /// A dial mismatch between two independent radios — a few hundred Hz is
     /// ordinary for two different SDRs' LOs — must not stop a decode: the
     /// carrier-offset search in `demodulate` exists exactly for this.
@@ -596,11 +656,12 @@ mod tests {
         let wave_f64: Vec<f64> = wave_i16.iter().map(|&s| s as f64).collect();
 
         // +500 Hz and -250 Hz: comfortably inside MAX_SHIFT_UP / MAX_SHIFT_DOWN
-        // (~1250 Hz / -281 Hz), and not multiples of the 31.25 Hz bin spacing,
-        // so this also exercises the residual sub-bin offset the search
-        // leaves behind.
+        // (~1250 Hz / -281 Hz) and, being exact multiples of the ~31.25 Hz
+        // bin spacing (16 and 8 bins), decodable by the integer-bin search
+        // alone — see `demodulate_tolerates_a_cfo_between_bins` for a residual
+        // that lands *between* two bins.
         for hz in [500.0_f64, -250.0] {
-            let shifted = shift_real_signal_hz(&wave_f64, hz, SAMPLE_RATE as f64);
+            let shifted = fractional_shift_hz(&wave_f64, hz, SAMPLE_RATE as f64);
             let shifted_i16: Vec<i16> = shifted
                 .iter()
                 .map(|&v| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
@@ -620,11 +681,38 @@ mod tests {
         let wave_i16 = m.modulate_with_leadin(&payload, Mode::Qpsk, 137);
         let wave_f64: Vec<f64> = wave_i16.iter().map(|&s| s as f64).collect();
 
-        let shifted = shift_real_signal_hz(&wave_f64, 3000.0, SAMPLE_RATE as f64);
+        let shifted = fractional_shift_hz(&wave_f64, 3000.0, SAMPLE_RATE as f64);
         let shifted_i16: Vec<i16> = shifted
             .iter()
             .map(|&v| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
             .collect();
         assert!(m.demodulate(&shifted_i16).is_none());
+    }
+
+    /// A CFO that lands *between* two bins — the integer-bin search alone
+    /// (see `demodulate_tolerates_a_realistic_dial_offset`, whose two offsets
+    /// are exact bin multiples) never lands on a residual small enough to
+    /// decode; `demodulate_verbose`'s fractional pre-shift search is what
+    /// exists to reach this. Real two-radio LO mismatches have no reason to
+    /// fall on a clean multiple of ~31.25 Hz.
+    #[test]
+    fn demodulate_tolerates_a_cfo_between_bins() {
+        let m = Modem::new();
+        let payload = b"between two bins, on purpose".to_vec();
+        let wave_i16 = m.modulate_with_leadin(&payload, Mode::Qpsk, 137);
+        let wave_f64: Vec<f64> = wave_i16.iter().map(|&s| s as f64).collect();
+
+        // Neither is a multiple of 31.25 Hz, so neither is reachable by
+        // `attempt_at`'s own integer-bin search without a fractional
+        // pre-shift first closing most of the gap.
+        for hz in [45.0_f64, -60.0] {
+            let shifted = fractional_shift_hz(&wave_f64, hz, SAMPLE_RATE as f64);
+            let shifted_i16: Vec<i16> = shifted
+                .iter()
+                .map(|&v| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+                .collect();
+            let attempt = m.demodulate_verbose(&shifted_i16);
+            assert_eq!(attempt.payload, Some(payload.clone()), "offset={hz} Hz: {attempt:?}");
+        }
     }
 }
