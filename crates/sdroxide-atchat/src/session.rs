@@ -536,6 +536,12 @@ mod tests {
         let s = AtChatSession::new("TA1ABC", None);
         // Wait for the station to come up on the radio backend.
         assert!(wait(&s, 5, |sn| sn.role.is_some()));
+        // Clear of the post-transmit mute the station's own startup
+        // JOIN_REQUEST leaves behind (its known airtime plus
+        // TX_RECOVERY_MUTE) — otherwise the frame synthesised below lands in
+        // the same window real self-interference would, and the segmenter
+        // rightly drops it, same as it would over the air.
+        std::thread::sleep(Duration::from_millis(1600));
 
         // Synthesise a CHAT frame from TA2DEF and feed it as demodulated audio.
         let modem = Modem::new();

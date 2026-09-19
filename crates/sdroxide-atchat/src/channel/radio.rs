@@ -63,18 +63,28 @@ const MIN_BURST: usize = 640;
 /// now that `SILENCE_HANG_HOPS` is wide enough to pad a one-hop click past
 /// it.
 const MIN_LOUD_HOPS: usize = 4;
-/// How long after this station's own transmit ring empties the segmenter
-/// ignores receive audio outright, before it trusts a hop's level at all.
+/// How much settling time the segmenter gives the receiver *after* this
+/// station's own burst has finished its known airtime, before it trusts a
+/// hop's level at all — see `RadioBridge::extend_rx_mute`, which anchors the
+/// mute to the burst's own duration rather than to watching `tx_pcm` empty.
+///
+/// The first cut of this anchored the mute to `tx_pending()` going false
+/// instead — the ring the audio thread drains, not the radio's own airtime —
+/// and live testing kept finding multi-second oversized captures right
+/// through it: the engine resamples this ring's 8 kHz to whatever the radio
+/// plays and buffers downstream of it, so the ring can read empty well before
+/// the burst is actually off the air. Anchoring to the known duration instead
+/// covers the real transmission *and* the settling after it in one span.
 ///
 /// Seen live: a receiver that has just carried this station's own strong
-/// local signal does not come back clean the instant the ring empties — an
+/// local signal does not come back clean the instant the burst ends — an
 /// AD9361 board's AGC/relay settling, worse on some boards than others,
-/// clipped (full-scale peaks) for a good part of a second afterward and fed
-/// the segmenter a "burst" that was really that settling, not a signal off
-/// the air. Widening `SILENCE_HANG_HOPS` and adding `MIN_LOUD_HOPS` cannot
-/// tell that apart from a real transmission if it is loud enough for long
-/// enough — the level itself says nothing about where it came from, so this
-/// exists to not even look until it has had a chance to pass.
+/// clipped (full-scale peaks) afterward and fed the segmenter a "burst" that
+/// was really that settling, not a signal off the air. Widening
+/// `SILENCE_HANG_HOPS` and adding `MIN_LOUD_HOPS` cannot tell that apart from
+/// a real transmission if it is loud enough for long enough — the level
+/// itself says nothing about where it came from, so this exists to not even
+/// look until it has had a chance to pass.
 const TX_RECOVERY_MUTE: Duration = Duration::from_millis(1200);
 const RX_RING_CAP: usize = SAMPLE_RATE as usize * 6;
 const TX_RING_CAP: usize = SAMPLE_RATE as usize * 30;
@@ -97,6 +107,11 @@ pub struct RadioBridge {
     /// the transmit-grant path have no `Station` handle, so they leave notes
     /// here and `session_main` drains them into the snapshot each tick.
     diag: Arc<Mutex<Vec<String>>>,
+    /// When the segmenter should next trust receive audio again — set at
+    /// grant time from the burst's own known airtime, not guessed after the
+    /// fact from watching `tx_pcm` empty. See `LinkTx::send` and
+    /// `TX_RECOVERY_MUTE`.
+    rx_mute_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for RadioBridge {
@@ -113,7 +128,25 @@ impl RadioBridge {
             carrier: Arc::new(AtomicBool::new(false)),
             seg: Arc::new(Mutex::new(None)),
             diag: Arc::new(Mutex::new(Vec::new())),
+            rx_mute_until: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Hold receive audio as untrusted through `secs` more of airtime plus
+    /// `TX_RECOVERY_MUTE`, from now — extending, never shortening, so a
+    /// second grant while the first's mute is still counting (back-to-back
+    /// bursts) cannot cut it short.
+    fn extend_rx_mute(&self, secs: f64) {
+        let until = Instant::now() + Duration::from_secs_f64(secs) + TX_RECOVERY_MUTE;
+        let mut slot = self.rx_mute_until.lock().unwrap();
+        if slot.is_none_or(|cur| until > cur) {
+            *slot = Some(until);
+        }
+    }
+
+    /// Whether receive audio is still within a transmit-recovery mute.
+    fn rx_muted(&self) -> bool {
+        self.rx_mute_until.lock().unwrap().is_some_and(|until| Instant::now() < until)
     }
 
     /// Leave a diagnostic line for the station log.
@@ -220,6 +253,7 @@ impl LinkTx for RadioTx {
             } else {
                 let n = samples.len();
                 let duration = n as f64 / SAMPLE_RATE as f64;
+                self.bridge.extend_rx_mute(duration);
                 let ring = {
                     let mut t = self.bridge.tx_pcm.lock().unwrap();
                     t.extend(samples);
@@ -278,19 +312,9 @@ async fn segmenter(
     let mut carrier_prev = false;
     let mut hops_since_report = 0u32;
     let mut fed_any = false;
-    // See `TX_RECOVERY_MUTE`. `None` until the first time our own transmit
-    // ring is observed to empty, so a station that has never transmitted
-    // does not sit muted on nothing.
-    let mut tx_was_pending = false;
-    let mut mute_until: Option<Instant> = None;
 
     loop {
         tick.tick().await;
-        let tx_pending_now = bridge.tx_pending();
-        if tx_was_pending && !tx_pending_now {
-            mute_until = Some(Instant::now() + TX_RECOVERY_MUTE);
-        }
-        tx_was_pending = tx_pending_now;
         loop {
             let hop: Vec<i16> = {
                 let mut r = rx_pcm.lock().unwrap();
@@ -299,7 +323,7 @@ async fn segmenter(
                 }
                 r.drain(..HOP).collect()
             };
-            if mute_until.is_some_and(|until| Instant::now() < until) {
+            if bridge.rx_muted() {
                 // Drop it outright: no burst to extend, no floor to skew.
                 // The carrier flag is explicit rather than merely untouched —
                 // this station's own listen-before-transmit must not read a
