@@ -24,8 +24,18 @@ use super::link::{Connector, LinkRx, LinkTx, b64_to_samples, samples_to_b64};
 use crate::netproto::{ClientMsg, SAMPLE_RATE, ServerMsg};
 
 const HOP: usize = SAMPLE_RATE as usize / 50; // 20 ms
-/// Quiet run that ends a burst (~60 ms).
-const SILENCE_HANG_HOPS: usize = 3;
+/// Quiet run that ends a burst (~180 ms).
+///
+/// Was 3 (~60 ms): on a real over-the-air link a burst's peak can dip below
+/// threshold for a hop or two — fading, a receiver's own AGC settling, a
+/// moment of destructive multipath — without the transmission actually
+/// having ended. At 60 ms the segmenter read that dip as silence and closed
+/// the burst early, so a real ~450 ms BEACON was handed to the modem in
+/// 600-1100 sample fragments — too short to contain a preamble, header *and*
+/// enough data symbols to ever decode, independent of anything the modem
+/// itself gets right. Two consecutive BEACON transmissions are seconds apart,
+/// so widening this cannot merge two real, separate bursts into one.
+const SILENCE_HANG_HOPS: usize = 9;
 /// Absolute noise floor (i16 peak) below which a hop is silence no matter what
 /// the adaptive floor has learned — keeps a genuinely dead input (a loopback,
 /// an unplugged rig) from ever reading as a carrier.
@@ -44,6 +54,14 @@ const FLOOR_ALPHA: f64 = 0.05;
 const FLOOR_INIT: f64 = 4000.0;
 /// A burst shorter than this is noise, not a frame (~2 OFDM symbols).
 const MIN_BURST: usize = 640;
+/// A captured burst needs at least this many genuinely loud hops (20 ms
+/// each), not counting the `SILENCE_HANG_HOPS` of trailing padding, before
+/// it is worth handing to the modem — see the comment where this is checked.
+/// A JOIN_REQUEST, the shortest real frame, is ~11 loud hops (220 ms); this
+/// only exists to catch what is left over once `MIN_BURST` no longer does,
+/// now that `SILENCE_HANG_HOPS` is wide enough to pad a one-hop click past
+/// it.
+const MIN_LOUD_HOPS: usize = 4;
 const RX_RING_CAP: usize = SAMPLE_RATE as usize * 6;
 const TX_RING_CAP: usize = SAMPLE_RATE as usize * 30;
 
@@ -232,6 +250,9 @@ async fn segmenter(
     let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(15));
     let mut burst: Vec<i16> = Vec::new();
     let mut quiet_hops = 0usize;
+    // How many hops of `burst` were actually loud, as opposed to the
+    // `SILENCE_HANG_HOPS` of padding tacked on the end — see `MIN_LOUD_HOPS`.
+    let mut loud_hops = 0usize;
     let mut in_burst = false;
     // Ambient level the "is the channel busy?" test measures against. A fixed
     // gate worked on the loopback, where the only thing in the ring is a frame,
@@ -290,17 +311,26 @@ async fn segmenter(
                 if !in_burst {
                     in_burst = true;
                     burst.clear();
+                    loud_hops = 0;
                 }
                 quiet_hops = 0;
+                loud_hops += 1;
                 burst.extend_from_slice(&hop);
             } else if in_burst {
                 burst.extend_from_slice(&hop);
                 quiet_hops += 1;
                 if quiet_hops >= SILENCE_HANG_HOPS {
                     in_burst = false;
-                    if burst.len() >= MIN_BURST {
+                    // `burst.len()` alone lets a one-hop transient — an RX
+                    // chain settling after this station's own over ends, on
+                    // the evidence a real receiver keeps producing — through
+                    // on `SILENCE_HANG_HOPS` of trailing padding alone, with
+                    // nothing behind it a demod could ever find a preamble
+                    // in. The shortest real frame (a JOIN_REQUEST) is well
+                    // past a dozen loud hops; a switching click is one.
+                    if burst.len() >= MIN_BURST && loud_hops >= MIN_LOUD_HOPS {
                         bridge.push_diag(format!(
-                            "RF: captured a {}-sample burst, handing it to the demod",
+                            "RF: captured a {}-sample burst ({loud_hops} loud hops), handing it to the demod",
                             burst.len()
                         ));
                         let b64 = samples_to_b64(&burst);
