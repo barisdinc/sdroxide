@@ -339,12 +339,22 @@ impl SdroxideApp {
                 if show_log {
                     if st.log.is_empty() {
                         ui.label(RichText::new("No activity logged yet.").weak());
+                        return;
                     }
-                    for line in &st.log {
-                        ui.label(
-                            RichText::new(line).monospace().size(10.0).color(theme::gray(150)),
-                        );
-                    }
+                    // A single selectable text block rather than a `Label`
+                    // per line: a `Label` cannot be dragged over or copied,
+                    // and an operator chasing an RF problem over chat with
+                    // someone else wants the whole log — Ctrl-A, Ctrl-C — not
+                    // one line retyped by hand. Rebuilt from `st.log` fresh
+                    // every frame, so nothing typed into it (there is nothing
+                    // to type into a read-only log for) would survive anyway.
+                    let mut text = st.log.join("\n");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .text_color(theme::gray(150)),
+                    );
                     return;
                 }
                 let mut shown = 0usize;

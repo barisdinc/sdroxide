@@ -314,9 +314,20 @@ async fn build_station(
     }
 }
 
+/// `HH:MM:SS.mmm` UTC, matching the chat transcript's `hms`. RF diagnostics
+/// can land two or three to a tick, so the log needs sub-second resolution to
+/// show their order at all — plain seconds would print the same stamp on all
+/// of them.
+fn stamp() -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs_today = now.as_secs() % 86_400;
+    let (h, m, s) = (secs_today / 3600, (secs_today / 60) % 60, secs_today % 60);
+    format!("{h:02}:{m:02}:{s:02}.{:03}", now.subsec_millis())
+}
+
 fn push_log(snap: &Mutex<AtChatSnapshot>, line: String) {
     let mut o = snap.lock().unwrap();
-    o.log.push(line);
+    o.log.push(format!("[{}] {line}", stamp()));
     while o.log.len() > LOG_CAP {
         o.log.remove(0);
     }
